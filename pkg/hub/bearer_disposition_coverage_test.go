@@ -56,6 +56,15 @@ type bearerEntryKey struct {
 	Variant string
 }
 
+// nonUserExemptionKinds are the entry-point exemption kinds that record a
+// route as having no user bearer surface. An exemption of any other kind
+// (authentication_only, hub_admin, ...) is a user surface, so its route
+// needs a catalog entry point or a pending entry as well.
+var nonUserExemptionKinds = map[authzop.ExemptionKind]bool{
+	authzop.ExemptionPublicEndpoint: true,
+	authzop.ExemptionInternalOnly:   true,
+}
+
 type bearerCoverage struct {
 	catalog      map[bearerEntryKey]authzop.OperationID
 	catalogPaths map[string]bool
@@ -80,6 +89,9 @@ func newBearerCoverage() bearerCoverage {
 		}
 	}
 	for _, ex := range authzop.EntryPointExemptions {
+		if !nonUserExemptionKinds[ex.Kind] {
+			continue
+		}
 		_, path := splitRouteKey(ex.Pattern)
 		c.exemptPaths[normalizeBearerPattern(path)] = true
 	}
@@ -112,7 +124,7 @@ func (c bearerCoverage) hasPrefix(prefix string) bool {
 
 // TestBearerDisposition_EveryRoutePatternCovered requires every live route
 // to have a bearer record: a catalog entry point, an entry-point exemption
-// or a pending entry.
+// of a non-user kind (nonUserExemptionKinds) or a pending entry.
 //
 //   - Every routeMetadataTable pattern. An exact pattern needs a record on
 //     the same path (and the same method when the key names one). A prefix
@@ -182,9 +194,11 @@ func TestBearerDisposition_EveryRoutePatternCovered(t *testing.T) {
 }
 
 // TestBearerDisposition_AgentSubRoutesNameAnOperation requires every
-// agentSubRouteTable row to name a catalog operation (ops or allMethodsOp)
-// or to have its catalog pattern listed in PendingBearerDispositions. Every
-// operation a row names must be a catalog operation.
+// agentSubRouteTable row to name a catalog operation (ops or allMethodsOp),
+// to have its catalog pattern declared as a catalog entry point (an opaque
+// row also by its "/{key}" form), or to have its catalog pattern listed in
+// PendingBearerDispositions. Every operation a row names must be a catalog
+// operation.
 func TestBearerDisposition_AgentSubRoutesNameAnOperation(t *testing.T) {
 	c := newBearerCoverage()
 	ids := authzop.CatalogOperationIDs()
@@ -197,8 +211,9 @@ func TestBearerDisposition_AgentSubRoutesNameAnOperation(t *testing.T) {
 			ops = append(ops, row.allMethodsOp)
 		}
 		n := normalizeBearerPattern(row.catalogPattern(false))
-		if len(ops) == 0 && !c.pendingPaths[n] && !c.pendingPaths[n+"/{}"] {
-			t.Errorf("agent sub-route %s (%s) names no operation and is not in PendingBearerDispositions", row.id, n)
+		catalogued := c.catalogPaths[n] || (row.opaque && c.catalogPaths[n+"/{}"])
+		if len(ops) == 0 && !catalogued && !c.pendingPaths[n] && !c.pendingPaths[n+"/{}"] {
+			t.Errorf("agent sub-route %s (%s) names no operation, is not a catalog entry point and is not in PendingBearerDispositions", row.id, n)
 		}
 		for _, op := range ops {
 			if !ids[op] {

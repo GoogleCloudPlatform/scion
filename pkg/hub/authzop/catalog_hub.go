@@ -505,4 +505,27 @@ var hubOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
+	{
+		ID:          "hub.policies.removed",
+		Domain:      "hub",
+		Description: "Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/policies", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/policies/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "none",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The handler answers 410 Gone for every caller and reads or changes nothing; no resource permission applies",
+			Scope:  "removed policy API",
+			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
+		}},
+		Bearer: NonUser(),
+	},
 }

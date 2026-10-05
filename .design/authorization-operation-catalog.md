@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 110
+**Operations:** 113
 
 ## Table of Contents
 
@@ -24,6 +24,7 @@
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
+- [agent.secrets.access](#agentsecretsaccess) — List, read and write secrets in the calling agent's own project
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
@@ -67,6 +68,7 @@
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
+- [user.session.logout](#usersessionlogout) — End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
@@ -90,6 +92,7 @@
 - [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
 - [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
+- [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
 - [skill.create](#skillcreate) — Create a new skill definition
 - [skill.update](#skillupdate) — Update an existing skill definition
@@ -745,6 +748,49 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.secrets.access
+
+**Domain:** agent
+
+**Description:** List, read and write secrets in the calling agent's own project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/secrets` |
+| http_route | GET | `/api/v1/agents/{id}/secrets/{key}` |
+| http_route | PUT | `/api/v1/agents/{id}/secrets/{key}` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `read-secret`, `update-resource`
+
+### Audit
+
+- **Event Type:** `agent.secrets.access`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; the project comes from the token; no user permission applies (scope: agent self access) — waives: `base_permission`
 
 ---
 
@@ -2471,6 +2517,38 @@
 
 ---
 
+## user.session.logout
+
+**Domain:** user
+
+**Description:** End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/auth/logout` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** none
+
+**Effects:** `update-resource`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **authentication_only:** Sign-in flow step that acknowledges the end of the caller's own session; no resource permission applies and no caller is refused (scope: session logout) — waives: `base_permission`, `denial_codes`
+
+---
+
 ## hub.authreset
 
 **Domain:** hub
@@ -3212,6 +3290,39 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.policies.removed
+
+**Domain:** hub
+
+**Description:** Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/policies` |
+| http_route | GET | `/api/v1/policies/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **authentication_only:** The handler answers 410 Gone for every caller and reads or changes nothing; no resource permission applies (scope: removed policy API) — waives: `base_permission`, `denial_codes`
 
 ---
 

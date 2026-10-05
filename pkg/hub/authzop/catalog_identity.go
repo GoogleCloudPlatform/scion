@@ -698,4 +698,26 @@ var identityOperations = []OperationSpec{
 		}},
 		Bearer: BearerDisposition{Kind: BearerOutOfScope, Owner: BearerOwnerUserProvisioning},
 	},
+	{
+		ID:          "user.session.logout",
+		Domain:      "user",
+		Description: "End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/logout", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "none",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Sign-in flow step that acknowledges the end of the caller's own session; no resource permission applies and no caller is refused",
+			Scope:  "session logout",
+			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
+		}},
+		Bearer: NonUser(),
+	},
 }

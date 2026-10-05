@@ -187,7 +187,8 @@ func postOp(op authzop.OperationID) map[string]authzop.OperationID {
 // agentSubRouteTable lists every agent sub-route. Rows are matched in order;
 // the first match wins. G and D append rows here (see B/plan/g-interfaces.md).
 // Every row names a catalog operation through ops or allMethodsOp, or its
-// pattern is listed in authzop.PendingBearerDispositions
+// pattern is a catalog entry point, or its pattern is listed in
+// authzop.PendingBearerDispositions
 // (TestBearerDisposition_AgentSubRoutesNameAnOperation).
 var agentSubRouteTable = []agentSubRouteRow{
 	// --- /api/v1/agents/ ---
