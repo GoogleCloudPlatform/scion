@@ -1840,6 +1840,38 @@ func TestUpdateAgentStatus_IfPhase(t *testing.T) {
 	assert.Equal(t, "stopped", got.Phase)
 }
 
+// IfRunID makes UpdateAgentStatus conditional on the stored run_id
+// (ptone/scion#2550): a mismatch writes nothing and returns ErrRunChanged,
+// which is a version conflict; a match applies; an empty IfRunID does not
+// check the run.
+func TestUpdateAgentStatus_IfRunID(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-run-id")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-new")
+	require.NoError(t, err)
+
+	err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped", IfRunID: "run-old"})
+	require.ErrorIs(t, err, store.ErrRunChanged)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "a mismatched update writes nothing")
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "run-new"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "an empty IfRunID applies unconditionally")
+}
+
 // ClearTerminalRemnants applies the stopped/error -> running clear whatever
 // the stored phase (ptone/scion#2014): message (unless set on the update),
 // stalled marker, exit code and reason.

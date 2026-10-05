@@ -1369,6 +1369,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfPhase != "" && current.Phase != su.IfPhase {
 		return store.ErrPhaseMismatch
 	}
+	if su.IfRunID != "" && current.RunID != su.IfRunID {
+		return store.ErrRunChanged
+	}
 
 	now := time.Now()
 
