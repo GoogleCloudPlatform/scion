@@ -22,6 +22,11 @@
  * of one project) asks the store instead of walking the list endpoint itself,
  * so a list is fetched once and then kept current from SSE.
  *
+ * Lists are walked in the server's compact view. A compact row merges into
+ * the feed's row for that agent and never strips the fields a full row
+ * holds; the feed is the store's own, so compact rows never reach the
+ * global `stateManager`.
+ *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
  * scope never changes, so page navigation (which re-scopes the global
@@ -112,7 +117,11 @@ export interface AgentStoreOptions {
    * listens to nothing.
    */
   events?: EventTarget | null;
-  /** Row projection requested from the server. Defaults to `full`. */
+  /**
+   * Row projection requested from the server. Defaults to `compact`: the
+   * rows carry every field the store's consumers read, without the heavy
+   * full-view fields such as `appliedConfig`.
+   */
   view?: 'full' | 'compact';
   pageSize?: number;
   maxPages?: number;
@@ -460,7 +469,7 @@ export class AgentStore {
     this.feedFactory = options.feedFactory ?? ((): StateManager => new StateManager());
     this.now = options.now ?? ((): number => Date.now());
     this.currentUserId = options.currentUserId ?? ((): string => stateManager.getCurrentUserId());
-    this.view = options.view ?? 'full';
+    this.view = options.view ?? 'compact';
     this.pageSize = options.pageSize ?? AGENT_STORE_PAGE_SIZE;
     this.maxPages = options.maxPages ?? AGENT_STORE_MAX_PAGES;
     this.pageTimeoutMs = options.pageTimeoutMs;
@@ -914,8 +923,10 @@ export class AgentStore {
         if (this.carriedTombstones.size > 0) {
           rows = rows.filter((row) => !this.carriedTombstones.has(row.id));
         }
-        // Only the hub list replaces feed rows. Other lists merge: the
-        // project list, for one, omits fields the hub rows carry.
+        // Only a full hub walk replaces feed rows. Every other walk merges:
+        // compact rows omit the full fields a row may hold (from a
+        // single-agent read), and the project list omits fields the hub
+        // rows carry.
         feed.seedAgents(rows, { token, partial: this.view === 'compact' || entry.key !== 'hub' });
       } finally {
         feed.endSeedEpoch(token);

@@ -543,10 +543,11 @@ describe('AgentStore rows shared across lists', () => {
     expect(find(h.store.peek(P1), 'a1')).toBe(row);
   });
 
-  it('a hub walk replaces feed rows, so a field the hub stopped sending is gone', async () => {
-    const h = createHarness([
-      agent('a1', { _messageability: { canMessage: true } } as Partial<Agent>),
-    ]);
+  it('a full hub walk replaces feed rows, so a field the hub stopped sending is gone', async () => {
+    const h = createHarness(
+      [agent('a1', { _messageability: { canMessage: true } } as Partial<Agent>)],
+      { view: 'full' }
+    );
     h.store.retain(HUB, () => {});
     const first = h.store.ensure(HUB);
     await h.connect();
@@ -754,8 +755,18 @@ describe('AgentStore freshness after a resync', () => {
 });
 
 describe('AgentStore feed completeness flag', () => {
-  it('a full hub walk with the feed connected sets the flag', async () => {
+  it('a hub walk with the feed connected sets the compact flag', async () => {
     const h = createHarness([agent('a1')]);
+    const loading = h.store.ensure(HUB);
+    await h.connect();
+    await loading;
+
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(false);
+  });
+
+  it('a full-view hub walk with the feed connected sets the full flag', async () => {
+    const h = createHarness([agent('a1')], { view: 'full' });
     const loading = h.store.ensure(HUB);
     await h.connect();
     await loading;
@@ -763,18 +774,21 @@ describe('AgentStore feed completeness flag', () => {
     expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
   });
 
-  it('a hub walk cut off by the page bound does not set the flag', async () => {
-    const h = createHarness([agent('a1'), agent('a2'), agent('a3')], { pageSize: 1, maxPages: 2 });
+  it('a full-view hub walk cut off by the page bound does not set the flag', async () => {
+    const h = createHarness([agent('a1'), agent('a2'), agent('a3')], {
+      view: 'full',
+      pageSize: 1,
+      maxPages: 2,
+    });
     const loading = h.store.ensure(HUB);
     await h.connect();
     await loading;
 
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(false);
   });
 
-  it('a compact hub walk cut off by the page bound does not set the flag', async () => {
+  it('a hub walk cut off by the page bound does not set the flag', async () => {
     const h = createHarness([agent('a1'), agent('a2'), agent('a3')], {
-      view: 'compact',
       pageSize: 1,
       maxPages: 2,
     });
@@ -817,7 +831,7 @@ describe('AgentStore feed completeness flag', () => {
 
     releaseFollowUp();
     await loading;
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
   });
 
   it('a project walk does not set the flag', async () => {
@@ -853,7 +867,7 @@ describe('AgentStore feed completeness flag', () => {
     const again = h.store.ensure(HUB);
 
     expect(h.feeds).toHaveLength(2);
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
     expect(h.feeds[1]?.isAgentSetComplete('compact')).toBe(false);
     await h.connect();
     await again;
@@ -876,7 +890,7 @@ describe('AgentStore feed completeness flag', () => {
 
 describe('AgentStore compact rows', () => {
   it('a compact walk merges into full rows in the feed and never strips full fields', async () => {
-    const h = createHarness([agent('a1', { phase: 'stopped' })], { view: 'compact' });
+    const h = createHarness([agent('a1', { phase: 'stopped' })]);
     h.store.retain(HUB, () => {});
     h.feeds[0]?.seedAgents([agent('a1', { harnessConfig: 'claude', phase: 'running' })]);
     const loading = h.store.ensure(HUB);
@@ -923,12 +937,12 @@ describe('AgentStore eviction', () => {
     const loads = [h.store.ensure(HUB), h.store.ensure(P2)];
     await h.connect();
     await Promise.all(loads);
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
 
     await vi.advanceTimersByTimeAsync(5 * 60_000);
 
     expect(h.store.peek(HUB)).toBeUndefined();
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
     expect(h.feeds[0]?.getAgent('a1')).toBeDefined();
     expect(h.feeds[0]?.getAgent('b1')).toBeDefined();
   });
@@ -951,7 +965,7 @@ describe('AgentStore eviction while the feed holds the hub set', () => {
     expect(h.store.peek(HUB)).toBeUndefined();
     expect(h.store.peek(P1)).toBeUndefined();
 
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
     expect(h.feeds[0]?.getAgent('a1')).toBeDefined();
   });
 

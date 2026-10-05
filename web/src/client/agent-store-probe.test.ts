@@ -1151,7 +1151,7 @@ describe('AgentStore delta probe', () => {
 
   it('merges compact rows into full rows without dropping full fields', async () => {
     const full = row('a1', 1, { appliedConfig: { harness: 'claude' } } as Partial<Agent>);
-    const h = await loaded([full]);
+    const h = await loaded([full], HUB, { view: 'full' });
     h.server.agents[0] = row('a1', 10, { name: 'renamed' });
     await tick();
     const a1 = find(h.store.peek(HUB), 'a1') as Agent & { appliedConfig?: unknown };

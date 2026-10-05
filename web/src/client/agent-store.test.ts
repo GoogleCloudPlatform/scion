@@ -104,7 +104,7 @@ describe('AgentStore coalescing', () => {
     await h.connect();
     await loading;
 
-    expect(h.server.requests).toEqual(['/api/v1/agents?limit=200']);
+    expect(h.server.requests).toEqual(['/api/v1/agents?view=compact&limit=200']);
   });
 
   it('one caller aborting detaches only that caller; the walk continues for the others', async () => {
@@ -371,8 +371,8 @@ describe('AgentStore coalescing', () => {
     await Promise.all(loads);
 
     expect(h.server.requests.sort()).toEqual([
-      '/api/v1/agents?scope=mine&label=team%3Da&limit=200',
-      '/api/v1/projects/p%201/agents?limit=200',
+      '/api/v1/agents?scope=mine&label=team%3Da&view=compact&limit=200',
+      '/api/v1/projects/p%201/agents?view=compact&limit=200',
     ]);
   });
 });
@@ -766,15 +766,15 @@ describe('AgentStore refetch triggers', () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ agents: [] }),
+      json: () => Promise.resolve({ agents: [{ id: 'g1', name: 'g1', projectId: 'p1' }] }),
     } as unknown as Response);
     const setScope = vi.spyOn(StateManager.prototype, 'setScope');
     const store = new AgentStore({ events: null });
 
-    await store.ensure(HUB);
+    const snapshot = await store.ensure(HUB);
 
     expect(apiFetch).toHaveBeenCalledWith(
-      '/api/v1/agents?limit=200',
+      '/api/v1/agents?view=compact&limit=200',
       expect.objectContaining({ suppressAccessDeniedToast: true })
     );
     // The default feed is a StateManager of its own, never the app-wide one.
@@ -782,6 +782,10 @@ describe('AgentStore refetch triggers', () => {
     const feed = setScope.mock.contexts[setScope.mock.calls.length - 1];
     expect(feed).toBeInstanceOf(StateManager);
     expect(feed).not.toBe(stateManager);
+    // Its compact rows stay in that feed.
+    expect(snapshot.agents.map((a) => a.id)).toEqual(['g1']);
+    expect((feed as StateManager).getAgent('g1')).toBeDefined();
+    expect(stateManager.getAgent('g1')).toBeUndefined();
     store.destroy();
   });
 });
