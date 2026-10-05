@@ -60,7 +60,20 @@ describe('healthBannerState', () => {
 });
 
 describe('nonHealthyChecks', () => {
-  it('includes a non-healthy nested broker status but not its check values', () => {
+  it("names a degraded broker's problem checks", () => {
+    expect(
+      nonHealthyChecks({
+        status: 'degraded',
+        hub: { status: 'healthy', checks: { database: 'healthy' } },
+        broker: {
+          status: 'degraded',
+          checks: { docker: 'available', nfs_mounts: 'unhealthy: share1 not mounted' },
+        },
+      })
+    ).toEqual(['broker.nfs_mounts: unhealthy: share1 not mounted']);
+  });
+
+  it('falls back to the broker status when no broker check qualifies', () => {
     expect(
       nonHealthyChecks({
         status: 'degraded',
@@ -68,6 +81,15 @@ describe('nonHealthyChecks', () => {
         broker: { status: 'degraded', checks: { docker: 'available' } },
       })
     ).toEqual(['broker: degraded']);
+  });
+
+  it('ignores broker checks when the broker is healthy', () => {
+    expect(
+      nonHealthyChecks({
+        status: 'healthy',
+        broker: { status: 'healthy', checks: { runtime: 'unavailable' } },
+      })
+    ).toEqual([]);
   });
 
   it('sorts and dedupes across top-level and nested checks', () => {

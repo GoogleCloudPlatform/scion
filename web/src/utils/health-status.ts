@@ -47,8 +47,11 @@ function asCheckMap(value: unknown): CheckMap {
 /**
  * Collects the non-healthy checks from a /healthz body: top-level checks
  * (standalone hub) and the nested hub checks (combined web+hub mode), plus
- * the nested broker's status when it is not healthy. Broker check values are
- * not "healthy"-valued (e.g. docker: "available"), so only its status counts.
+ * the nested broker's problem checks when it is not healthy, as
+ * "broker.<key>: <value>". A broker check is a problem when its value is
+ * neither "available" nor "healthy" (the broker's own rule in
+ * pkg/runtimebroker/handlers.go); "broker: <status>" is the fallback when
+ * no check qualifies.
  */
 export function nonHealthyChecks(health: Record<string, unknown> | null | undefined): string[] {
   if (!health) return [];
@@ -65,7 +68,14 @@ export function nonHealthyChecks(health: Record<string, unknown> | null | undefi
   if (broker && typeof broker === 'object') {
     const status = broker.status;
     if (typeof status === 'string' && status !== '' && status !== 'healthy') {
-      seen.add(`broker: ${status}`);
+      let named = false;
+      for (const [k, v] of Object.entries(asCheckMap(broker.checks))) {
+        if (v !== 'available' && v !== 'healthy') {
+          seen.add(`broker.${k}: ${v}`);
+          named = true;
+        }
+      }
+      if (!named) seen.add(`broker: ${status}`);
     }
   }
   return [...seen].sort();
