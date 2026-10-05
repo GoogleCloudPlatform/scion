@@ -15,9 +15,10 @@
  */
 
 /**
- * Chat members and chat search: ages under a week stay compact
- * ("5m ago"); older instants show an absolute date through `time.ts`, in the
- * display zone with the zone named (tz-refactor task 21).
+ * Chat members and chat search: ages under a week use
+ * `formatRelative(iso, { style: 'narrow' })` ("5m ago"); older instants show
+ * an absolute date through `time.ts`, in the display zone with the zone named
+ * (tz-refactor task 21). A future instant is clock skew and reads "now".
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -44,15 +45,39 @@ afterEach(() => {
 
 const NOW = '2026-09-23T12:00:00Z';
 
+/**
+ * Compact ages under a week, with the exact narrow `en` output. Values are
+ * rounded (not floored) per unit with `Math.round`, so an exact past half
+ * rounds toward zero, and `numeric: 'auto'` gives "now" and "yesterday".
+ */
+const COMPACT_CASES: Array<[string, string, string]> = [
+  ['same instant', '2026-09-23T12:00:00Z', 'now'],
+  ['59 seconds', '2026-09-23T11:59:01Z', '59s ago'],
+  ['5 minutes', '2026-09-23T11:55:00Z', '5m ago'],
+  ['59m40s rounds to 1 hour', '2026-09-23T11:00:20Z', '1h ago'],
+  ['exactly 59.5 minutes stays at 59 (Math.round of -59.5)', '2026-09-23T11:00:30Z', '59m ago'],
+  ['3 hours', '2026-09-23T09:00:00Z', '3h ago'],
+  ['23h40m rounds to 1 day', '2026-09-22T12:20:00Z', 'yesterday'],
+  ['3 days', '2026-09-20T12:00:00Z', '3d ago'],
+  ['6 days', '2026-09-17T12:00:00Z', '6d ago'],
+  ['6d14h rounds to 7 days', '2026-09-16T22:00:00Z', '7d ago'],
+  ['5 minutes in the future (clock skew) clamps to now', '2026-09-23T12:05:00Z', 'now'],
+];
+
 describe('scion-chat-members activity age', () => {
   const fmt = (iso: string): string =>
     (document.createElement('scion-chat-members') as any).formatRelativeTime(iso);
 
-  it('keeps compact ages under a week', () => {
+  it.each(COMPACT_CASES)('shows a compact age: %s', (_name, iso, want) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
-    expect(fmt('2026-09-23T11:55:00Z')).toBe('5 min ago');
-    expect(fmt('2026-09-20T12:00:00Z')).toBe('3d ago');
+    expect(fmt(iso)).toBe(want);
+  });
+
+  it('switches to an absolute date at exactly 7 days', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    expect(fmt('2026-09-16T12:00:00Z')).toBe('Sep 16, 2026 (UTC)');
   });
 
   it('shows an older date in the display zone, with the zone named', () => {
@@ -68,11 +93,16 @@ describe('scion-chat-search result time', () => {
   const fmt = (iso: string): string =>
     (document.createElement('scion-chat-search') as any).formatTime(iso);
 
-  it('keeps compact ages under a week', () => {
+  it.each(COMPACT_CASES)('shows a compact age: %s', (_name, iso, want) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
-    expect(fmt('2026-09-23T11:55:00Z')).toBe('5m ago');
-    expect(fmt('2026-09-23T09:00:00Z')).toBe('3h ago');
+    expect(fmt(iso)).toBe(want);
+  });
+
+  it('switches to an absolute date at exactly 7 days', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    expect(fmt('2026-09-16T12:00:00Z')).toBe('Sep 16, 2026');
   });
 
   it('shows an older date compactly in the display zone, with the zone in the title', () => {

@@ -67,6 +67,10 @@ type AgentStore struct {
 	// driver rejects the clause outright, so it must be elided there.
 	dialectOnce sync.Once
 	dialectName string
+
+	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
+	// read and its swap, to simulate a concurrent writer.
+	afterRunIDRead func(agentID string)
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
@@ -134,6 +138,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		RunID:               a.RunID,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
@@ -150,6 +155,25 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	if a.LaunchLastReportAt != nil {
 		sa.LaunchLastReportAt = *a.LaunchLastReportAt
 	}
+	if a.RunIntent != nil {
+		sa.RunIntent = store.RunIntent(*a.RunIntent)
+	}
+	if a.RunIntentAt != nil {
+		t := *a.RunIntentAt
+		sa.RunIntentAt = &t
+	}
+	if a.StartClaimID != nil {
+		sa.StartClaimID = *a.StartClaimID
+	}
+	sa.StartClaimKind = store.StartClaimKind(a.StartClaimKind)
+	sa.StartClaimState = store.StartClaimState(a.StartClaimState)
+	sa.StartClaimOwner = a.StartClaimOwner
+	sa.StartClaimTarget = a.StartClaimTarget
+	sa.StartClaimAt = copyTimePtr(a.StartClaimAt)
+	sa.StartClaimLeaseUntil = copyTimePtr(a.StartClaimLeaseUntil)
+	sa.StartClaimUnconfirmedAt = copyTimePtr(a.StartClaimUnconfirmedAt)
+	sa.StartClaimHoldUntil = copyTimePtr(a.StartClaimHoldUntil)
+	sa.StartClaimLaunchID = a.StartClaimLaunchID
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
 		sa.ReincarnationUpdatedAt = &t
@@ -1027,8 +1051,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 // The SQL SELECT list is exactly agentMemberSelectFields — no wide column
 // (AppliedConfig in particular) is ever read off the wire for a candidate
 // row — which is what keeps a 2,000-row candidate scan cheap enough for the
-// server's request WriteTimeout, not just what the design's equality gate
-// requires.
+// server's request WriteTimeout, not just what the member/full equality
+// gate requires.
 //
 // The candidate set is bounded by the caller's ceiling check to at most a
 // couple thousand rows, so this fetches every matching row up to max (with
@@ -1213,8 +1237,13 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.RuntimeBrokerID != "" {
 		preds = append(preds, agent.RuntimeBrokerIDEQ(filter.RuntimeBrokerID))
 	}
-	if filter.Phase != "" {
+	switch {
+	case filter.Phase != "" && filter.OrRunIntent != "":
+		preds = append(preds, agent.Or(agent.PhaseEQ(filter.Phase), agent.RunIntentEQ(filter.OrRunIntent)))
+	case filter.Phase != "":
 		preds = append(preds, agent.PhaseEQ(filter.Phase))
+	case filter.OrRunIntent != "":
+		preds = append(preds, agent.RunIntentEQ(filter.OrRunIntent))
 	}
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
@@ -1352,6 +1381,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ExitReason = ""
 		su.Message = ""
 		su.ClearExit = false
+		su.ClearMessageIf = ""
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1435,6 +1465,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Message != "" {
 		upd.SetMessage(su.Message)
+	} else if su.ClearMessageIf != "" && current.Message == su.ClearMessageIf {
+		upd.SetMessage("")
 	}
 	if su.ConnectionState != "" {
 		upd.SetConnectionState(su.ConnectionState)
@@ -2230,4 +2262,87 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 	}
 
 	return result, nil
+}
+
+// setAgentRunIDAttempts bounds SetAgentRunID's read-then-swap loop. Each
+// retry means another writer changed run_id between the read and the
+// swap; a handful of retries absorbs any realistic contention.
+const setAgentRunIDAttempts = 8
+
+// SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
+// current value and swaps it under a compare-and-swap, retrying if another
+// writer got in between, so the returned previous value is exactly the one
+// this write replaced. That needs no transaction or row lock, and so works
+// the same on every dialect.
+//
+// The swap also requires that no delete holds the row (runIDWritable), and
+// a row that a delete holds returns store.ErrDeleteInProgress. The delete
+// claim is itself a single-row write, so the database orders the two: a
+// claim that lands first refuses this write, and one that lands after it
+// snapshots the new run ID (ptone/scion#2550 P1 round 3).
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return "", err
+	}
+	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
+		row, err := s.client.Agent.Query().
+			Where(agent.IDEQ(uid)).
+			Select(agent.FieldRunID, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+			Only(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		now := time.Now()
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+			return "", store.ErrDeleteInProgress
+		}
+		if s.afterRunIDRead != nil {
+			s.afterRunIDRead(agentID)
+		}
+		n, err := s.client.Agent.Update().
+			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
+			SetRunID(runID).
+			Save(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		if n > 0 {
+			return row.RunID, nil
+		}
+	}
+	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
+}
+
+// runIDWritable is store.DeletionHoldsRow negated, plus deleted_at IS NULL,
+// as a predicate for SetAgentRunID's swap. TestRunIDWritable_MatchesGoPredicate
+// keeps the two in step.
+func runIDWritable(now time.Time) predicate.Agent {
+	return agent.And(
+		agent.DeletedAtIsNil(),
+		agent.Or(
+			agent.DeletionStateIsNil(),
+			agent.DeletionStateNotIn(store.DeletionStateDeleting, store.DeletionStateFinalizing),
+			agent.And(
+				agent.DeletionStateEQ(store.DeletionStateDeleting),
+				agent.Or(agent.DeletionLeaseAtIsNil(), agent.DeletionLeaseAtLTE(now)),
+			),
+		),
+	)
+}
+
+// CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
+func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		SetRunID(newRunID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
 }

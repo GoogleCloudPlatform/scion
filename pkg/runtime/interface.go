@@ -95,6 +95,11 @@ type RunConfig struct {
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
 	// chown when NFS (N1-5); the branches below key on "nfs" only.
 	WorkspaceBackendName string
+	// HomeStorageBackend selects where the agent home lives on the
+	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
+	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
+	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	HomeStorageBackend string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -109,6 +114,11 @@ type RunConfig struct {
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
 	// the volume mount — pod sees only its project subtree (design §9.4).
 	NFSSubPath string
+	// NFSSubPathRoot is workspace_storage.nfs.subpath_root, set when
+	// WorkspaceBackendName is "nfs". Empty means
+	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
+	// NFS export and host paths from it (via config.ResolveSubPathRoot).
+	NFSSubPathRoot string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the
@@ -140,6 +150,11 @@ type RunConfig struct {
 	// NFSAgentBranch is the branch the agent's workspace is created for,
 	// recorded by the init container. Only used with NFSAgentDirName.
 	NFSAgentBranch string
+	// NFSAgentDirEmpty marks an NFSAgentDirName agent of an empty-per-agent
+	// project: the mounts are the same, but the init container prepares an
+	// empty workspace with no branch record (SCION_WORKSPACE_MODE
+	// empty-per-agent) and nothing clones into it. NFSAgentBranch is unused.
+	NFSAgentDirEmpty bool
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string
@@ -256,11 +271,25 @@ type SharedDirRealization struct {
 	SubPaths map[string]string
 }
 
+// RunRef identifies the runtime entry a Delete targets. ID is the backend
+// handle returned by Run or reported by List (a container ID on Docker,
+// Podman and Apple; a pod or instance name on k8s, Cloud Run and Sandbox).
+// RunID is the scion.run_id label of the run the caller intends to remove;
+// it is empty for legacy entries created before run IDs existed.
+//
+// The signature change is deliberate (ptone/scion#2550): every backend must
+// decide how it honours RunID, rather than silently falling back to name
+// semantics through an optional side interface.
+type RunRef struct {
+	ID    string
+	RunID string
+}
+
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
 	Stop(ctx context.Context, id string) error
-	Delete(ctx context.Context, id string) error
+	Delete(ctx context.Context, ref RunRef) error
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogs(ctx context.Context, id string) (string, error)
 	Attach(ctx context.Context, id string) error

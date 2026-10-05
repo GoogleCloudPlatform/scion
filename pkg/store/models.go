@@ -139,6 +139,39 @@ type Agent struct {
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
 
+	// RunID is the identity of the agent's current or most recent run
+	// (ptone/scion#2550), minted by the Hub per create/start/restart
+	// dispatch and carried on the runtime entry as the scion.run_id label.
+	// "" for a row not dispatched since run IDs existed. Like the launch
+	// columns, UpdateAgent never writes it; the only writer is SetAgentRunID,
+	// so a concurrent whole-row CAS write cannot clobber it.
+	RunID string `json:"-"`
+
+	// RunIntent is whether the agent should be running ("running" or
+	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
+	// time of the last intent write. Internal bookkeeping, untagged like the
+	// launch columns. UpdateAgent and CreateAgent never write them; the only
+	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
+	RunIntent   RunIntent  `json:"-"`
+	RunIntentAt *time.Time `json:"-"`
+
+	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
+	// held. Internal bookkeeping, untagged like the launch columns.
+	// UpdateAgent and CreateAgent never write them; the only writers are the
+	// AgentStore start-claim methods and a launch's terminal write.
+	StartClaimID            string          `json:"-"`
+	StartClaimKind          StartClaimKind  `json:"-"`
+	StartClaimState         StartClaimState `json:"-"`
+	StartClaimOwner         string          `json:"-"`
+	StartClaimTarget        string          `json:"-"`
+	StartClaimAt            *time.Time      `json:"-"`
+	StartClaimLeaseUntil    *time.Time      `json:"-"`
+	StartClaimUnconfirmedAt *time.Time      `json:"-"`
+	StartClaimHoldUntil     *time.Time      `json:"-"`
+	// StartClaimLaunchID is the launch a create claim is linked to ("" when
+	// none): only that launch's end settles the claim.
+	StartClaimLaunchID string `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
@@ -595,6 +628,32 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Project members group marker annotations (ptone/scion#2556).
+const (
+	// AnnotationProjectMembersGroup marks a group as the hub-managed
+	// project:<slug>:members group. It is the only key the hub writes and the
+	// key project registration checks before adopting an existing group with
+	// that slug. The hub (createProjectMembersGroup) and the store marker
+	// backfill both write it.
+	AnnotationProjectMembersGroup = "scion.io/project-members-group"
+
+	// LegacyAnnotationProjectMembersGroup is the marker key the store marker
+	// backfill wrote before ptone/scion#2556. The one-shot migration
+	// MigrateLegacyProjectMembersGroupMarkers rewrites it to
+	// AnnotationProjectMembersGroup. No current code sets it; the migration
+	// only removes it. The group API marker guards and the owner-clearing
+	// backfill still accept it, because an older binary may write it during
+	// a rolling upgrade.
+	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
+)
+
+// AnnotationProjectAgentsGroup marks a group as the hub-managed
+// project:<slug>:agents group. The hub (createProjectGroup) writes it and
+// checks it (isSystemProjectAgentsGroup) before adopting an existing group
+// with that slug, and the store agents group marker backfill writes it on
+// legitimate pre-upgrade groups.
+const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,
@@ -824,6 +883,12 @@ type RuntimeBroker struct {
 	// existed) or the hub has not yet learned it.
 	DefaultProfile string `json:"defaultProfile,omitempty"`
 
+	// WorkspaceStorage describes where the broker places agent workspaces,
+	// reported at registration and refreshed on every heartbeat (stored as
+	// JSON). Nil means the broker has never reported it (an older broker);
+	// the hub refuses a cross-broker move involving such a broker.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -875,6 +940,11 @@ type BrokerCapabilities struct {
 	// agent on non-git projects). The hub refuses to dispatch such agents to
 	// brokers without it, returning 412 (fail closed; design #2703 D3).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates the broker can take part in moving an agent
+	// between brokers that share a workspace export (`scion reincarnate
+	// --broker`). The hub refuses a move unless both the source and the
+	// target broker report it (412).
+	AgentMove bool `json:"agentMove"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -3004,6 +3074,109 @@ type DelegationEdge struct {
 	Grandfathered bool      `json:"grandfathered"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+
+	// AuthorityProvenance, EffectCeiling and Deactivation are recorded at
+	// write time and stay off public JSON. Their zero values mean
+	// "unrecorded": an edge written without them never reads as principal.
+	AuthorityProvenance
+	EffectCeiling
+	Deactivation
+}
+
+// EffectCeilingKind is the kind of a frozen effect ceiling.
+type EffectCeilingKind string
+
+const (
+	// EffectCeilingUnrecorded is the zero value: provenance was not
+	// recorded. It never carries permission IDs and is never read as
+	// EffectCeilingPrincipal.
+	EffectCeilingUnrecorded EffectCeilingKind = ""
+	// EffectCeilingBounded carries a complete permission allow-list
+	// interpreted under Version. An empty list allows nothing.
+	EffectCeilingBounded EffectCeilingKind = "bounded"
+	// EffectCeilingPrincipal carries no credential caveat: the live
+	// principal's authority is the only bound.
+	EffectCeilingPrincipal EffectCeilingKind = "principal"
+)
+
+// EffectCeiling is the frozen upper bound recorded with an
+// authority-producing write. It is never recomputed after the write.
+type EffectCeiling struct {
+	Kind              EffectCeilingKind          `json:"-"`
+	Version           permissions.CeilingVersion `json:"-"` // bounded only: copied unchanged from a UAT source, or V1 for coverage computed from an agent parent
+	PermissionIDs     []string                   `json:"-"` // bounded only; sorted, de-duplicated
+	BoundaryKind      string                     `json:"-"` // permissions.BoundaryKind of the source credential; "" for principal
+	BoundaryProjectID string                     `json:"-"`
+	SourceExpiresAt   *time.Time                 `json:"-"` // UAT expiry when the source credential is a UAT (descriptive only)
+}
+
+// Frozen returns the permission ceiling for a bounded ceiling. ok is false
+// for principal and unrecorded; callers must branch on Kind and must never
+// treat !ok as unrestricted.
+func (c EffectCeiling) Frozen() (permissions.FrozenPermissionCeiling, bool) {
+	if c.Kind != EffectCeilingBounded {
+		return permissions.FrozenPermissionCeiling{}, false
+	}
+	ids := c.PermissionIDs
+	if ids == nil {
+		ids = []string{}
+	}
+	return permissions.FrozenPermissionCeiling{Version: c.Version, PermissionIDs: ids}, true
+}
+
+// SourceCredentialKind is the credential that authenticated the source of an
+// authority-producing write.
+type SourceCredentialKind string
+
+const (
+	SourceCredentialSession         SourceCredentialKind = "session"
+	SourceCredentialDevLocal        SourceCredentialKind = "dev_local"
+	SourceCredentialUAT             SourceCredentialKind = "uat"
+	SourceCredentialAgent           SourceCredentialKind = "agent"
+	SourceCredentialScheduler       SourceCredentialKind = "scheduler"
+	SourceCredentialSystemMigration SourceCredentialKind = "system_migration"
+)
+
+// ProvenanceVersionV1 is the first recorded AuthorityProvenance layout.
+// ProvenanceVersion 0 means provenance was not recorded.
+const ProvenanceVersionV1 = 1
+
+// AuthorityProvenance records who authorized an authority-producing write
+// and with which credential. The Initiator* fields use the
+// InitiatorAttribution names and value domain.
+type AuthorityProvenance struct {
+	ProvenanceVersion           int                  `json:"-"` // 0 = unrecorded, 1 = v1
+	SourcePrincipalKind         string               `json:"-"` // "user" | "agent"
+	SourcePrincipalID           string               `json:"-"`
+	SourceCredentialKind        SourceCredentialKind `json:"-"`
+	SourceCredentialID          string               `json:"-"` // UAT ID, agent credential JTI; "" for session and dev_local
+	SourceEventID               string               `json:"-"` // scheduler: fired scheduled event ID (reference only)
+	SourceScheduleID            string               `json:"-"` // scheduler: recurring schedule ID, may be empty
+	SourceAuthorizationRevision int                  `json:"-"` // scheduler: revision the event snapshotted
+	InitiatorPrincipalKind      string               `json:"-"`
+	InitiatorPrincipalID        string               `json:"-"`
+	InitiatorCredentialKind     string               `json:"-"` // InitiatorCredentialKind* domain
+	InitiatorCredentialID       string               `json:"-"`
+}
+
+// EdgeDeactivationCause records why a delegation edge or assignment was
+// deactivated. The empty value means active, or deactivated before causes
+// were recorded.
+type EdgeDeactivationCause string
+
+const (
+	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
+	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
+	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+)
+
+// Deactivation is the deactivation record of an edge or assignment.
+type Deactivation struct {
+	Cause EdgeDeactivationCause `json:"-"`
+	At    *time.Time            `json:"-"`
+	OpID  string                `json:"-"` // one ID per deactivating operation
 }
 
 // Delegation edge principal types

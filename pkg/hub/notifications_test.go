@@ -64,8 +64,8 @@ func (d *recordingDispatcher) getCalls() []dispatchCall {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -90,7 +90,7 @@ func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Ag
 func (d *recordingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -99,8 +99,8 @@ func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // notificationTestEnv holds all components for a notification test.
@@ -1135,15 +1135,24 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(ctx, deletedSub))
 
-	env.nd.Start()
-	defer env.nd.Stop()
+	// The delete engine resolves DELETED subscribers from its snapshot
+	// before the row is removed, then persists and delivers them
+	// asynchronously after the delete committed (design ptone/scion#2483
+	// §2.3). There is no deleted-event subscriber any more.
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	require.Len(t, pending, 1)
 
-	// Publish an agent deleted event
-	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	// Resolution is a read only: nothing is stored or sent yet, and the
+	// delivery works after the watched row is gone (hard delete).
+	assert.Empty(t, env.dispatcher.getCalls())
+	require.NoError(t, env.store.DeleteAgent(ctx, env.watched.ID))
 
-	require.Eventually(t, func() bool {
-		return len(env.dispatcher.getCalls()) == 1
-	}, 2*time.Second, 50*time.Millisecond)
+	select {
+	case <-env.nd.DeliverDeletedNotifications(ctx, pending):
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery did not finish")
+	}
+	require.Len(t, env.dispatcher.getCalls(), 1)
 
 	calls := env.dispatcher.getCalls()
 	assert.Contains(t, calls[0].Message, "watched-agent has been DELETED")
@@ -1157,17 +1166,20 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 func TestNotificationDispatcher_DeletedNotMatchedWithoutSubscription(t *testing.T) {
 	env := setupNotificationTest(t)
 
-	// Default subscription does not include DELETED
+	// Default subscription does not include DELETED: nothing resolves.
+	ctx := context.Background()
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	assert.Empty(t, pending)
+	<-env.nd.DeliverDeletedNotifications(ctx, pending)
+	assert.Empty(t, env.dispatcher.getCalls())
+
+	// A deleted event on the bus no longer triggers anything either: the
+	// dispatcher does not subscribe to it.
 	env.nd.Start()
 	defer env.nd.Stop()
-
-	env.pub.PublishAgentDeleted(context.Background(), env.watched.ID, env.project.ID)
-
-	// Give time for event to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Should not trigger since default sub only has COMPLETED and WAITING_FOR_INPUT
-	assert.Empty(t, env.dispatcher.getCalls())
+	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	assert.Never(t, func() bool { return len(env.dispatcher.getCalls()) > 0 },
+		200*time.Millisecond, 10*time.Millisecond, "no dispatch for a bus deleted event")
 }
 
 func TestFormatNotificationMessage_Deleted(t *testing.T) {

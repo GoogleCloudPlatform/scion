@@ -43,7 +43,7 @@ import (
 // paged branch's actual page size is P_eff = min(limit, floor((4000-n)/7)),
 // not limit itself, so the per-request decision cost 5+n+7*P_eff never
 // exceeds the decision ceiling (sortedProjectDecisionCeiling, 4,005) at any
-// of the design's own n values.
+// of the n values tested here.
 //
 // The expected page size and decision count are hard-coded from the
 // page-size bound's own worked table here, not derived by calling
@@ -104,8 +104,8 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 // is the page-size bound's walk test: a limit=500 walk over n=2,000 must
 // still return every readable agent exactly once, in order, even though
 // P_eff (285 at n=2,000) is well under the requested limit -- both at R=n
-// (every page item readable) and at R=400 (a strict readable subset, design
-// 5.3's R<n case).
+// (every page item readable) and at R=400 (a strict readable subset, the
+// R<n case).
 func TestListProjectAgentsSorted_PagedWalk_PageSizeBound_AllReadableReturnedOnce(t *testing.T) {
 	t.Run("R=n", func(t *testing.T) {
 		f := sortedListSetup(t)
@@ -160,9 +160,11 @@ func TestListProjectAgentsSorted_PagedWalk_PageSizeBound_AllReadableReturnedOnce
 // is the page-size bound's raced variant: at n=501, limit=500 (so
 // P_eff=499, per effectivePagedPageSize), racing every single page item
 // still costs exactly 4,498 decisions (5+n+8*P_eff: every raced item costs
-// 8, not 7, because step 5a re-decides all 8 actions including read, not
-// just the 7 remaining ones) -- inside the design's stated raced exception
-// to the decision ceiling (4,505), even though the unraced variant above is
+// 8, not 7, because the race re-decision redoes all 8 actions including
+// read, not just the 7 remaining ones) -- inside the raced exception to
+// the decision ceiling: the ceiling plus the race allowance is 4,505
+// (4,005 + 500), and the most any paged request can actually reach is
+// 4,504, which is the bound asserted below. The unraced variant above is
 // already at 4,005.
 //
 // pEff (and therefore the expected decision count) is hard-coded here, not
@@ -193,13 +195,13 @@ func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling
 
 	const want = 5 + n + 8*wantPEff // 5 + 501 + 8*499 = 4,498
 	assert.Len(t, emitter.records, want, "every page item raced costs 8 (full re-decision), not 7")
-	assert.LessOrEqual(t, want, 4504, "the design's stated raced exception to the decision ceiling")
+	assert.LessOrEqual(t, want, 4504, "the raced exception to the decision ceiling")
 }
 
 // racingAllMembersStore mutates every candidate's Labels (via the real
 // store, bypassing the read path) the first time ListAgentMembers is
 // called, simulating every page item racing between the member read and the
-// full-row read (design 5.3 step 5a) -- the n-items generalization of
+// full-row read -- the n-items generalization of
 // mutatingAfterMembersStore, which only races one row.
 type racingAllMembersStore struct {
 	store.Store

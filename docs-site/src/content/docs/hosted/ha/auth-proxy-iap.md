@@ -256,13 +256,35 @@ The agent token refresh endpoint (`POST /api/v1/agents/{id}/token/refresh`) retu
 
 The `transport` entry is only present when `auth.transport` is configured on the Hub. Old clients ignore `tokens[]`; new clients consume both layers.
 
+If the Hub is configured to mint transport tokens but cannot mint one (for example, the Hub's service account has lost `roles/iam.serviceAccountTokenCreator` on the transport SA), the refresh still succeeds with the app token, the `transport` entry is omitted, and the response carries a `transportError` field with a fixed, generic description. The underlying error stays in the Hub's logs. An agent that uses a hub-provided transport token logs the failure and records the transport outcome of each refresh (`refreshed`, `failed` or `absent`) in `~/.scion/transport-token.status`, which `sciontool doctor` reports. Agents that do not use a hub-provided transport token (metadata mode, or no transport) ignore transport entries and record nothing. An agent in a proxy mode that started without a transport token counts as using one: it records outcomes, and it adopts the first transport entry it receives. The file never contains a token, and it is removed with the transport token file when an agent starts without a transport token.
+
+### Recovering with `reset-auth`
+
+`scion agent reset-auth <agent>` also pushes a fresh transport token when the Hub mints them. The broker writes it to `~/.scion/transport-token` next to the agent token, and `sciontool init` reloads it straight away and records the outcome `reset`, so doctor no longer shows an earlier failed refresh as the latest event. A value that cannot be parsed is not adopted: the agent keeps its current credential, restores the file from it, and records the reset as failed. If the agent has no credential yet (it started without a transport token in a proxy mode), the file is removed instead. This recovers an agent whose transport token has already expired, since that agent's own refresh can no longer get through the platform guard. If the Hub cannot mint a transport token, the reset still replaces the agent token.
+
+### Agents that started without a transport token
+
+If the Hub cannot mint a transport token at dispatch time, the agent starts without one. The Hub still sets `SCION_TRANSPORT_MODE` whenever it is configured to mint transport tokens. In a proxy mode (`iap` or `cloudrun_invoker`), such an agent adopts the first transport token it receives later, either from a token refresh or from `reset-auth`. That token is written to `~/.scion/transport-token` through the same path as a normal refresh, and it is picked up without a restart: sciontool's hub clients (including the long-lived one in the agent's init process) re-read the file, and every new in-agent hub client uses it, including clients created by processes that were already running. Until then, requests carry no transport header, and `sciontool doctor` reports that no transport credential has been received. Because the platform guard usually blocks the agent's own refresh until it has a credential, `reset-auth` is the usual way to recover. Without a proxy mode, the agent ignores a transport token that arrives after start.
+
+### Diagnosing with `sciontool doctor`
+
+Inside the agent, `sciontool doctor` has a **Transport Auth** section that shows:
+
+- the header mode (`SCION_TRANSPORT_MODE`) and the header it uses, plus a shortened form of the audience (enough to spot a mismatch);
+- which credential is in use (the refreshed file or the bootstrap value) and when it expires. The check fails if that credential has expired, cannot be parsed, or none is available, and warns when it is within the refresh margin;
+- the expiry of the bootstrap value and of the file side by side, and when the file was last written;
+- the transport outcome of the last refresh, or of the last `reset-auth`.
+
+Doctor never prints token values. Its authentication checks tell a rejection by the platform proxy (a non-JSON 401/403, or a redirect to Google sign-in) apart from a rejection by the Hub (a JSON error), and the remediation differs: for a proxy rejection, run `reset-auth` and check the transport mode and audience; for a Hub rejection, the agent token itself is invalid. Doctor does not follow redirects. Redirects are shown only as their scheme and host, never with their query string. A redirect to any other host means authentication could not be confirmed, and it counts as a failed check; it usually means `SCION_HUB_ENDPOINT` is not the hub's final URL. A 404 on `/healthz` can come from the platform rather than the Hub, since some platforms (for example Cloud Run) reserve that path.
+
 ### Agent-side token source selection
 
 The agent (`pkg/sciontool/hub`) selects an OIDC token source automatically:
 
-1. **`SCION_TRANSPORT_TOKEN_FILE` or `SCION_TRANSPORT_TOKEN` set** → **Injected mode**: reads the refreshed file, with the env value as bootstrap fallback. The hub-provided token from dispatch is refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used. The file alone does not select this mode.
+1. **`SCION_TRANSPORT_TOKEN_FILE` or `SCION_TRANSPORT_TOKEN` set** → **Injected mode**: reads the refreshed file, with the env value as bootstrap fallback. The hub-provided token from dispatch is refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used. Outside a proxy mode, the file alone does not select this mode.
 2. **Running on GCP (metadata server available)** → **Metadata mode**: fetches OIDC from the GCE metadata server using the ambient SA identity (the PR #307 pattern). Audience is set via `SCION_HUB_OIDC_AUDIENCE` or defaults to the hub URL.
-3. **Neither** → No OIDC transport (agent uses plain HTTP).
+3. **`SCION_TRANSPORT_MODE` is a proxy mode (`iap` or `cloudrun_invoker`)** → **File-backed mode with no bootstrap value**, for an agent that started without a transport token. The `sciontool` hub client always selects this mode in a proxy mode. It sends no transport header until a refresh or `reset-auth` delivers a token, which is then written to `~/.scion/transport-token`. Other clients built with `transportauth.FromEnv`, such as the in-agent `scion` CLI and doctor, select it only once that file exists. See [Agents that started without a transport token](#agents-that-started-without-a-transport-token).
+4. **None of the above** → No OIDC transport (agent uses plain HTTP).
 
 The header follows `SCION_TRANSPORT_MODE` in every in-agent client: `iap` sends `Proxy-Authorization`, `cloudrun_invoker` sends `X-Serverless-Authorization`, and anything else sends `Authorization`.
 
@@ -437,7 +459,7 @@ server:
 ### 6. Verify
 
 1. Access the Hub URL in a browser — IAP should prompt for Google login, then the Hub should show your identity.
-2. Dispatch an agent and verify it can communicate back to the Hub (check agent logs for OIDC transport messages).
+2. Dispatch an agent and verify it can communicate back to the Hub (check agent logs for OIDC transport messages, or run `sciontool doctor` inside the agent).
 3. Check Hub logs for `Proxy auth configured: provider=iap` and `Transport auth configured: mode=iap` at startup.
 
 ### Reference scripts

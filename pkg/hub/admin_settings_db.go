@@ -228,6 +228,10 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
+	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
+	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
+	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
+	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
 	b2 := snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
@@ -483,6 +487,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before anything is written.
+	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -535,6 +544,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field from the stored config (the same view GET
+	// masked) before any section document is built. This runs after the 422
+	// checks so a Layer-0 request is still rejected as such.
+	//
+	// github_app private_key and webhook_secret are not persisted in DB mode
+	// (the github_app section has no secret fields), so for them this check
+	// only validates the request; their handling is tracked in
+	// ptone/scion#2938.
+	if req.Server != nil {
+		stored, err := storedServerConfigDB(ops)
+		if err != nil {
+			slog.Error("PUT server-config: failed to load stored config for masked values", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {
@@ -559,6 +590,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs["access"] = doc
 		accessBaseRev = rev
+	}
+
+	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
+	// admin form has no fields for them), and validate them.
+	if doc, ok := sectionDocs["lifecycle"]; ok {
+		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		var lc opsettings.LifecycleSettings
+		if err := json.Unmarshal(merged, &lc); err == nil {
+			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
+				return
+			}
+		}
+		sectionDocs["lifecycle"] = merged
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -603,24 +653,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Validate profile timezones (beyond JSON schema — IANA name check).
-	if doc, ok := sectionDocs["profiles"]; ok {
-		var profiles opsettings.ProfilesSettings
-		if err := json.Unmarshal(doc, &profiles); err == nil {
-			for name, profile := range profiles {
-				if profile.Timezone != "" {
-					if _, err := time.LoadLocation(profile.Timezone); err != nil {
-						writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-							fmt.Sprintf("profile %q: invalid timezone %q: %v", name, profile.Timezone, err), nil)
-						return
-					}
-				}
-			}
-		}
-	}
 	// Validate shared_dir_size on runtime and profile entries (beyond JSON
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.
+	var saveWarnings []string
 	{
 		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
@@ -633,6 +669,36 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
+		}
+		// shared_dir_storage_backend "nfs" needs a complete
+		// server.shared_dir_storage.nfs block, which lives only in the
+		// global settings file. Configuration only; no mount is checked.
+		if len(runtimes) > 0 || len(profiles) > 0 {
+			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
+				var sdGlobal *config.V1SharedDirStorageConfig
+				if gs != nil && gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
+				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+					return
+				}
+			}
+		}
+		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
+		// with the same warning as config validate. A section missing from
+		// this request is checked against its current value.
+		_, hasRuntimes := sectionDocs["runtimes"]
+		_, hasProfiles := sectionDocs["profiles"]
+		if hasRuntimes || hasProfiles {
+			snap := ops.Snapshot()
+			if !hasRuntimes {
+				runtimes = snap.Runtimes
+			}
+			if !hasProfiles {
+				profiles = snap.Profiles
+			}
+			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
 		}
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
@@ -734,6 +800,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"applied":          appliedKeys,
 			"requires_restart": []string{},
 		},
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -972,6 +1041,18 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
+			}
+			if hub.StartClaimLeaseTTL != "" {
+				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.StartMaxDuration != "" {
+				keys = append(keys, "server.hub.start_max_duration")
+			}
+			if hub.StartUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_unconfirmed_hold")
+			}
+			if hub.StartCreateUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_create_unconfirmed_hold")
 			}
 			if hub.SoftDeleteRetainFiles != nil {
 				keys = append(keys, "server.hub.soft_delete_retain_files")
@@ -1362,6 +1443,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention
 			}
 			d.SoftDeleteRetainFiles = req.Server.Hub.SoftDeleteRetainFiles
+			d.StartClaimLeaseTTL = req.Server.Hub.StartClaimLeaseTTL
+			d.StartMaxDuration = req.Server.Hub.StartMaxDuration
+			d.StartUnconfirmedHold = req.Server.Hub.StartUnconfirmedHold
+			d.StartCreateUnconfirmedHold = req.Server.Hub.StartCreateUnconfirmedHold
 		}
 		doc = d
 

@@ -883,18 +883,6 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	return errors.Join(errs...)
 }
 
-// legacyProjectMembersGroupAnnotation is the project-members-group marker
-// written by the entadapter marker backfill
-// (BackfillProjectMembersGroupMarkers). It differs from
-// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
-// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
-// owner-clearing backfill matches either key.
-//
-// This literal duplicates the entadapter constant
-// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
-// fold the two together under ptone/scion#2556.
-const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
-
 // projectMembersGroupOwnerBackfillPageSize is the ListGroups page size for
 // backfillClearProjectMembersGroupOwners. It is a package variable, not a
 // const, so tests can shrink it to exercise the pagination loop.
@@ -909,11 +897,11 @@ var projectMembersGroupOwnerBackfillPageSize = 200
 // members group is now created without an owner.
 //
 // Groups are identified by the project-members-group marker annotation
-// (either key, see legacyProjectMembersGroupAnnotation), never by slug, so a
-// user-created group with a look-alike slug is left untouched. The pass runs
-// on every startup and is idempotent: a group whose OwnerID is already empty
-// is skipped, so a second run changes nothing. Per-group update errors are
-// logged and skipped.
+// (either key, see store.LegacyAnnotationProjectMembersGroup), never by
+// slug, so a user-created group with a look-alike slug is left untouched.
+// The pass runs on every startup and is idempotent: a group whose OwnerID is
+// already empty is skipped, so a second run changes nothing. Per-group update
+// errors are logged and skipped.
 func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
 	// All groups are scanned rather than filtering by GroupType: the scan is
 	// paginated and cheap, and a type filter could miss legacy group shapes.

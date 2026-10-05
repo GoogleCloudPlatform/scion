@@ -169,6 +169,12 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// WorkspaceStorageBackend is the configured server.workspace_storage
+	// backend name ("" means "local"). It is reported to the hub, with
+	// NFSConfig's first share, as the broker's workspace storage descriptor
+	// (see BuildWorkspaceStorageDescriptor).
+	WorkspaceStorageBackend string
+
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
@@ -1110,14 +1116,31 @@ func (s *Server) logNFSStartupResult() {
 		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
 }
 
+// ghResolutionCacheCloseTimeout bounds how long Shutdown waits for
+// background refreshes of the GitHub resolution cache before writing it to
+// disk (see GitHubResolutionCache.Close).
+const ghResolutionCacheCloseTimeout = 10 * time.Second
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Write any resolution cache entries still waiting for their delayed
-	// write. Deferred so it runs on every return path, and after the HTTP
-	// server has drained, when in-flight requests have finished adding to it.
+	// Close the resolution cache: wait, within a bound, for background
+	// refreshes still running, then write any entries still waiting for
+	// their delayed write. Deferred so it runs on every return path, and
+	// after the HTTP server has drained, when in-flight requests have
+	// finished adding to it.
+	//
+	// parentCtx keeps the caller's ctx: ctx is reassigned below to the
+	// drain timeout, whose cancel runs before this deferred func, so a
+	// bound derived from it would already be cancelled here.
+	parentCtx := ctx
 	defer func() {
-		if s.ghResolutionCache != nil {
-			s.ghResolutionCache.Flush()
+		if s.ghResolutionCache == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(parentCtx, ghResolutionCacheCloseTimeout)
+		defer cancel()
+		if err := s.ghResolutionCache.Close(closeCtx); err != nil {
+			slog.Warn("GitHub resolution cache closed before background refreshes finished", "error", err)
 		}
 	}()
 
@@ -1552,11 +1575,18 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	slug = strings.ToLower(slug)
 
 	filter := scopedNameFilter(slug, projectID)
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	// A recorded runtime type (ptone/scion#2748) can exclude the default
+	// runtime; auxListAgentsSorted applies the same restriction.
+	useDefault := s.defaultRuntimeAllowed(ctx)
+	var agents []api.AgentInfo
+	var err error
+	if useDefault {
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
 	}
-	agents = agentsForProject(agents, projectID)
 	matchManager := s.manager
 	matchRuntime := s.runtime
 
@@ -1577,11 +1607,13 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err != nil {
-			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		if useDefault {
+			agents, err = s.manager.List(ctx, fallbackFilter)
+			if err != nil {
+				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			}
+			agents = agentsWithoutProjectLabel(agents)
 		}
-		agents = agentsWithoutProjectLabel(agents)
 		matchManager = s.manager
 		matchRuntime = s.runtime
 		if len(agents) == 0 {
@@ -1645,19 +1677,10 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 // other: they are paired at the moment the match is found, not looked up
 // again afterward.
 func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for name, aux := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-		auxRuntimes[name] = aux
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
-	sort.Strings(auxNames)
-
 	var listErr error
-	for _, rtName := range auxNames {
-		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
+	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		rtName := aux.identity
+		auxAgents, auxErr := aux.Manager.List(ctx, filter)
 		if auxErr != nil {
 			if listErr == nil {
 				listErr = fmt.Errorf("%w %q: %v", errAuxiliaryRuntimeList, rtName, auxErr)
@@ -1670,7 +1693,7 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, auxRuntimes[rtName].Manager, auxRuntimes[rtName].Runtime, nil
+			return matched, aux.Manager, aux.Runtime, nil
 		}
 	}
 	if listErr != nil {

@@ -203,10 +203,20 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 
-		// Use project-scoped client which supports agent lookup by name/slug
-		if err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Delete(ctx, agentName, opts); err != nil {
-			cancel()
-			errs = append(errs, fmt.Sprintf("%s: %v", agentName, wrapHubError(err)))
+		// Use project-scoped client which supports agent lookup by name/slug.
+		// On 202 the hub is still deleting; deleteViaHubAndWait polls until
+		// the outcome is known (design ptone/scion#2483 R4).
+		outcome, err := deleteViaHubAndWait(ctx, hubCtx.Client.ProjectAgents(hubCtx.ProjectID), agentName, opts, func() {
+			statusf("Agent '%s': the Hub is still deleting it; waiting for the delete to finish...\n", agentName)
+		})
+		cancel()
+		if err != nil {
+			err = wrapHubError(err)
+		} else {
+			err = hubDeleteFailure(agentName, outcome, "local worktree kept")
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", agentName, err))
 			if isJSONOutput() {
 				results = append(results, map[string]interface{}{
 					"agent":  agentName,
@@ -216,8 +226,28 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 			}
 			continue
 		}
-		cancel()
 
+		if !outcome.Confirmed() {
+			// Accepted, but completion could not be observed (403 or poll
+			// timeout; failures were handled above). Not a failure, but
+			// nothing local is touched: the worktree is kept, and the sync
+			// state is left alone so that a later sync sees the agent as
+			// stale once the hub finishes.
+			msg := hubDeletePendingMessage(outcome)
+			if isJSONOutput() {
+				results = append(results, map[string]interface{}{
+					"agent":        agentName,
+					"status":       "accepted",
+					"message":      msg,
+					"worktreeKept": true,
+				})
+			} else {
+				statusf("Agent '%s': %s.\n", agentName, msg)
+			}
+			continue
+		}
+
+		// Confirmed (204, or 202 then the poll saw the agent gone).
 		// Also clean up local agent files (worktree, agent directory).
 		// The Hub dispatches container cleanup to the runtime broker, but local
 		// filesystem artifacts must be removed by the CLI to avoid orphaned agents.

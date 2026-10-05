@@ -372,6 +372,17 @@ func (r *SubstrateRuntime) AsyncLaunchUnsupported() bool { return true }
 
 var _ AsyncLaunchUnsupportedRuntime = (*SubstrateRuntime)(nil)
 
+// SupportsEmptyPerAgentWorkspace reports false: Run never mounts
+// RunConfig.Workspace (the actor's filesystem comes from its template), so
+// it cannot give an agent the private agents/<slug>/workspace directory an
+// empty-per-agent project (design #2703) requires. Opting out makes a
+// broker whose default runtime is substrate stop advertising the mode, so
+// the hub fails such creates closed with 412 instead of silently running
+// the agent without its workspace.
+func (r *SubstrateRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+var _ EmptyPerAgentCapableRuntime = (*SubstrateRuntime)(nil)
+
 // ExecUser returns "scion" — the tmux session runs under the scion user
 // after sciontool init sets up the environment, same as every other
 // runtime.
@@ -380,7 +391,20 @@ func (r *SubstrateRuntime) ExecUser() string { return "scion" }
 // Run implements the 9 steps of substrate-runtime.md §4. Any failure after
 // CreateActor triggers best-effort cleanup (delete the actor and its
 // egress policy) before returning.
+// errEmptyPerAgentSubstrate is returned by SubstrateRuntime.Run for an
+// empty-per-agent agent (design #2703).
+var errEmptyPerAgentSubstrate = errors.New("substrate: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the substrate runtime, " +
+	"which does not mount the agent's workspace directory; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
 func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Checked before anything touches the control plane: substrate never
+	// mounts RunConfig.Workspace, so it cannot give the agent its private
+	// directory. SupportsEmptyPerAgentWorkspace=false keeps the hub from
+	// dispatching here once the broker's heartbeat reports it; this covers
+	// the window before that, as Cloud Run's rejectEmptyPerAgentOnCloudRun does.
+	if isEmptyPerAgentRun(cfg) {
+		return "", errEmptyPerAgentSubstrate
+	}
 	// Fail fast on a misconfigured egress_allow before touching the control
 	// plane at all. NewSubstrateRuntime already validates this at
 	// construction time; this is a defensive re-check in case a
@@ -599,7 +623,10 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 // Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
 // (ignoring NotFound), then DeleteActor(any_state=true), then drop the
 // in-memory control token (and label record, best effort).
-func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
+// P4: enforce ref.RunID (ptone/scion#2550). Today the actor name is reused
+// across runs, so this still targets whatever actor holds the name.
+func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	atespace, actorName, err := splitSubstrateID(id)
 	if err != nil {
 		return err
@@ -653,7 +680,7 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 // suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
 // keeps the workspace and frees the worker rather than deleting the actor.
 func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, id)
+	return r.Delete(ctx, RunRef{ID: id})
 }
 
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
@@ -855,6 +882,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			ProjectID:     projectID,
 			ProjectPath:   projectPath,
 			Image:         image,
+			RunID:         labels[api.LabelRunID],
 		})
 	}
 	return agents, nil

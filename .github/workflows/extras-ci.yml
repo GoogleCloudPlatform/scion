@@ -40,6 +40,15 @@ on:
       - 'go.mod'
       - 'go.sum'
 
+# One run per PR: a new push to the same PR cancels the superseded run
+# (ptone/scion#2845). Cancelling is limited to pull_request events. Outside
+# pull_request the group is the unique run_id, not github.ref, so runs on
+# main (should a push trigger ever be added) never share a group and are
+# never cancelled, even while pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

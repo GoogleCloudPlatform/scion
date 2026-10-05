@@ -31,7 +31,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
-import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
+import { ACTIVITY_DISPLAY, stateLabel } from '../../../shared/agent-state-display.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
@@ -49,8 +49,11 @@ import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
 import '../status-badge.js';
-import { formatInstantWithZone } from '../../../utils/time.js';
+import { formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+
+/** Ages under this are shown relative; older ones as an absolute date. */
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Popup window geometry for a terminal. Roughly 80x24 at a comfortable size. */
 const TERMINAL_POPOUT_WIDTH = 1024;
@@ -269,6 +272,11 @@ export class ScionChatMembers extends LitElement {
       min-height: 0;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
+      /* The last row clears the home indicator (the page uses
+         viewport-fit=cover); the inset is 0 elsewhere. */
+      padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 
     .section-label {
@@ -995,7 +1003,11 @@ export class ScionChatMembers extends LitElement {
     // detail message is the same text the agent detail page shows, and
     // "Updated" is the last state change — matching the agent list's column,
     // not the `lastSeen` heartbeat.
-    const detailText = a.detailMessage || a.activity || a.phase || 'unknown';
+    const detailText =
+      a.detailMessage ||
+      (a.activity ? stateLabel(a.activity.toLowerCase()) : '') ||
+      a.phase ||
+      'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';
     const tooltipContent = updatedText ? `${detailText}\n${updatedText}` : detailText;
@@ -1067,20 +1079,15 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  /** Format an ISO timestamp as relative time (e.g., "2 min ago"). */
+  /** Format an ISO timestamp as a compact relative age (e.g., "2m ago"). */
   private formatRelativeTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'just now';
-    if (diffMin < 60) return `${diffMin} min ago`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs} hr ago`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
+    const ageMs = Date.now() - d.getTime();
+    // A future instant is clock skew between hub and browser.
+    if (ageMs < 0) return 'now';
+    // Under a week: a compact relative age.
+    if (ageMs < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
     // Older than a week: an absolute date in the display zone, zone named.
     return formatInstantWithZone(iso, 'date');
   }

@@ -1440,7 +1440,7 @@ func TestSubstrateDelete_FallsBackToDeleteActorUIDWhenGetActorFails(t *testing.T
 		}, nil
 	}
 
-	if err := rt.Delete(context.Background(), id); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: id}); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 
@@ -3102,4 +3102,30 @@ func TestSleepWithContext(t *testing.T) {
 			t.Fatalf("sleepWithContext returned after %s, want it to wait at least the requested %s", elapsed, d)
 		}
 	})
+}
+
+// TestSubstrateRun_RejectsEmptyPerAgent pins the Run-time guard behind
+// SupportsEmptyPerAgentWorkspace=false (design #2703): substrate never
+// mounts RunConfig.Workspace, so an empty-per-agent start that reaches the
+// broker before its first heartbeat corrects the static capabilities is
+// refused before any control-plane call. Other modes still run.
+func TestSubstrateRun_RejectsEmptyPerAgent(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	cfg := testSubstrateRunConfig()
+	cfg.Env = append(append([]string(nil), cfg.Env...), "SCION_WORKSPACE_MODE=empty-per-agent")
+	if _, err := rt.Run(context.Background(), cfg); !errors.Is(err, errEmptyPerAgentSubstrate) {
+		t.Fatalf("Run(empty-per-agent) error = %v, want errEmptyPerAgentSubstrate", err)
+	}
+	if calls := rec.list(); len(calls) != 0 {
+		t.Fatalf("Run(empty-per-agent) made control-plane calls %v, want none", calls)
+	}
+
+	cfg = testSubstrateRunConfig()
+	cfg.Env = append(append([]string(nil), cfg.Env...), "SCION_WORKSPACE_MODE=shared-plain")
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run(shared-plain) error = %v, want nil", err)
+	}
 }

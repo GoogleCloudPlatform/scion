@@ -837,6 +837,26 @@ func (_u *AgentUpdate) ClearLaunchID() *AgentUpdate {
 	return _u
 }
 
+// SetRunID sets the "run_id" field.
+func (_u *AgentUpdate) SetRunID(v string) *AgentUpdate {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentUpdate) ClearRunID() *AgentUpdate {
+	_u.mutation.ClearRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -1196,6 +1216,246 @@ func (_u *AgentUpdate) SetNillableDeletionRequest(v *string) *AgentUpdate {
 // ClearDeletionRequest clears the value of the "deletion_request" field.
 func (_u *AgentUpdate) ClearDeletionRequest() *AgentUpdate {
 	_u.mutation.ClearDeletionRequest()
+	return _u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdate) SetRunIntent(v string) *AgentUpdate {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntent(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdate) ClearRunIntent() *AgentUpdate {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdate) SetRunIntentAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (_u *AgentUpdate) SetStartClaimID(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimID(v)
+	return _u
+}
+
+// SetNillableStartClaimID sets the "start_claim_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (_u *AgentUpdate) ClearStartClaimID() *AgentUpdate {
+	_u.mutation.ClearStartClaimID()
+	return _u
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (_u *AgentUpdate) SetStartClaimKind(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimKind(v)
+	return _u
+}
+
+// SetNillableStartClaimKind sets the "start_claim_kind" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimKind(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimKind(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (_u *AgentUpdate) ClearStartClaimKind() *AgentUpdate {
+	_u.mutation.ClearStartClaimKind()
+	return _u
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (_u *AgentUpdate) SetStartClaimState(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimState(v)
+	return _u
+}
+
+// SetNillableStartClaimState sets the "start_claim_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimState(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (_u *AgentUpdate) ClearStartClaimState() *AgentUpdate {
+	_u.mutation.ClearStartClaimState()
+	return _u
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (_u *AgentUpdate) SetStartClaimOwner(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimOwner(v)
+	return _u
+}
+
+// SetNillableStartClaimOwner sets the "start_claim_owner" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimOwner(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimOwner(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (_u *AgentUpdate) ClearStartClaimOwner() *AgentUpdate {
+	_u.mutation.ClearStartClaimOwner()
+	return _u
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (_u *AgentUpdate) SetStartClaimTarget(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimTarget(v)
+	return _u
+}
+
+// SetNillableStartClaimTarget sets the "start_claim_target" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimTarget(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimTarget(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (_u *AgentUpdate) ClearStartClaimTarget() *AgentUpdate {
+	_u.mutation.ClearStartClaimTarget()
+	return _u
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (_u *AgentUpdate) SetStartClaimAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetStartClaimAt(v)
+	return _u
+}
+
+// SetNillableStartClaimAt sets the "start_claim_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimAt(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (_u *AgentUpdate) ClearStartClaimAt() *AgentUpdate {
+	_u.mutation.ClearStartClaimAt()
+	return _u
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (_u *AgentUpdate) SetStartClaimLeaseUntil(v time.Time) *AgentUpdate {
+	_u.mutation.SetStartClaimLeaseUntil(v)
+	return _u
+}
+
+// SetNillableStartClaimLeaseUntil sets the "start_claim_lease_until" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimLeaseUntil(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimLeaseUntil(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (_u *AgentUpdate) ClearStartClaimLeaseUntil() *AgentUpdate {
+	_u.mutation.ClearStartClaimLeaseUntil()
+	return _u
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (_u *AgentUpdate) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetStartClaimUnconfirmedAt(v)
+	return _u
+}
+
+// SetNillableStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimUnconfirmedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimUnconfirmedAt(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (_u *AgentUpdate) ClearStartClaimUnconfirmedAt() *AgentUpdate {
+	_u.mutation.ClearStartClaimUnconfirmedAt()
+	return _u
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (_u *AgentUpdate) SetStartClaimHoldUntil(v time.Time) *AgentUpdate {
+	_u.mutation.SetStartClaimHoldUntil(v)
+	return _u
+}
+
+// SetNillableStartClaimHoldUntil sets the "start_claim_hold_until" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimHoldUntil(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimHoldUntil(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (_u *AgentUpdate) ClearStartClaimHoldUntil() *AgentUpdate {
+	_u.mutation.ClearStartClaimHoldUntil()
+	return _u
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_u *AgentUpdate) SetStartClaimLaunchID(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimLaunchID(v)
+	return _u
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimLaunchID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (_u *AgentUpdate) ClearStartClaimLaunchID() *AgentUpdate {
+	_u.mutation.ClearStartClaimLaunchID()
 	return _u
 }
 
@@ -1607,6 +1867,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
 	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -1714,6 +1980,78 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimID(); ok {
+		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimID, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimKind(); ok {
+		_spec.SetField(agent.FieldStartClaimKind, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimKindCleared() {
+		_spec.ClearField(agent.FieldStartClaimKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimState(); ok {
+		_spec.SetField(agent.FieldStartClaimState, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimStateCleared() {
+		_spec.ClearField(agent.FieldStartClaimState, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimOwner(); ok {
+		_spec.SetField(agent.FieldStartClaimOwner, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimOwnerCleared() {
+		_spec.ClearField(agent.FieldStartClaimOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimTarget(); ok {
+		_spec.SetField(agent.FieldStartClaimTarget, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimTargetCleared() {
+		_spec.ClearField(agent.FieldStartClaimTarget, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimAt(); ok {
+		_spec.SetField(agent.FieldStartClaimAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimAtCleared() {
+		_spec.ClearField(agent.FieldStartClaimAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLeaseUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimLeaseUntil, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimLeaseUntilCleared() {
+		_spec.ClearField(agent.FieldStartClaimLeaseUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimUnconfirmedAt(); ok {
+		_spec.SetField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimUnconfirmedAtCleared() {
+		_spec.ClearField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimHoldUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimHoldUntil, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimHoldUntilCleared() {
+		_spec.ClearField(agent.FieldStartClaimHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimLaunchIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -2657,6 +2995,26 @@ func (_u *AgentUpdateOne) ClearLaunchID() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunID sets the "run_id" field.
+func (_u *AgentUpdateOne) SetRunID(v string) *AgentUpdateOne {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentUpdateOne) ClearRunID() *AgentUpdateOne {
+	_u.mutation.ClearRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -3016,6 +3374,246 @@ func (_u *AgentUpdateOne) SetNillableDeletionRequest(v *string) *AgentUpdateOne 
 // ClearDeletionRequest clears the value of the "deletion_request" field.
 func (_u *AgentUpdateOne) ClearDeletionRequest() *AgentUpdateOne {
 	_u.mutation.ClearDeletionRequest()
+	return _u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdateOne) SetRunIntent(v string) *AgentUpdateOne {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntent(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdateOne) ClearRunIntent() *AgentUpdateOne {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdateOne) SetRunIntentAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (_u *AgentUpdateOne) SetStartClaimID(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimID(v)
+	return _u
+}
+
+// SetNillableStartClaimID sets the "start_claim_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (_u *AgentUpdateOne) ClearStartClaimID() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimID()
+	return _u
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (_u *AgentUpdateOne) SetStartClaimKind(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimKind(v)
+	return _u
+}
+
+// SetNillableStartClaimKind sets the "start_claim_kind" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimKind(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimKind(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (_u *AgentUpdateOne) ClearStartClaimKind() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimKind()
+	return _u
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (_u *AgentUpdateOne) SetStartClaimState(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimState(v)
+	return _u
+}
+
+// SetNillableStartClaimState sets the "start_claim_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimState(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (_u *AgentUpdateOne) ClearStartClaimState() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimState()
+	return _u
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (_u *AgentUpdateOne) SetStartClaimOwner(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimOwner(v)
+	return _u
+}
+
+// SetNillableStartClaimOwner sets the "start_claim_owner" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimOwner(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimOwner(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (_u *AgentUpdateOne) ClearStartClaimOwner() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimOwner()
+	return _u
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (_u *AgentUpdateOne) SetStartClaimTarget(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimTarget(v)
+	return _u
+}
+
+// SetNillableStartClaimTarget sets the "start_claim_target" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimTarget(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimTarget(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (_u *AgentUpdateOne) ClearStartClaimTarget() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimTarget()
+	return _u
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (_u *AgentUpdateOne) SetStartClaimAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetStartClaimAt(v)
+	return _u
+}
+
+// SetNillableStartClaimAt sets the "start_claim_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimAt(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (_u *AgentUpdateOne) ClearStartClaimAt() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimAt()
+	return _u
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (_u *AgentUpdateOne) SetStartClaimLeaseUntil(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetStartClaimLeaseUntil(v)
+	return _u
+}
+
+// SetNillableStartClaimLeaseUntil sets the "start_claim_lease_until" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimLeaseUntil(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimLeaseUntil(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (_u *AgentUpdateOne) ClearStartClaimLeaseUntil() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimLeaseUntil()
+	return _u
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (_u *AgentUpdateOne) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetStartClaimUnconfirmedAt(v)
+	return _u
+}
+
+// SetNillableStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimUnconfirmedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimUnconfirmedAt(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (_u *AgentUpdateOne) ClearStartClaimUnconfirmedAt() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimUnconfirmedAt()
+	return _u
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (_u *AgentUpdateOne) SetStartClaimHoldUntil(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetStartClaimHoldUntil(v)
+	return _u
+}
+
+// SetNillableStartClaimHoldUntil sets the "start_claim_hold_until" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimHoldUntil(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimHoldUntil(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (_u *AgentUpdateOne) ClearStartClaimHoldUntil() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimHoldUntil()
+	return _u
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_u *AgentUpdateOne) SetStartClaimLaunchID(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimLaunchID(v)
+	return _u
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimLaunchID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (_u *AgentUpdateOne) ClearStartClaimLaunchID() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimLaunchID()
 	return _u
 }
 
@@ -3457,6 +4055,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
 	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -3564,6 +4168,78 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimID(); ok {
+		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimID, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimKind(); ok {
+		_spec.SetField(agent.FieldStartClaimKind, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimKindCleared() {
+		_spec.ClearField(agent.FieldStartClaimKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimState(); ok {
+		_spec.SetField(agent.FieldStartClaimState, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimStateCleared() {
+		_spec.ClearField(agent.FieldStartClaimState, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimOwner(); ok {
+		_spec.SetField(agent.FieldStartClaimOwner, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimOwnerCleared() {
+		_spec.ClearField(agent.FieldStartClaimOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimTarget(); ok {
+		_spec.SetField(agent.FieldStartClaimTarget, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimTargetCleared() {
+		_spec.ClearField(agent.FieldStartClaimTarget, field.TypeString)
+	}
+	if value, ok := _u.mutation.StartClaimAt(); ok {
+		_spec.SetField(agent.FieldStartClaimAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimAtCleared() {
+		_spec.ClearField(agent.FieldStartClaimAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLeaseUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimLeaseUntil, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimLeaseUntilCleared() {
+		_spec.ClearField(agent.FieldStartClaimLeaseUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimUnconfirmedAt(); ok {
+		_spec.SetField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimUnconfirmedAtCleared() {
+		_spec.ClearField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimHoldUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimHoldUntil, field.TypeTime, value)
+	}
+	if _u.mutation.StartClaimHoldUntilCleared() {
+		_spec.ClearField(agent.FieldStartClaimHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimLaunchIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

@@ -207,10 +207,10 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		parts = append(parts, fmt.Sprintf(`labels.broker_id = %q`, opts.BrokerID))
 	}
 	if !opts.Since.IsZero() {
-		parts = append(parts, fmt.Sprintf(`timestamp >= %q`, opts.Since.Format(time.RFC3339Nano)))
+		parts = append(parts, fmt.Sprintf(`timestamp >= %q`, opts.Since.UTC().Format(time.RFC3339Nano)))
 	}
 	if !opts.Until.IsZero() {
-		parts = append(parts, fmt.Sprintf(`timestamp < %q`, opts.Until.Format(time.RFC3339Nano)))
+		parts = append(parts, fmt.Sprintf(`timestamp < %q`, opts.Until.UTC().Format(time.RFC3339Nano)))
 	}
 	if opts.Severity != "" {
 		parts = append(parts, fmt.Sprintf(`severity >= %s`, strings.ToUpper(opts.Severity)))

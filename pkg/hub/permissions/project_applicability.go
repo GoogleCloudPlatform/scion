@@ -209,11 +209,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"gcp_service_account.read": {BoundaryKindHub}, "gcp_service_account.list": {BoundaryKindHub},
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
 
-	// broker.create has no Permission.UATScope yet (not a resolvable
-	// selector today) but is pre-reviewed here as hub-only:
-	// when a future Registry row adds UATScope: "broker:create",
-	// ResolveSelector starts succeeding immediately with the correct
-	// boundary, no second A.1-side change required.
+	// broker.create's selector "broker:create" is hub-only: a broker is a
+	// hub-level resource.
 	"broker.create": {BoundaryKindHub},
 }
 
@@ -356,9 +353,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"gcp_service_account.verify": {TargetClassKindHubResource, TargetClassKindProjectScoped},
 	"gcp_service_account.assign": {TargetClassKindProjectScoped},
 
-	// broker.create has no UATScope yet (see PermissionAllowedBoundaries);
-	// pre-reviewed here too so D.1 need only add the UATScope, matching the
-	// same rationale.
+	// broker.create targets the hub-level broker collection only.
 	"broker.create": {TargetClassKindHubResource},
 }
 

@@ -570,6 +570,10 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 // resolves to Kubernetes rather than docker, the re-check that runs after
 // that second, authoritative resolution must NOT downgrade to block —
 // Kubernetes keeps its own runtime-aware default of passthrough instead.
+// The request body includes SCION_METADATA_MODE_SOURCE=hub, matching what a
+// real hub dispatch always sends alongside an elevated mode; without it this
+// resolvedEnv would be treated as untrusted and downgraded before the
+// Kubernetes carve-out is ever reached.
 func TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
 	var capturedEnv []string
@@ -581,6 +585,7 @@ func TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernete
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})
@@ -650,7 +655,8 @@ func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *
 // TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
 // is the restart-path twin of
 // TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
-// above.
+// above, including the same SCION_METADATA_MODE_SOURCE=hub marker and the
+// same reason for it.
 func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
 	var capturedEnv []string
@@ -662,6 +668,7 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})

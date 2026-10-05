@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
@@ -58,6 +59,12 @@ type startContext struct {
 	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
 	// own classifications survive the function that computes them.
 	EnvClassifications map[string]api.EnvKind
+
+	// AssignSelection is the profile and runtime entry a GCP identity
+	// "assign" dispatch on Kubernetes read its ServiceAccount mapping and
+	// namespace from, or nil when no ServiceAccount was resolved. The start
+	// and restart handlers compare it with their own later resolution.
+	AssignSelection *dispatchProfileSelection
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -110,6 +117,16 @@ type startContextInputs struct {
 	// (e.g. "worktree-per-agent"). Threaded from CreateAgentRequest so the
 	// broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string
+
+	// WorkspaceStoragePath is the create request's GCS bootstrap path. The
+	// workspace is downloaded after buildStartContext (createAgent /
+	// runLaunch), so it is threaded here only so the workspace-source
+	// checks see it as the explicit source it is.
+	WorkspaceStoragePath string
+	// RunID is the hub-minted per-run identity for this dispatch
+	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
+	// hub; pkg/agent then mints one itself.
+	RunID string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -367,6 +384,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		return nil, sce
 	}
 
+	// GCP identity mode "assign" on the Kubernetes runtime uses Workload
+	// Identity instead of the sciontool metadata emulator: the pod runs as a
+	// Kubernetes ServiceAccount (KSA) the operator has already bound to the
+	// requested GSA via Workload Identity, out of band. Scion never creates,
+	// annotates, or binds KSAs itself (see docs-site/.../ha/setup-gcp.md).
+	// Resolved here, alongside the block rejection above and before any env
+	// or pod work, for the same reason: it can reject the dispatch outright.
+	// It rewrites gcpMetadataMode to "passthrough" so the env-emission switch
+	// below sets SCION_METADATA_MODE with no new switch arm;
+	// assignIdentity.SAEmail/ProjectID carry the SA email and
+	// project ID forward to that switch, which sets them as informational
+	// env, since the passthrough case does not set them on its own.
+	assignIdentity, sce := s.resolveKubernetesAssignIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	if sce != nil {
+		return nil, sce
+	}
+	resolvedKSAName := assignIdentity.KSAName
+	if resolvedKSAName != "" {
+		gcpMetadataMode = store.GCPMetadataModePassthrough
+	}
+
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
@@ -570,9 +608,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// work — see the comment there for why the Kubernetes/"block" check
 	// runs where it does.
 	//
-	// requireLocalRuntime follows the identical struct-or-env precedence
-	// gcpMetadataMode used above — see downgradeUnverifiedHubDefaultPassthrough's
-	// doc comment for what it means and how it's used below and in
+	// gcpMetadataMode itself was already resolved earlier in this function
+	// (effectiveGCPMetadataMode) and validated against the Kubernetes/"block"
+	// check above. requireLocalRuntime follows the identical struct-or-env
+	// precedence — see downgradeUnverifiedHubDefaultPassthrough's doc comment
+	// for what it means and how it's used below and in
 	// recheckHubDefaultPassthrough.
 	requireLocalRuntime := false
 	if in.Config != nil && in.Config.GCPIdentity != nil {
@@ -624,6 +664,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// hub separately injects it via resolvedEnv. See ptone/scion#1873.
 		env["SCION_METADATA_MODE"] = gcpMetadataMode
 		classifyBrokerEnv("SCION_METADATA_MODE", api.EnvKindPlain)
+		// resolvedKSAName is only non-empty when a Kubernetes "assign"
+		// dispatch rewrote gcpMetadataMode to "passthrough" above (see that
+		// block's comment). The hub's start/restart path already injects
+		// SCION_METADATA_SA_EMAIL/PROJECT_ID into resolvedEnv unconditionally
+		// for assign, and at least one harness (harnesses/grok-build)
+		// consumes SCION_METADATA_PROJECT_ID directly for Vertex AI
+		// autodetection and project fallback, independent of the metadata
+		// emulator. Setting them here too, from the same values that block
+		// already resolved, makes create produce the same env as
+		// start/restart instead of differing by dispatch path. A genuine
+		// (non-rewritten) passthrough dispatch never reaches this branch, so
+		// it is unaffected.
+		if resolvedKSAName != "" {
+			env["SCION_METADATA_SA_EMAIL"] = assignIdentity.SAEmail
+			classifyBrokerEnv("SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
+			env["SCION_METADATA_PROJECT_ID"] = assignIdentity.ProjectID
+			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+		}
 	default:
 		return nil, &startContextError{
 			Status: http.StatusBadRequest,
@@ -658,6 +716,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
 		FreshProvision: in.Operation == opCreate,
+		RunID:          in.RunID,
 	}
 
 	if in.Attach {
@@ -682,6 +741,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.InlineConfig != nil {
 		opts.InlineConfig = in.InlineConfig
 	}
+
+	// ResolvedKubernetesServiceAccountName (not InlineConfig) is how the
+	// mapped KSA reaches the pod: for an existing agent, GetAgent
+	// (pkg/agent/provision.go) builds its config from the template chain
+	// plus the persisted scion-agent.json and never consults InlineConfig,
+	// so a value injected only into opts.InlineConfig would silently not
+	// apply on start/restart of an agent that already has a persisted
+	// config. This field is read directly in pkg/agent/run.go's Kubernetes
+	// RunConfig builder, after GetAgent, so it applies on create and on
+	// start/restart alike. It is never persisted (not part of ScionConfig),
+	// so it is recomputed fresh on every dispatch, the same way
+	// SCION_METADATA_MODE itself is — a later mapping change takes effect on
+	// the next start without touching scion-agent.json.
+	opts.ResolvedKubernetesServiceAccountName = resolvedKSAName
 
 	if len(in.SharedDirs) > 0 {
 		opts.SharedDirs = in.SharedDirs
@@ -802,6 +875,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Empty-per-agent mode (design #2703) ---
+	// The hub sends the canonical "empty-per-agent" on create and start (or
+	// pre-resolves it into resolvedEnv, already merged into env above). The
+	// agent gets a private, initially empty, non-git directory at
+	// <projectDir>/agents/<slug>/workspace; any other workspace source in the
+	// same request is contradictory and refused rather than guessed at.
+	emptyPerAgent := store.SharingModeEmptyPerAgent == store.WorkspaceSharingMode(env["SCION_WORKSPACE_MODE"])
+	if emptyPerAgent {
+		if msg := emptyPerAgentConflict(in); msg != "" {
+			span.SetStatus(codes.Error, msg)
+			return nil, &startContextError{Status: http.StatusBadRequest, Message: msg}
+		}
+		opts.EmptyPerAgentWorkspace = true
+	} else if msg := ambiguousNonGitWorkspace(in, worktreeProvisioned); msg != "" {
+		span.SetStatus(codes.Error, msg)
+		return nil, &startContextError{Status: http.StatusBadRequest, Message: msg}
+	}
+
 	// --- SCION_WORKSPACE_GIT ---
 	// Emit when the workspace is (or will be) a git repository. Mode alone is
 	// insufficient because shared-plain may or may not be git-backed.
@@ -818,6 +909,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if !isGitWorkspace {
 		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+	}
+	if emptyPerAgent {
+		// Never git, whatever a stale resolvedEnv claims.
+		isGitWorkspace = false
+		delete(env, "SCION_WORKSPACE_GIT")
+		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
 	if isGitWorkspace {
 		env["SCION_WORKSPACE_GIT"] = "true"
@@ -836,7 +933,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.NoAuth {
 		opts.ResolvedSecrets = nil
 	} else if len(in.ResolvedSecrets) > 0 {
-		opts.ResolvedSecrets = in.ResolvedSecrets
+		// Defense in depth for rows that predate the hub's create/patch
+		// reserved-target check and dispatch-time drop, or that reached this
+		// call through some other path: never attach an environment-type
+		// secret whose target is reserved for scion's own control-plane env
+		// vars to the runtime config.
+		opts.ResolvedSecrets = make([]api.ResolvedSecret, 0, len(in.ResolvedSecrets))
+		for _, rs := range in.ResolvedSecrets {
+			if (rs.Type == "environment" || rs.Type == "") && secret.IsReservedEnvTarget(rs.Target) {
+				if s.config.Debug {
+					s.envSecretLog.Debug("Dropping reserved-target resolved secret", "name", rs.Name, "target", rs.Target)
+				}
+				continue
+			}
+			opts.ResolvedSecrets = append(opts.ResolvedSecrets, rs)
+		}
 		if s.config.Debug {
 			s.envSecretLog.Debug("Received resolved secrets", "count", len(in.ResolvedSecrets))
 		}
@@ -891,13 +1002,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-run this same check after their own, later resolution.
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
-	return &startContext{
+	sc := &startContext{
 		Opts:               opts,
 		TemplateSlug:       templateSlug,
 		Manager:            mgr,
 		RuntimeType:        dispatchRuntimeType,
 		EnvClassifications: envCls,
-	}, nil
+	}
+	if resolvedKSAName != "" {
+		sel := assignIdentity.Selection
+		sc.AssignSelection = &sel
+	}
+	return sc, nil
 }
 
 // hubDefaultPassthroughRuntimeTypes mirrors pkg/hub's map of the same name
@@ -1032,11 +1148,18 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		return cfg.GCPIdentity.MetadataMode
 	}
 	raw := resolvedEnv["SCION_METADATA_MODE"]
+	source := resolvedEnv["SCION_METADATA_MODE_SOURCE"]
 	if cfg != nil {
 		for _, e := range cfg.Env {
 			parts := strings.SplitN(e, "=", 2)
-			if len(parts) == 2 && parts[0] == "SCION_METADATA_MODE" {
+			if len(parts) != 2 {
+				continue
+			}
+			switch parts[0] {
+			case "SCION_METADATA_MODE":
 				raw = parts[1]
+			case "SCION_METADATA_MODE_SOURCE":
+				source = parts[1]
 			}
 		}
 	}
@@ -1045,6 +1168,20 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		// resolvedEnv when dispatching a start for a provisioned agent. This
 		// is also how a resolved project or hub default GCP identity mode
 		// reaches the broker.
+		//
+		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
+		// alongside its own authoritative mode (DispatchAgentStart,
+		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// predate that write won't send the marker at all, and on such a hub
+		// this value could be whatever a stray stored env var or secret
+		// happened to contain rather than a real dispatch decision. Downgrade
+		// an elevated (non-block) mode to the secure default in that case; an
+		// already out-of-range mode still falls through to the allow-list
+		// rejection elsewhere unchanged, marker or not.
+		elevated := raw == store.GCPMetadataModeAssign || raw == store.GCPMetadataModePassthrough
+		if elevated && source != "hub" {
+			return store.GCPMetadataModeBlock
+		}
 		return raw
 	}
 	return mode
@@ -1226,12 +1363,12 @@ func validateMountedWorktree(workspacePath, base string) error {
 // ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
 // assumes no worktree can exist yet whenever the sentinel is missing, and
 // would otherwise wipe every worktree under the shared base.
+//
+// The sentinel is looked for in exactly the directories ProvisionShared
+// checks (in.SentinelDirs: the sentinel directory, the base's parent by
+// default, and LegacyDir when set), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
-	sentinelDir := in.SentinelDir
-	if sentinelDir == "" {
-		sentinelDir = filepath.Dir(in.Resolved.HostPath)
-	}
-	if _, err := os.Stat(filepath.Join(sentinelDir, provision.ProvisionSentinelFile)); err != nil {
+	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); err != nil {
@@ -1625,8 +1762,79 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if cfg == nil || cfg.HubAgentDefaults.IsEmpty() {
+	if cfg == nil {
 		return ctx
 	}
-	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+	return withStartHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}
+
+// withStartHubAgentDefaults attaches hub defaults decoded from a start or
+// restart request body (or a create request's config) to ctx, so
+// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Returns ctx unchanged for a nil or empty value.
+func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if d.IsEmpty() {
+		return ctx
+	}
+	return api.ContextWithHubAgentDefaults(ctx, d)
+}
+
+// emptyPerAgentConflict returns a client-facing message when an
+// empty-per-agent request (design #2703) also names another workspace
+// source, or "" when it does not. The hub never sends these together; a
+// request that does is refused rather than resolved in favour of either.
+func emptyPerAgentConflict(in startContextInputs) string {
+	if in.WorkspaceStoragePath != "" {
+		return "empty-per-agent workspaces cannot be seeded from a workspace upload"
+	}
+	cfg := in.Config
+	if cfg == nil {
+		return ""
+	}
+	switch {
+	case cfg.Workspace != "":
+		return "empty-per-agent workspaces do not take a workspace path"
+	case cfg.GitClone != nil:
+		return "empty-per-agent workspaces cannot be combined with a git clone"
+	case cfg.SharedWorkspace:
+		return "empty-per-agent workspaces cannot be combined with a shared workspace"
+	}
+	return ""
+}
+
+// ambiguousNonGitWorkspace returns a client-facing message when a create for
+// a hub-managed project (ProjectPath is ~/.scion/projects/<slug>) names no
+// workspace source at all: no workspace mode, no workspace path, no GCS
+// workspace upload, no git clone, no shared workspace and no worktree. A
+// current hub always sends one of them (the hub-managed project path, or for
+// a remote broker with hub storage the upload's workspaceStoragePath, for a
+// shared non-git project; the empty-per-agent mode otherwise), so such a
+// request means the mode was lost on the way (or the hub could not compute
+// the project path, which also fails closed here).
+// Provisioning would then fall back to the shared project directory, which
+// for an empty-per-agent agent breaks isolation, so it is refused (design
+// #2703 P2). Start and restart are not checked: they legitimately omit the
+// config, and the hub re-sends the mode on them.
+func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) string {
+	if in.Operation != opCreate || in.ProjectSlug == "" || in.WorkspaceMode != "" || worktreeProvisioned {
+		return ""
+	}
+	// Only the conventional hub-managed path (which createAgent resolves
+	// from the slug before buildStartContext) is checked; a linked
+	// project's own ProjectPath keeps its existing resolution.
+	globalDir, err := config.GetGlobalDir()
+	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+		return ""
+	}
+	if in.WorkspaceStoragePath != "" {
+		return ""
+	}
+	if in.Config != nil && (in.Config.Workspace != "" || in.Config.GitClone != nil || in.Config.SharedWorkspace) {
+		return ""
+	}
+	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
+		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
 }

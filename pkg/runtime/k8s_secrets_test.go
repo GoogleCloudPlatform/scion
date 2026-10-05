@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -81,6 +82,60 @@ func TestBuildPod_FallbackSecrets_Environment(t *testing.T) {
 				t.Errorf("expected key DB_PASS, got %s", env.ValueFrom.SecretKeyRef.Key)
 			}
 		}
+	}
+}
+
+// TestBuildPod_FallbackSecrets_ReservedTargetCollidesWithConfigEnv_SystemEnvWins
+// verifies that when an environment-type resolved secret targets the same
+// name as an entry already in config.Env, the pod's env list keeps the
+// config.Env value and does not also add a secretKeyRef for the same name.
+// config.Env is where the broker places values it has already
+// authoritatively decided, such as SCION_METADATA_MODE, so a resolved
+// secret must not be able to re-decide them via a second env entry.
+func TestBuildPod_FallbackSecrets_ReservedTargetCollidesWithConfigEnv_SystemEnvWins(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+
+	config := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Env:          []string{"SCION_METADATA_MODE=block"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "RESERVED_NAME_SECRET", Type: "environment", Target: "SCION_METADATA_MODE", Value: "passthrough", Source: "user"},
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
+		},
+	}
+
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	var modeValues []corev1.EnvVar
+	foundAPIKeyRef := false
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "SCION_METADATA_MODE" {
+			modeValues = append(modeValues, env)
+		}
+		if env.Name == "API_KEY" {
+			foundAPIKeyRef = true
+			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+				t.Error("API_KEY should have ValueFrom.SecretKeyRef")
+			}
+		}
+	}
+
+	if len(modeValues) != 1 {
+		t.Fatalf("expected exactly one SCION_METADATA_MODE env entry, got %d: %+v", len(modeValues), modeValues)
+	}
+	if modeValues[0].Value != "block" {
+		t.Errorf("expected SCION_METADATA_MODE literal value %q, got %+v", "block", modeValues[0])
+	}
+	if modeValues[0].ValueFrom != nil {
+		t.Errorf("expected SCION_METADATA_MODE to keep its config.Env literal value, not a secretKeyRef: %+v", modeValues[0])
+	}
+	if !foundAPIKeyRef {
+		t.Error("expected non-colliding environment secret API_KEY to still be injected")
 	}
 }
 
@@ -223,6 +278,43 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 
 	// The CSI volume is mounted whole under the staging root.
 	assertStagingMount(t, pod, "secrets-store")
+}
+
+// TestBuildPod_GKESecrets_ReservedTargetCollidesWithConfigEnv_SystemEnvWins is
+// the GKE-hybrid-path counterpart of the fallback-path collision test above:
+// a resolved secret targeting a name already present in config.Env must not
+// add a second env entry for that name.
+func TestBuildPod_GKESecrets_ReservedTargetCollidesWithConfigEnv_SystemEnvWins(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	rt.GKEMode = true
+
+	config := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Env:          []string{"SCION_METADATA_MODE=block"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "RESERVED_NAME_SECRET", Type: "environment", Target: "SCION_METADATA_MODE", Value: "passthrough", Source: "user", Ref: "projects/my-project/secrets/reserved-name"},
+		},
+	}
+
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	var modeValues []corev1.EnvVar
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "SCION_METADATA_MODE" {
+			modeValues = append(modeValues, env)
+		}
+	}
+	if len(modeValues) != 1 {
+		t.Fatalf("expected exactly one SCION_METADATA_MODE env entry, got %d: %+v", len(modeValues), modeValues)
+	}
+	if modeValues[0].Value != "block" || modeValues[0].ValueFrom != nil {
+		t.Errorf("expected SCION_METADATA_MODE to keep its config.Env literal value, got %+v", modeValues[0])
+	}
 }
 
 func TestBuildPod_GKESecrets_File(t *testing.T) {
@@ -639,7 +731,7 @@ func TestDelete_PodNotFound_StillCleansSecrets(t *testing.T) {
 	}
 
 	// Delete should not error even though pod doesn't exist
-	err = rt.Delete(ctx, "test-agent")
+	err = rt.Delete(ctx, RunRef{ID: "test-agent"})
 	if err != nil {
 		t.Fatalf("Delete should succeed when pod is not found: %v", err)
 	}

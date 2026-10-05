@@ -187,7 +187,7 @@ func TestSAAssign2147_AgentCreatedByOwner_RealEdge_CanAssignProjectSA(t *testing
 	createDCProject(t, s, projectID, "2147-agent-owner-project")
 	createTestUserWithProjectRole(t, s, ownerID, "2147-agent-owner@test.com", projectID, store.ProjectRoleOwner)
 	createDCAgent(t, s, agentID, projectID, ownerID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
 	sa := &store.GCPServiceAccount{
@@ -222,7 +222,7 @@ func TestSAAssign2147_AgentCreatedByMember_RealEdge_CanAssignProjectSA(t *testin
 	createDCProject(t, s, projectID, "2147-agent-member-project")
 	createTestUserWithProjectRole(t, s, memberID, "2147-agent-member@test.com", projectID, store.ProjectRoleMember)
 	createDCAgent(t, s, agentID, projectID, memberID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, memberID, store.DelegationPrincipalAgent, agentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, memberID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
 	sa := &store.GCPServiceAccount{
@@ -692,7 +692,7 @@ func TestSAAssign2147_MemberAgentCreatesAgent_Enforce_EvaluatesCreatingSA(t *tes
 				},
 			}
 			require.NoError(t, m.store.CreateAgent(ctx, creator))
-			createDCEdge(t, m.store, store.DelegationPrincipalUser, m.member.ID, store.DelegationPrincipalAgent, creator.ID,
+			seedRecordedDelegationEdge(t, m.store, store.DelegationPrincipalUser, m.member.ID, store.DelegationPrincipalAgent, creator.ID,
 				store.RoleScopeProject, m.proj.ID, string(AgentRoleFull))
 
 			targetSA := wiringSA(t, m.store, store.ScopeProject, m.proj.ID, "2147-path-target-"+tc.name+"@p.iam.gserviceaccount.com")

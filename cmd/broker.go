@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -555,12 +556,13 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 2: Complete broker join with join token
 		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:     createResp.BrokerID,
-			JoinToken:    createResp.JoinToken,
-			Hostname:     brokerName,
-			Version:      version.Version,
-			Capabilities: brokerRegistrationCapabilities(),
-			Profiles:     profiles,
+			BrokerID:         createResp.BrokerID,
+			JoinToken:        createResp.JoinToken,
+			Hostname:         brokerName,
+			Version:          version.Version,
+			Capabilities:     brokerRegistrationCapabilities(),
+			Profiles:         profiles,
+			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
@@ -1524,7 +1526,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    Auth:        %s\n", conn.AuthMode)
 			fmt.Printf("    Status:      %s\n", connStatus)
 			if !conn.RegisteredAt.IsZero() {
-				fmt.Printf("    Registered:  %s\n", conn.RegisteredAt.Format("2006-01-02"))
+				fmt.Printf("    Registered:  %s\n", clitime.Format(conn.RegisteredAt, clitime.Date))
 			}
 		}
 		if status.HubConnected {
@@ -1533,7 +1535,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 			}
 			if !status.LastHeartbeat.IsZero() {
-				fmt.Printf("  Last seen:   %s\n", formatRelativeTime(status.LastHeartbeat))
+				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else if status.Registered {
 			fmt.Printf("\n  Connected:   no (Hub unreachable)\n")
@@ -1556,7 +1558,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 			}
 			if !status.LastHeartbeat.IsZero() {
-				fmt.Printf("  Last seen:   %s\n", formatRelativeTime(status.LastHeartbeat))
+				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else {
 			fmt.Printf("  Connected:   no (Hub unreachable)\n")
@@ -1645,7 +1647,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 	for _, c := range allCreds {
 		regDate := ""
 		if !c.RegisteredAt.IsZero() {
-			regDate = c.RegisteredAt.Format("2006-01-02")
+			regDate = clitime.Format(c.RegisteredAt, clitime.Date)
 		}
 		authMode := string(c.AuthMode)
 		if authMode == "" {
@@ -1726,7 +1728,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 	}
 	fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 	if !status.LastHeartbeat.IsZero() {
-		fmt.Printf("  Last seen:   %s\n", formatRelativeTime(status.LastHeartbeat))
+		fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 	}
 	fmt.Printf("  Hub:         %s\n", status.HubEndpoint)
 	fmt.Println()
@@ -1924,12 +1926,13 @@ func getLocalBrokerID() string {
 // Hub; it does not start the broker daemon or construct a runtime), so
 // "attach" is always included — the same missing-capability-implies-
 // supported default used everywhere else this feature answers the
-// question, applied because there is nothing here to say otherwise. A
+// question, applied because there is nothing here to say otherwise. The
+// same holds for "emptyPerAgentWorkspace" (false only for Cloud Run). A
 // runtime that actually opts out reports it once the broker itself runs
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
