@@ -29,14 +29,17 @@ import (
 )
 
 // provisionedOnlyFrom decodes the provisionedOnly field from an agent JSON
-// object (absent decodes as false, matching omitempty).
+// object. The key must be present: the REST shape always sends it, even
+// when false, so a client merging responses clears a stale true.
 func provisionedOnlyFrom(t *testing.T, raw json.RawMessage) bool {
 	t.Helper()
-	var v struct {
-		ProvisionedOnly bool `json:"provisionedOnly"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &v))
-	return v.ProvisionedOnly
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &m))
+	field, ok := m["provisionedOnly"]
+	require.True(t, ok, "provisionedOnly missing from agent JSON: %s", raw)
+	var v bool
+	require.NoError(t, json.Unmarshal(field, &v))
+	return v
 }
 
 // getProvisionedOnly reads provisionedOnly for agentID from both the get
@@ -113,6 +116,20 @@ func TestProvisionedOnly_StartedAgent(t *testing.T) {
 	agent := createSiteAgent(t, s, project, "po-running", state.PhaseRunning, store.RunIntentRunning)
 
 	assert.False(t, getProvisionedOnly(t, srv, project.ID, agent.ID))
+}
+
+// A started agent sends an explicit "provisionedOnly": false on get, not
+// an absent key, so the web's partial seed merge overwrites a true merged
+// while the agent was provision-only.
+func TestProvisionedOnly_StartedAgentSendsExplicitFalse(t *testing.T) {
+	disp := newSiteIntentDispatcher(nil)
+	srv, s, project := setupCreateAgentServer(t, disp)
+	disp.s = s
+	agent := createSiteAgent(t, s, project, "po-explicit", state.PhaseRunning, store.RunIntentRunning)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"provisionedOnly":false`)
 }
 
 // enrichAgent and enrichAgents compute the same view; an active launch or

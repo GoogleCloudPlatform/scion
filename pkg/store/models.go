@@ -183,8 +183,10 @@ type Agent struct {
 	// ProvisionedOnly is a computed, read-only view (ptone/scion#2929):
 	// true when the agent was provisioned but never asked to run (see
 	// ComputeAgentProvisionedOnly). Like Launch, only the hub populates it,
-	// at response time.
-	ProvisionedOnly bool `json:"provisionedOnly,omitempty"`
+	// at response time. No omitempty (as on the SSE status event): this
+	// struct is the REST agent shape, and an explicit false lets the web's
+	// partial seed merge clear a previously merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 
 	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
 	// The persisted deletion_* columns: a leased, sticky delete marker.
