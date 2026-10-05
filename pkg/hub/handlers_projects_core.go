@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -522,6 +523,27 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// rollbackCreatedProject undoes this request's project creation (secret,
+	// role bindings, project row) after a workspace initialization failure.
+	rollbackCreatedProject := func() {
+		if req.GitHubToken != "" && s.secretBackend != nil && project.GitRemote != "" {
+			if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, project.ID); delErr != nil {
+				s.projectsLogger().Warn("failed to clean up project secret after workspace init failure",
+					"project_id", project.ID, "error", delErr)
+			}
+		}
+		// Cascade-delete role bindings before the project row to avoid
+		// orphaned bindings referencing a deleted project (R1 review fix).
+		if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
+			s.projectsLogger().Warn("failed to clean up role bindings after workspace init failure",
+				"project_id", project.ID, "error", rbErr)
+		}
+		if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
+			s.projectsLogger().Warn("failed to clean up project record after workspace init failure",
+				"project_id", project.ID, "error", delErr)
+		}
+	}
+
 	// Initialize filesystem workspace for hub-managed projects and shared-workspace git projects.
 	if project.IsSharedWorkspace() {
 		// Shared-workspace git project: clone the repository into the workspace.
@@ -529,29 +551,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		if err := s.cloneSharedWorkspaceProject(ctx, project); err != nil {
 			s.projectsLogger().Error("shared workspace clone failed, rolling back project creation",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
-			if req.GitHubToken != "" && s.secretBackend != nil && project.GitRemote != "" {
-				if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, project.ID); delErr != nil {
-					s.projectsLogger().Warn("failed to clean up project secret after clone failure",
-						"project_id", project.ID, "error", delErr)
-				}
-			}
-			// Cascade-delete role bindings before the project row to avoid
-			// orphaned bindings referencing a deleted project (R1 review fix).
-			if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
-				s.projectsLogger().Warn("failed to clean up role bindings after clone failure",
-					"project_id", project.ID, "error", rbErr)
-			}
-			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to clean up project record after clone failure",
-					"project_id", project.ID, "error", delErr)
+			rollbackCreatedProject()
+			// Workspace storage did not respond: 503, with no clone wording
+			// and no filesystem path in the body.
+			if writeWorkspaceStorageUnavailable(w, err) {
+				return
 			}
 			// Use appropriate HTTP status based on the error kind
 			statusCode := http.StatusInternalServerError
 			var details map[string]interface{}
 			var gitErr *util.GitError
-			if errors.Is(err, errWorkspaceContentTimeout) {
-				statusCode = http.StatusServiceUnavailable
-			} else if errors.As(err, &gitErr) {
+			if errors.As(err, &gitErr) {
 				if guidance := gitErr.UserGuidance(); guidance != "" {
 					details = map[string]interface{}{"guidance": guidance}
 				}
@@ -569,6 +579,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
 		if err := s.initHubManagedProject(project); err != nil {
+			// Workspace storage did not respond: the workspace (and its
+			// seeded .scion/settings.yaml) cannot be created, so roll back
+			// like the clone failure above and answer 503. Other failures
+			// stay best-effort, as before.
+			if errors.Is(err, errWorkspaceContentTimeout) {
+				s.projectsLogger().Error("project workspace storage did not respond, rolling back project creation",
+					"project_id", project.ID, "slug", project.Slug, "error", err)
+				rollbackCreatedProject()
+				writeWorkspaceStorageUnavailable(w, err)
+				return
+			}
 			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
@@ -942,6 +963,24 @@ var workspaceReadDir = os.ReadDir
 // writeWorkspaceStorageUnavailable.
 var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
 
+// workspaceProbeCall is one in-flight directory read shared by every
+// probeWorkspaceContent call for the same directory. entries and err are
+// written before done is closed and read only after it is closed.
+type workspaceProbeCall struct {
+	done    chan struct{}
+	entries []os.DirEntry
+	err     error
+}
+
+// workspaceProbesInFlight maps a directory to its in-flight
+// *workspaceProbeCall. On a hung mount a read never returns and its
+// goroutine holds an OS thread in the syscall. Without deduplication every
+// request would add one more stuck thread (and Go aborts the process at its
+// thread limit). With it, there is at most one stuck read per directory:
+// later probes wait on the existing read, with their own timeout, instead of
+// starting a new one.
+var workspaceProbesInFlight sync.Map
+
 // probeWorkspaceContent reports whether dir exists and contains meaningful
 // workspace files beyond just infrastructure directories.
 //
@@ -949,33 +988,36 @@ var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
 // volume). A hung mount would block a bare os.ReadDir indefinitely, and this
 // runs on the request path, so the read runs in a goroutine bounded by
 // workspaceContentTimeout. This is the same guard checkWorkspaceStorageHealth
-// applies to os.Stat on the same mount.
+// applies to os.Stat on the same mount. Concurrent probes of the same
+// directory share one read (see workspaceProbesInFlight); a probe that joins
+// an in-flight read can see a result up to one read old.
 //
-// On timeout it returns (false, errWorkspaceContentTimeout). The goroutine
-// stays blocked until the read returns. The buffered channel lets it exit
-// then without a receiver. A read error (missing dir, permission) is not an
+// On timeout it returns (false, errWorkspaceContentTimeout). The read keeps
+// running until it returns, then removes itself from
+// workspaceProbesInFlight. A read error (missing dir, permission) is not an
 // error here. It means "no content" and returns (false, nil).
 func probeWorkspaceContent(dir string) (bool, error) {
-	type readResult struct {
-		entries []os.DirEntry
-		err     error
+	call := &workspaceProbeCall{done: make(chan struct{})}
+	if existing, loaded := workspaceProbesInFlight.LoadOrStore(dir, call); loaded {
+		call = existing.(*workspaceProbeCall)
+	} else {
+		readDir := workspaceReadDir
+		go func(c *workspaceProbeCall) {
+			c.entries, c.err = readDir(dir)
+			workspaceProbesInFlight.CompareAndDelete(dir, c)
+			close(c.done)
+		}(call)
 	}
-	ch := make(chan readResult, 1)
-	readDir := workspaceReadDir
-	go func() {
-		entries, err := readDir(dir)
-		ch <- readResult{entries: entries, err: err}
-	}()
 
 	timer := time.NewTimer(workspaceContentTimeout)
 	defer timer.Stop()
 
-	var res readResult
 	select {
-	case res = <-ch:
+	case <-call.done:
 	case <-timer.C:
 		return false, errWorkspaceContentTimeout
 	}
+	res := call
 	if res.err != nil {
 		return false, nil
 	}

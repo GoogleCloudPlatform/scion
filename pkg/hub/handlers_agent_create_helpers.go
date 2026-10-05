@@ -247,9 +247,16 @@ func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
 // template-derived fields after the initial config block has been set up.
 // It populates GitClone config from project labels for git-anchored projects, and
 // sets template ID, hash, and hub access scopes from the resolved template.
-func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+//
+// It returns an error only when the project workspace path could not be
+// resolved because workspace storage did not respond (wraps
+// errWorkspaceContentTimeout). Creating the agent anyway would leave
+// Workspace empty, and the broker would fall back to the legacy local
+// project path: the agent would run against the wrong workspace. Every other
+// failure here stays best-effort.
+func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	if agent.AppliedConfig == nil {
-		return
+		return nil
 	}
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
@@ -277,7 +284,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
 			workspacePath, err := s.hubManagedProjectPath(project.Slug)
-			if err == nil {
+			if err != nil {
+				if errors.Is(err, errWorkspaceContentTimeout) {
+					return err
+				}
+			} else {
 				agent.AppliedConfig.Workspace = workspacePath
 			}
 		}
@@ -294,6 +305,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	return nil
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after
@@ -325,7 +337,10 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 //     default only fills a slot that request, project, AND template all
 //     left empty (design §5.2 risk (b);
 //     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
-func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+//
+// It returns populateAgentConfig's error: non-nil only on a workspace storage
+// timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
+func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
 	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
@@ -350,7 +365,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
 
-	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
+	return s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 }
 
 // resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:

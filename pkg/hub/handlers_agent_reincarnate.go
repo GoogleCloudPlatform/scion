@@ -360,6 +360,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	imageRegistry := dispatchImageRegistry(dispatcher)
 	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
@@ -531,6 +534,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 	imageRegistry := dispatchImageRegistry(dispatcher)
 	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return

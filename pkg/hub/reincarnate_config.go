@@ -197,7 +197,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// resolveDerivedConfig alone would skip the project/hub defaulting step
 	// and let the template win over a project or hub default (design §3.3
 	// Amendment A1 property 1).
-	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
+	if err := s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate); err != nil {
+		return nil, nil, err
+	}
 
 	// Design §3.4 Amendment A11.1(a): fill Image from Hub settings, then the
 	// resolved harness config, when deriveAgentConfig still left it empty.

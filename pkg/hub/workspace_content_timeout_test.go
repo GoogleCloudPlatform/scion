@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,6 +250,7 @@ func TestProjectWorkspaceList_HungStorageReturns503(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
 }
 
 // When the project path cannot be resolved (here: a hung workspace mount),
@@ -270,4 +273,189 @@ func TestExecutePostDeletionEffects_LogsUnresolvedProjectPath(t *testing.T) {
 	assert.Contains(t, out, "project_id="+project.ID)
 	assert.Contains(t, out, "slug="+f.slug)
 	assert.DirExists(t, f.localDir, "nothing is removed when the path is unresolved")
+}
+
+// N4: concurrent and repeated probes of the same directory share one read,
+// so a hung mount costs at most one stuck goroutine (and OS thread) per
+// directory. Once the read returns, the next probe starts a fresh read.
+func TestProbeWorkspaceContent_DedupesInFlightReads(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0644))
+
+	var reads atomic.Int32
+	release := make(chan struct{})
+	prevRead, prevTimeout := workspaceReadDir, workspaceContentTimeout
+	workspaceReadDir = func(d string) ([]os.DirEntry, error) {
+		reads.Add(1)
+		<-release
+		return os.ReadDir(d)
+	}
+	workspaceContentTimeout = 30 * time.Millisecond
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+		workspaceReadDir, workspaceContentTimeout = prevRead, prevTimeout
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := probeWorkspaceContent(dir)
+			assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+		}()
+	}
+	wg.Wait()
+	for i := 0; i < 3; i++ {
+		_, err := probeWorkspaceContent(dir)
+		assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+	}
+	assert.Equal(t, int32(1), reads.Load(), "a hung directory must have only one read in flight")
+
+	// Unblock the stuck read; it removes itself from the in-flight map.
+	close(release)
+	released = true
+	require.Eventually(t, func() bool {
+		_, inFlight := workspaceProbesInFlight.Load(dir)
+		return !inFlight
+	}, 5*time.Second, 5*time.Millisecond)
+
+	has, err := probeWorkspaceContent(dir)
+	require.NoError(t, err)
+	assert.True(t, has)
+	assert.Equal(t, int32(2), reads.Load(), "after the read returns, the next probe reads again")
+}
+
+// N3 (round 2): the slug-rename skip is logged, and nothing is renamed.
+func TestMigrateProjectSlug_LogsUnresolvedProjectPath(t *testing.T) {
+	f := newHungPathFixture(t, "old-slug-hung")
+	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+	hangReadDirFor(t, mountRoot)
+
+	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+
+	project := &store.Project{ID: "proj-rename-hung", Slug: "new-slug-hung", Name: "Renamed"}
+	srv.migrateProjectSlug(context.Background(), project, f.slug)
+
+	out := logs.String()
+	assert.Contains(t, out, "skipping rename, the directory may keep the old slug")
+	assert.Contains(t, out, "project_id="+project.ID)
+	assert.Contains(t, out, "slug="+f.slug)
+	assert.Contains(t, out, "new_slug="+project.Slug)
+	assert.DirExists(t, f.localDir, "nothing is renamed when the path is unresolved")
+	assert.NoDirExists(t, filepath.Join(filepath.Dir(f.localDir), project.Slug))
+}
+
+// hungStorageServer returns a test server whose workspace storage is an NFS
+// mount that never answers.
+func hungStorageServer(t *testing.T) (*Server, store.Store, string) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	mountRoot := filepath.Join(tmpHome, "nfs-mount")
+	hangReadDirFor(t, mountRoot)
+	srv, s := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	return srv, s, mountRoot
+}
+
+func requireNoProjectNamed(t *testing.T, s store.Store, name string) {
+	t.Helper()
+	res, err := s.ListProjects(context.Background(), store.ProjectFilter{Name: name}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items, "project %q must be rolled back", name)
+}
+
+// N2 (round 2): hub-native project create rolls back and answers 503 when
+// workspace storage does not respond.
+func TestCreateProject_HubNative_HungStorageReturns503(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Hung Native"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+	requireNoProjectNamed(t, s, "Hung Native")
+}
+
+// N1 (round 2): shared-workspace project create answers a plain 503 (no
+// clone wording, no path) and rolls back.
+func TestCreateProject_SharedWorkspace_HungStorageReturns503(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name:          "Hung Shared",
+		GitRemote:     "github.com/test/hung-shared",
+		WorkspaceMode: "shared",
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+	assert.NotContains(t, rec.Body.String(), "clone", "storage timeout is not a clone failure")
+	requireNoProjectNamed(t, s, "Hung Shared")
+}
+
+// N2 (round 2): cloning into a hub-native project rolls back and answers
+// 503 when workspace storage does not respond.
+func TestProjectClone_HubNative_HungStorageReturns503(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	src := &store.Project{ID: tid("project-hung-clone-src"), Name: "Hung Clone Source", Slug: "hung-clone-source"}
+	require.NoError(t, s.CreateProject(context.Background(), src))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]string{"name": "Hung Clone"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+	requireNoProjectNamed(t, s, "Hung Clone")
+}
+
+// B1 (round 2): agent create in a hub-native project answers 503 when the
+// workspace path cannot be resolved, before any agent row exists or any
+// dispatch happens. Creating it anyway would run the agent against the
+// broker's legacy local project path.
+func TestCreateAgent_HungStorageReturns503NoAgentNoDispatch(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	srv.SetDispatcher(disp)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hung-storage"), Slug: "hung-storage-broker",
+		Name: "Hung Storage Broker", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("project-hung-agent"), Slug: "hung-agent", Name: "Hung Agent Project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":            "hung-agent",
+		"projectId":       project.ID,
+		"runtimeBrokerId": broker.ID,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID, IncludeDeleted: true}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "no agent row may be created")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
+// B1 (round 2): deriveAgentConfig propagates the timeout (used by create,
+// scheduled dispatch and reincarnate) and leaves Workspace empty.
+func TestDeriveAgentConfig_HungStorageReturnsError(t *testing.T) {
+	srv, _, _ := hungStorageServer(t)
+	project := &store.Project{ID: "proj-derive-hung", Slug: "derive-hung", Name: "Derive Hung"}
+	agent := &store.Agent{ID: "agent-derive-hung", AppliedConfig: &store.AgentAppliedConfig{}}
+
+	err := srv.deriveAgentConfig(context.Background(), agent, project, nil)
+	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Empty(t, agent.AppliedConfig.Workspace)
 }
