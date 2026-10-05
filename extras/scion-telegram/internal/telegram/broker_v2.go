@@ -1833,23 +1833,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	// Get project agents (with cache refresh as the sender).
-	senderPrincipal, senderEmail := "", ""
-	var senderErr error
-	if tgMsg.From != nil {
-		mapping, mErr := b.store.GetUserMapping(ctx, strconv.FormatInt(tgMsg.From.ID, 10))
-		switch {
-		case mErr != nil:
-			b.log.Warn("Failed to look up sender mapping", "error", mErr)
-			senderErr = errSenderLookupFailed
-		case mapping != nil:
-			senderEmail = mapping.ScionEmail
-			senderPrincipal = linkedUserPrincipal(mapping)
-			if senderPrincipal == "" {
-				senderErr = errSenderLinkStale
-			}
-		}
-	}
-	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderPrincipal, senderErr)
+	agents, senderEmail, agentsErr := b.getProjectAgents(ctx, link.ProjectID, tgMsg.From)
 	listUnavailable := func(replyTo string) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderEmail, link.ProjectSlug)
 	}
@@ -2653,40 +2637,40 @@ var errSenderLinkStale = errors.New("sender's linked Scion account has no email"
 // read from the store.
 var errSenderLookupFailed = errors.New("sender link lookup failed")
 
-// getProjectAgents returns the agent slugs of a project for routing a message.
+// getProjectAgents returns the agent slugs of a project for routing a
+// message from sender, plus the sender's Scion email when it was looked up.
 //
-// The cache is keyed by project and shared by all senders. When it is stale
-// the list is refreshed from the hub as the message sender (onBehalfOf).
-// When the plugin cannot act as the sender (onBehalfOf == "") the hub is not
-// called and any cached list is used as is. A non-nil error means no list is
-// available: senderErr (or errSenderNotLinked) when the plugin cannot act as
-// the sender, otherwise the hub error.
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBehalfOf string, senderErr error) ([]string, error) {
-	cached, err := b.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
+// The cache is keyed by project and shared by all senders. Only when it is
+// stale is the sender's link mapping looked up and the list refreshed from
+// the hub as that user. When the plugin cannot act as the sender (not
+// linked, link without email, or lookup failure) the hub is not called and
+// any cached list is used as is. A non-nil error means no list is
+// available: errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed
+// when the plugin cannot act as the sender, otherwise the hub error.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, sender *TGUser) (slugs []string, senderEmail string, err error) {
+	cached, cacheErr := b.store.GetProjectAgents(ctx, projectID)
+	if cacheErr != nil {
+		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", cacheErr)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents), nil
+		return agentSlugs(cached.Agents), "", nil
 	}
 
-	if onBehalfOf == "" {
+	onBehalfOf, senderEmail, senderErr := b.senderPrincipal(ctx, sender)
+	if senderErr != nil {
 		if cached != nil {
-			return agentSlugs(cached.Agents), nil
+			return agentSlugs(cached.Agents), senderEmail, nil
 		}
-		if senderErr != nil {
-			return nil, senderErr
-		}
-		return nil, errSenderNotLinked
+		return nil, senderEmail, senderErr
 	}
 
 	agents, err := b.hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
-			return agentSlugs(cached.Agents), nil
+			return agentSlugs(cached.Agents), senderEmail, nil
 		}
-		return nil, err
+		return nil, senderEmail, err
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
@@ -2698,7 +2682,30 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBe
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agentSlugs(agents), nil
+	return agentSlugs(agents), senderEmail, nil
+}
+
+// senderPrincipal looks up the sender's link mapping and returns the
+// principal to act as and the linked Scion email. The error is
+// errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed when the
+// plugin cannot act as the sender.
+func (b *TelegramBrokerV2) senderPrincipal(ctx context.Context, sender *TGUser) (principal, email string, err error) {
+	if sender == nil {
+		return "", "", errSenderNotLinked
+	}
+	mapping, mErr := b.store.GetUserMapping(ctx, strconv.FormatInt(sender.ID, 10))
+	switch {
+	case mErr != nil:
+		b.log.Warn("Failed to look up sender mapping", "error", mErr)
+		return "", "", errSenderLookupFailed
+	case mapping == nil:
+		return "", "", errSenderNotLinked
+	}
+	principal = linkedUserPrincipal(mapping)
+	if principal == "" {
+		return "", mapping.ScionEmail, errSenderLinkStale
+	}
+	return principal, mapping.ScionEmail, nil
 }
 
 // replyAgentListUnavailable tells the sender why their message could not be

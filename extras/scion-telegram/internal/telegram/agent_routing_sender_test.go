@@ -231,3 +231,47 @@ func TestV2_Routing_LinkWithoutEmailWithCacheGetsReregisterText(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.Equal(t, staleLinkText, sent[0].Text)
 }
+
+// mappingLookupCountingStore counts link-mapping lookups.
+type mappingLookupCountingStore struct {
+	Store
+	lookups int
+}
+
+func (s *mappingLookupCountingStore) GetUserMapping(ctx context.Context, id string) (*TelegramUserMapping, error) {
+	s.lookups++
+	return s.Store.GetUserMapping(ctx, id)
+}
+
+func TestV2_AgentRefresh_FreshCacheSkipsSenderLookupAndHub(t *testing.T) {
+	b, _, hub := newRoutingTestBroker(t)
+	linkTestUser(t, b.store, 456, "alice@example.com")
+	require.NoError(t, b.store.SaveProjectAgents(context.Background(), &ProjectAgents{
+		ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now(),
+	}))
+	counting := &mappingLookupCountingStore{Store: b.store}
+	b.store = counting
+
+	_, _, err := b.getProjectAgents(context.Background(), "proj-1", &TGUser{ID: 456})
+	require.NoError(t, err)
+	assert.Zero(t, counting.lookups, "no sender lookup while the cache is fresh")
+	assert.Empty(t, hub.agentCalls())
+}
+
+func TestV2_AgentRefresh_StaleCacheLooksUpSender(t *testing.T) {
+	b, _, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	principal := linkTestUser(t, b.store, 456, "alice@example.com")
+	saveStaleAgentCache(t, b.store, "proj-1", "coder")
+	counting := &mappingLookupCountingStore{Store: b.store}
+	b.store = counting
+
+	slugs, email, err := b.getProjectAgents(context.Background(), "proj-1", &TGUser{ID: 456})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"coder"}, slugs)
+	assert.Equal(t, "alice@example.com", email)
+	assert.Equal(t, 1, counting.lookups)
+	calls := hub.agentCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, principal, calls[0].OnBehalfOf)
+}
