@@ -123,7 +123,8 @@ not the environment variable.
 
 ### `Known gap` — the gemini-cli harness does not consume `SCION_THINKING_LEVEL`
 
-Repo-wide, `SCION_THINKING_LEVEL` is honoured by exactly two harnesses, codex and antigravity.
+Repo-wide, `SCION_THINKING_LEVEL` is honoured by exactly three harnesses: codex, antigravity and
+claude.
 Each declares a `thinking:` block in its `config.yaml` that maps the level to a native tier, and
 its `provision.py` resolves it with `scion_harness.resolve_thinking` (see [Thinking Level
 Map](/scion/reference/harness-settings/#thinking-level-map-thinking)). The gemini-cli

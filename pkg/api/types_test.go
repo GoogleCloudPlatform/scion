@@ -549,3 +549,15 @@ func TestReincarnateEligible(t *testing.T) {
 		})
 	}
 }
+
+// ProvisionedOnly has no omitempty: false is sent explicitly so a client
+// merging responses clears a previously seen true (ptone/scion#2929).
+func TestAgentInfo_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
+	data, err := json.Marshal(AgentInfo{Name: "a"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"provisionedOnly":false`) {
+		t.Errorf("expected explicit provisionedOnly false, got %s", data)
+	}
+}

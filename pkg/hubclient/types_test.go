@@ -364,3 +364,22 @@ func TestCreateAgentRequest_AcceptAsyncLaunchJSON(t *testing.T) {
 		t.Errorf("opt-in must be omitted when false: %s", b)
 	}
 }
+
+// ProvisionedOnly has no omitempty: re-encoding an Agent keeps an explicit
+// false (ptone/scion#2929). A Hub that predates the field decodes as false.
+func TestAgent_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
+	var a Agent
+	if err := json.Unmarshal([]byte(`{"id":"agent-1"}`), &a); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if a.ProvisionedOnly {
+		t.Errorf("absent provisionedOnly should decode as false")
+	}
+	data, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"provisionedOnly":false`) {
+		t.Errorf("expected explicit provisionedOnly false, got %s", data)
+	}
+}
