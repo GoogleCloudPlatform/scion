@@ -34,6 +34,7 @@ import type {
   ProjectMemberGroup,
 } from '../../shared/types.js';
 import { showConfirm } from './confirm-dialog.js';
+import { MEMBERSHIP_CHANGED_EVENT } from '../../utils/membership-events.js';
 import {
   ScionProjectMembersEditor,
   AUTHORITY_CHANGED_MESSAGE,
@@ -1824,5 +1825,66 @@ describe('Add dialog per-role reasons', () => {
     expect(
       customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: true, mode: 'add' })
     ).toEqual({ disabled: true, reason: '' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Membership-changed event
+// ---------------------------------------------------------------------------
+
+describe('membership-changed event', () => {
+  function listen(): ReturnType<typeof vi.fn> {
+    const heard = vi.fn();
+    window.addEventListener(MEMBERSHIP_CHANGED_EVENT, (e) => heard((e as CustomEvent).detail), {
+      once: true,
+    });
+    return heard;
+  }
+
+  it('is dispatched once a role save succeeds', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'u-new', displayLabel: 'New' });
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(201, {}));
+    const heard = listen();
+
+    await el.handleSave();
+
+    expect(heard).toHaveBeenCalledWith({ kind: 'project', id: 'p-1' });
+  });
+
+  it('is not dispatched when a role save fails', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    el.openEditDialog(DAVE);
+    el.toggleCustomRole('r-ceil', true);
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      apiError(403, 'target_role_protected', `cannot assign role: ${CEILING_REASON}`)
+    );
+    const heard = listen();
+
+    await el.handleSave();
+
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it('is dispatched once a member is removed', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(204, null));
+    const heard = listen();
+
+    await el.handleRemoveRow(BOB);
+
+    expect(heard).toHaveBeenCalledWith({ kind: 'project', id: 'p-1' });
+  });
+
+  it('is dispatched once ownership is transferred', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(200, {}));
+    el.transferNewOwnerId = 'u-dave';
+    const heard = listen();
+
+    await el.handleTransferOwnership();
+
+    expect(heard).toHaveBeenCalledWith({ kind: 'project', id: 'p-1' });
   });
 });

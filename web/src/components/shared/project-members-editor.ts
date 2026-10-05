@@ -43,6 +43,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import type { ApiErrorInfo } from '../../client/api.js';
+import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import type {
   AssignableProjectRole,
   MembershipCapabilities,
@@ -1294,6 +1295,7 @@ export class ScionProjectMembersEditor extends LitElement {
       });
 
       if (res.ok) {
+        dispatchMembershipChanged({ kind: 'project', id: this.projectId });
         this.dialogOpen = false;
         this.actionFeedback = {
           message: mode === 'add' ? 'Member added' : 'Roles updated',
@@ -1454,7 +1456,10 @@ export class ScionProjectMembersEditor extends LitElement {
         method: 'DELETE',
         suppressAccessDeniedToast: true,
       });
-      if (res.ok) return null;
+      if (res.ok) {
+        dispatchMembershipChanged({ kind: 'project', id: this.projectId });
+        return null;
+      }
       const info = await parseApiError(res, `HTTP ${res.status}`);
       return describeCustomRoleError(info.message);
     } catch (err) {
@@ -1550,6 +1555,7 @@ export class ScionProjectMembersEditor extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
+      dispatchMembershipChanged({ kind: 'project', id: this.projectId });
       this.transferDialogOpen = false;
       this.actionFeedback = {
         message: 'Ownership transferred successfully',

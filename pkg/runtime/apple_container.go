@@ -128,7 +128,13 @@ func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *AppleContainerRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the container ref.ID and ignores ref.RunID. Apple's CLI
+// uses the container name as its ID, so between the caller's List and this
+// call a recreated container of the same name could be hit; the caller's
+// run_id filter narrows but does not close that window.
+// P4: enforce ref.RunID (ptone/scion#2550).
+func (r *AppleContainerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	// Apple's `container rm` doesn't support -f and fails on running containers,
 	// so kill first (ignoring errors if already stopped) then remove.
 	_, _ = runSimpleCommand(ctx, r.Command, "kill", id)
@@ -231,6 +237,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 
 		info := api.AgentInfo{
 			ContainerID:     c.Configuration.ID,
+			RunID:           c.Configuration.Labels[api.LabelRunID],
 			Name:            c.Configuration.Labels["scion.name"],
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],
