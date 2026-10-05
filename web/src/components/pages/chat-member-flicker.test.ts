@@ -51,7 +51,14 @@ const fakeState = vi.hoisted(() => {
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({ navigateTo: vi.fn(), stateManager: fakeState }));
+vi.mock('../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  stateManager: fakeState,
+}));
 vi.mock('../../client/api.js', async (orig) => ({
   ...(await orig<typeof import('../../client/api.js')>()),
   apiFetch: vi.fn(),

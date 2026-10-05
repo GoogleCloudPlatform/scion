@@ -233,6 +233,14 @@ type BrokerHeartbeat struct {
 	// (backend, NFS export identity and share health) on every heartbeat.
 	// An older broker omits it and the hub keeps the stored value.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the attach capability of the broker's
+	// registered profiles (store.BrokerProfile.Attach) on every heartbeat,
+	// so a change is seen without re-registering. It lists only profiles
+	// whose attach support the broker knows; a profile it cannot answer
+	// for yet is left out, and the hub keeps that profile's stored value.
+	// An older broker omits the field and the hub keeps every stored
+	// value.
+	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or
@@ -249,6 +257,15 @@ type BrokerHeartbeat struct {
 type StartInFlight struct {
 	ProjectID string `json:"projectId"`
 	Slug      string `json:"slug"`
+}
+
+// ProfileAttachState is one profile's attach capability in a heartbeat.
+type ProfileAttachState struct {
+	// Name is the profile name, matching store.BrokerProfile.Name.
+	Name string `json:"name"`
+	// Attach reports whether the profile's runtime supports interactive
+	// attach.
+	Attach bool `json:"attach"`
 }
 
 // BrokerInventory describes which runtime targets a heartbeat's agent list
