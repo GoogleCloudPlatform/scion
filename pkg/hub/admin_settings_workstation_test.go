@@ -1145,3 +1145,22 @@ func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
 		t.Errorf("home_storage not written:\n%s", readFileString(t, settingsPath))
 	}
 }
+
+// A null home_storage removes the block, and a body without home_storage
+// skips the check; neither reaches HomeStorage.Validate with a nil block.
+func TestWorkstation_PutServerConfig_HomeStorageNullOrAbsent(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nserver:\n  home_storage:\n    leaf: pod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	if rr := putServerConfig(t, srv, `{"server":{"log_level":"debug"}}`); rr.Code != http.StatusOK {
+		t.Fatalf("absent home_storage: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := putServerConfig(t, srv, `{"server":{"home_storage":null}}`); rr.Code != http.StatusOK {
+		t.Fatalf("null home_storage: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := yamlAt(readYAMLMap(t, settingsPath), "server", "home_storage"); got != nil {
+		t.Errorf("home_storage = %v, want removed", got)
+	}
+}

@@ -592,25 +592,6 @@ func fieldByIndexPath(v reflect.Value, index []int) (reflect.Value, bool) {
 	return v, true
 }
 
-// isEmptyJSONValue mirrors encoding/json's omitempty test.
-func isEmptyJSONValue(v reflect.Value) bool {
-	switch v.Kind() {
-	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
-		return v.Len() == 0
-	case reflect.Bool:
-		return !v.Bool()
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return v.Int() == 0
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return v.Uint() == 0
-	case reflect.Float32, reflect.Float64:
-		return v.Float() == 0
-	case reflect.Interface, reflect.Pointer:
-		return v.IsNil()
-	}
-	return false
-}
-
 func leafKeys(leaves []bodyLeaf) []string {
 	out := make([]string, 0, len(leaves))
 	for _, l := range leaves {
@@ -651,9 +632,10 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{err.Error()}
 		}
 	}
-	if under("server.home_storage") && req.Server != nil {
+	if under("server.home_storage") && req.Server != nil && req.Server.HomeStorage != nil {
 		// Same check as the file-mode handler: backend, leaf and
-		// stop_grace_seconds must hold known values.
+		// stop_grace_seconds must hold known values. A null home_storage
+		// (nil pointer) removes the block and has nothing to check.
 		if err := req.Server.HomeStorage.Validate(); err != nil {
 			return &serverConfigFileValidationError{err.Error()}
 		}
