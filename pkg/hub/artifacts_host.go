@@ -25,7 +25,7 @@ import (
 )
 
 // artifactHost is the hub's implementation of artifacts.Host: it answers the
-// artifact service's two questions from the hub's identity context and authz
+// artifact service's three questions from the hub's identity context and authz
 // engine, and turns hub types into the strings the service sees.
 type artifactHost struct {
 	server *Server

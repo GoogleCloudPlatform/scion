@@ -200,11 +200,17 @@ func TestMigrationSentinelWithholdsOnlyArtifactRead(t *testing.T) {
 
 // TestArtifactHostAuthorizeImpliesPermits: Authorize applies the
 // credential's own limits first, so an identity the hub builds in process
-// (no token id) is refused even when it carries the read scope.
+// (no token id) is refused even when it carries the read scope. The agent
+// has a recorded delegation and the backfill is complete, so Permits is the
+// only reason left for the deny; the control shows the same agent with a
+// token id is authorized.
 func TestArtifactHostAuthorizeImpliesPermits(t *testing.T) {
 	srv, s := testServer(t)
 	host := newArtifactHost(srv)
 	agent := createTestAgent(t, s)
+	delegator := createScopeSuperAdmin(t, s, "artifact-delegator-tokenless")
+	addRecordedArtifactEdge(t, s, delegator.ID, agent.ID, agent.ProjectID)
+	markEdgeBackfillComplete(t, s)
 	tokenless := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims: jwt.Claims{Subject: agent.ID}, ProjectID: agent.ProjectID,
 		Scopes: []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead}, ScopeSchema: CurrentAgentScopeSchema,
@@ -212,6 +218,13 @@ func TestArtifactHostAuthorizeImpliesPermits(t *testing.T) {
 	ctx := contextWithIdentity(context.Background(), tokenless)
 	assert.False(t, host.Permits(ctx, agent.ProjectID, artifacts.PermissionRead))
 	assert.False(t, host.Authorize(ctx, agent.ProjectID, artifacts.PermissionRead))
+
+	withToken := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: agent.ID, ID: "jti-" + agent.ID}, ProjectID: agent.ProjectID,
+		Scopes: []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead}, ScopeSchema: CurrentAgentScopeSchema,
+	}}
+	assert.True(t, host.Authorize(contextWithIdentity(context.Background(), withToken), agent.ProjectID, artifacts.PermissionRead),
+		"control: the same agent with a token id is authorized, so the tokenless deny comes from Permits")
 }
 
 // TestArtifactHostServesGenuinelyMintedAgentToken uses the real create

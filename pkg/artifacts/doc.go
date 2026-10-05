@@ -20,7 +20,7 @@
 // binary today and linked into a standalone server later. It must never import
 // pkg/hub or any other hub package. Everything it needs to know about the
 // caller comes through the Host interface, which carries strings only, so a
-// later standalone deployment can answer the same two questions over a wire
+// later standalone deployment can answer the same three questions over a wire
 // protocol without changing this package.
 //
 // The hub mounts the service under /api/v1/artifacts. While the hub.artifacts
