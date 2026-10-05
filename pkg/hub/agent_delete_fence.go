@@ -42,9 +42,9 @@ import (
 // lease expires, and the broker accepts up to deleteNotAfterMargin past
 // notAfter (its own skew allowance), so the hub subtracts the same margin
 // from the lease. With synchronised clocks the broker's last accepted
-// instant is then the lease expiry; skew in either direction beyond the
-// margin fails toward refusal on one side or the other only as far as the
-// skew itself.
+// instant is then the lease expiry. A broker clock further ahead of the
+// hub's refuses in-time deletes (safe: the hub retries); one further behind
+// accepts late deletes, past the lease expiry by the skew beyond the margin.
 //
 // A cross-node (deferred) delete carries the engine's claim instead, in
 // DeleteDispatchArgs. The executing node re-reads the row, drops the intent
@@ -143,8 +143,10 @@ func staleDeleteDispatchFromText(text string) bool {
 //     outstanding): the intent still runs, as design ptone/scion#2483
 //     §2.3.1 and its follow-up 3 expect ("teardown may still complete on
 //     the broker"). The outstanding intent blocks start, so there is no
-//     lease to bound it: notAfter = min(now + budget, ctx's deadline), which
-//     covers the intent failing on a timeout while the broker still works;
+//     lease to bound it: notAfter = min(now + budget, ctx's deadline) less
+//     deleteNotAfterMargin, which covers the intent failing on a timeout
+//     while the broker still works (the margin offsets the broker's skew
+//     allowance, as for the lease bound);
 //   - anything else (a newer claim, a lapsed lease, any other failure,
 //     finalizing, soft-deleted): dropped.
 func deferredDeleteDeadline(ctx context.Context, row *store.Agent, claim int64, now time.Time) (time.Time, bool) {
@@ -156,11 +158,11 @@ func deferredDeleteDeadline(ctx context.Context, row *store.Agent, claim int64, 
 		row.DeletionLeaseAt != nil && row.DeletionLeaseAt.After(now):
 		return deleteNotAfter(now, *row.DeletionLeaseAt), true
 	case row.DeletionState == store.DeletionStateFailed && row.DeletionCode == store.DeletionCodeInDoubt:
-		notAfter := now.Add(deleteDispatchBudget)
-		if dl, ok := ctx.Deadline(); ok && dl.Before(notAfter) {
-			notAfter = dl
+		end := now.Add(deleteDispatchBudget)
+		if dl, ok := ctx.Deadline(); ok && dl.Before(end) {
+			end = dl
 		}
-		return notAfter, true
+		return end.Add(-deleteNotAfterMargin), true
 	}
 	return time.Time{}, false
 }

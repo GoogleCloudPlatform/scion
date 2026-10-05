@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,7 +254,7 @@ func TestDeleteFence_ExecDeferredDeleteChecksClaim(t *testing.T) {
 	leaseBound := func(_ time.Time, row *store.Agent) time.Time {
 		return row.DeletionLeaseAt.Add(-deleteNotAfterMargin)
 	}
-	budgetBound := func(t0 time.Time, _ *store.Agent) time.Time { return t0.Add(deleteDispatchBudget) }
+	budgetBound := func(t0 time.Time, _ *store.Agent) time.Time { return t0.Add(115 * time.Second) } // budget 120s - margin 5s
 	for _, c := range []tc{
 		{name: "current live claim", seed: seedLiveDeleting, wantSend: true, wantNotAfter: leaseBound},
 		// The engine's wait ended with this intent outstanding: it still
@@ -333,14 +334,14 @@ func TestDeferredDeleteDeadline_InDoubtUsesCtxDeadline(t *testing.T) {
 	row := &store.Agent{DeletionClaim: 3, DeletionState: store.DeletionStateFailed, DeletionCode: store.DeletionCodeInDoubt}
 	got, ok := deferredDeleteDeadline(context.Background(), row, 3, t0)
 	require.True(t, ok)
-	assert.Equal(t, t0.Add(deleteDispatchBudget), got)
+	assert.Equal(t, t0.Add(115*time.Second), got, "budget 120s less the 5s margin")
 
 	dl := time.Now().Add(30 * time.Second)
 	ctx, cancel := context.WithDeadline(context.Background(), dl)
 	defer cancel()
 	got, ok = deferredDeleteDeadline(ctx, row, 3, time.Now())
 	require.True(t, ok)
-	assert.True(t, got.Equal(dl), "notAfter = %v, want the ctx deadline %v", got, dl)
+	assert.True(t, got.Equal(dl.Add(-deleteNotAfterMargin)), "notAfter = %v, want the ctx deadline less the margin %v", got, dl.Add(-deleteNotAfterMargin))
 }
 
 // renewalHookStore observes the engine's lease renewals. The first renewal
@@ -355,6 +356,7 @@ type renewalHookStore struct {
 	release   chan struct{}
 	mu        sync.Mutex
 	renewals  int
+	timedOut  atomic.Bool // SwapRunIntent gave up waiting for the renewal
 }
 
 func isRenewal(set store.DeletionFields) bool {
@@ -384,6 +386,7 @@ func (h *renewalHookStore) SwapRunIntent(ctx context.Context, agentID string, in
 	select {
 	case <-h.first:
 	case <-time.After(10 * time.Second):
+		h.timedOut.Store(true)
 	}
 	return h.Store.SwapRunIntent(ctx, agentID, intent)
 }
@@ -443,6 +446,11 @@ func TestDeleteFence_NotAfterTracksRenewals(t *testing.T) {
 				t.Fatal("the engine never finished")
 			}
 
+			hooks.mu.Lock()
+			renewals := hooks.renewals
+			hooks.mu.Unlock()
+			require.GreaterOrEqual(t, renewals, 1, "no renewal ran before the dispatch")
+			require.False(t, hooks.timedOut.Load(), "the dispatch did not wait for the renewal")
 			require.True(t, client.deleteCalled)
 			want := t0.Add(tc.want)
 			got := client.lastDeleteOpts.notAfter

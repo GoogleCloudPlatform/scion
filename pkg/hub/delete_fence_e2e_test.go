@@ -276,10 +276,10 @@ func TestDeleteFence_E2E_LateDeleteAfterAbandonment(t *testing.T) {
 
 			f.lapse(t, plan)
 			tc.between(t, f)
-			// The delete reaches the broker 75s after it was sent: past
-			// notAfter (the 60s lease) plus the skew margin.
-			// (The last accepted instant is notAfter + 5s = the lease
-			// expiry, t0+60s.)
+			// The delete reaches the broker 75s after it was sent. notAfter
+			// is t0+55s (the 60s lease less the 5s margin), so the broker's
+			// last accepted instant is notAfter + 5s = t0+60s, the lease
+			// expiry.
 			f.setBrokerNow(f.t0.Add(75 * time.Second))
 			close(f.client.release)
 
@@ -309,4 +309,31 @@ func TestDeleteFence_E2E_InTimeDeleteProceeds(t *testing.T) {
 	assert.Empty(t, entries)
 	require.Len(t, deletes, 1)
 	assert.Equal(t, "run-a", deletes[0].RunID)
+}
+
+// The margin's boundary: notAfter is t0+55s and the broker accepts until
+// t0+60s, the lease expiry. A delete reaching the broker at t0+62s, after
+// the lease expired, is refused; without the hub's margin (notAfter =
+// t0+60s, accepted until t0+65s) it would have been accepted. One reaching
+// it at t0+58s, while the lease is still live, is accepted.
+func TestDeleteFence_E2E_MarginBoundary(t *testing.T) {
+	t.Run("after the lease expiry", func(t *testing.T) {
+		f := newFenceE2E(t)
+		done, plan, opts := f.startDelete(t)
+		require.True(t, opts.NotAfter.Equal(f.t0.Add(55*time.Second)), "notAfter = %v, want t0+55s", opts.NotAfter)
+		f.lapse(t, plan)
+		f.setBrokerNow(f.t0.Add(62 * time.Second))
+		close(f.client.release)
+		f.requireSurvived(t, f.wait(t, done), "run-a")
+	})
+	t.Run("before the lease expiry", func(t *testing.T) {
+		f := newFenceE2E(t)
+		done, _, _ := f.startDelete(t)
+		f.setBrokerNow(f.t0.Add(58 * time.Second))
+		close(f.client.release)
+		out := f.wait(t, done)
+		assert.Equal(t, deletionOutcomeDeleted, out.kind, "outcome %+v", out)
+		entries, _ := f.mgr.snapshot()
+		assert.Empty(t, entries)
+	})
 }
