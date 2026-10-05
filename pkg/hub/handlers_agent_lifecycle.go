@@ -838,8 +838,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// published here. sd is non-nil exactly when a start leg was dispatched.
 	landed := sd != nil && (action == api.AgentActionStart || action == api.AgentActionRestart)
 	if landed {
-		if ref := s.deleteWonAfterLanding(ctx, id, dispatchWarns.Warnings()); ref != nil {
-			ref.write(w)
+		if s.deleteWonAfterLanding(ctx, id) {
+			writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
 			return
 		}
 	}
@@ -847,7 +847,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// The row was hard-deleted between the re-read above and this
 		// write: the same delete_in_progress answer.
 		if landed && errors.Is(err, store.ErrNotFound) {
-			deleteInProgressRefusalWithWarnings(id, dispatchWarns.Warnings()).write(w)
+			writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
 			return
 		}
 		writeErrorFromErr(w, err, "")

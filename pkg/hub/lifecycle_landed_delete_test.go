@@ -108,6 +108,7 @@ func TestLifecycle_DeleteWinsAfterLanding(t *testing.T) {
 				requireIntentDeleteInProgress(t, rec, agent.ID)
 				var body ErrorResponse
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, deletedWhileStartingMessage, body.Error.Message)
 				assert.Contains(t, body.Error.Details["warnings"], landedRunRemovedWarning,
 					"the compensation warning is carried in the details")
 				var raw map[string]json.RawMessage
