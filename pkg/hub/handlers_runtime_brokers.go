@@ -836,6 +836,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				Heartbeat:       true, // Ensures LastSeen is updated
 				Message:         agentHB.Message,
 			}
+			// A stop queued while the broker was offline keeps its
+			// stop_queued status and notice until the stop is applied or the
+			// container is confirmed gone: a running report means it has not
+			// been applied yet.
+			if agent.ContainerStatus == containerStatusStopQueued {
+				statusUpdate.ContainerStatus = ""
+				statusUpdate.Message = ""
+			}
 
 			// Guard: a heartbeat must never revert an agent out of a
 			// terminal phase (stopped/failed) that was set by an explicit
@@ -1226,6 +1234,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// Stop agents that run although their run intent is stopped (a start
 	// that reached the broker after a stop).
 	s.stopAgentsRunningWithIntentStopped(ctx, id, prevBroker, &heartbeat, report)
+
+	// Settle queued stops of a broker reached over HTTP only: confirm the
+	// ones its complete inventory shows terminated, and apply the rest.
+	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
+	s.drainQueuedStopsFromHeartbeat(id, &heartbeat)
 
 	w.WriteHeader(http.StatusOK)
 }

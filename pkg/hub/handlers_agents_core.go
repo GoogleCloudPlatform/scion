@@ -971,16 +971,48 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 			}
 		}()
 	}
-	func() {
-		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
-		defer cancel()
-		if err := s.store.DeleteAgent(sctx, agent.ID); err != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", err)
+	// The row delete is retried a few times; if it still fails, the row is
+	// left visibly failed rather than in phase created with no message.
+	var deleteErr error
+	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * createCleanupDeleteBackoff)
 		}
-	}()
+		func() {
+			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer cancel()
+			deleteErr = s.store.DeleteAgent(sctx, agent.ID)
+		}()
+		if deleteErr == nil || errors.Is(deleteErr, store.ErrNotFound) {
+			deleteErr = nil
+			break
+		}
+	}
+	if deleteErr != nil {
+		s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", deleteErr)
+		func() {
+			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer cancel()
+			if err := s.store.UpdateAgentStatus(sctx, agent.ID, store.AgentStatusUpdate{
+				Phase:   string(state.PhaseError),
+				Message: createRowRemoveFailedMessage,
+			}); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: marking the row failed also failed", "agent_id", agent.ID, "error", err)
+			}
+		}()
+	}
 	// Detaches from ctx and applies its own timeout internally.
 	s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 }
+
+// Create-failure cleanup: the row delete is tried createCleanupDeleteAttempts
+// times, backing off createCleanupDeleteBackoff more each time; a row that
+// could not be removed is left in phase error with createRowRemoveFailedMessage.
+const (
+	createCleanupDeleteAttempts  = 3
+	createCleanupDeleteBackoff   = 200 * time.Millisecond
+	createRowRemoveFailedMessage = "Create failed and the agent record could not be removed; delete the agent to retry."
+)
 
 // dispatchDeleteFailedCreate returns cleanupFailedCreate's deleteRuntime step
 // for a broker-dispatched create: remove the agent's provisioned files and

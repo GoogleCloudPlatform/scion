@@ -395,7 +395,8 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	if dispatcher == nil {
 		return errors.New("no dispatcher")
 	}
-	return s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
+	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
+	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		rollback, err := s.reserveStartCapacity(ctx, agent)
 		if err != nil {
 			return false, err
@@ -414,6 +415,37 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return false, s.writeStartedStatus(ctx, agent)
 	})
+	if err != nil && provisioned && startOutcomeOf(err) == startReleased && !isClaimRefusal(err) && agent.RunIntentAt != nil {
+		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
+	}
+	return err
+}
+
+// provisionedRestingNote ends the message a provisioned agent gets when its
+// start did not happen: it is back at rest and can be started again.
+const provisionedRestingNote = "The agent is still provisioned and can be started again."
+
+// isClaimRefusal reports whether err is a start refused before dispatch by
+// its claim (held, not eligible, lost, or a delete holding the row).
+func isClaimRefusal(err error) bool {
+	var held *store.ClaimHeldError
+	return errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) ||
+		errors.Is(err, errStartClaimLost) || errors.Is(err, store.ErrDeleteInProgress)
+}
+
+// settleFailedProvisionedStart returns a provisioned agent (phase created)
+// whose start definitely did not happen to its resting state: the message
+// says why, and run intent goes back to stopped, compare-and-set on the
+// intent the start recorded at intentAt, so a newer start or stop wins.
+func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.store.UpdateAgentStatus(sctx, agentID, store.AgentStatusUpdate{Message: message}); err != nil {
+		slog.Warn("Failed provisioned start: message write failed", "agent_id", agentID, "error", err)
+	}
+	if _, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped); err != nil {
+		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
+	}
 }
 
 // writeStartedStatus is startAgentCore's default post-start write: the

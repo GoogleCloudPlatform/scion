@@ -54,6 +54,14 @@ func isBrokerQuotaCountedPhase(phase string) bool {
 	}
 }
 
+// agentHoldsBrokerCapacity reports whether agent's reservation must be kept:
+// it is in a counted phase, or its stop is queued for an offline broker (the
+// container may still be running until the stop is applied or the container
+// is confirmed gone).
+func agentHoldsBrokerCapacity(agent *store.Agent) bool {
+	return isBrokerQuotaCountedPhase(agent.Phase) || agent.ContainerStatus == containerStatusStopQueued
+}
+
 // releaseBrokerQuota releases agent's max_agents_per_broker reservation, if
 // any. Best-effort and safe to call unconditionally (e.g. on every stop or
 // suspend) — a no-op when the agent has no runtime broker assigned, and
@@ -229,7 +237,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
-			if !isBrokerQuotaCountedPhase(agent.Phase) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
 				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 				released++
 			}
