@@ -229,12 +229,17 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 
 // statusUpdateIsEmpty reports whether the update carries nothing for the
 // store to persist (beyond the Updated/LastSeen bump every write does).
+// Every field counts, including the internal json:"-" ones a decoded status
+// POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants,
+// IfPhase): erring towards "not empty" only means the store write runs.
+// TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 	return !statusUpdateTouchesGuardedFields(su) &&
 		su.ToolName == "" && su.ConnectionState == "" && su.ContainerStatus == "" &&
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
-		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == ""
+		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
+		!su.ClearTerminalRemnants && su.IfPhase == ""
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
