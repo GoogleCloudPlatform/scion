@@ -2595,12 +2595,17 @@ func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContex
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hub client for template sync: %w", err)
 	}
+	_, isGlobal, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project path for template sync: %w", err)
+	}
 	return &HubContext{
 		Client:      client,
 		Endpoint:    endpoint,
 		ProjectPath: projectPath,
 		ProjectID:   projectID,
 		Settings:    settings,
+		IsGlobal:    isGlobal,
 	}, nil
 }
 

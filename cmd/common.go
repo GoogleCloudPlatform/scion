@@ -527,6 +527,10 @@ func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
 // git remote. Every other branch (context/settings short-circuit, missing
 // remote, zero matches) is identical for both callers.
 func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
+	if hubCtx == nil {
+		return "", errors.New("no hub context available to resolve the project ID")
+	}
+
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil

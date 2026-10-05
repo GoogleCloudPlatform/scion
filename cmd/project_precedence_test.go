@@ -315,8 +315,44 @@ func TestTemplateSyncHubContext(t *testing.T) {
 	assert.Equal(t, globalDir, hubCtx.ProjectPath)
 	require.NotNil(t, hubCtx.Settings)
 	assert.Equal(t, globalLocalID, hubCtx.Settings.ProjectID)
+	assert.True(t, hubCtx.IsGlobal, "the global project path must be reported as global")
 
 	id, err := GetProjectID(hubCtx)
 	require.NoError(t, err)
 	assert.Equal(t, linkedID, id)
+}
+
+// TestTemplateSyncHubContext_NonGlobalProject pins IsGlobal to false when
+// template sync targets a regular project directory.
+func TestTemplateSyncHubContext_NonGlobalProject(t *testing.T) {
+	const linkedID = "linked-project-id"
+	setupFlagPrecedenceHome(t, "http://hub.invalid", "", "")
+
+	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
+		[]byte("hub:\n  enabled: true\n  endpoint: http://hub.invalid\n"), 0644))
+	resolvedDir, err := filepath.EvalSymlinks(projectDir)
+	require.NoError(t, err)
+
+	hubCtx, err := templateSyncHubContext(resolvedDir, "http://hub.invalid", linkedID)
+	require.NoError(t, err)
+	assert.False(t, hubCtx.IsGlobal, "a regular project path must not be reported as global")
+	assert.Equal(t, linkedID, hubCtx.ProjectID)
+}
+
+// TestResolveProjectIDByGitRemote_NilContext checks that a nil hub context
+// returns an error instead of panicking.
+func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
+	for _, failOnAmbiguous := range []bool{true, false} {
+		assert.NotPanics(t, func() {
+			id, err := resolveProjectIDByGitRemote(nil, failOnAmbiguous)
+			assert.Error(t, err)
+			assert.Empty(t, id)
+		})
+	}
+	assert.NotPanics(t, func() {
+		_, err := GetProjectID(nil)
+		assert.Error(t, err)
+	})
 }
