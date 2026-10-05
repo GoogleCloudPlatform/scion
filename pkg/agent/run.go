@@ -1605,6 +1605,17 @@ authDone:
 		}
 	}
 
+	// The agent's workspace placement, reported to the hub on every start
+	// that gets here (so a re-provision refreshes it). See
+	// workspacePlacementFor for when the workspace is on the export.
+	workspacePlacement := workspacePlacementFor(workspacePlacementInput{
+		Backend:       workspaceBackendName,
+		Runtime:       m.Runtime.Name(),
+		PVClaimName:   nfsPVClaimName,
+		ClonePerAgent: opts.GitClone != nil && store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent,
+		AgentDirName:  nfsAgentDirName,
+	})
+
 	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
 	// else its runtime entry's (applied below under the template/agent
 	// kubernetes block). The profile is the one named for this start, else
@@ -1916,6 +1927,7 @@ authDone:
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
+				a.WorkspacePlacement = workspacePlacement
 				return &a, nil
 			}
 		}
@@ -1935,7 +1947,71 @@ authDone:
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
+		WorkspacePlacement:    workspacePlacement,
 	}, nil
+}
+
+// workspacePlacementInput is what a start resolved about its workspace.
+type workspacePlacementInput struct {
+	// Backend is the workspace backend that served the workspace ("" for
+	// the local backend).
+	Backend string
+	// Runtime is the runtime's name (runtime.Runtime.Name()).
+	Runtime string
+	// PVClaimName is the NFS PV claim the pod mounts the workspace from;
+	// "" when the share has no pv_name.
+	PVClaimName string
+	// ClonePerAgent is true when the agent was dispatched as a git
+	// clone-per-agent workspace.
+	ClonePerAgent bool
+	// AgentDirName is the agent's own directory on the export, when one
+	// was chosen (clone-per-agent and empty-per-agent on Kubernetes).
+	AgentDirName string
+}
+
+// exportMountingRuntimes are the non-Kubernetes runtimes that mount the nfs
+// workspace backend's resolved path itself as the agent's workspace:
+//   - docker, podman, container: buildCommonRunArgs bind-mounts
+//     RunConfig.Workspace (the nfs host path) at the container workspace
+//     (pkg/runtime/common.go); rootless podman refuses nfs (podman.go).
+//   - cloudrun: mounts the export's <subPathRoot>/<projectID>/workspace as
+//     an NFS volume at the container workspace (cloudrun_runtime.go
+//     provisionCloudRunNFS and the "workspace" volume in Run).
+//
+// Any other runtime is not known to work on the export: cloudrun-sandbox
+// copies the workspace to broker-local disk, substrate never mounts it, and
+// a new runtime must be added here deliberately.
+var exportMountingRuntimes = map[string]bool{
+	"docker":    true,
+	"podman":    true,
+	"container": true,
+	"cloudrun":  true,
+}
+
+// workspacePlacementFor returns the placement reported to the hub. It fails
+// closed: export only when the workspace is known to be mounted from the
+// shared NFS export, local otherwise. On Kubernetes the pod mounts the export
+// only through a PV claim (without one it gets an EmptyDir), and a
+// clone-per-agent workspace is on the export only in its own agent
+// directory, which also needs the claim. Other runtimes count only when
+// listed in exportMountingRuntimes.
+func workspacePlacementFor(in workspacePlacementInput) string {
+	if in.Backend != "nfs" {
+		return api.WorkspacePlacementLocal
+	}
+	if isKubernetesRuntime(in.Runtime) {
+		if in.PVClaimName == "" {
+			return api.WorkspacePlacementLocal
+		}
+		if in.ClonePerAgent && in.AgentDirName == "" {
+			return api.WorkspacePlacementLocal
+		}
+		return api.WorkspacePlacementExport
+	}
+	if exportMountingRuntimes[in.Runtime] {
+		return api.WorkspacePlacementExport
+	}
+	return api.WorkspacePlacementLocal
 }
 
 // writeAgentTokenFile writes the agent's hub credential to the canonical token

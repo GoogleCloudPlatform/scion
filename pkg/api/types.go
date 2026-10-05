@@ -619,7 +619,13 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
-	Warnings   []string          `json:"warnings,omitempty"`
+	// WorkspacePlacement is where the start that produced this info placed
+	// the agent's workspace: WorkspacePlacementExport or
+	// WorkspacePlacementLocal. Empty when this info did not come from a
+	// start that resolved the workspace (a listing, or an agent found
+	// already running).
+	WorkspacePlacement string   `json:"workspacePlacement,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
 	// HubOnlyEnvWarnings carries only the warnings for broker-local values
 	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
 	// agent. They are also included in Warnings; this field lets the broker
