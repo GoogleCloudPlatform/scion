@@ -501,9 +501,9 @@ export class ScionInboxTray extends LitElement {
         aria-expanded=${this.open}
       >
         <sl-icon name="envelope"></sl-icon>
-        ${
-          count > 0 ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>` : nothing
-        }
+        ${count > 0
+          ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>`
+          : nothing}
       </button>
       ${this.open ? this.renderPanel() : nothing}
     `;
@@ -515,13 +515,11 @@ export class ScionInboxTray extends LitElement {
       <div class="panel" role="dialog" aria-label="Inbox">
         <div class="panel-header">
           <h3 class="panel-title">Inbox</h3>
-          ${
-            count > 0
-              ? html`<button class="mark-all-btn" @click=${(): void => void this.markAll()}>
-                  Mark all read
-                </button>`
-              : nothing
-          }
+          ${count > 0
+            ? html`<button class="mark-all-btn" @click=${(): void => void this.markAll()}>
+                Mark all read
+              </button>`
+            : nothing}
         </div>
         <div class="panel-list">
           ${count > 0 ? this.messages.map((m) => this.renderItem(m)) : this.renderEmpty()}

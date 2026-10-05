@@ -703,9 +703,9 @@ export class ScionNotificationTray extends LitElement {
         aria-expanded=${this.open}
       >
         <sl-icon name="bell"></sl-icon>
-        ${
-          count > 0 ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>` : nothing
-        }
+        ${count > 0
+          ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>`
+          : nothing}
       </button>
       ${this.open ? this.renderPanel() : nothing}
     `;
@@ -717,13 +717,11 @@ export class ScionNotificationTray extends LitElement {
       <div class="panel" role="dialog" aria-label="Notifications">
         <div class="panel-header">
           <h3 class="panel-title">Notifications</h3>
-          ${
-            count > 0
-              ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
-                  Mark all read
-                </button>`
-              : nothing
-          }
+          ${count > 0
+            ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
+                Mark all read
+              </button>`
+            : nothing}
         </div>
         <div class="panel-list">
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
@@ -795,19 +793,17 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            ${
-              isChatNotificationStatus(n.status)
-                ? // Chat rows carry the nil agent UUID, so "View agent" would
-                  // link to /agents/00000000-... and 404. Until the row records
-                  // its conversation there is nowhere honest to send the click.
-                  nothing
-                : html`<a
-                    href="/agents/${n.agentId}"
-                    @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
-                  >
-                    View agent
-                  </a>`
-            }
+            ${isChatNotificationStatus(n.status)
+              ? // Chat rows carry the nil agent UUID, so "View agent" would
+                // link to /agents/00000000-... and 404. Until the row records
+                // its conversation there is nowhere honest to send the click.
+                nothing
+              : html`<a
+                  href="/agents/${n.agentId}"
+                  @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
+                >
+                  View agent
+                </a>`}
             <button class="mark-read-link" @click=${(): void => void this.ackOne(n.id)}>
               Mark read
             </button>

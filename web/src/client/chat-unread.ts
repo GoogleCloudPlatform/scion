@@ -47,7 +47,8 @@ export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
 export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
 
 type InitialHandle =
-  { kind: 'idle'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
+  | { kind: 'idle'; id: number }
+  | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
 
 /** The unread fields of `GET /api/v1/chat/spaces`. */
 export interface UnreadSpace {

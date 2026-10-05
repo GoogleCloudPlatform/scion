@@ -508,6 +508,44 @@ describe('ChatUnreadCounter first refresh', () => {
     }
   });
 
+  it('refreshes once when idle comes while a chat event refresh is pending', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      // Idle arrives inside the debounce window.
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS / 2);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('skips the first refresh after an explicit refresh', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await counter.refresh();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
   it('sends nothing when stopped before idle', async () => {
     vi.useFakeTimers();
     const idle = installIdleCallback();
