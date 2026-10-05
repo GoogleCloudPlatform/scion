@@ -3874,15 +3874,15 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| broker_call | — | `controlchannel:TunnelRequest` |
-| broker_call | — | `controlchannel:OpenStream` |
-| broker_call | — | `controlchannel:SendStreamData` |
-| broker_call | — | `controlchannel:ResizeStream` |
-| broker_call | — | `controlchannel:CloseStream` |
-| broker_call | — | `controlchannel:handleResponse` |
-| broker_call | — | `controlchannel:handleStreamData` |
-| broker_call | — | `controlchannel:handleStreamClose` |
-| broker_call | — | `controlchannel:handleEvent` |
+| broker_call | — | `TunnelRequest:controlchannel` |
+| broker_call | — | `OpenStream:controlchannel` |
+| broker_call | — | `SendStreamData:controlchannel` |
+| broker_call | — | `ResizeStream:controlchannel` |
+| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `handleResponse:controlchannel` |
+| broker_call | — | `handleStreamData:controlchannel` |
+| broker_call | — | `handleStreamClose:controlchannel` |
+| broker_call | — | `handleEvent:controlchannel` |
 
 **Principals:** `broker`, `system`
 

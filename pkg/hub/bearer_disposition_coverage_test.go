@@ -488,3 +488,54 @@ func TestProjectSubRoutes_EveryRecordedPathReachesItsBranch(t *testing.T) {
 		}
 	}
 }
+
+// catalogNonHTTPEntryProblem returns why a non-HTTP catalog entry point
+// does not name a live entry point, or "" when it does. The pattern is
+// either "<function>:<detail>", naming a function declared in pkg/hub, or
+// a route metadata RouteID.
+func catalogNonHTTPEntryProblem(t *testing.T, ep authzop.EntryPoint) string {
+	t.Helper()
+	if fn, _, ok := strings.Cut(ep.Pattern, ":"); ok {
+		if hubFunctionDeclared(t, fn) {
+			return ""
+		}
+		return fmt.Sprintf("%s %s: no function %s declared in pkg/hub", ep.Kind, ep.Pattern, fn)
+	}
+	for _, meta := range routeMetadataTable {
+		if meta.RouteID == ep.Pattern {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%s %s: pattern must be <function>:<detail> or a route metadata RouteID", ep.Kind, ep.Pattern)
+}
+
+// TestBearerDisposition_CatalogNonHTTPEntriesAreLive requires every
+// non-HTTP catalog entry point (other than CLI commands, which live outside
+// pkg/hub) to name a function declared in pkg/hub or a route metadata
+// RouteID.
+func TestBearerDisposition_CatalogNonHTTPEntriesAreLive(t *testing.T) {
+	checked := 0
+	for _, spec := range authzop.Catalog {
+		for _, ep := range spec.EntryPoints {
+			if bearerHTTPLikeKinds[ep.Kind] || ep.Kind == authzop.EntryPointCLICommand {
+				continue
+			}
+			checked++
+			if p := catalogNonHTTPEntryProblem(t, ep); p != "" {
+				t.Errorf("%s: %s", spec.ID, p)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no non-HTTP catalog entry point was checked")
+	}
+
+	for _, ep := range []authzop.EntryPoint{
+		{Kind: authzop.EntryPointBrokerCall, Pattern: "noSuchHubFunction:controlchannel"},
+		{Kind: authzop.EntryPointBrokerCall, Pattern: "controlchannel.NoSuchCall"},
+	} {
+		if catalogNonHTTPEntryProblem(t, ep) == "" {
+			t.Errorf("entry point %+v must be rejected", ep)
+		}
+	}
+}
