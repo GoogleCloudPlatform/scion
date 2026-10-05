@@ -2841,7 +2841,8 @@ func (b *TelegramBrokerV2) lookupSender(ctx context.Context, sender *TGUser) *se
 // stale is the sender's link mapping looked up and the list refreshed from
 // the hub as that user. When the plugin cannot act as the sender (not
 // linked, link without email, or lookup failure) the hub is not called and
-// any cached list is used as is. A non-nil error means no list is
+// any cached list is used as is. A stale cache also covers a failed refresh,
+// except when the hub denies the sender. A non-nil error means no list is
 // available: errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed
 // when the plugin cannot act as the sender, otherwise the hub error.
 func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, sender *TGUser) (slugs []string, link *senderLink, err error) {
@@ -2864,7 +2865,10 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
-		if cached != nil {
+		// A stale cache covers an unavailable hub, not a denial: when the
+		// sender is denied (or their link is no longer accepted) the error
+		// is returned so they are told why and nothing is delivered.
+		if cached != nil && !isForbiddenHubError(err) {
 			return agentSlugs(cached.Agents), link, nil
 		}
 		return nil, link, err

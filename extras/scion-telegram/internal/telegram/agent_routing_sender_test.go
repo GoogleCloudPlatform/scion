@@ -341,3 +341,29 @@ func TestV2_Routing_UnlinkedSenderGetsRegisterHint(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.Equal(t, registerHint, sent[0].Text)
 }
+
+func TestV2_AgentRefresh_DeniedSenderIsNotServedFromStaleCache(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"permission denied": {forbiddenListAgents(), "Your Scion account (alice@example.com) doesn't have permission to list agents in my-project. Ask a project owner."},
+		"stale link":        {staleLinkError("on-behalf-of principal not found"), staleLinkText},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, tgSrv, hub := newRoutingTestBroker(t)
+			hub.listAgentsErr = tc.err
+			saveStaleAgentCache(t, b.store, "proj-1", "coder")
+			linkTestUser(t, b.store, 456, "alice@example.com")
+			delivered := false
+			b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+			b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+			assert.False(t, delivered, "a denied sender's message is not delivered")
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1)
+			assert.Equal(t, tc.want, sent[0].Text)
+		})
+	}
+}
