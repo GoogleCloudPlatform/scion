@@ -585,6 +585,32 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the same user-record check as UnifiedAuthMiddleware: a token
+	// whose subject has no user record, or whose user is suspended, is not
+	// reported valid. A store failure is reported as 503 store_error, as the
+	// middleware does.
+	if s.store != nil {
+		u, uErr := s.store.GetUser(r.Context(), claims.UserID)
+		switch {
+		case errors.Is(uErr, store.ErrNotFound):
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		case uErr != nil:
+			slog.Error("Auth validate: user store lookup failed",
+				"user_id", claims.UserID, "error", uErr)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
+		case u == nil:
+			// No user record and no error: treated as not found.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		case u.Status == store.UserStatusSuspended:
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
+	}
+
 	var expiresAt *time.Time
 	if claims.Expiry != nil {
 		t := claims.Expiry.Time()

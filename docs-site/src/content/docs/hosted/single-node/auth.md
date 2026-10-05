@@ -66,6 +66,8 @@ Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `4
 
 When the deletion succeeds, Scion also removes all of the user's role bindings (project, hub and system). It then removes the user's user-scope secrets and environment variables; this step is best effort, and anything it cannot remove (for example while an external secret backend is unavailable) is removed by a startup sweep once the backend is reachable. The sweep runs in the background after the Hub starts, within a time limit, and does not delay startup. If no secret backend is configured (for example because it failed to start), secrets whose value is stored in the Hub database are still removed; a secret that only references an external backend (GCP Secret Manager) is kept until a sweep can also remove its external value. Bindings left behind by deletions made before this change are not cleaned up. To clear such a binding when it is a project's only owner, add a real owner first, then remove the old binding from the project's members.
 
+After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.
