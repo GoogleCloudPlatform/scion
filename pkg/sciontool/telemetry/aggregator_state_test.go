@@ -123,7 +123,12 @@ func TestAggregatorState_RoundTripsEveryField(t *testing.T) {
 		case reflect.Int, reflect.Int64:
 			f.SetInt(int64(100 + i))
 		case reflect.Map:
-			want.ToolCalls = map[string]ToolCallStats{"Bash": {Calls: 3, Success: 2, Error: 1}}
+			// Only ToolCalls is populated here; any other map field must be
+			// added explicitly so it is actually round-tripped.
+			if name := v.Type().Field(i).Name; name != "ToolCalls" {
+				t.Fatalf("field %s: unhandled map field; extend this test", name)
+			}
+			f.Set(reflect.ValueOf(map[string]ToolCallStats{"Bash": {Calls: 3, Success: 2, Error: 1}}))
 		case reflect.Struct:
 			if f.Type() != reflect.TypeOf(time.Time{}) {
 				t.Fatalf("field %s: unhandled struct type %s", v.Type().Field(i).Name, f.Type())
