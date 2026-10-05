@@ -1693,15 +1693,15 @@ func init() {
 	// runtimebroker.DefaultConnectionState holds the default value on creation for the connection_state field.
 	runtimebroker.DefaultConnectionState = runtimebrokerDescConnectionState.Default.(string)
 	// runtimebrokerDescAutoProvide is the schema descriptor for auto_provide field.
-	runtimebrokerDescAutoProvide := runtimebrokerFields[18].Descriptor()
+	runtimebrokerDescAutoProvide := runtimebrokerFields[19].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[24].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[25].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[25].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[26].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.

@@ -1253,8 +1253,8 @@ type V1ServerHubConfig struct {
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
-	// Today it only sets the reaper's staleness window (8x this value); it
-	// will also be sent to the broker once the async dispatch path lands.
+	// It is sent to the broker with each asynchronous create and sets the
+	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 

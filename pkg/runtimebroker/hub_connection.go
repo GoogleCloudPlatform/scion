@@ -129,6 +129,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				logging.Subsystem("broker.heartbeat"),
 			)
 			hb.auxiliaryManagers = server.getAuxiliaryManagers
+			hb.workspaceStorage = server.workspaceStorageDescriptor
 			hb.startsInFlight = server.startsInFlightSnapshot
 			hb.SetVersion(server.version)
 			hb.SetDefaultRuntime(server.runtime)

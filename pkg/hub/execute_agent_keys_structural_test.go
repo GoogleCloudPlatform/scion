@@ -213,16 +213,12 @@ func TestExecuteAgentKeys_NeverReachesDispatchAgentMessage(t *testing.T) {
 // contract's invariant (contract C§5: "the route tag must remain consistent
 // across admission, outcome, and internal-error audit records emitted for
 // the same request"): finishAgentKeysInternalError/logAgentKeysInternalErrorAudit
-// take route as a real parameter rather than hardcoding "keys" -- reachable
-// only in principle today, since no production call site routes the bridge
-// through this function today
-// (tryAgentKeysMessageBridge never calls it: its own target-resolution step
-// happens before the bridge runs at all). This drives the function directly
-// with both route values and asserts the audit record reflects whichever
-// one was passed, so the invariant holds structurally, not just for the two
-// call sites that happen to exist right now.
+// take route as a real parameter rather than hardcoding "keys". This drives
+// the function directly with every route value and asserts the audit record
+// reflects whichever one was passed, so the invariant holds structurally,
+// not just for the call sites that happen to exist right now.
 func TestLogAgentKeysInternalErrorAudit_RouteTagIsParameterized(t *testing.T) {
-	for _, route := range []agentKeysRoute{agentKeysRouteKeys, agentKeysRouteRawBridge} {
+	for _, route := range []agentKeysRoute{agentKeysRouteKeys, agentKeysRouteRawRemoved} {
 		t.Run(string(route), func(t *testing.T) {
 			f := newAgentKeysRouteFixture(t)
 			log := installSentinelLogCapture(t)

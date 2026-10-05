@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
@@ -225,6 +226,10 @@ type BrokerHeartbeat struct {
 	// recorded target is listed here as complete. An older broker omits the
 	// field, and the Hub then never draws that conclusion.
 	Inventory *BrokerInventory `json:"inventory,omitempty"`
+	// WorkspaceStorage refreshes the broker's workspace storage descriptor
+	// (backend, NFS export identity and share health) on every heartbeat.
+	// An older broker omits it and the hub keeps the stored value.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or
@@ -311,6 +316,9 @@ type JoinBrokerRequest struct {
 	Version      string          `json:"version"`
 	Capabilities []string        `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile `json:"profiles,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor at
+	// registration time. Share health is refreshed by heartbeats.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.

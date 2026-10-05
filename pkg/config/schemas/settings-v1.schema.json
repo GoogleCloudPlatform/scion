@@ -1020,19 +1020,19 @@
         },
         "async_agent_launch": {
           "type": "boolean",
-          "description": "Reserved: no create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch, off by default; a launch is non-blocking only when this is on AND the client request also opts in (acceptAsyncLaunch). Restart required to change.",
+          "description": "Turns on asynchronous agent create, off by default. A create is asynchronous only when this is on AND the client request also opts in (acceptAsyncLaunch); other requests, provision-only creates and reprovisioning stay synchronous, as do creates sent to a broker without async launch support. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
           "x-since": "1"
         },
         "launch_timeout": {
           "type": "string",
-          "description": "Reserved: not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state (e.g. '5m'). Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
           "x-since": "1"
         },
         "launch_keepalive_seconds": {
           "type": "integer",
-          "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
+          "description": "Broker keepalive interval, in seconds, sent to the broker with each asynchronous create. A launch with no broker report for 8x this value is ended. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
           "x-since": "1"
         },
