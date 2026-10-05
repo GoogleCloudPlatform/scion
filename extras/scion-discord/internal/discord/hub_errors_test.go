@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/bwmarrin/discordgo"
@@ -304,4 +305,115 @@ func TestHandleIncomingMessage_HubOutageStillRoutesToDefault(t *testing.T) {
 	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "please build it"))
 
 	assert.Equal(t, []string{"scion.project." + luProject + ".agent.worker.messages"}, topics)
+}
+
+func TestHubError_DeliveryText(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     hubError
+		email   string
+		project string
+		want    string
+	}{
+		{"message denied", hubError{StatusCode: 403, Code: "message_denied", Message: "Message delivery denied"}, "alice@example.com", "proj-one",
+			"Your Scion account (alice@example.com) doesn't have permission to message agents in **proj-one**. Ask a project owner."},
+		{"message denied without account or project", hubError{StatusCode: 403, Code: "message_denied"}, "", "",
+			"Your Scion account doesn't have permission to message agents in this hub. Ask a project owner."},
+		{"forbidden with denied action", hubError{StatusCode: 403, Code: "forbidden", DeniedAction: "message", ResourceType: "agent"}, "alice@example.com", "proj-one",
+			"Your Scion account (alice@example.com) doesn't have permission to message agents in **proj-one**. Ask a project owner."},
+		{"forbidden without details", hubError{StatusCode: 403, Code: "forbidden", Message: "forbidden"}, "alice@example.com", "proj-one",
+			"Your Scion account (alice@example.com) doesn't have permission to message agents in **proj-one**. Ask a project owner."},
+		{"unknown linked user", hubError{StatusCode: 403, Code: "forbidden", Message: "on-behalf-of principal not found"}, "alice@example.com", "proj-one", staleLinkText},
+		{"inactive linked user", hubError{StatusCode: 403, Code: "forbidden", Message: "on-behalf-of principal is not active"}, "alice@example.com", "proj-one", staleLinkText},
+		{"unresolved sender identity", hubError{StatusCode: 403, Code: "forbidden", Message: "sender identity could not be resolved"}, "alice@example.com", "proj-one", staleLinkText},
+		{"agent not found", hubError{StatusCode: 404, Code: "agent_not_found"}, "alice@example.com", "proj-one",
+			"Target agent not found. Use `/scion agents` to see available agents."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.err.userFacingMessage(tt.email, tt.project))
+		})
+	}
+}
+
+func TestParseHubError_ReadsDenialDetails(t *testing.T) {
+	he := parseHubError(&http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(deniedBody("message", "agent")))})
+	assert.Equal(t, "forbidden", he.Code)
+	assert.Equal(t, "message", he.DeniedAction)
+	assert.Equal(t, "agent", he.ResourceType)
+}
+
+// deliveryFailureBodies are hub answers to a rejected message delivery,
+// with the expected reply.
+var deliveryFailureBodies = map[string]struct {
+	body string
+	want string
+}{
+	"message denied": {`{"error":{"code":"message_denied","message":"Message delivery denied"}}`,
+		"Your Scion account (alice@example.com) doesn't have permission to message agents in **proj-one**. Ask a project owner."},
+	"unknown linked user": {`{"error":{"code":"forbidden","message":"on-behalf-of principal not found"}}`, staleLinkText},
+	"denied action": {deniedBody("message", "agent"),
+		"Your Scion account (alice@example.com) doesn't have permission to message agents in **proj-one**. Ask a project owner."},
+}
+
+func TestHandleIncomingMessage_DeliveryErrorsGetActionableText(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		path := "/api/v1/broker/inbound"
+		if routed {
+			path = "/api/v1/broker/inbound/routed"
+		}
+		for name, tc := range deliveryFailureBodies {
+			t.Run(fmt.Sprintf("routed=%v/%s", routed, name), func(t *testing.T) {
+				e := newLinkedUserEnv(t)
+				e.linkChannel(t)
+				e.setDefaultAgent(t, "worker")
+				e.cacheAgents(t, luPrincipal, time.Now(), "worker")
+				e.hub.failRequest(http.MethodPost, path, http.StatusForbidden, tc.body)
+				b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+				b.config = &Config{RoutedInboundEnabled: routed}
+
+				b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "please build it"))
+
+				require.NotEmpty(t, e.hub.callsTo(http.MethodPost, path), "the message reached the hub")
+				assert.Equal(t, []string{tc.want}, channelReplies(t, e.discord))
+			})
+		}
+	}
+}
+
+func TestHandleMessageCommand_DeliveryErrorGetsActionableText(t *testing.T) {
+	for name, tc := range deliveryFailureBodies {
+		t.Run(name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+			e.hub.failRequest(http.MethodPost, "/api/v1/broker/inbound", http.StatusForbidden, tc.body)
+			e.commands.deliverInbound = b.deliverInbound
+
+			e.commands.HandleMessage(e.session, luCommand("message", luStringOpt("agent", "worker"), luStringOpt("text", "hi")))
+
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.want))
+		})
+	}
+}
+
+func TestAskUserReply_DeliveryErrorGetsActionableText(t *testing.T) {
+	for name, tc := range deliveryFailureBodies {
+		t.Run(name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+			e.hub.failRequest(http.MethodPost, "/api/v1/broker/inbound", http.StatusForbidden, tc.body)
+			e.callback.deliverInbound = b.deliverInbound
+			require.NoError(t, e.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+				RequestID: "req-1", MessageID: "m-1", ChannelID: luChannel, AgentSlug: "worker", ProjectID: luProject,
+				Choices: []string{"yes", "no"}, ExpiresAt: time.Now().Add(time.Hour),
+			}))
+			i := luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{CustomID: "ask:opt:req-1:0"})
+
+			e.callback.Dispatch(e.session, i, "ask:opt:req-1:0", nil)
+
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.want))
+		})
+	}
 }

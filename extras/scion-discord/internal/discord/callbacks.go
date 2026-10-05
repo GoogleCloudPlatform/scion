@@ -345,7 +345,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 
 	// Deliver the response to the hub.
 	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
-		h.respondUpdate(s, i, he.userFacingMessage(), nil)
+		h.respondUpdate(s, i, deliveryErrorText(ctx, s, h.store, h.log, he, interactionUserID(i), pending.ChannelID, pending.ProjectID), nil)
 		return
 	}
 

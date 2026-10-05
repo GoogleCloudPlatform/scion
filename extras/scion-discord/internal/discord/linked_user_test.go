@@ -91,7 +91,7 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if failing && onBehalfOf != "" {
+	if failing {
 		w.WriteHeader(failure.status)
 		_, _ = io.WriteString(w, failure.body)
 		return

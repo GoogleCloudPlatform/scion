@@ -1126,7 +1126,7 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	if he := h.deliverInbound(topic, msg); he != nil {
-		h.followup(s, i, he.userFacingMessage())
+		h.followup(s, i, he.userFacingMessage(emailFromPrincipal(sender), link.ProjectSlug))
 		return
 	}
 

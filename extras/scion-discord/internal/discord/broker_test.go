@@ -450,7 +450,7 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := tt.err.userFacingMessage()
+			msg := tt.err.userFacingMessage("", "")
 			assert.Contains(t, msg, tt.contains)
 		})
 	}

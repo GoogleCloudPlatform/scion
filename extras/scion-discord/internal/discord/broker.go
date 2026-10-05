@@ -101,19 +101,35 @@ type hubError struct {
 	StatusCode int
 	Code       string `json:"code"`
 	Message    string `json:"message"`
+	// DeniedAction and ResourceType come from the error details of a
+	// denial, when present.
+	DeniedAction string `json:"-"`
+	ResourceType string `json:"-"`
 }
 
 func (e *hubError) Error() string {
 	return fmt.Sprintf("hub error %d (%s): %s", e.StatusCode, e.Code, e.Message)
 }
 
-// userFacingMessage returns a short message suitable for displaying to chat users.
-func (e *hubError) userFacingMessage() string {
+// userFacingMessage returns the text shown for a failed message delivery.
+// email is the sender's linked Scion account email and project the project
+// slug; either is "" when unknown.
+func (e *hubError) userFacingMessage(email, project string) string {
 	switch e.Code {
 	case "agent_not_found":
 		return "Target agent not found. Use `/scion agents` to see available agents."
 	case "forbidden":
-		return "You don't have permission to message this agent."
+		// The hub sends no distinct code when the linked user is unknown or
+		// inactive, so this matches on the message text.
+		if strings.HasPrefix(e.Message, "on-behalf-of principal") || strings.HasPrefix(e.Message, "sender identity") {
+			return staleLinkText
+		}
+		if action := actionPhrase(e.DeniedAction, e.ResourceType); action != "" {
+			return permissionDeniedText(email, action, project)
+		}
+		return permissionDeniedText(email, "message agents", project)
+	case "message_denied":
+		return permissionDeniedText(email, "message agents", project)
 	case "agent_not_running":
 		return "Agent is not running. It may be stopped, suspended, or in error state."
 	case "broker_auth_failed", "unauthorized":
@@ -140,6 +156,10 @@ func parseHubError(resp *http.Response) *hubError {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details struct {
+				DeniedAction string `json:"denied_action"`
+				ResourceType string `json:"resource_type"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == "" {
@@ -149,6 +169,8 @@ func parseHubError(resp *http.Response) *hubError {
 	}
 	he.Code = envelope.Error.Code
 	he.Message = envelope.Error.Message
+	he.DeniedAction = envelope.Error.Details.DeniedAction
+	he.ResourceType = envelope.Error.Details.ResourceType
 	return he
 }
 
@@ -1649,7 +1671,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			"type", msg.Type)
 
 		if he := b.deliverInbound(topic, msg); he != nil {
-			s.ChannelMessageSend(channelID, he.userFacingMessage())
+			s.ChannelMessageSend(channelID, he.userFacingMessage(senderMapping.ScionEmail, link.ProjectSlug))
 		}
 	}
 
@@ -1690,7 +1712,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 			if he := b.deliverInbound(mentionTopic, mentionMsg); he != nil {
 				b.log.Warn("Failed to deliver mention notification",
-					"agent", bm.Name, "error", he.userFacingMessage())
+					"agent", bm.Name, "error", he.Error())
 			}
 		}
 	}
@@ -1786,7 +1808,7 @@ func (b *DiscordBroker) handleRoutedInbound(
 
 	result, he := b.deliverRoutedInbound(link.ProjectID, effectiveDefault, msg)
 	if he != nil {
-		s.ChannelMessageSend(channelID, he.userFacingMessage())
+		s.ChannelMessageSend(channelID, he.userFacingMessage(mapping.ScionEmail, link.ProjectSlug))
 		return
 	}
 

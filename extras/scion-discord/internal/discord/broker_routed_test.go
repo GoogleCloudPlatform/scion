@@ -1236,7 +1236,7 @@ func TestHubError_UserFacingMessage_NewCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			he := &hubError{Code: tt.code, Message: "test"}
-			assert.Contains(t, he.userFacingMessage(), tt.contains)
+			assert.Contains(t, he.userFacingMessage("", ""), tt.contains)
 		})
 	}
 }

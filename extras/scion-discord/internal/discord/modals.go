@@ -139,7 +139,7 @@ func HandleModalSubmit(
 		}
 
 		if he := deliverInbound(topic, msg); he != nil {
-			respondEphemeral(s, i, he.userFacingMessage())
+			respondEphemeral(s, i, deliveryErrorText(ctx, s, store, log, he, discordUserID, pending.ChannelID, pending.ProjectID))
 			return
 		}
 	}

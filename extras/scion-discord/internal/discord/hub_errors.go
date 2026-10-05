@@ -15,12 +15,16 @@
 package discord
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/bwmarrin/discordgo"
 )
 
 // staleLinkText is shown when the hub no longer accepts the Scion account a
@@ -200,4 +204,18 @@ func pluralize(noun string) string {
 		return noun[:len(noun)-1] + "ies"
 	}
 	return noun + "s"
+}
+
+// deliveryErrorText returns the reply for a message delivery the hub
+// rejected, sent by the Discord user to projectID from channelID.
+func deliveryErrorText(ctx context.Context, s *discordgo.Session, store Store, log *slog.Logger, he *hubError, discordUserID, channelID, projectID string) string {
+	email := ""
+	if mapping, _ := getUserMapping(ctx, store, log, discordUserID); mapping != nil {
+		email = mapping.ScionEmail
+	}
+	project := ""
+	if link, err := resolveChannelLink(ctx, s, store, channelID); err == nil && link != nil && link.ProjectID == projectID {
+		project = link.ProjectSlug
+	}
+	return he.userFacingMessage(email, project)
 }
