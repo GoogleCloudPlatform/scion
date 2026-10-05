@@ -153,6 +153,7 @@ func TestHandleSetup_ProjectReadWithLinkedUser(t *testing.T) {
 	require.NotEmpty(t, reqs)
 	assert.Equal(t, "/api/v1/projects", reqs[0].Path)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 	assert.Contains(t, f.slack.lastText(t), "Project One")
 }
 
