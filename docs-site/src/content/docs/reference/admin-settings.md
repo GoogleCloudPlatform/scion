@@ -37,12 +37,23 @@ The database always wins for Layer-1 keys. Bootstrap values are used as initial 
 
 ### Layer-0 edits by deployment mode
 
-Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config` depends on the deployment mode (`server.mode`), not on the database driver. `GET` reports it as `layer0_editable`.
+Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config` depends on the deployment mode, not on the database driver. `GET` reports it as `layer0_editable`.
 
-- **Hosted Hubs** (`server.mode: hosted`): Layer-1 keys are written to the database. Layer-0 keys are rejected with `422 layer0_rejected`, and keys with no database home (such as `active_profile`, `workspace_path` or `auto_inject_gcloud_adc`) with `422`. Deployment tooling owns `settings.yaml`.
-- **Workstation Hubs** (the default mode): Layer-1 keys are written to the database. Layer-0 keys and keys with no database home are written to `settings.yaml`. `log_level` is applied immediately and the co-located broker reloads its runtime. Every other key written to the file is listed in the response's `reload.requires_restart`, and `file_keys` lists everything that went to the file.
+- **Hosted Hubs** (started with `--hosted`, or `server.mode: hosted` in `settings.yaml` / `SCION_SERVER_MODE=hosted`): Layer-1 keys are written to the database. Layer-0 keys are rejected with `422 layer0_rejected`, and keys with no database home (such as `active_profile`, `workspace_path` or `auto_inject_gcloud_adc`) with `422`. Deployment tooling owns `settings.yaml`.
+- **Workstation Hubs** (the default mode): Layer-1 keys are written to the database. Layer-0 keys and keys with no database home are written to `settings.yaml`. `log_level` is applied immediately and the co-located broker reloads its runtime. Every other key that changed in the file is listed in the response's `reload.requires_restart`, and `file_keys` lists every key that changed in the file.
 
-A workstation save that touches both destinations is checked as a whole first. Any validation failure, for either part, writes nothing. The new `settings.yaml` is then staged next to the old one, the database sections are written, and the staged file is moved into place last. If a database write fails (for example `409 revision_conflict`), `settings.yaml` is left unchanged. Database sections written before the failure stay written, as for any save that touches several sections, and are listed in `applied`. Only if the final file move fails are the database changes saved without the file changes; the `500` response lists them.
+`server.mode` must be empty (workstation), `workstation`, `hosted` or `production` (the legacy name for hosted). The server refuses to start with any other value; a typo used to mean workstation.
+
+On a workstation Hub the file edit follows the request body field by field:
+
+- Each field the body carries is set. An explicit empty value (`""`, `false`, `0`, `[]`) or `null` clears it, which for most fields removes the key from `settings.yaml`.
+- Fields the body leaves out are kept. For example, `server.broker.broker_id` and `broker_token`, which the Hub writes itself, survive a save that sends the rest of `server.broker`.
+- Values that are already in the file are not rewritten and are not listed as needing a restart, so saving an unchanged form writes nothing.
+- The file is edited in place: comments, key order and keys the Hub does not know survive. A `settings.yaml` that uses YAML anchors or aliases on an edited path cannot be edited in place, and the save is rejected with `422` (edit that file by hand).
+
+Some workstation fields are overridden at every start by the workstation defaults and `scion server start` flags, so a value in `settings.yaml` has no effect: `server.broker.enabled` and `server.broker.host` (`--enable-runtime-broker`, `--host`), `server.hub.host` (`--host`), `server.auth.dev_mode` (`--dev-auth`), `server.storage.provider` (`--storage-bucket`) and `server.secrets.backend`. The admin UI shows them read-only with a "Set by workstation startup defaults / server flags" badge.
+
+A workstation save that touches both destinations is checked as a whole first. Any validation failure, for either part, writes nothing. The Hub then takes its settings-file lock and prepares the new `settings.yaml` in memory, writes the database sections, and writes the file last, atomically, before releasing the lock. Other writers in the same server process (broker registration writing its token, the workstation-settings and identity endpoints) take the same lock, so neither change is lost. Writers in other processes, such as a `scion` CLI command, are not covered. If a database write fails (for example `409 revision_conflict`), `settings.yaml` is left unchanged. Database sections written before the failure stay written, as for any save that touches several sections, and are listed in `applied`. Only if the final file write fails are the database changes saved without the file changes; the `500` response lists them.
 
 On every Hub, a key the API cannot store anywhere (an unknown or misspelled key, or a field with no settings home) is rejected with `422 unpersisted_keys_rejected`, unless its value is unchanged from what `GET` returns. A save never answers `200` for a key it dropped. An empty body is a `400`.
 
@@ -148,7 +159,11 @@ Maintenance mode set through the admin API (`PUT /api/v1/admin/maintenance`) is 
 ### Break-glass by deployment mode
 
 - **Hosted Hubs:** maintenance is **cluster-consistent**. A database row is propagated to all replicas and cannot be overridden by per-node environment variables or `settings.yaml`.
-- **Workstation Hubs:** starting the Hub with `SCION_SERVER_ADMIN_MODE=true` or `admin_mode: true` in `settings.yaml` keeps it in maintenance for that run, even when the database row says otherwise. `GET /api/v1/admin/maintenance` then reports `"break_glass": true`. Restart without the setting to hand control back to the row.
+- **Workstation Hubs:** starting the Hub with `SCION_SERVER_ADMIN_MODE=true` or `admin_mode: true` in `settings.yaml` keeps it in maintenance for that run, even when the database row says otherwise. `GET /api/v1/admin/maintenance` then reports `"break_glass": true` and the admin UI shows a notice. Restart without the setting to hand control back to the row.
+
+While a break-glass is active, a save from the maintenance page updates the stored row (for example its message) but cannot take this run out of maintenance. When a row already exists, a save that does not set `enabled` keeps the row's own on/off value, so the Hub leaves maintenance after a restart without the break-glass. When no row exists yet, such a save stores the current state, which is "on" during a break-glass. Turn maintenance off explicitly, or the Hub stays in maintenance after that restart.
+
+`admin_mode: true` in `settings.yaml` can only be cleared by editing the file: the admin API stores maintenance in the database, not in `settings.yaml`.
 
 ## HA Bootstrap Guidance
 
@@ -170,7 +185,8 @@ The admin settings page (`/admin/server-config`) is layer-aware, permission-gate
 
 - **Permission-Gated Tabs:** Settings page tabs are dynamically gated by the caller's actual resource-level permissions. For example, a role with template-only permissions (like `template.*`) sees only the **Templates** tab, with other administrative tabs hidden. Nav and route guards use granular, per-item permission checks driven by the `/api/v1/admin/status` permissions array.
 - **Hosted Hubs:** Layer-0 fields are read-only with a "Managed via deployment configuration" badge. Layer-1 fields are editable.
-- **Workstation Hubs:** Fields pinned by `SCION_SERVER_*` environment variables are read-only with a "Set via environment variable" badge. Other fields are editable: Layer-1 fields save to the database, Layer-0 fields to `settings.yaml`.
+- **Workstation Hubs:** Fields pinned by `SCION_SERVER_*` environment variables are read-only with a "Set via environment variable" badge, and fields that server start flags override with a "Set by workstation startup defaults / server flags" badge. Other fields are editable: Layer-1 fields save to the database, Layer-0 fields to `settings.yaml`.
+- **Default Agent Role, Default Maximum Agent Role and Default Harness Auth** are shown read-only on every Hub. The Hub cannot save or apply them from its settings database yet (ptone/scion#3067).
 
 ### Layout Structure
 
@@ -213,6 +229,7 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 |-----------|---------|
 | 🔒 *Managed via deployment configuration* | Layer-0 field on a hosted Hub — not editable |
 | 🔒 *Set via environment variable* | Field pinned by `SCION_SERVER_*` on a workstation Hub |
+| 🔒 *Set by workstation startup defaults / server flags* | Workstation field that `scion server start` overrides at every start |
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |
 | Deprecation banner | `SCION_SERVER_*` used for Layer-1 settings |
