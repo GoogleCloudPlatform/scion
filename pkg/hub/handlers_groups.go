@@ -264,6 +264,25 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A group created under a parent becomes a member of that parent and
+	// inherits the parent's role bindings, so the caller needs the same
+	// authority on the parent as adding a group member to it would require.
+	// This runs before anything is created.
+	if req.ParentID != "" {
+		parent, err := s.store.GetGroup(ctx, req.ParentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, "parent group not found: "+req.ParentID, nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if _, _, ok := s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember); !ok {
+			return
+		}
+	}
+
 	ownerID := req.OwnerID
 	createdBy := ""
 	if identity := GetIdentityFromContext(ctx); identity != nil {
@@ -618,11 +637,6 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	ctx := r.Context()
 	groupID := group.ID
 
-	// Enforce authorization: only group owner or admins can add members
-	if !s.authorize(w, r, groupResource(group), ActionAddMember) {
-		return
-	}
-
 	var req AddGroupMemberRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -649,53 +663,11 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
-	// Platform admins and group resource owners bypass the role-hierarchy check.
-	//
-	// The hierarchy is defined over user membership in the group, so it cannot be
-	// evaluated for an agent or broker caller — which is why the pre-#591 form of
-	// this guard let those callers grant any role at all. Such a caller reaches
-	// this point only through an explicit addMember policy, and is held to adding
-	// plain members: escalating someone to admin or owner requires a caller whose
-	// own standing in the group can be checked.
-	userIdent, isUserCaller := GetIdentityFromContext(ctx).(UserIdentity)
-	if !isUserCaller {
-		if req.Role != store.GroupMemberRoleMember {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Only group owners can add owners or admins", nil)
-			return
-		}
-	} else {
-		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(userIdent),
-			Credential: credentialContextForIdentity(userIdent),
-			Resource:   Resource{Type: "group", ID: "hub"},
-			Action:     Action("update"),
-			Permission: "group.update",
-		}).Allowed
-		if !isResourceOwner && !isPlatformAdmin {
-			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
-			switch req.Role {
-			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
-				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners can add owners or admins", nil)
-					return
-				}
-			case store.GroupMemberRoleMember:
-				if err != nil {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
-				if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
-			}
-		}
+	// Authorization on the group: addMember, the role hierarchy, and the
+	// delegation check (see authorizeGroupMemberGrant).
+	canDelegateResult, canDelegateReason, ok := s.authorizeGroupMemberGrant(w, r, group, req.Role)
+	if !ok {
+		return
 	}
 
 	// Resolve the member ID from human-friendly identifiers.
@@ -766,35 +738,6 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	}
 
-	// CanDelegate check: ensure the actor has sufficient authority to grant
-	// the membership. Because membership in a role-bearing group confers all
-	// of that group's role-binding authority, the actor must hold every
-	// permission that becomes newly reachable.
-	//
-	// This applies to ALL callers (user AND agent) and ALL member types
-	// (user, group, agent). An agent with group.addMember authority must
-	// pass the same delegation test as a user caller — group governance role
-	// does NOT substitute for resource authority.
-	var canDelegateResult, canDelegateReason string
-	if s.authzService != nil {
-		actorIdentity := GetIdentityFromContext(ctx)
-		if actorIdentity != nil {
-			grantDesc := GrantDescriptor{
-				Type:    GrantTypeGroupMembership,
-				GroupID: groupID,
-			}
-			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
-			canDelegateResult = "allow"
-			canDelegateReason = delegateDecision.Reason
-			if !delegateDecision.Allowed {
-				logAuthzDenial(r, actorIdentity, groupResource(group), ActionAddMember,
-					"CanDelegate denied: "+delegateDecision.Reason)
-				writeForbidden(w, "Cannot grant authority you do not hold: "+delegateDecision.Reason)
-				return
-			}
-		}
-	}
-
 	member := &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: req.MemberType,
@@ -861,6 +804,107 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		DisplayName: s.resolveGroupMemberDisplayName(ctx, member.MemberType, member.MemberID),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// authorizeGroupMemberGrant runs the authorization for adding a member with
+// the given role to group, writing the refusal response and returning ok=false
+// when the caller may not. It is shared by addGroupMember and by createGroup
+// when a new group is created under a parent group (the new group becomes a
+// member of the parent, so it needs the same authority on the parent):
+//
+//  1. group.addMember on the group;
+//  2. the role hierarchy within the group;
+//  3. CanDelegate for a membership of the group.
+//
+// On success it returns the CanDelegate result and reason for the audit
+// record.
+func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Request, group *store.Group, role string) (canDelegateResult, canDelegateReason string, ok bool) {
+	ctx := r.Context()
+
+	// Only group owners, group admins or callers granted group.addMember
+	// may add members.
+	if !s.authorize(w, r, groupResource(group), ActionAddMember) {
+		return "", "", false
+	}
+
+	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
+	// Platform admins and group resource owners bypass the role-hierarchy check.
+	//
+	// The hierarchy is defined over user membership in the group, so it cannot be
+	// evaluated for an agent or broker caller — which is why an earlier form of
+	// this guard let those callers grant any role at all. Such a caller reaches
+	// this point only through an explicit addMember policy, and is held to adding
+	// plain members: making someone an admin or owner requires a caller whose
+	// own standing in the group can be checked.
+	userIdent, isUserCaller := GetIdentityFromContext(ctx).(UserIdentity)
+	if !isUserCaller {
+		if role != store.GroupMemberRoleMember {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Only group owners can add owners or admins", nil)
+			return "", "", false
+		}
+	} else {
+		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
+		isPlatformAdmin := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   Resource{Type: "group", ID: "hub"},
+			Action:     Action("update"),
+			Permission: "group.update",
+		}).Allowed
+		if !isResourceOwner && !isPlatformAdmin {
+			callerMembership, err := s.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userIdent.ID())
+			switch role {
+			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
+				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners can add owners or admins", nil)
+					return "", "", false
+				}
+			case store.GroupMemberRoleMember:
+				if err != nil {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners or admins can add members", nil)
+					return "", "", false
+				}
+				if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners or admins can add members", nil)
+					return "", "", false
+				}
+			}
+		}
+	}
+
+	// CanDelegate check: ensure the actor has sufficient authority to grant
+	// the membership. Because membership in a role-bearing group confers all
+	// of that group's role-binding authority, the actor must hold every
+	// permission that becomes newly reachable.
+	//
+	// This applies to ALL callers (user AND agent) and ALL member types
+	// (user, group, agent). An agent with group.addMember authority must
+	// pass the same delegation test as a user caller — group governance role
+	// does NOT substitute for resource authority.
+	if s.authzService != nil {
+		actorIdentity := GetIdentityFromContext(ctx)
+		if actorIdentity != nil {
+			grantDesc := GrantDescriptor{
+				Type:    GrantTypeGroupMembership,
+				GroupID: group.ID,
+			}
+			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
+			canDelegateResult = "allow"
+			canDelegateReason = delegateDecision.Reason
+			if !delegateDecision.Allowed {
+				logAuthzDenial(r, actorIdentity, groupResource(group), ActionAddMember,
+					"CanDelegate denied: "+delegateDecision.Reason)
+				writeForbidden(w, "Cannot grant authority you do not hold: "+delegateDecision.Reason)
+				return "", "", false
+			}
+		}
+	}
+
+	return canDelegateResult, canDelegateReason, true
 }
 
 // handleGroupMemberByID handles DELETE on /api/v1/groups/{groupId}/members/{type}/{id}
