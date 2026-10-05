@@ -51,6 +51,9 @@ type BrokerInfoResponse struct {
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
 	Projects     []ProjectInfo       `json:"projects,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor, the
+	// same value it reports to the hub on every heartbeat.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -95,6 +98,16 @@ type BrokerCapabilities struct {
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
 	// hub refuses to dispatch such agents to a broker without it (412).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates this broker can take part in moving an agent to
+	// or from another broker on the same workspace export (`scion
+	// reincarnate --broker`). The hub refuses a move unless both brokers
+	// report it (412).
+	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -170,6 +183,10 @@ type AgentResponse struct {
 	// found the agent already running reports the existing run's ID, so
 	// the hub can record the run that actually exists (ptone/scion#2550).
 	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the start this response answers placed
+	// the agent's workspace (api.WorkspacePlacementExport or
+	// WorkspacePlacementLocal). Empty when no start resolved it.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -618,6 +635,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+		WorkspacePlacement:    info.WorkspacePlacement,
 	}
 	if len(info.HubOnlyEnvWarnings) > 0 {
 		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)

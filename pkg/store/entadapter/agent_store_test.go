@@ -1815,3 +1815,65 @@ func TestUpdateAgentStatus_ClearMessageIf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "newer", got.Message)
 }
+
+// IfPhase makes UpdateAgentStatus conditional on the stored phase
+// (ptone/scion#2014): a mismatch writes nothing and returns ErrPhaseMismatch,
+// which is a version conflict.
+func TestUpdateAgentStatus_IfPhase(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-phase")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+
+	err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", Message: "x", IfPhase: "stopped"})
+	require.ErrorIs(t, err, store.ErrPhaseMismatch)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Empty(t, got.Message, "a mismatched update writes nothing")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfPhase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+}
+
+// ClearTerminalRemnants applies the stopped/error -> running clear whatever
+// the stored phase (ptone/scion#2014): message (unless set on the update),
+// stalled marker, exit code and reason.
+func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-remnants")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	code := 137
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "starting", Message: "Agent crashed with exit code 137", ExitCode: &code, ExitReason: "crashed",
+	}))
+	row, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	row.StalledFromActivity = "working"
+	require.NoError(t, s.UpdateAgent(ctx, row))
+
+	// Without the flag, starting -> running keeps them.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Message)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+	assert.Empty(t, got.StalledFromActivity)
+	assert.Empty(t, got.ExitReason)
+	assert.Nil(t, got.ExitCode)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "fresh", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh", got.Message)
+}

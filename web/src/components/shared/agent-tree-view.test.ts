@@ -30,6 +30,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   layoutForest,
@@ -309,6 +310,17 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
     expect(statusLabel('k1')).toBe('stopped');
+  });
+
+  it('shows a provision-only agent as created (not started) with a start hint (ptone/scion#2929)', async () => {
+    el.agents = el.agents.map((a) =>
+      a.id === 'k1' ? { ...a, phase: 'created', provisionedOnly: true } : a
+    );
+    await el.updateComplete;
+
+    const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge?.getAttribute('title')).toContain('scion start kid');
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */
@@ -1578,5 +1590,78 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
     pointer('pointerdown', link!);
     expect(canvas().classList.contains('dragging')).toBe(false);
     expect(selectStartPrevented(textTarget())).toBe(false);
+  });
+});
+
+// ptone/scion#2483 phase 2: the graph shows each node's deletion state in
+// compact form (no lifecycle actions in the graph).
+describe('deletion badge on graph nodes', () => {
+  const T0 = Date.parse('2026-10-04T12:00:00Z');
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const base = { soft: false, claim: 1, startedAt: iso(T0) };
+  let el: ScionAgentTreeView;
+
+  async function mountTree(agents: Agent[]): Promise<void> {
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = agents;
+    document.body.appendChild(el);
+    await el.updateComplete;
+  }
+
+  afterEach(() => {
+    el?.remove();
+    vi.useRealTimers();
+  });
+
+  /** The compact badge text and full title on the node linking to /agents/<id>. */
+  async function nodeBadge(id: string): Promise<{ text: string; title: string } | null> {
+    const badge = el.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
+      `a.node[href="/agents/${id}"] scion-deletion-badge`
+    );
+    await badge?.updateComplete;
+    const inner = badge?.shadowRoot?.querySelector<HTMLElement>('.badge');
+    return inner ? { text: inner.textContent?.trim() ?? '', title: inner.title } : null;
+  }
+
+  it('shows Deleting…, Delete failed and Interrupted compactly, with the full label as title', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: T0 });
+    await mountTree([
+      {
+        ...agent('d1', 'deleting'),
+        deletion: { ...base, state: 'deleting', leaseExpiresAt: iso(T0 + 60_000) },
+      },
+      {
+        ...agent('d2', 'failed'),
+        deletion: { ...base, state: 'failed', code: 'runtime_error', error: 'broker refused' },
+      },
+      { ...agent('d3', 'abandoned'), deletion: { ...base, state: 'failed', code: 'abandoned' } },
+      agent('d4', 'plain'),
+    ]);
+    expect(await nodeBadge('d1')).toEqual({ text: 'Deleting…', title: 'Deleting…' });
+    expect(await nodeBadge('d2')).toEqual({
+      text: 'Delete failed',
+      title: 'Delete failed: broker refused',
+    });
+    expect(await nodeBadge('d3')).toEqual({ text: 'Interrupted', title: 'Delete interrupted' });
+    expect(await nodeBadge('d4')).toBeNull();
+    // The status badge is still there, and the graph offers no delete actions.
+    expect(
+      el.shadowRoot!.querySelector('a.node[href="/agents/d1"] scion-status-badge')
+    ).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-deletion-banner')).toBeNull();
+  });
+
+  it('flips a deleting node to Interrupted at its lease with no new data', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: T0 });
+    await mountTree([
+      {
+        ...agent('d1', 'deleting'),
+        deletion: { ...base, state: 'deleting', leaseExpiresAt: iso(T0 + 20_000) },
+      },
+    ]);
+    expect((await nodeBadge('d1'))?.text).toBe('Deleting…');
+    vi.advanceTimersByTime(20_000);
+    await el.updateComplete;
+    expect((await nodeBadge('d1'))?.text).toBe('Interrupted');
   });
 });

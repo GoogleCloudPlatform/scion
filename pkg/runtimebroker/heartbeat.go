@@ -77,7 +77,11 @@ type HeartbeatService struct {
 	auxiliaryManagers func() []agent.Manager // optional: returns managers for non-default runtimes
 	version           string
 	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
-	log               *slog.Logger
+	// startsInFlight returns the agent starts running on this broker
+	// (Server.startsInFlightSnapshot). Optional: when nil, the heartbeat
+	// neither lists starts nor advertises the capability.
+	startsInFlight func() []launchKey
+	log            *slog.Logger
 
 	// defaultRuntime is the broker's own default runtime instance, set once
 	// by the caller that constructs this service (which already holds it)
@@ -91,6 +95,16 @@ type HeartbeatService struct {
 	// listed in time is reported incomplete, so liveness and the other
 	// targets' data keep flowing every interval.
 	listingDeadline time.Duration
+
+	// workspaceStorage, when set, returns the broker's current workspace
+	// storage descriptor, reported on every heartbeat so the hub sees share
+	// health changes. Nil omits the field.
+	workspaceStorage func() *api.BrokerWorkspaceStorage
+
+	// defaultProfile, when set, returns the broker's default (active)
+	// profile name, reported on every heartbeat. A nil func, or a nil
+	// result (unknown), omits the field.
+	defaultProfile func() *string
 
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
@@ -305,7 +319,31 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
+			// Cross-broker agent move is not implemented by this broker.
+			AgentMove: false,
 		},
+	}
+	if s.workspaceStorage != nil {
+		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+	if s.defaultProfile != nil {
+		if name := s.defaultProfile(); name != nil {
+			v := *name
+			heartbeat.DefaultProfile = &v
+		}
+	}
+
+	// Starts in flight are read BEFORE the agents are listed: a start that
+	// finishes between the two reads is then either still listed here or
+	// its container is in the agent list, so the hub never sees neither.
+	if s.startsInFlight != nil {
+		heartbeat.Capabilities.StartsInFlight = true
+		for _, k := range s.startsInFlight() {
+			if s.projectFilter != nil && !s.projectFilter(k.ProjectID) {
+				continue
+			}
+			heartbeat.StartsInFlight = append(heartbeat.StartsInFlight, hubclient.StartInFlight{ProjectID: k.ProjectID, Slug: k.Slug})
+		}
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the

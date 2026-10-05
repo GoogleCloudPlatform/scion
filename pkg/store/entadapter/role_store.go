@@ -467,8 +467,14 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 			return nil, fmt.Errorf("%w: agent %s", store.ErrNotFound, rb.PrincipalID)
 		}
 	case store.RoleBindingPrincipalGroup:
-		if _, err := r.client.Group.Get(ctx, principalUID); err != nil {
+		g, err := r.client.Group.Get(ctx, principalUID)
+		if err != nil {
 			return nil, fmt.Errorf("%w: group %s", store.ErrNotFound, rb.PrincipalID)
+		}
+		// Project members groups are system-managed and cannot be granted
+		// roles, on any scope.
+		if store.IsProjectMembersGroup(entGroupToStore(g)) {
+			return nil, fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, rb.PrincipalID)
 		}
 	}
 

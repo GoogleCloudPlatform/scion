@@ -28,6 +28,19 @@ import (
 // HashPrefix is the prefix for SHA-256 hashes.
 const HashPrefix = "sha256:"
 
+// contentHashPattern matches a content hash produced by this package:
+// HashPrefix followed by 64 lowercase hex characters.
+var contentHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// IsContentHash reports whether s is a content hash in the "sha256:<hex64>"
+// form produced by HashBytes and ComputeContentHash. Content-addressed
+// caches (for example the broker's template cache) use this value as a
+// directory name, so callers use it to tell such a directory name apart from
+// a human-chosen name.
+func IsContentHash(s string) bool {
+	return contentHashPattern.MatchString(s)
+}
+
 // gitBlobHashPattern matches a bare git object ID: 40 lowercase hex characters.
 var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 

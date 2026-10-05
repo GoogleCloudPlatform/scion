@@ -352,6 +352,20 @@ func (_c *AgentCreate) SetNillableRuntimeBrokerID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_c *AgentCreate) SetWorkspacePlacement(v string) *AgentCreate {
+	_c.mutation.SetWorkspacePlacement(v)
+	return _c
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableWorkspacePlacement(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetWorkspacePlacement(*v)
+	}
+	return _c
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
 	_c.mutation.SetWebPtyEnabled(v)
@@ -896,6 +910,146 @@ func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetStartClaimID sets the "start_claim_id" field.
+func (_c *AgentCreate) SetStartClaimID(v string) *AgentCreate {
+	_c.mutation.SetStartClaimID(v)
+	return _c
+}
+
+// SetNillableStartClaimID sets the "start_claim_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimID(*v)
+	}
+	return _c
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (_c *AgentCreate) SetStartClaimKind(v string) *AgentCreate {
+	_c.mutation.SetStartClaimKind(v)
+	return _c
+}
+
+// SetNillableStartClaimKind sets the "start_claim_kind" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimKind(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimKind(*v)
+	}
+	return _c
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (_c *AgentCreate) SetStartClaimState(v string) *AgentCreate {
+	_c.mutation.SetStartClaimState(v)
+	return _c
+}
+
+// SetNillableStartClaimState sets the "start_claim_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimState(*v)
+	}
+	return _c
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (_c *AgentCreate) SetStartClaimOwner(v string) *AgentCreate {
+	_c.mutation.SetStartClaimOwner(v)
+	return _c
+}
+
+// SetNillableStartClaimOwner sets the "start_claim_owner" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimOwner(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimOwner(*v)
+	}
+	return _c
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (_c *AgentCreate) SetStartClaimTarget(v string) *AgentCreate {
+	_c.mutation.SetStartClaimTarget(v)
+	return _c
+}
+
+// SetNillableStartClaimTarget sets the "start_claim_target" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimTarget(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimTarget(*v)
+	}
+	return _c
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (_c *AgentCreate) SetStartClaimAt(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimAt(v)
+	return _c
+}
+
+// SetNillableStartClaimAt sets the "start_claim_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimAt(*v)
+	}
+	return _c
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (_c *AgentCreate) SetStartClaimLeaseUntil(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimLeaseUntil(v)
+	return _c
+}
+
+// SetNillableStartClaimLeaseUntil sets the "start_claim_lease_until" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimLeaseUntil(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimLeaseUntil(*v)
+	}
+	return _c
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (_c *AgentCreate) SetStartClaimUnconfirmedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimUnconfirmedAt(v)
+	return _c
+}
+
+// SetNillableStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimUnconfirmedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimUnconfirmedAt(*v)
+	}
+	return _c
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (_c *AgentCreate) SetStartClaimHoldUntil(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimHoldUntil(v)
+	return _c
+}
+
+// SetNillableStartClaimHoldUntil sets the "start_claim_hold_until" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimHoldUntil(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimHoldUntil(*v)
+	}
+	return _c
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_c *AgentCreate) SetStartClaimLaunchID(v string) *AgentCreate {
+	_c.mutation.SetStartClaimLaunchID(v)
+	return _c
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimLaunchID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimLaunchID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -1004,6 +1158,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultDetached
 		_c.mutation.SetDetached(v)
 	}
+	if _, ok := _c.mutation.WorkspacePlacement(); !ok {
+		v := agent.DefaultWorkspacePlacement
+		_c.mutation.SetWorkspacePlacement(v)
+	}
 	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
 		v := agent.DefaultWebPtyEnabled
 		_c.mutation.SetWebPtyEnabled(v)
@@ -1091,6 +1249,26 @@ func (_c *AgentCreate) defaults() {
 	if _, ok := _c.mutation.DeletionRequest(); !ok {
 		v := agent.DefaultDeletionRequest
 		_c.mutation.SetDeletionRequest(v)
+	}
+	if _, ok := _c.mutation.StartClaimKind(); !ok {
+		v := agent.DefaultStartClaimKind
+		_c.mutation.SetStartClaimKind(v)
+	}
+	if _, ok := _c.mutation.StartClaimState(); !ok {
+		v := agent.DefaultStartClaimState
+		_c.mutation.SetStartClaimState(v)
+	}
+	if _, ok := _c.mutation.StartClaimOwner(); !ok {
+		v := agent.DefaultStartClaimOwner
+		_c.mutation.SetStartClaimOwner(v)
+	}
+	if _, ok := _c.mutation.StartClaimTarget(); !ok {
+		v := agent.DefaultStartClaimTarget
+		_c.mutation.SetStartClaimTarget(v)
+	}
+	if _, ok := _c.mutation.StartClaimLaunchID(); !ok {
+		v := agent.DefaultStartClaimLaunchID
+		_c.mutation.SetStartClaimLaunchID(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := agent.DefaultID()
@@ -1310,6 +1488,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeString, value)
 		_node.RuntimeBrokerID = value
 	}
+	if value, ok := _c.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+		_node.WorkspacePlacement = value
+	}
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 		_node.WebPtyEnabled = value
@@ -1469,6 +1651,46 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RunIntentAt(); ok {
 		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
 		_node.RunIntentAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimID(); ok {
+		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
+		_node.StartClaimID = &value
+	}
+	if value, ok := _c.mutation.StartClaimKind(); ok {
+		_spec.SetField(agent.FieldStartClaimKind, field.TypeString, value)
+		_node.StartClaimKind = value
+	}
+	if value, ok := _c.mutation.StartClaimState(); ok {
+		_spec.SetField(agent.FieldStartClaimState, field.TypeString, value)
+		_node.StartClaimState = value
+	}
+	if value, ok := _c.mutation.StartClaimOwner(); ok {
+		_spec.SetField(agent.FieldStartClaimOwner, field.TypeString, value)
+		_node.StartClaimOwner = value
+	}
+	if value, ok := _c.mutation.StartClaimTarget(); ok {
+		_spec.SetField(agent.FieldStartClaimTarget, field.TypeString, value)
+		_node.StartClaimTarget = value
+	}
+	if value, ok := _c.mutation.StartClaimAt(); ok {
+		_spec.SetField(agent.FieldStartClaimAt, field.TypeTime, value)
+		_node.StartClaimAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimLeaseUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimLeaseUntil, field.TypeTime, value)
+		_node.StartClaimLeaseUntil = &value
+	}
+	if value, ok := _c.mutation.StartClaimUnconfirmedAt(); ok {
+		_spec.SetField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime, value)
+		_node.StartClaimUnconfirmedAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimHoldUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimHoldUntil, field.TypeTime, value)
+		_node.StartClaimHoldUntil = &value
+	}
+	if value, ok := _c.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+		_node.StartClaimLaunchID = value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2000,6 +2222,24 @@ func (u *AgentUpsert) UpdateRuntimeBrokerID() *AgentUpsert {
 // ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
 func (u *AgentUpsert) ClearRuntimeBrokerID() *AgentUpsert {
 	u.SetNull(agent.FieldRuntimeBrokerID)
+	return u
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsert) SetWorkspacePlacement(v string) *AgentUpsert {
+	u.Set(agent.FieldWorkspacePlacement, v)
+	return u
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateWorkspacePlacement() *AgentUpsert {
+	u.SetExcluded(agent.FieldWorkspacePlacement)
+	return u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsert) ClearWorkspacePlacement() *AgentUpsert {
+	u.SetNull(agent.FieldWorkspacePlacement)
 	return u
 }
 
@@ -2687,6 +2927,186 @@ func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
 	return u
 }
 
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsert) SetStartClaimID(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimID, v)
+	return u
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimID() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimID)
+	return u
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsert) ClearStartClaimID() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimID)
+	return u
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsert) SetStartClaimKind(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimKind, v)
+	return u
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimKind() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimKind)
+	return u
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsert) ClearStartClaimKind() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimKind)
+	return u
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsert) SetStartClaimState(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimState, v)
+	return u
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimState() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimState)
+	return u
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsert) ClearStartClaimState() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimState)
+	return u
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsert) SetStartClaimOwner(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimOwner, v)
+	return u
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimOwner() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimOwner)
+	return u
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsert) ClearStartClaimOwner() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimOwner)
+	return u
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsert) SetStartClaimTarget(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimTarget, v)
+	return u
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimTarget() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimTarget)
+	return u
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsert) ClearStartClaimTarget() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimTarget)
+	return u
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsert) SetStartClaimAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimAt, v)
+	return u
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimAt)
+	return u
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsert) ClearStartClaimAt() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimAt)
+	return u
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsert) SetStartClaimLeaseUntil(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimLeaseUntil, v)
+	return u
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimLeaseUntil() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimLeaseUntil)
+	return u
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsert) ClearStartClaimLeaseUntil() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimLeaseUntil)
+	return u
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsert) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimUnconfirmedAt, v)
+	return u
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimUnconfirmedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimUnconfirmedAt)
+	return u
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsert) ClearStartClaimUnconfirmedAt() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimUnconfirmedAt)
+	return u
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsert) SetStartClaimHoldUntil(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimHoldUntil, v)
+	return u
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimHoldUntil() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimHoldUntil)
+	return u
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsert) ClearStartClaimHoldUntil() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimHoldUntil)
+	return u
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsert) SetStartClaimLaunchID(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimLaunchID, v)
+	return u
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimLaunchID() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimLaunchID)
+	return u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsert) ClearStartClaimLaunchID() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimLaunchID)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -3239,6 +3659,27 @@ func (u *AgentUpsertOne) UpdateRuntimeBrokerID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRuntimeBrokerID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertOne) SetWorkspacePlacement(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertOne) ClearWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 
@@ -4040,6 +4481,216 @@ func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
 	})
 }
 
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsertOne) SetStartClaimID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimID(v)
+	})
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimID()
+	})
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsertOne) ClearStartClaimID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimID()
+	})
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsertOne) SetStartClaimKind(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimKind(v)
+	})
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimKind()
+	})
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsertOne) ClearStartClaimKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimKind()
+	})
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsertOne) SetStartClaimState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimState(v)
+	})
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimState()
+	})
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsertOne) ClearStartClaimState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimState()
+	})
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsertOne) SetStartClaimOwner(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimOwner(v)
+	})
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimOwner()
+	})
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsertOne) ClearStartClaimOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimOwner()
+	})
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsertOne) SetStartClaimTarget(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimTarget(v)
+	})
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimTarget() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimTarget()
+	})
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsertOne) ClearStartClaimTarget() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimTarget()
+	})
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsertOne) SetStartClaimAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimAt(v)
+	})
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimAt()
+	})
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsertOne) ClearStartClaimAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimAt()
+	})
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsertOne) SetStartClaimLeaseUntil(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLeaseUntil(v)
+	})
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimLeaseUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLeaseUntil()
+	})
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsertOne) ClearStartClaimLeaseUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLeaseUntil()
+	})
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertOne) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimUnconfirmedAt(v)
+	})
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimUnconfirmedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimUnconfirmedAt()
+	})
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertOne) ClearStartClaimUnconfirmedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimUnconfirmedAt()
+	})
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsertOne) SetStartClaimHoldUntil(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimHoldUntil(v)
+	})
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimHoldUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimHoldUntil()
+	})
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsertOne) ClearStartClaimHoldUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimHoldUntil()
+	})
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsertOne) SetStartClaimLaunchID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLaunchID(v)
+	})
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLaunchID()
+	})
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsertOne) ClearStartClaimLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLaunchID()
+	})
+}
+
 // Exec executes the query.
 func (u *AgentUpsertOne) Exec(ctx context.Context) error {
 	if len(u.create.conflict) == 0 {
@@ -4759,6 +5410,27 @@ func (u *AgentUpsertBulk) UpdateRuntimeBrokerID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRuntimeBrokerID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertBulk) SetWorkspacePlacement(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertBulk) ClearWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 
@@ -5557,6 +6229,216 @@ func (u *AgentUpsertBulk) UpdateRunIntentAt() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIntentAt()
+	})
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsertBulk) SetStartClaimID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimID(v)
+	})
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimID()
+	})
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsertBulk) ClearStartClaimID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimID()
+	})
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsertBulk) SetStartClaimKind(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimKind(v)
+	})
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimKind()
+	})
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsertBulk) ClearStartClaimKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimKind()
+	})
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsertBulk) SetStartClaimState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimState(v)
+	})
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimState()
+	})
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsertBulk) ClearStartClaimState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimState()
+	})
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsertBulk) SetStartClaimOwner(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimOwner(v)
+	})
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimOwner()
+	})
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsertBulk) ClearStartClaimOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimOwner()
+	})
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsertBulk) SetStartClaimTarget(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimTarget(v)
+	})
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimTarget() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimTarget()
+	})
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsertBulk) ClearStartClaimTarget() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimTarget()
+	})
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsertBulk) SetStartClaimAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimAt(v)
+	})
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimAt()
+	})
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsertBulk) ClearStartClaimAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimAt()
+	})
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsertBulk) SetStartClaimLeaseUntil(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLeaseUntil(v)
+	})
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimLeaseUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLeaseUntil()
+	})
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsertBulk) ClearStartClaimLeaseUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLeaseUntil()
+	})
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertBulk) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimUnconfirmedAt(v)
+	})
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimUnconfirmedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimUnconfirmedAt()
+	})
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertBulk) ClearStartClaimUnconfirmedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimUnconfirmedAt()
+	})
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsertBulk) SetStartClaimHoldUntil(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimHoldUntil(v)
+	})
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimHoldUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimHoldUntil()
+	})
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsertBulk) ClearStartClaimHoldUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimHoldUntil()
+	})
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsertBulk) SetStartClaimLaunchID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLaunchID(v)
+	})
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLaunchID()
+	})
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsertBulk) ClearStartClaimLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLaunchID()
 	})
 }
 

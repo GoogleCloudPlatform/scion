@@ -170,9 +170,23 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// authz input, and no list reader uses it (only the delete dispatch, from
 	// a single-row read).
 	"RunID": true,
+	// workspace_placement is written only through SetAgentWorkspacePlacement
+	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here. It is not an authz input.
+	"WorkspacePlacement": true,
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
 	"RunIntent": true, "RunIntentAt": true,
+	// ProvisionedOnly is computed by the hub at response time from Phase,
+	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
+	// not stored.
+	"ProvisionedOnly": true,
+	// Start claim columns are written only through the start-claim store
+	// methods (never by CreateAgent/UpdateAgent).
+	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
+	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
+	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
+	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

@@ -356,7 +356,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 // still marshal the key and would make the broker-side rung "fire" with zero
 // values, which is how file-mode parity would silently break.
 func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
-	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil); got != nil {
+	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil); got != nil {
 		t.Errorf("want nil for empty section, got %+v", got)
 	}
 	// The two hub-resolved fields alone must not put the field on the wire:
@@ -364,18 +364,18 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 	d := opsettings.AgentDefaultsSettings{}
 	d.DefaultTemplate = "team-default"
 	d.DefaultHarnessConfig = "claude-vertex"
-	if got := remoteHubAgentDefaults(d, nil); got != nil {
+	if got := remoteHubAgentDefaults(d, nil, nil); got != nil {
 		t.Errorf("template/harness-config defaults must not travel here, got %+v", got)
 	}
 	// A single limit is enough to send.
 	d = opsettings.AgentDefaultsSettings{}
 	d.DefaultMaxTurns = 50
-	if got := remoteHubAgentDefaults(d, nil); got == nil || got.MaxTurns != 50 {
+	if got := remoteHubAgentDefaults(d, nil, nil); got == nil || got.MaxTurns != 50 {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
 	}
 	// The hub auto-expose default alone is enough to send, false included.
 	off := false
-	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off)
+	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil)
 	if got == nil || got.AutoExposePorts == nil || *got.AutoExposePorts {
 		t.Errorf("want autoExposePorts=false on the wire, got %+v", got)
 	}

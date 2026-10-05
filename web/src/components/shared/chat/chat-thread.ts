@@ -37,6 +37,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
@@ -75,6 +76,9 @@ import {
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+import { ComposerRoomController, type RoomComposer } from './composer-room.js';
+import { PinOnResizeController } from './pin-on-resize.js';
+import { focusElement } from '../focus-moved.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -349,6 +353,30 @@ export class ScionChatThread extends LitElement {
    */
   readonly _zone = new DisplayZoneController(this);
 
+  /**
+   * Keeps the composer's text field from growing past the visible frame: see
+   * composer-room.ts.
+   */
+  readonly _composerRoom = new ComposerRoomController(this, () => ({
+    // The message list, or the column holding the empty / loading / error
+    // state (and, on a phone, the typing indicator) in its place.
+    messages:
+      this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll, .state-area, .state-msg') ??
+      null,
+    composer: this.shadowRoot?.querySelector<RoomComposer>('scion-chat-composer') ?? null,
+  }));
+
+  /**
+   * Keeps a list pinned to the bottom there when it gets shorter (the
+   * keyboard opening): see pin-on-resize.ts. Not while the open-time unread
+   * anchor holds the scroll position.
+   */
+  readonly _pinOnResize = new PinOnResizeController(
+    this,
+    () => this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll') ?? null,
+    () => this.pinnedToBottom && !this._unreadAnchorActive
+  );
+
   // DEPRECATED(wave-1): agentId-based mode — remove after v2 is stable and flag is permanently ON.
   @property()
   agentId = '';
@@ -431,6 +459,10 @@ export class ScionChatThread extends LitElement {
   @state() private sending = false;
   @state() private sendError: string | null = null;
   @state() private pinnedToBottom = true;
+  /** Whether the user expanded a one-line send error to its full text. */
+  @state() private sendErrorExpanded = false;
+  /** Whether the one-line send error (phone or tablet) cuts its text. */
+  @state() private sendErrorTruncated = false;
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
@@ -438,6 +470,11 @@ export class ScionChatThread extends LitElement {
   private messageRowsVersion = 0;
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
+    // A new (or cleared) send error starts collapsed.
+    if (changedProperties.has('sendError')) {
+      this.sendErrorExpanded = false;
+      this.sendErrorTruncated = false;
+    }
     // These updates affect controls around the transcript, not its rows.
     // Invalidate for every other property (including future ones), and for
     // explicit requestUpdate() calls such as read-receipt expiry. Metadata
@@ -445,7 +482,12 @@ export class ScionChatThread extends LitElement {
     if (
       changedProperties.size === 0 ||
       [...changedProperties.keys()].some(
-        (key) => key !== 'typingUsers' && key !== 'agents' && key !== 'pinnedToBottom'
+        (key) =>
+          key !== 'typingUsers' &&
+          key !== 'agents' &&
+          key !== 'pinnedToBottom' &&
+          key !== 'sendErrorExpanded' &&
+          key !== 'sendErrorTruncated'
       )
     ) {
       this.messageRowsVersion++;
@@ -779,7 +821,13 @@ export class ScionChatThread extends LitElement {
         overflow-y: auto;
         overflow-x: hidden;
         overscroll-behavior: contain;
-        padding: 0.5rem 0;
+        /* Set by the chat page's mobile panels; see chat.ts. Code blocks
+         * and tables are scrollers of their own, so they still pan sideways. */
+        touch-action: var(--chat-touch-action, auto);
+        /* In a tight keyboard frame inside the chat shell (it publishes
+         * --scion-chat-tight) the padding goes, so the list can give up all
+         * its room to the composer rather than keeping a 1rem minimum. */
+        padding: calc(0.5rem * (1 - var(--scion-chat-tight, 0))) 0;
         display: flex;
         flex-direction: column;
       }
@@ -906,6 +954,72 @@ export class ScionChatThread extends LitElement {
         color: var(--scion-danger-600, #dc2626);
         background: var(--scion-danger-50, #fef2f2);
         border-top: 1px solid var(--scion-danger-200, #fecaca);
+      }
+
+      /* The expandable form (phone or tablet, text cut): a button that
+         looks like the plain row. The native button look is switched off
+         explicitly (iOS also rounds buttons); the background, colour and
+         padding come from .send-error above, which as an author style
+         already beats the button's defaults. */
+      button.send-error {
+        appearance: none;
+        -webkit-appearance: none;
+        border-radius: 0;
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0;
+        border: none;
+        border-top: 1px solid var(--scion-danger-200, #fecaca);
+        font: inherit;
+        font-size: var(--chat-fs-base);
+        text-align: start;
+        cursor: pointer;
+      }
+
+      /* On a phone or tablet the error is one line, cut with an ellipsis,
+         until the user expands it; it can shrink (and clip) rather than
+         push the composer's field out of the frame. The composer may shrink
+         too (see chat-composer.ts). */
+      @media (max-width: 768px), (pointer: coarse) {
+        .send-error {
+          flex-shrink: 1;
+          min-height: 0;
+          overflow: hidden;
+        }
+
+        .send-error:not([data-expanded]) {
+          white-space: nowrap;
+          text-overflow: ellipsis;
+        }
+
+        scion-chat-composer {
+          min-height: 0;
+        }
+
+        /* The empty, loading and error states stand where the list does and
+           give way like it: no fixed padding, and they can shrink to nothing
+           rather than push the composer out of a short frame. */
+        .state-msg {
+          min-height: 0;
+          overflow: hidden;
+          padding-top: 0;
+          padding-bottom: 0;
+        }
+
+        /* The state message and the typing indicator at its foot, as one
+           column standing where the list does (see renderContentAndTyping). */
+        .state-area {
+          display: flex;
+          flex-direction: column;
+          flex: 1;
+          min-height: 0;
+          overflow: hidden;
+        }
+
+        .state-area > .typing-indicator {
+          flex: none;
+        }
       }
 
       /* Mention results footer */
@@ -1097,6 +1211,19 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
+    this.measureSendErrorTruncation();
+    this.observeSendError();
+    // The typing indicator is in the list on a phone or tablet: when it
+    // appears or goes, a list at the bottom stays at the bottom.
+    if (
+      changedProperties.has('typingUsers') &&
+      this._composerRoom.capped &&
+      this.pinnedToBottom &&
+      !this._unreadAnchorActive
+    ) {
+      const list = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+      if (list) list.scrollTop = list.scrollHeight;
+    }
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
       placeMenuInViewport(
         this.renderRoot.querySelector<HTMLElement>('.context-menu'),
@@ -1195,6 +1322,9 @@ export class ScionChatThread extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._sendErrorObserver?.disconnect();
+    this._sendErrorObserver = null;
+    this._observedSendError = null;
     this.stopStream();
     this.deactivateUnreadAnchor();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
@@ -4081,7 +4211,7 @@ export class ScionChatThread extends LitElement {
     if (composer) {
       const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
       if (slTextarea) {
-        (slTextarea as HTMLElement).focus();
+        focusElement(slTextarea as HTMLElement);
       }
     }
   }
@@ -4155,8 +4285,7 @@ export class ScionChatThread extends LitElement {
     }
     return html`
       <div class="thread-container">
-        ${this.renderContent()}
-        ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
+        ${this.renderContent()} ${this.renderSendError()}
         ${this.canSend
           ? html`
               <scion-chat-composer
@@ -4170,11 +4299,86 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
+  /**
+   * The send error. On a desktop layout, the full text, as it always was.
+   * On a phone or tablet it is one line with an ellipsis, so its height
+   * never changes with the frame; when the text is actually cut it is a
+   * button that expands to the full text (its title carries it too).
+   */
+  private renderSendError(): TemplateResult | typeof nothing {
+    if (!this.sendError) return nothing;
+    const expandable =
+      this._composerRoom.capped && (this.sendErrorTruncated || this.sendErrorExpanded);
+    if (!expandable) return html`<div class="send-error">${this.sendError}</div>`;
+    return html`
+      <button
+        type="button"
+        class="send-error"
+        title=${this.sendError}
+        aria-expanded=${this.sendErrorExpanded ? 'true' : 'false'}
+        ?data-expanded=${this.sendErrorExpanded}
+        @click=${(): void => {
+          this.sendErrorExpanded = !this.sendErrorExpanded;
+        }}
+      >
+        ${this.sendError}
+      </button>
+    `;
+  }
+
+  /** On a phone or tablet, whether the one-line send error cuts its text. */
+  private measureSendErrorTruncation(): void {
+    if (!this._composerRoom.capped || !this.sendError || this.sendErrorExpanded) return;
+    const el = this.shadowRoot?.querySelector<HTMLElement>('.send-error');
+    if (!el) return;
+    const truncated = el.scrollWidth > el.clientWidth + 1;
+    if (truncated !== this.sendErrorTruncated) this.sendErrorTruncated = truncated;
+  }
+
+  /** Watches the send error's width on a phone or tablet (rotation, panels). */
+  private _sendErrorObserver: ResizeObserver | null = null;
+  private _observedSendError: Element | null = null;
+
+  /**
+   * Re-measure the send error's truncation whenever its width changes, not
+   * only when the thread renders: a rotation can make a fitting error cut,
+   * or a cut one fit.
+   */
+  private observeSendError(): void {
+    const el = this._composerRoom.capped
+      ? (this.shadowRoot?.querySelector('.send-error') ?? null)
+      : null;
+    if (el === this._observedSendError) return;
+    this._sendErrorObserver?.disconnect();
+    this._observedSendError = el;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    this._sendErrorObserver ??= new ResizeObserver(() => this.measureSendErrorTruncation());
+    this._sendErrorObserver.observe(el);
+  }
+
+  /**
+   * The message list (or the state message in its place) and the typing
+   * indicator. On a desktop layout the indicator follows the list, as it
+   * always did. On a phone or tablet it is the list's last item (see
+   * renderContent()); with no list (the empty, loading and error states) it
+   * shares a column with the state message, at its foot, and the composer
+   * sizes its field from that column, so a typist arriving takes room from
+   * the state message, never from the field.
+   */
+  private renderContentAndTyping(): TemplateResult {
+    if (!this._composerRoom.capped) {
+      return html`${this.renderContent()} ${this.renderTypingIndicator()}`;
+    }
+    if (!this.showsStateMessage) return html`${this.renderContent()}`;
+    return html`<div class="state-area">
+      ${this.renderContent()} ${this.renderTypingIndicator()}
+    </div>`;
+  }
+
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderInteragentToggle()} ${this.renderContent()} ${this.renderTypingIndicator()}
-        ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
+        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()} ${this.renderSendError()}
         <scion-chat-composer
           .agents=${this.agents}
           .members=${this.members}
@@ -4257,6 +4461,15 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
+  /**
+   * Whether renderContent() shows a state message (empty, loading or load
+   * error) in place of the message list.
+   */
+  private get showsStateMessage(): boolean {
+    if (this.messages.length > 0) return false;
+    return this.loading || !!this.error || !this.hasInteragentMessages;
+  }
+
   private renderContent() {
     if (this.loading && this.messages.length === 0) {
       return html`
@@ -4308,6 +4521,13 @@ export class ScionChatThread extends LitElement {
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
             : nothing}
           ${guard([this.messageRowsVersion, this.seenExpired], () => this.renderMessages())}
+          ${
+            // On a phone or tablet the typing indicator is the last item in
+            // the list, so it takes no room from the composer and someone
+            // starting to type never moves it; a list at the bottom keeps
+            // it in view (see updated()).
+            this._composerRoom.capped ? this.renderTypingIndicator() : nothing
+          }
         </div>
         ${!this.pinnedToBottom
           ? html`

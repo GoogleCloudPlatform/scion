@@ -34,9 +34,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gopkg.in/yaml.v3"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -89,6 +91,11 @@ type startContextInputs struct {
 	// only: the hub-managed marker block and host-side worktree provisioning,
 	// which treat ProjectPath as a project root, skip it.
 	ProjectPathFromContainer bool
+	// HubGlobalProject is set when the hub marked this dispatch as its
+	// global project by sending the global slug alongside ProjectPath (see
+	// splitHubGlobalSlug). ProjectSlug is then left empty, so the path
+	// alone resolves the project, as for any dispatch with a path.
+	HubGlobalProject bool
 
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
@@ -127,6 +134,11 @@ type startContextInputs struct {
 	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
 	// hub; pkg/agent then mints one itself.
 	RunID string
+	// TemplateName is the agent's template slug as sent on start and
+	// restart. It is used for naming only (StartOptions.TemplateName) and
+	// never to locate or load a template; a create's Config.Template slug
+	// takes precedence. A content hash is ignored.
+	TemplateName string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -179,6 +191,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// The broker's global directory belongs to the global project. A
+	// dispatch that names another project with that path must fail before
+	// the marker block below, which would otherwise rewrite the global
+	// marker and create project-configs entries for that project.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		if msg := globalDirProjectConflict(in.ProjectPath, in.ProjectID, in.HubGlobalProject); msg != "" {
+			span.SetStatus(codes.Error, msg)
+			return nil, &startContextError{Status: http.StatusConflict, Message: msg}
+		}
+	}
+
 	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the
@@ -206,7 +229,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				// Detect stale marker: hub's project ID differs and the old
 				// external config dir was cleaned up (project was deleted and
 				// recreated with the same name — miller79/scion#28).
-				if in.ProjectID != "" && marker.ProjectID != in.ProjectID {
+				// The global marker is only rewritten for the global project
+				// itself (see globalDirProjectConflict above).
+				if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
 					extPath, _ := marker.ExternalProjectPath()
 					if isStaleExternalDir(extPath) {
 						slug := marker.ProjectSlug
@@ -812,6 +837,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	if templateSlug == "" && !transfer.IsContentHash(in.TemplateName) {
+		templateSlug = in.TemplateName
+	}
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
 	}
@@ -1735,6 +1763,98 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
 	}
+}
+
+// globalProjectSlug is the hub slug of the global project.
+const globalProjectSlug = "global"
+
+// splitHubGlobalSlug separates the hub's global-project mark from the slug.
+// The hub sends the global slug together with a project path only for its
+// global project; the path still resolves the project, so the slug is
+// dropped (returned empty) and reported as the mark instead. Any other
+// slug is returned unchanged.
+func splitHubGlobalSlug(projectPath, projectSlug string) (slug string, hubGlobal bool) {
+	if projectPath != "" && projectSlug == globalProjectSlug {
+		return "", true
+	}
+	return projectSlug, false
+}
+
+// globalDirProjectConflict returns a non-empty error message when
+// projectPath is the broker's global scion directory (or a project root whose
+// .scion entry is that directory) and the dispatch is not for the global
+// project. The global project is the one the hub marks as global
+// (hubGlobal), the "global" id, an empty id, or the hub id this broker has
+// recorded for its global project (see isGlobalDirProjectID).
+func globalDirProjectConflict(projectPath, projectID string, hubGlobal bool) string {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	if !config.IsGlobalProjectDir(projectPath) && !config.IsGlobalProjectDir(filepath.Join(projectPath, config.DotScion)) {
+		return ""
+	}
+	if hubGlobal || projectID == "" || projectID == "global" || isGlobalDirProjectID(globalDir, projectID) {
+		return ""
+	}
+	return fmt.Sprintf("project path %q is this broker's global scion directory, which cannot hold project %s. "+
+		"Re-register this broker as a provider without a local path (scion runtime-broker provide --project <project>) "+
+		"or with the project's own directory (--path)", projectPath, projectID)
+}
+
+// canRewriteProjectMarker reports whether the stale-marker branch may rewrite
+// the .scion marker under projectPath for projectID. Any project directory
+// other than the global directory may be rewritten. The global marker may
+// only be rewritten for the global project: the one the hub marks as global,
+// or the id the global settings record.
+func canRewriteProjectMarker(projectPath, projectID string, hubGlobal bool) bool {
+	if !config.IsGlobalProjectDir(projectPath) {
+		return true
+	}
+	if hubGlobal {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	id := globalSettingsProjectID(globalDir)
+	return id != "" && id == projectID
+}
+
+// isGlobalDirProjectID reports whether projectID is the hub id this broker
+// has recorded for its global project. The global settings decide when they
+// record an id; a global .scion marker that disagrees with them is ignored.
+// Without a settings id, the marker's project-id is used.
+func isGlobalDirProjectID(globalDir, projectID string) bool {
+	if id := globalSettingsProjectID(globalDir); id != "" {
+		return id == projectID
+	}
+	// The global marker may carry an empty slug, which ReadProjectMarker
+	// rejects, so only its project-id is read here.
+	markerPath := filepath.Join(globalDir, config.DotScion)
+	if !config.IsProjectMarkerFile(markerPath) {
+		return false
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return false
+	}
+	var marker config.ProjectMarker
+	return yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID
+}
+
+// globalSettingsProjectID returns the hub project id recorded in the global
+// settings, or "" when none is recorded.
+func globalSettingsProjectID(globalDir string) string {
+	settings, err := config.LoadSettings(globalDir)
+	if err != nil {
+		return ""
+	}
+	if id := settings.GetHubProjectID(); id != "" {
+		return id
+	}
+	return settings.ProjectID
 }
 
 // isStaleExternalDir returns true if the external project config directory
