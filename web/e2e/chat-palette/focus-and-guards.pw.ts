@@ -19,7 +19,7 @@
  * Alt/Shift and IME do not accidentally toggle/commit.
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { setupApiMocks, AGENT_WITH_DM, SELF_USER_ID, type TrackedRequest } from './mock-api.js';
 import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
@@ -82,7 +82,7 @@ test('Meta+K also opens the palette from the composer', async ({ page }) => {
   await expect(paletteInput(page)).toBeFocused();
 });
 
-function paletteOptions(page: Page) {
+function paletteOptions(page: Page): Locator {
   return page.locator('scion-quick-palette .palette-option');
 }
 

@@ -793,25 +793,24 @@ export class ScionQuickPalette extends LitElement {
     if (!this.open || !input) return;
     input.focus();
     // Already focused: no focus event, so apply it here.
-    void this.applyTypeahead();
+    this.applyTypeahead();
   }
 
   private readonly handleQueryInputFocus = (): void => {
-    void this.applyTypeahead();
+    this.applyTypeahead();
   };
 
   /**
    * Once the query input has focus, by the open or by a click, the keys
-   * typed since the open was requested become the query, caret at the end,
-   * as if typed into the input.
+   * typed since the open was requested become the query. The query is empty
+   * then: an open clears it, and keys typed before the focus were captured.
    */
-  private async applyTypeahead(): Promise<void> {
+  private applyTypeahead(): void {
+    // A focus while closed (the closing dialog's input) must leave a capture
+    // a host has started for a reopen running.
+    if (!this.open) return;
     const typed = this.activeTypeahead.take();
-    const input = this.paletteInputEl;
-    if (!typed || !this.open || !input) return;
-    this.queryText = input.value + typed;
-    await this.updateComplete;
-    input.setSelectionRange(input.value.length, input.value.length);
+    if (typed) this.queryText = typed;
   }
 
   private handlePaletteRequestClose(

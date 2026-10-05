@@ -1297,6 +1297,23 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(input(el).value).toBe('co');
   });
 
+  it("a focus on the input while closed leaves the host's capture running", async () => {
+    const typeahead = new PaletteTypeahead();
+    const el = await mountClosed(typeahead);
+    typeahead.start();
+    typeOutside('c');
+    input(el).focus();
+    await el.updateComplete;
+
+    expect(typeahead.isCapturing).toBe(true);
+    expect(typeahead.pending).toBe('c');
+    outside.focus();
+    expect(typeOutside('o').defaultPrevented).toBe(true);
+    await show(el);
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('co');
+  });
+
   it('nothing is captured while the palette is closed', async () => {
     await mountClosed();
     expect(typeOutside('a').defaultPrevented).toBe(false);
