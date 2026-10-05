@@ -17,6 +17,7 @@ package hub
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -58,13 +59,21 @@ default_timezone: Asia/Tokyo
 
 	for name, snap := range map[string]Layer1Snapshot{"with server": with, "without server": without} {
 		if snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas {
-			t.Errorf("%s: EnforceBrokerQuotas = %v, want false", name, snap.EnforceBrokerQuotas)
+			t.Errorf("%s: EnforceBrokerQuotas = %s, want false", name, boolPtrText(snap.EnforceBrokerQuotas))
 		}
 		if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
-			t.Errorf("%s: AgentSecretsUserScopeOnly = %v, want true", name, snap.AgentSecretsUserScopeOnly)
+			t.Errorf("%s: AgentSecretsUserScopeOnly = %s, want true", name, boolPtrText(snap.AgentSecretsUserScopeOnly))
 		}
 		if snap.DefaultTimezone != "Asia/Tokyo" {
 			t.Errorf("%s: DefaultTimezone = %q, want Asia/Tokyo", name, snap.DefaultTimezone)
 		}
 	}
+}
+
+// boolPtrText renders a *bool for test failure messages.
+func boolPtrText(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return strconv.FormatBool(*b)
 }

@@ -1967,17 +1967,23 @@ func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
 }
 
 // topLevelTelemetryEnabled returns settings.yaml's top-level
-// telemetry.enabled, or nil when unset.
+// telemetry.enabled, or nil when unset. It decodes through V1TelemetryConfig
+// like applyTopLevelSettingsSections, so YAML 1.1 booleans (yes/no/on/off)
+// are read the same way on both load paths.
 func topLevelTelemetryEnabled(raw map[string]interface{}) *bool {
-	tel, ok := raw["telemetry"].(map[string]interface{})
-	if !ok {
+	telRaw, ok := raw["telemetry"]
+	if !ok || telRaw == nil {
 		return nil
 	}
-	b, ok := tel["enabled"].(bool)
-	if !ok {
+	data, err := yamlv3.Marshal(telRaw)
+	if err != nil {
 		return nil
 	}
-	return &b
+	var tel V1TelemetryConfig
+	if err := yamlv3.Unmarshal(data, &tel); err != nil {
+		return nil
+	}
+	return tel.Enabled
 }
 
 // applyTopLevelSettingsSections copies the hub-level settings that live at

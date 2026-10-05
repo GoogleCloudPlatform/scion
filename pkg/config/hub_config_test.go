@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1645,10 +1646,10 @@ default_gcp_identity_mode: block
 
 	for name, gc := range map[string]*GlobalConfig{"with server": withServer, "without server": without} {
 		if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
-			t.Errorf("%s: EnforceBrokerQuotas = %v, want false", name, gc.EnforceBrokerQuotas)
+			t.Errorf("%s: EnforceBrokerQuotas = %s, want false", name, boolPtrString(gc.EnforceBrokerQuotas))
 		}
 		if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
-			t.Errorf("%s: AgentSecretsUserScopeOnly = %v, want true", name, gc.AgentSecretsUserScopeOnly)
+			t.Errorf("%s: AgentSecretsUserScopeOnly = %s, want true", name, boolPtrString(gc.AgentSecretsUserScopeOnly))
 		}
 		if gc.DefaultTimezone != "Europe/Berlin" {
 			t.Errorf("%s: DefaultTimezone = %q, want Europe/Berlin", name, gc.DefaultTimezone)
@@ -1657,7 +1658,7 @@ default_gcp_identity_mode: block
 			t.Errorf("%s: DefaultHarnessConfig = %q, want claude", name, gc.DefaultHarnessConfig)
 		}
 		if gc.DefaultScratchpad == nil || !*gc.DefaultScratchpad {
-			t.Errorf("%s: DefaultScratchpad = %v, want true", name, gc.DefaultScratchpad)
+			t.Errorf("%s: DefaultScratchpad = %s, want true", name, boolPtrString(gc.DefaultScratchpad))
 		}
 		if gc.DefaultGCPIdentityMode != "block" {
 			t.Errorf("%s: DefaultGCPIdentityMode = %q, want block", name, gc.DefaultGCPIdentityMode)
@@ -1703,7 +1704,7 @@ func TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings(t *testing.T) {
 				t.Fatal(err)
 			}
 			if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
-				t.Errorf("file only: TelemetryEnabled = %v, want false", gc.TelemetryEnabled)
+				t.Errorf("file only: TelemetryEnabled = %s, want false", boolPtrString(gc.TelemetryEnabled))
 			}
 
 			t.Setenv("SCION_SERVER_TELEMETRYENABLED", "true")
@@ -1712,7 +1713,7 @@ func TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings(t *testing.T) {
 				t.Fatal(err)
 			}
 			if gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
-				t.Errorf("with env: TelemetryEnabled = %v, want true (env beats file)", gc.TelemetryEnabled)
+				t.Errorf("with env: TelemetryEnabled = %s, want true (env beats file)", boolPtrString(gc.TelemetryEnabled))
 			}
 		})
 	}
@@ -1736,13 +1737,13 @@ func TestLoadGlobalConfig_ServerYAMLWithServerlessSettings(t *testing.T) {
 		t.Errorf("Hub.Port = %d, want 7777 from server.yaml", gc.Hub.Port)
 	}
 	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
-		t.Errorf("EnforceBrokerQuotas = %v, want false from settings.yaml", gc.EnforceBrokerQuotas)
+		t.Errorf("EnforceBrokerQuotas = %s, want false from settings.yaml", boolPtrString(gc.EnforceBrokerQuotas))
 	}
 	if gc.DefaultTimezone != "Europe/Paris" {
 		t.Errorf("DefaultTimezone = %q, want Europe/Paris from settings.yaml", gc.DefaultTimezone)
 	}
 	if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
-		t.Errorf("TelemetryEnabled = %v, want false (settings.yaml beats server.yaml)", gc.TelemetryEnabled)
+		t.Errorf("TelemetryEnabled = %s, want false (settings.yaml beats server.yaml)", boolPtrString(gc.TelemetryEnabled))
 	}
 }
 
@@ -1765,9 +1766,47 @@ func TestLoadGlobalConfig_ServerYAMLOnlyUnchanged(t *testing.T) {
 		t.Errorf("LoadGlobalConfig differs from the plain legacy load:\n got  %+v\n want %+v", gc, legacy)
 	}
 	if gc.Hub.Port != 7777 || gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
-		t.Errorf("server.yaml values lost: port=%d telemetry=%v", gc.Hub.Port, gc.TelemetryEnabled)
+		t.Errorf("server.yaml values lost: port=%d telemetry=%s", gc.Hub.Port, boolPtrString(gc.TelemetryEnabled))
 	}
 	if gc.EnforceBrokerQuotas != nil || gc.DefaultTimezone != "" {
-		t.Errorf("top-level sections set without a settings.yaml: quotas=%v tz=%q", gc.EnforceBrokerQuotas, gc.DefaultTimezone)
+		t.Errorf("top-level sections set without a settings.yaml: quotas=%s tz=%q", boolPtrString(gc.EnforceBrokerQuotas), gc.DefaultTimezone)
+	}
+}
+
+// boolPtrString renders a *bool for test failure messages.
+func boolPtrString(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return strconv.FormatBool(*b)
+}
+
+// TestLoadGlobalConfig_TelemetryYAML11Bool checks that a YAML 1.1 boolean
+// (enabled: yes) in settings.yaml's top-level telemetry section is read the
+// same on the settings.yaml path and the legacy path, including over a
+// server.yaml telemetryEnabled.
+func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
+	const tel = "telemetry:\n  enabled: yes\n"
+	for name, files := range map[string]map[string]string{
+		"with server":    {"settings.yaml": "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + tel},
+		"without server": {"settings.yaml": "schema_version: \"1\"\n" + tel},
+		"over server.yaml": {
+			"server.yaml":   "telemetryEnabled: false\n",
+			"settings.yaml": "schema_version: \"1\"\n" + tel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, files)
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+				t.Errorf("TelemetryEnabled = %s, want true", boolPtrString(gc.TelemetryEnabled))
+			}
+			if gc.TelemetryConfig == nil || gc.TelemetryConfig.Enabled == nil || !*gc.TelemetryConfig.Enabled {
+				t.Errorf("TelemetryConfig.Enabled disagrees with TelemetryEnabled")
+			}
+		})
 	}
 }
