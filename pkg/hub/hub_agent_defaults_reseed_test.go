@@ -24,7 +24,7 @@ import (
 )
 
 // TestHubAgentDefaults_RuntimeBrokerAndTimezoneSurviveReseed pins
-// ptone/scion#2073 review finding 11 on the hub side: settings.yaml
+// ptone/scion#2073, hub side: settings.yaml
 // default_runtime_broker and default_timezone, extracted into the
 // agent_defaults row as syncHubSettings does on boot (pinned in cmd by
 // TestBootReseed_FileRuntimeBrokerAndTimezoneSurvive), reach the hub's

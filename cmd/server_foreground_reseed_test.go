@@ -24,7 +24,7 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-// ptone/scion#2073 review finding 11: settings.yaml default_runtime_broker
+// ptone/scion#2073: settings.yaml default_runtime_broker
 // and default_timezone reach the hub through the boot reseed. Before
 // extractAgentDefaults listed them, the seeded agent_defaults row dropped
 // both and the hub applied "". The hub side (hubAgentDefaults after

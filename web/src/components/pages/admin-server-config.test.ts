@@ -616,8 +616,7 @@ describe('scion-page-admin-server-config', () => {
     });
 
     it('a minimal workstation GET with no user change sends no Layer-0 leaves', async () => {
-      // The GET a hub returns for a stock workstation settings.yaml
-      // (review phase4-r4 finding 1).
+      // The GET a hub returns for a stock workstation settings.yaml.
       const minimal = {
         schema_version: '1',
         settings_tier: 'db',

@@ -25,8 +25,8 @@ import (
 )
 
 // The DB-backed server-config PUT must never answer 200 "saved" for a key it
-// neither persists nor rejects (review phase4-r1 finding 1: the onboarding
-// gcloud ADC choice was silently dropped on SQLite). Layer-0 and unclassified
+// neither persists nor rejects (the onboarding gcloud ADC choice was once
+// silently dropped on SQLite this way). Layer-0 and unclassified
 // keys are already rejected by koanf-key classification; what slipped through
 // were keys that never became a koanf key at all:
 //

@@ -31,8 +31,7 @@ import (
 // newHubNameDBServer boots a DB-mode server whose bootstrap sets
 // server.hub.hub_name and whose endpoints row is seeded from that bootstrap,
 // the way syncHubSettings seeds it on every boot. "Prod.Hub" deliberately
-// does not match the schema pattern: bootstrap accepts it (ptone/scion#2073
-// review finding 12).
+// does not match the schema pattern: bootstrap accepts it (ptone/scion#2073).
 func newHubNameDBServer(t *testing.T, bootstrapHubName string) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
@@ -94,7 +93,7 @@ func supersededKeyNames(resp ServerConfigDBResponse, section string) []string {
 	return keys
 }
 
-// Review finding 1: making the endpoints row managed (PUT public_url) must
+// Making the endpoints row managed (PUT public_url) must
 // not report the bootstrap hub_name as superseded. Nothing overrides it:
 // the managed row has no hub_name and ApplySnapshot keeps the bootstrap
 // value.
@@ -117,7 +116,7 @@ func TestServerConfigDB_HubName_ManagedEndpointsNotSuperseded(t *testing.T) {
 	assert.Equal(t, "Prod.Hub", resp.Server.Hub.HubName, "GET returns the effective hub_name")
 }
 
-// Review findings 1 and 12: a PUT that echoes the effective hub_name back
+// A PUT that echoes the effective hub_name back
 // (as a client sending the GET body does) neither fails, even when the
 // bootstrap value does not match the schema pattern, nor writes hub_name.
 func TestServerConfigDB_HubName_EchoNeitherFailsNorWrites(t *testing.T) {
@@ -147,7 +146,7 @@ func TestServerConfigDB_HubName_EchoNeitherFailsNorWrites(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 }
 
-// Review finding 1: a PUT that changes hub_name persists it, ApplySnapshot
+// A PUT that changes hub_name persists it, ApplySnapshot
 // applies it, and later endpoints writes that omit hub_name keep it.
 func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	srv, fakeStore, ops := newHubNameDBServer(t, "boot-hub")
@@ -186,7 +185,7 @@ func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	row, _ = endpointsRow(t, fakeStore)
 	assert.Empty(t, row.HubName)
 	assert.Equal(t, "boot-hub", getServerConfigDB(t, srv, ops).Server.Hub.HubName)
-	// The running hub switches back too (round-2 finding 1): Snapshot
+	// The running hub switches back too: Snapshot
 	// resolves the bootstrap name, so ApplySnapshot does not keep the stale
 	// managed name. The GCP secret backend label follows the name
 	// ApplySnapshot resolves (snap.HubName, else the startup name).
@@ -195,7 +194,7 @@ func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	assert.Equal(t, "boot-hub", running.HubName())
 }
 
-// Round-2 finding 5: endpoints PUTs are built on the current row, so a
+// Endpoints PUTs are built on the current row, so a
 // hub_name-only PUT keeps the managed public_url and image_registry, and an
 // image_registry-only PUT keeps public_url and hub_name.
 func TestServerConfigDB_Endpoints_PutChangesOnlyItsFields(t *testing.T) {
@@ -233,7 +232,7 @@ func TestServerConfigDB_HubName_InvalidChangeRejected(t *testing.T) {
 	assert.Equal(t, before, after)
 }
 
-// Round-3 finding 1: with no hub_name configured anywhere, GET returns ""
+// With no hub_name configured anywhere, GET returns ""
 // (unset), not this replica's hostname, so an echoed GET body sent to any
 // replica is a no-op; a hostname-shaped name in a PUT is a real change; and
 // set, clear, ApplySnapshot leaves the running hub on its own startup
@@ -276,7 +275,7 @@ func TestServerConfigDB_HubName_UnsetStaysUnsetAndRunsStartupDefault(t *testing.
 	assert.Equal(t, startupDefault, running.HubName())
 }
 
-// Round-3 finding 2: ApplySnapshot reports hub_name as applied only when the
+// ApplySnapshot reports hub_name as applied only when the
 // running name changes, including the reset to the startup default.
 func TestApplySnapshot_HubNameAppliedOnlyOnChange(t *testing.T) {
 	appliedKeys := func(res map[string]interface{}) []string {
@@ -291,7 +290,7 @@ func TestApplySnapshot_HubNameAppliedOnlyOnChange(t *testing.T) {
 	assert.NotContains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{})), "hub_name")
 }
 
-// Round-3 finding 3: on a seeded (non-managed) endpoints row, fields this
+// On a seeded (non-managed) endpoints row, fields this
 // node overrides by env are not carried into the shared row; without the
 // env override they are carried.
 func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
@@ -330,7 +329,7 @@ func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
 	assert.Equal(t, opsettings.EndpointsSettings{HubName: "new-hub"}, row)
 }
 
-// Round-3 finding 3: with no endpoints row, the base is the effective
+// With no endpoints row, the base is the effective
 // (bootstrap) public_url and image_registry.
 func TestServerConfigDB_Endpoints_NoRowBaseFromSnapshot(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
@@ -372,7 +371,7 @@ func (c *endpointsRaceStore) GetHubSetting(ctx context.Context, section string) 
 	return row, err
 }
 
-// Round-3 finding 3: the endpoints carry-forward write is CAS-guarded on the
+// The endpoints carry-forward write is CAS-guarded on the
 // revision it read, so a concurrent write yields 409 and nothing is written.
 func TestServerConfigDB_Endpoints_ConcurrentWrite409(t *testing.T) {
 	fake := newFakeHubSettingStore()

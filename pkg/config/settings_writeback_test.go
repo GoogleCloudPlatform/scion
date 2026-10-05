@@ -600,7 +600,7 @@ func TestDetectYAMLIndent(t *testing.T) {
 	}
 }
 
-// TestUpdateVersionedSetting_AnchorsNotShared is the review repro: editing
+// TestUpdateVersionedSetting_AnchorsNotShared pins anchors: editing
 // an anchored value must not change the aliases that refer to it.
 func TestUpdateVersionedSetting_AnchorsNotShared(t *testing.T) {
 	t.Run("anchored scalar", func(t *testing.T) {
@@ -874,7 +874,7 @@ func TestReplaceYAMLMapValue_NonScalar(t *testing.T) {
 	}
 }
 
-// TestUpdateVersionedSetting_MergeKeys covers the review repros: a delete
+// TestUpdateVersionedSetting_MergeKeys covers merge keys: a delete
 // under a `<<` merge key must remove the merged value, as the struct path
 // does, rather than silently do nothing or uncover it.
 func TestUpdateVersionedSetting_MergeKeys(t *testing.T) {
@@ -907,7 +907,7 @@ func TestUpdateVersionedSetting_MergeKeys(t *testing.T) {
 	})
 }
 
-// TestWriteSettingsFileAtomic_SymlinkedDirectoryRelativeLink is the review's
+// TestWriteSettingsFileAtomic_SymlinkedDirectoryRelativeLink covers a
 // dotfiles layout: the settings directory is a symlink and the settings
 // file is a relative link with `..`, which must resolve against the
 // physical parent, as the kernel (and every read) does.
@@ -999,7 +999,7 @@ func TestUpdateVersionedSetting_RoundTripRefusal(t *testing.T) {
 	})
 }
 
-// TestUpdateVersionedSetting_AliasKeys covers the review repros: a key
+// TestUpdateVersionedSetting_AliasKeys covers alias keys: a key
 // written as an alias (`*k :`) expands to its anchor's value, which the
 // node edit cannot match by name, so the edit must take the struct path
 // rather than append a duplicate field (an unloadable file) or miss the

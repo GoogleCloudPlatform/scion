@@ -42,7 +42,7 @@ func newStartupNamedServer(t *testing.T, hubName string) *Server {
 	return srv
 }
 
-// Round-4 finding 2: an unset configured hub_name resets the running name
+// An unset configured hub_name resets the running name
 // to the name resolved at startup, not to the hostname, so a hub_name set
 // only through server start --config survives the first ApplySnapshot and
 // returns after a clear. (The GCP secret label follows the same resolved
@@ -73,7 +73,7 @@ func TestApplySnapshot_UnsetHubNameWithoutStartupNameUsesDefault(t *testing.T) {
 	assert.Equal(t, config.ResolveHubNameOrDefault(""), srv.HubName())
 }
 
-// Round-4 finding 1: BuildLayer1SnapshotFromFile carries the configured
+// BuildLayer1SnapshotFromFile carries the configured
 // hub_name; without it every file-mode reload would reset a configured hub
 // to its startup name.
 func TestBuildLayer1SnapshotFromFile_CarriesHubName(t *testing.T) {
@@ -87,7 +87,7 @@ func TestBuildLayer1SnapshotFromFile_CarriesHubName(t *testing.T) {
 	assert.Equal(t, "file-hub", srv.HubName())
 }
 
-// Round-4 finding 1: a file-mode reload driven by settings.yaml
+// A file-mode reload driven by settings.yaml
 // server.hub.hub_name applies that name.
 func TestReloadSettings_FileHubName(t *testing.T) {
 	home := t.TempDir()
@@ -103,7 +103,7 @@ func TestReloadSettings_FileHubName(t *testing.T) {
 	assert.Equal(t, "yaml-hub", srv.HubName())
 }
 
-// Round-5 finding 1: the GCP secret backend label follows the name
+// The GCP secret backend label follows the name
 // ApplySnapshot resolves: the configured hub_name, else the startup name.
 func TestApplySnapshot_GCPSecretLabelFollowsHubName(t *testing.T) {
 	srv := newStartupNamedServer(t, "cfg-hub")

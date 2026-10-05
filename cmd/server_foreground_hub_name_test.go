@@ -17,7 +17,7 @@ package cmd
 import "testing"
 
 // A hub_name the schema rejects is warned about at startup, not fatal
-// (ptone/scion#2073 review finding 12).
+// (ptone/scion#2073).
 func TestWarnNonConformingHubName(t *testing.T) {
 	cases := map[string]bool{
 		"":         false, // unset: falls back to the hostname

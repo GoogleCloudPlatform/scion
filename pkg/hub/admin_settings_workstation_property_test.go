@@ -16,8 +16,8 @@
 
 package hub
 
-// Property-style test over the workstation server-config PUT (review
-// phase4-r4 B, oracle made independent in r5 N1).
+// Property-style test over the workstation server-config PUT, with an oracle
+// independent of the implementation.
 //
 // Bodies are generated from combinations of Layer-0 / file-only leaves
 // (zero, non-zero, null, absent) and block nulls against several seed files.

@@ -328,7 +328,7 @@ func TestSQLite_ServerConfigSectionReset(t *testing.T) {
 	}
 }
 
-// Review r1 finding 2: on SQLite the maintenance section is never seeded, so
+// On SQLite the maintenance section is never seeded, so
 // with no row the live state (set at startup from SCION_SERVER_ADMIN_MODE or
 // settings.yaml) is authoritative. GET must report it, and a message-only PUT
 // must build on it rather than on the empty snapshot, which would write
@@ -399,7 +399,7 @@ func rejectedKeys(t *testing.T, rr *httptest.ResponseRecorder) (string, []string
 	return resp.Error, resp.Keys
 }
 
-// Review r1 finding 1: a key the DB-backed PUT neither persists nor rejects
+// A key the DB-backed PUT neither persists nor rejects
 // by classification must not get 200 "saved". Each case writes nothing.
 func TestSQLite_PutServerConfig_UnpersistedKeysRejected(t *testing.T) {
 	cases := []struct {
@@ -492,7 +492,7 @@ func TestSQLite_PutServerConfig_EchoAccepted(t *testing.T) {
 	}
 }
 
-// Review r1 finding 5: with the real SQLite propagation wiring (in-process
+// With the real SQLite propagation wiring (in-process
 // ChannelEventPublisher + StartPropagation, as startSettingsPropagation does
 // it), the event echo and a poll-backstop Refresh re-apply leave a PUT intact.
 func TestSQLite_Propagation_PutSurvivesEchoAndRefresh(t *testing.T) {

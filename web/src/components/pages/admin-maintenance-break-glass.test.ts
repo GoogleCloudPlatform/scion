@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-// Review phase4-r2 N5(a): when the hub reports break_glass, the maintenance
+// When the hub reports break_glass, the maintenance
 // page explains why turning maintenance off has no effect.
 
 function handler(breakGlass: boolean) {

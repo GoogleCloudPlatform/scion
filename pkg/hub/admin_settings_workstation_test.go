@@ -232,7 +232,7 @@ server:
     bucket: my-bucket
 `
 
-// Review r2 finding 1: on a workstation hub an explicit false, "" or zero
+// On a workstation hub an explicit false, "" or zero
 // in the body clears the value (omitempty fields lose the key); leaves the
 // body does not carry are kept. Each row also checks the response names the
 // changed leaves.
@@ -302,7 +302,7 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 		},
 		{
 			// No cors block in the file: an absent block means CORS on, so
-			// the explicit false must create the block (review r3 finding 1).
+			// the explicit false must create the block.
 			name:     "hub CORS off without a cors block",
 			body:     `{"server":{"hub":{"cors":{"enabled":false}}}}`,
 			want:     map[string]interface{}{"server.hub.cors.enabled": false},
@@ -369,7 +369,7 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 	}
 }
 
-// Review r2 N2: a pure echo of the GET body writes nothing and reports
+// A pure echo of the GET body writes nothing and reports
 // nothing as requires_restart.
 func TestWorkstation_PutServerConfig_EchoWritesNothing(t *testing.T) {
 	settingsPath := workstationHome(t)
@@ -393,7 +393,7 @@ func TestWorkstation_PutServerConfig_EchoWritesNothing(t *testing.T) {
 	}
 }
 
-// Review r2 N1: a broker-token write (config.UpdateSetting, as broker
+// A broker-token write (config.UpdateSetting, as broker
 // registration does) racing a workstation PUT must not lose either update,
 // and the lock order must not deadlock against the DB writes or the
 // workstation-settings PATCH.
@@ -603,7 +603,7 @@ func TestMaintenanceBreakGlass_ByMode(t *testing.T) {
 	}
 }
 
-// Review r2 finding 2: the workstation UI now sends buildLayer1Payload's
+// The workstation UI now sends buildLayer1Payload's
 // explicit empties for Layer-1 fields; the DB must clear them, and none of
 // them may leak into settings.yaml.
 func TestWorkstation_PutServerConfig_ClearsLayer1Values(t *testing.T) {
@@ -629,7 +629,7 @@ func TestWorkstation_PutServerConfig_ClearsLayer1Values(t *testing.T) {
 	}
 }
 
-// Review r2 N5(b): during a workstation break-glass with an existing row, a
+// During a workstation break-glass with an existing row, a
 // message-only PUT keeps the row's admin_mode (false), so the hub leaves
 // maintenance once restarted without the break-glass; live state stays on.
 func TestMaintenanceBreakGlass_MessagePutKeepsRowAdminMode(t *testing.T) {
@@ -745,7 +745,7 @@ func TestWorkstation_PutServerConfig_CORSOffTakesEffect(t *testing.T) {
 	}
 }
 
-// Review r3 finding 2: the PUT never writes a server.mode the server would
+// The PUT never writes a server.mode the server would
 // refuse to start with.
 func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 	settingsPath := workstationHome(t)
@@ -765,7 +765,7 @@ func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 	}
 }
 
-// Review r3 N-c: broker_id/broker_token are hub-owned; the PUT may echo them
+// broker_id/broker_token are hub-owned; the PUT may echo them
 // (the masked token included) but not change or clear them.
 func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
 	for _, tc := range []struct {
@@ -807,7 +807,7 @@ func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
 	}
 }
 
-// Review r3 N-d: a hosted GET -> PUT round trip (schema_version and other
+// A hosted GET -> PUT round trip (schema_version and other
 // unclassified echoes included) is a 200 and writes nothing to the file.
 func TestHosted_PutServerConfig_FullGetEchoIsNoOp(t *testing.T) {
 	settingsPath := tempSettingsHome(t)
@@ -833,7 +833,7 @@ func TestHosted_PutServerConfig_FullGetEchoIsNoOp(t *testing.T) {
 	}
 }
 
-// Review r3 N-e: a lone masked Layer-0 secret echo (siblings left out) is an
+// A lone masked Layer-0 secret echo (siblings left out) is an
 // unchanged value: 200 on both hub kinds, nothing written.
 func TestPutServerConfig_LoneMaskedLayer0Echo(t *testing.T) {
 	for _, workstation := range []bool{false, true} {
@@ -855,7 +855,7 @@ func TestPutServerConfig_LoneMaskedLayer0Echo(t *testing.T) {
 	}
 }
 
-// Review r3 N-h: schema_version "1" sent to a file without the key is the
+// schema_version "1" sent to a file without the key is the
 // value GET reports, so nothing is written.
 func TestWorkstation_PutServerConfig_SchemaVersionEcho(t *testing.T) {
 	settingsPath := tempSettingsHome(t)
@@ -873,7 +873,7 @@ func TestWorkstation_PutServerConfig_SchemaVersionEcho(t *testing.T) {
 	}
 }
 
-// Review r3 N-f: the workstation-settings PATCH answers a file it cannot edit
+// The workstation-settings PATCH answers a file it cannot edit
 // in place with 422 and the hand-edit hint, like the PUT.
 func TestWorkstationSettingsPatch_UneditableFile422(t *testing.T) {
 	settingsPath := tempSettingsHome(t)
@@ -888,7 +888,7 @@ func TestWorkstationSettingsPatch_UneditableFile422(t *testing.T) {
 	}
 }
 
-// Review r3 N-a: the registry endpoint (like the runtime endpoint and the
+// The registry endpoint (like the runtime endpoint and the
 // hubsync cleanup, through the same config.LoadModifySaveVersionedSettings)
 // loads, modifies and saves under the settings-file lock, so a concurrent
 // broker-token write survives.
@@ -947,7 +947,7 @@ func TestHosted_PutServerConfig_SharedDirStorageIsLayer0(t *testing.T) {
 	}
 }
 
-// Review r4 finding 2: a null on server keeps the hub-owned broker
+// A null on server keeps the hub-owned broker
 // identity and clears everything else.
 func TestWorkstation_PutServerConfig_ServerNullKeepsBrokerIdentity(t *testing.T) {
 	settingsPath := workstationHome(t)
@@ -975,7 +975,7 @@ func TestWorkstation_PutServerConfig_ServerNullKeepsBrokerIdentity(t *testing.T)
 	}
 }
 
-// Review r4 finding 1 (server side): the zero-valued Layer-0 leaves the old
+// The zero-valued Layer-0 leaves the old
 // UI sent from an untouched form, against a minimal workstation file, write
 // nothing and report no restart. (active_profile/workspace_path "" and
 // auto_provide:false are real changes; the UI no longer sends unchanged
@@ -1003,7 +1003,7 @@ func TestWorkstation_PutServerConfig_UntouchedFormZerosWriteNothing(t *testing.T
 	}
 }
 
-// Review r5 N2: a settings.yaml without a server key makes the hub read its
+// A settings.yaml without a server key makes the hub read its
 // server config from the deprecated server.yaml. A workstation PUT that
 // would create the server block (and so drop every server.yaml setting at
 // the next start) is refused with 409; top-level edits still work.
@@ -1043,7 +1043,7 @@ func TestWorkstation_PutServerConfig_LegacyServerYAMLRefused(t *testing.T) {
 	}
 }
 
-// Review r6 N1: the guard finds the legacy server.yaml where the loader
+// The guard finds the legacy server.yaml where the loader
 // does: the --config file the server was started with, and ./server.yaml in
 // the working directory, not only the global dir.
 func TestWorkstation_PutServerConfig_LegacyServerYAMLSources(t *testing.T) {
@@ -1090,7 +1090,7 @@ func TestWorkstation_PutServerConfig_LegacyServerYAMLSources(t *testing.T) {
 	}
 }
 
-// Review r6 N3: with a server.yaml present but a settings.yaml that already
+// With a server.yaml present but a settings.yaml that already
 // has a server key, the loader reads settings.yaml, so the PUT edits it.
 func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T) {
 	settingsPath := tempSettingsHome(t)
