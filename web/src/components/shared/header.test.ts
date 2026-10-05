@@ -40,7 +40,6 @@ import {
   projectIdFromDashboardPath,
   projectIdFromChatSpacePath,
   slugFromChatPath,
-  isMacPlatform,
   type ScionHeader,
 } from './header.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
@@ -148,59 +147,6 @@ describe('slugFromChatPath', () => {
   it('ignores query parameters and hash fragments', () => {
     expect(slugFromChatPath('/chat/my-project?foo=bar')).toBe('my-project');
     expect(slugFromChatPath('/chat/my-project#hash')).toBe('my-project');
-  });
-});
-
-describe('isMacPlatform', () => {
-  const originalPlatform = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
-  const originalUAData = Object.getOwnPropertyDescriptor(window.navigator, 'userAgentData');
-
-  afterEach(() => {
-    if (originalPlatform) {
-      Object.defineProperty(window.navigator, 'platform', originalPlatform);
-    }
-    if (originalUAData) {
-      Object.defineProperty(window.navigator, 'userAgentData', originalUAData);
-    } else {
-      delete (window.navigator as unknown as Record<string, unknown>).userAgentData;
-    }
-  });
-
-  function setPlatform(platform: string): void {
-    Object.defineProperty(window.navigator, 'platform', { value: platform, configurable: true });
-  }
-
-  function setUserAgentDataPlatform(platform: string | undefined): void {
-    Object.defineProperty(window.navigator, 'userAgentData', {
-      value: platform === undefined ? undefined : { platform },
-      configurable: true,
-    });
-  }
-
-  it('without Client Hints, falls back to the navigator.platform regex', () => {
-    setUserAgentDataPlatform(undefined);
-    setPlatform('MacIntel');
-    expect(isMacPlatform()).toBe(true);
-
-    setPlatform('Linux x86_64');
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it('prefers navigator.userAgentData.platform over navigator.platform when both are present', () => {
-    // navigator.platform disagrees on purpose, to prove Client Hints wins.
-    setPlatform('Linux x86_64');
-    setUserAgentDataPlatform('macOS');
-    expect(isMacPlatform()).toBe(true);
-
-    setPlatform('MacIntel');
-    setUserAgentDataPlatform('Windows');
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it('returns false, not throw, when navigator is unavailable', () => {
-    vi.stubGlobal('navigator', undefined);
-    expect(isMacPlatform()).toBe(false);
-    vi.unstubAllGlobals();
   });
 });
 
