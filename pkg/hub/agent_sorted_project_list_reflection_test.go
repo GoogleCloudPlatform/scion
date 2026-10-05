@@ -173,6 +173,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
 	"RunIntent": true, "RunIntentAt": true,
+	// ProvisionedOnly is computed by the hub at response time from Phase,
+	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
+	// not stored.
+	"ProvisionedOnly": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
