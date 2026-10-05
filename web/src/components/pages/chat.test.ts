@@ -1596,8 +1596,10 @@ describe('chat page — late DM peer lookups', () => {
     return releases;
   }
 
-  /** A page whose user ID is unknown, so a peer-ID DM route is resolved over the API. */
-  /** A page without a cached user ID that reports itself mounted. */
+  /**
+   * A mounted page whose user ID is unknown, so a peer-ID DM route is
+   * resolved over the API.
+   */
   function createPageWithoutUserId(): any {
     const el = createPage();
     el.pageData = {};
