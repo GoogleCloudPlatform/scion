@@ -716,8 +716,8 @@ func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
 		ids := make([]string, 0, len(got))
 		for _, g := range got {
 			ids = append(ids, g.ID)
-			assert.Equal(t, store.EdgeDeactivationAgentHardDelete, g.Deactivation.Cause)
-			assert.Equal(t, opID, g.Deactivation.OpID)
+			assert.Equal(t, store.EdgeDeactivationAgentHardDelete, g.Cause)
+			assert.Equal(t, opID, g.OpID)
 		}
 		assert.Equal(t, []string{e.ID}, ids, "edge %s is deactivated with cause agent_hard_delete under the audited operation ID", e.ID)
 	}
