@@ -149,6 +149,16 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the delegation-adoption store tests
+# (TestDelegationAdoptionStore*, which covers the record validation, index
+# and error-mapping cases; TestDelegationEdgeGuardedDeactivate*; and
+# TestDelegationAdoptionUniqueViolationInTxRollsBack): the guarded edge
+# deactivation puts its guard in the UPDATE predicate, and a unique-index
+# violation inside a transaction must roll the transaction back, on both
+# backends. The TestProvenanceAdoption* tests are left out: they call the
+# composite Migrate, which runs every data backfill, including the one whose
+# raw SQL is invalid on Postgres (see above).
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -181,7 +191,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestDelegationAdoptionStore|TestDelegationEdgeGuardedDeactivate|TestDelegationAdoptionUniqueViolationInTxRollsBack)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
