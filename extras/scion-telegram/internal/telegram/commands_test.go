@@ -790,3 +790,85 @@ func TestCommandHandler_GroupsVisibleTo_CachesMembershipAndBoundsConcurrency(t *
 	calls2, _ := tgSrv.chatMemberStats()
 	assert.Equal(t, groups, calls2)
 }
+
+func TestCommandHandler_GroupsVisibleTo_GoneOrForbiddenChatIsNotVisible(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	saveStatusTestLinks(t, store)
+	tgSrv.setChatMember(-101, 456, "member")
+	tgSrv.mu.Lock()
+	tgSrv.chatMemberErrors = map[int64]apiResponse{
+		-103: {OK: false, ErrorCode: 400, Description: "Bad Request: chat not found"},
+		-104: {OK: false, ErrorCode: 403, Description: "Forbidden: bot was kicked from the supergroup chat"},
+	}
+	tgSrv.mu.Unlock()
+	links, err := store.GetAllGroupLinks(context.Background())
+	require.NoError(t, err)
+
+	visible, unchecked := h.groupsVisibleTo(context.Background(), 456, links)
+
+	assert.False(t, unchecked, "a gone or forbidden chat is a definite answer")
+	var ids []int64
+	for _, l := range visible {
+		ids = append(ids, l.ChatID)
+	}
+	assert.ElementsMatch(t, []int64{-101, -102}, ids)
+}
+
+func TestCommandHandler_GroupsVisibleTo_FailedCheckIsCachedBriefly(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -501, ChatTitle: "Flaky", ProjectID: "p1", LinkedBy: "999", LinkedAt: time.Now().UTC(), Active: true,
+	}))
+	tgSrv.mu.Lock()
+	tgSrv.failChatMember = map[int64]bool{-501: true}
+	tgSrv.mu.Unlock()
+	links, err := store.GetAllGroupLinks(ctx)
+	require.NoError(t, err)
+
+	_, unchecked := h.groupsVisibleTo(ctx, 456, links)
+	assert.True(t, unchecked)
+	_, unchecked = h.groupsVisibleTo(ctx, 456, links)
+	assert.True(t, unchecked, "a remembered failure is still reported as unchecked")
+	calls, _ := tgSrv.chatMemberStats()
+	assert.Equal(t, 1, calls, "a recent failure is not retried")
+
+	// After the failure window the check runs again.
+	tgSrv.mu.Lock()
+	tgSrv.failChatMember = nil
+	tgSrv.mu.Unlock()
+	tgSrv.setChatMember(-501, 456, "member")
+	h.memberCacheMu.Lock()
+	key := "456:-501"
+	e := h.memberCache[key]
+	e.checkedAt = time.Now().Add(-2 * memberFailureCacheTTL)
+	h.memberCache[key] = e
+	h.memberCacheMu.Unlock()
+
+	visible, unchecked := h.groupsVisibleTo(ctx, 456, links)
+	assert.False(t, unchecked)
+	assert.Len(t, visible, 1)
+	calls, _ = tgSrv.chatMemberStats()
+	assert.Equal(t, 2, calls)
+}
+
+func TestCommandHandler_Status_ConcurrentSetProjects(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -601, ProjectID: "p1", ProjectSlug: "p1", LinkedBy: "456", LinkedAt: time.Now().UTC(), Active: true,
+	}))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			h.SetProjects([]ProjectOption{{ID: "p1", Slug: fmt.Sprintf("alpha-%d", i)}})
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+	}
+	<-done
+	assert.Len(t, tgSrv.getSentMessages(), 5)
+}

@@ -150,6 +150,9 @@ type fakeTGServerV2 struct {
 	// failChatMember makes getChatMember fail with a server error for
 	// these chats.
 	failChatMember map[int64]bool
+	// chatMemberErrors makes getChatMember fail with a given Telegram error
+	// for these chats.
+	chatMemberErrors map[int64]apiResponse
 	// chatMemberCalls counts getChatMember requests.
 	chatMemberCalls int
 	// chatMemberDelay, when set, delays each getChatMember response;
@@ -299,6 +302,7 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			}
 			delay := f.chatMemberDelay
 			fail := f.failChatMember[chatID]
+			apiErr, hasAPIErr := f.chatMemberErrors[chatID]
 			status, ok := f.chatMembers[chatID][userID]
 			f.mu.Unlock()
 			time.Sleep(delay)
@@ -307,6 +311,10 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			f.mu.Unlock()
 			if fail {
 				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
+			if hasAPIErr {
+				json.NewEncoder(w).Encode(apiErr)
 				return
 			}
 			if !ok {

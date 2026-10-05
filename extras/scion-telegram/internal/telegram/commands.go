@@ -66,6 +66,7 @@ type CommandHandler struct {
 	botUsername    string
 	log            *slog.Logger
 	cachedProjects []ProjectOption
+	projectsMu     sync.Mutex // guards cachedProjects
 
 	// memberCache remembers successful group-membership checks for /status,
 	// keyed by "userID:chatID".
@@ -75,12 +76,27 @@ type CommandHandler struct {
 
 type memberCacheEntry struct {
 	member    bool
+	failed    bool
 	checkedAt time.Time
 }
+
+// ttl returns how long the entry is reused.
+func (e memberCacheEntry) ttl() time.Duration {
+	if e.failed {
+		return memberFailureCacheTTL
+	}
+	return memberCacheTTL
+}
+
+// errMembershipCheckFailed reports a recently failed membership check that
+// is not retried yet.
+var errMembershipCheckFailed = errors.New("group membership check failed recently")
 
 const (
 	// memberCacheTTL bounds how long a group-membership check is reused.
 	memberCacheTTL = 2 * time.Minute
+	// memberFailureCacheTTL bounds how long a failed check is remembered.
+	memberFailureCacheTTL = 30 * time.Second
 	// memberCheckWorkers bounds concurrent membership checks for /status.
 	memberCheckWorkers = 6
 	// statusUncheckedNote is appended when some groups could not be checked.
@@ -104,7 +120,9 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 // SetProjects updates the cached project list used to display project names
 // (e.g. in /status). It is not offered in setup pickers.
 func (h *CommandHandler) SetProjects(projects []ProjectOption) {
+	h.projectsMu.Lock()
 	h.cachedProjects = projects
+	h.projectsMu.Unlock()
 }
 
 // registerHint is the reply sent when a command needs a linked Scion account
@@ -506,6 +524,10 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	// List only groups the sender linked or is currently a member of.
 	links, unchecked := h.groupsVisibleTo(ctx, msg.From.ID, allLinks)
 
+	h.projectsMu.Lock()
+	cachedProjects := h.cachedProjects
+	h.projectsMu.Unlock()
+
 	var lines []string
 	for _, link := range links {
 		title := link.ChatTitle
@@ -517,8 +539,8 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		}
 		// Resolve slug from cached projects if stored as UUID.
 		slug := link.ProjectSlug
-		if slug == link.ProjectID && len(h.cachedProjects) > 0 {
-			for _, p := range h.cachedProjects {
+		if slug == link.ProjectID && len(cachedProjects) > 0 {
+			for _, p := range cachedProjects {
 				if p.ID == link.ProjectID {
 					slug = p.DisplayName()
 					break
@@ -614,57 +636,78 @@ func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, link
 	return visible, unchecked
 }
 
-// isUserNotInChatError reports whether a getChatMember error means the user
-// is not in the chat, as opposed to the check itself failing.
-func isUserNotInChatError(err error) bool {
+// isNotVisibleChatError reports whether a getChatMember error means the
+// group is not visible to the user, as opposed to the check itself failing:
+// the user is not in the chat (400 user/member not found), the chat is gone
+// (400 chat not found), or the bot can no longer see the chat (403, e.g.
+// the bot was kicked).
+func isNotVisibleChatError(err error) bool {
 	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusBadRequest {
+	if !errors.As(err, &apiErr) {
 		return false
 	}
-	desc := strings.ToLower(apiErr.Description)
-	return strings.Contains(desc, "user not found") ||
-		strings.Contains(desc, "member not found") ||
-		strings.Contains(desc, "participant_id_invalid")
+	switch apiErr.Code {
+	case http.StatusForbidden:
+		return true
+	case http.StatusBadRequest:
+		desc := strings.ToLower(apiErr.Description)
+		return strings.Contains(desc, "user not found") ||
+			strings.Contains(desc, "member not found") ||
+			strings.Contains(desc, "participant_id_invalid") ||
+			strings.Contains(desc, "chat not found")
+	default:
+		return false
+	}
 }
 
 // isGroupMember reports whether the user is currently in the chat, using a
-// short-lived cache of successful checks.
+// short-lived cache of results and of failed checks.
 func (h *CommandHandler) isGroupMember(ctx context.Context, chatID, userID int64) (bool, error) {
 	key := strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
 	h.memberCacheMu.Lock()
 	entry, ok := h.memberCache[key]
 	h.memberCacheMu.Unlock()
-	if ok && time.Since(entry.checkedAt) < memberCacheTTL {
+	if ok && time.Since(entry.checkedAt) < entry.ttl() {
+		if entry.failed {
+			return false, errMembershipCheckFailed
+		}
 		return entry.member, nil
 	}
 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	isMember := false
+	result := memberCacheEntry{checkedAt: time.Now()}
 	m, err := h.api.GetChatMember(ctx, chatID, userID)
 	switch {
 	case err == nil:
-		isMember = m.IsCurrentMember()
-	case isUserNotInChatError(err):
-		// Telegram does not know the user in this chat: not a member.
+		result.member = m.IsCurrentMember()
+	case isNotVisibleChatError(err):
+		// Not visible to the user: not a member.
+	case ctx.Err() != nil:
+		// The request ended with the caller's context; not remembered.
+		return false, err
 	default:
 		h.log.Debug("Could not check group membership for /status", "chat_id", chatID, "error", err)
-		return false, err
+		result.failed = true
 	}
 
 	h.memberCacheMu.Lock()
-	defer h.memberCacheMu.Unlock()
 	if h.memberCache == nil {
 		h.memberCache = make(map[string]memberCacheEntry)
 	}
 	for k, e := range h.memberCache {
-		if time.Since(e.checkedAt) >= memberCacheTTL {
+		if time.Since(e.checkedAt) >= e.ttl() {
 			delete(h.memberCache, k)
 		}
 	}
-	h.memberCache[key] = memberCacheEntry{member: isMember, checkedAt: time.Now()}
-	return isMember, nil
+	h.memberCache[key] = result
+	h.memberCacheMu.Unlock()
+
+	if result.failed {
+		return false, err
+	}
+	return result.member, nil
 }
 
 func (h *CommandHandler) handleSettings(msg *TGMessage) {
