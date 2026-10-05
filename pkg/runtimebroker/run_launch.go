@@ -379,6 +379,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Activity:        sr.info.Activity,
 			ContainerStatus: sr.info.ContainerStatus,
 			RunID:           sr.info.RunID,
+
+			WorkspacePlacement: sr.info.WorkspacePlacement,
 		}
 	}
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)

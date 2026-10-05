@@ -1279,11 +1279,44 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
 		applyBrokerAgentConfig(agent, resp.Agent)
+		d.recordWorkspacePlacement(ctx, agent, resp.Agent.WorkspacePlacement)
 	} else if d.debug {
 		d.log.Debug("applyBrokerResponse: broker response has nil Agent",
 			"agentName", agent.Name,
 		)
 	}
+}
+
+// recordWorkspacePlacement persists the workspace placement a broker reported
+// for a start (see store.Agent.WorkspacePlacement) with the narrow
+// SetAgentWorkspacePlacement write, and mirrors it on the in-memory agent.
+// Every start that resolves the workspace reports it, so a re-provision
+// overwrites the previous value. An empty or malformed value (a response
+// from no start, or an older broker) records nothing. Best effort: a failed
+// write leaves the previous value, which a move refuses unless it is export.
+func (d *HTTPAgentDispatcher) recordWorkspacePlacement(ctx context.Context, agent *store.Agent, placement string) {
+	if !validWorkspacePlacementReport(placement) {
+		return
+	}
+	agent.WorkspacePlacement = placement
+	if d.store == nil || agent.ID == "" {
+		return
+	}
+	if err := d.store.SetAgentWorkspacePlacement(ctx, agent.ID, placement); err != nil && !errors.Is(err, store.ErrNotFound) {
+		d.log.Warn("Failed to record the agent's workspace placement",
+			"agent_id", agent.ID, "placement", placement, "error", err)
+	}
+}
+
+// maxWorkspacePlacementBytes bounds a reported workspace placement.
+const maxWorkspacePlacementBytes = 64
+
+// validWorkspacePlacementReport reports whether a broker-reported workspace
+// placement should be recorded: non-empty, bounded and free of control
+// characters. Values the hub does not recognise are recorded as reported
+// and read as "not on the export" (isWorkspacePlacementOnExport).
+func validWorkspacePlacementReport(placement string) bool {
+	return placement != "" && len(placement) <= maxWorkspacePlacementBytes && !hasControlCharacter(placement)
 }
 
 // applyBrokerAgentConfig copies the non-status fields of a broker's agent
@@ -3258,6 +3291,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3390,6 +3424,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)

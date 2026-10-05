@@ -352,6 +352,20 @@ func (_c *AgentCreate) SetNillableRuntimeBrokerID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_c *AgentCreate) SetWorkspacePlacement(v string) *AgentCreate {
+	_c.mutation.SetWorkspacePlacement(v)
+	return _c
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableWorkspacePlacement(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetWorkspacePlacement(*v)
+	}
+	return _c
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
 	_c.mutation.SetWebPtyEnabled(v)
@@ -1042,6 +1056,20 @@ func (_c *AgentCreate) SetNillableStartClaimLaunchID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_c *AgentCreate) SetSoftDeleteOpID(v string) *AgentCreate {
+	_c.mutation.SetSoftDeleteOpID(v)
+	return _c
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSoftDeleteOpID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSoftDeleteOpID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -1149,6 +1177,10 @@ func (_c *AgentCreate) defaults() {
 	if _, ok := _c.mutation.Detached(); !ok {
 		v := agent.DefaultDetached
 		_c.mutation.SetDetached(v)
+	}
+	if _, ok := _c.mutation.WorkspacePlacement(); !ok {
+		v := agent.DefaultWorkspacePlacement
+		_c.mutation.SetWorkspacePlacement(v)
 	}
 	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
 		v := agent.DefaultWebPtyEnabled
@@ -1476,6 +1508,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeString, value)
 		_node.RuntimeBrokerID = value
 	}
+	if value, ok := _c.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+		_node.WorkspacePlacement = value
+	}
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 		_node.WebPtyEnabled = value
@@ -1679,6 +1715,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.StartClaimLaunchID(); ok {
 		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
 		_node.StartClaimLaunchID = value
+	}
+	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+		_node.SoftDeleteOpID = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2210,6 +2250,24 @@ func (u *AgentUpsert) UpdateRuntimeBrokerID() *AgentUpsert {
 // ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
 func (u *AgentUpsert) ClearRuntimeBrokerID() *AgentUpsert {
 	u.SetNull(agent.FieldRuntimeBrokerID)
+	return u
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsert) SetWorkspacePlacement(v string) *AgentUpsert {
+	u.Set(agent.FieldWorkspacePlacement, v)
+	return u
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateWorkspacePlacement() *AgentUpsert {
+	u.SetExcluded(agent.FieldWorkspacePlacement)
+	return u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsert) ClearWorkspacePlacement() *AgentUpsert {
+	u.SetNull(agent.FieldWorkspacePlacement)
 	return u
 }
 
@@ -3095,6 +3153,24 @@ func (u *AgentUpsert) ClearStartClaimLaunchID() *AgentUpsert {
 	return u
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsert) SetSoftDeleteOpID(v string) *AgentUpsert {
+	u.Set(agent.FieldSoftDeleteOpID, v)
+	return u
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSoftDeleteOpID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSoftDeleteOpID)
+	return u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsert) ClearSoftDeleteOpID() *AgentUpsert {
+	u.SetNull(agent.FieldSoftDeleteOpID)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -3647,6 +3723,27 @@ func (u *AgentUpsertOne) UpdateRuntimeBrokerID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRuntimeBrokerID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertOne) SetWorkspacePlacement(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertOne) ClearWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 
@@ -4679,6 +4776,27 @@ func (u *AgentUpsertOne) ClearStartClaimLaunchID() *AgentUpsertOne {
 	})
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) SetSoftDeleteOpID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) ClearSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
+	})
+}
+
 // Exec executes the query.
 func (u *AgentUpsertOne) Exec(ctx context.Context) error {
 	if len(u.create.conflict) == 0 {
@@ -5398,6 +5516,27 @@ func (u *AgentUpsertBulk) UpdateRuntimeBrokerID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRuntimeBrokerID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertBulk) SetWorkspacePlacement(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertBulk) ClearWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 
@@ -6427,6 +6566,27 @@ func (u *AgentUpsertBulk) UpdateStartClaimLaunchID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearStartClaimLaunchID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStartClaimLaunchID()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) SetSoftDeleteOpID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) ClearSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 
