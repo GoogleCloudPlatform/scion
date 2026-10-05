@@ -34,6 +34,13 @@ type EventData struct {
 	Source    string `json:"source,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 
+	// Model is the model named by the event payload itself, when the
+	// harness reports one (e.g. antigravity's modelName, or the opencode
+	// bridge's joined provider/model). Telemetry prefers it over
+	// SCION_MODEL for the model label (design §3.2); empty means the
+	// payload carried none.
+	Model string `json:"model,omitempty"`
+
 	// Tool-specific fields
 	ToolInput  string `json:"tool_input,omitempty"`
 	ToolOutput string `json:"tool_output,omitempty"`
