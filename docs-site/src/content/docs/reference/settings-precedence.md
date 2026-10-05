@@ -422,7 +422,9 @@ config, where it looks explicit. The rerunnable maintenance migration `auto-expo
 from the hub admin maintenance page, or with
 `POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project and
 template exactly as reincarnate would. A running agent keeps the old value in its container until
-it is next provisioned or reincarnated.
+it is next provisioned or reincarnated. A run that had to skip agents (its log reports
+`skipped N agent(s)`) still shows as completed, and the maintenance page does not offer completed
+migrations again, so re-run it with the `POST` call above.
 
 The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST`,
 `SCION_AUTO_EXPOSE_INTERVAL`, `SCION_AUTO_EXPOSE_MIN_PORT`) have no project or hub tier and follow

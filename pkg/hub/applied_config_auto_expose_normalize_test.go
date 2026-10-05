@@ -90,12 +90,12 @@ func explicitKeep() *store.AgentCreateInputs {
 	return &store.AgentCreateInputs{Workspace: "/tmp/reincarnate-workspace", InlineConfig: &api.ScionConfig{Env: map[string]string{"KEEP": "1"}}}
 }
 
-// TestEnvCleanup_AutoExposeNormalizationMatchesReincarnate pins that the
+// TestAutoExposeEnvNormalize_MatchesReincarnate pins that the
 // normalized SCION_AUTO_EXPOSE_PORTS equals what reincarnate derives for the
 // same agent, that the stamp leaves InlineConfig.Env, and that a second run
 // is a no-op. A stale stamp with no project or template value drops to
 // inherited (the hub default at dispatch).
-func TestEnvCleanup_AutoExposeNormalizationMatchesReincarnate(t *testing.T) {
+func TestAutoExposeEnvNormalize_MatchesReincarnate(t *testing.T) {
 	cases := []struct {
 		name        string
 		projectAnno string
@@ -156,11 +156,11 @@ func TestEnvCleanup_AutoExposeNormalizationMatchesReincarnate(t *testing.T) {
 	}
 }
 
-// TestEnvCleanup_AutoExposeNormalizationLeavesOthersAlone covers the agents
+// TestAutoExposeEnvNormalize_LeavesOthersAlone covers the agents
 // normalization must not touch: an explicit value (in CreateInputs), and an
 // agent without CreateInputs, which cannot tell a stamp from an explicit
 // value.
-func TestEnvCleanup_AutoExposeNormalizationLeavesOthersAlone(t *testing.T) {
+func TestAutoExposeEnvNormalize_LeavesOthersAlone(t *testing.T) {
 	cases := []struct {
 		name string
 		in   aeNormalizeAgent
@@ -195,9 +195,9 @@ func TestEnvCleanup_AutoExposeNormalizationLeavesOthersAlone(t *testing.T) {
 	}
 }
 
-// TestEnvCleanup_AutoExposeNormalizationDryRun reports the re-derivation
+// TestAutoExposeEnvNormalize_DryRun reports the re-derivation
 // without writing.
-func TestEnvCleanup_AutoExposeNormalizationDryRun(t *testing.T) {
+func TestAutoExposeEnvNormalize_DryRun(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		appliedEnv:   map[string]string{"KEEP": "1"},
 		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
@@ -254,11 +254,11 @@ func TestEnvCleanup_AutoExposeKeysExemptFromAllowlist(t *testing.T) {
 	assert.Equal(t, derived, rec.NewAppliedConfig.Env, "new snapshot")
 }
 
-// TestEnvCleanup_AutoExposeNormalizationLeavesInlineTZToTZCleanup pins F2:
+// TestAutoExposeEnvNormalize_LeavesInlineTZToTZCleanup pins F2:
 // normalization touches SCION_AUTO_EXPOSE_PORTS only, so a historical TZ held
 // only in InlineConfig.Env stays for adoptLegacyTZ, which the TZ cleanup (and
 // every TZ reader) runs, and it becomes a legacy pin.
-func TestEnvCleanup_AutoExposeNormalizationLeavesInlineTZToTZCleanup(t *testing.T) {
+func TestAutoExposeEnvNormalize_LeavesInlineTZToTZCleanup(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		appliedEnv:   map[string]string{"KEEP": "1"},
 		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true", agentTZEnvKey: "Asia/Tokyo"},
@@ -290,11 +290,11 @@ func (s *projectLookupStore) GetProject(ctx context.Context, id string) (*store.
 	return nil, s.err
 }
 
-// TestEnvCleanup_AutoExposeNormalizationProjectLookup covers the project
+// TestAutoExposeEnvNormalize_ProjectLookup covers the project
 // lookup: a project that no longer exists contributes no tier, as at
 // reincarnate, while any other lookup failure skips the agent so the next run
 // retries it instead of dropping the project tier.
-func TestEnvCleanup_AutoExposeNormalizationProjectLookup(t *testing.T) {
+func TestAutoExposeEnvNormalize_ProjectLookup(t *testing.T) {
 	t.Run("project gone", func(t *testing.T) {
 		_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 			appliedEnv:   map[string]string{"KEEP": "1"},
@@ -322,11 +322,11 @@ func TestEnvCleanup_AutoExposeNormalizationProjectLookup(t *testing.T) {
 	})
 }
 
-// TestEnvCleanup_AutoExposeNormalizationTemplateRepushed covers N3: the
+// TestAutoExposeEnvNormalize_TemplateRepushed covers N3: the
 // template is resolved by the agent's template reference, as reincarnate
 // does, so a template deleted and re-pushed under a new ID still supplies
 // its tier.
-func TestEnvCleanup_AutoExposeNormalizationTemplateRepushed(t *testing.T) {
+func TestAutoExposeEnvNormalize_TemplateRepushed(t *testing.T) {
 	srv, s, project, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		templateEnv:  map[string]string{aeKey: "false"},
 		templateID:   tid("template-deleted-before-repush"),
@@ -352,10 +352,10 @@ func (s *templateLookupStore) GetTemplate(ctx context.Context, id string) (*stor
 	return nil, s.err
 }
 
-// TestEnvCleanup_AutoExposeNormalizationTemplateLookupError covers N2: a
+// TestAutoExposeEnvNormalize_TemplateLookupError covers N2: a
 // template lookup failure skips the agent rather than dropping the template
 // tier.
-func TestEnvCleanup_AutoExposeNormalizationTemplateLookupError(t *testing.T) {
+func TestAutoExposeEnvNormalize_TemplateLookupError(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		templateEnv:  map[string]string{aeKey: "false"},
 		appliedEnv:   map[string]string{"KEEP": "1"},
@@ -379,9 +379,9 @@ func (s *failingUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) er
 	return errors.New("update rejected")
 }
 
-// TestEnvCleanup_AutoExposeNormalizationCountsOnlyWrites covers N4: an agent
+// TestAutoExposeEnvNormalize_CountsOnlyWrites covers N4: an agent
 // whose write fails is reported as skipped, not as re-derived.
-func TestEnvCleanup_AutoExposeNormalizationCountsOnlyWrites(t *testing.T) {
+func TestAutoExposeEnvNormalize_CountsOnlyWrites(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		appliedEnv:   map[string]string{"KEEP": "1"},
 		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
@@ -396,10 +396,10 @@ func TestEnvCleanup_AutoExposeNormalizationCountsOnlyWrites(t *testing.T) {
 	assert.Contains(t, buf.String(), "WARN agent="+agent.ID+" - failed to update, retried by the next run")
 }
 
-// TestEnvCleanup_AutoExposeNormalizationTouchesOnlyAutoExpose pins that the
+// TestAutoExposeEnvNormalize_TouchesOnlyAutoExpose pins that the
 // normalization changes SCION_AUTO_EXPOSE_PORTS and nothing else: keys the
 // env cleanup would strip (GITHUB_TOKEN, an unsourced key) stay.
-func TestEnvCleanup_AutoExposeNormalizationTouchesOnlyAutoExpose(t *testing.T) {
+func TestAutoExposeEnvNormalize_TouchesOnlyAutoExpose(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		appliedEnv:   map[string]string{"KEEP": "1", "GITHUB_TOKEN": "x", "UNSOURCED_VAR": "y", "SCION_AUTO_EXPOSE_MODE": "all"},
 		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true", "GITHUB_TOKEN": "x"},
@@ -427,10 +427,10 @@ func TestEnvCleanup_AutoExposeSecretStillStripped(t *testing.T) {
 	assert.Equal(t, map[string]string{aeKey: "true"}, reloadAgent(t, s, agent.ID).AppliedConfig.Env)
 }
 
-// TestAutoExposeEnvNormalizeRerunsThroughExecuteMigration runs the migration
+// TestAutoExposeEnvNormalize_RerunsThroughExecuteMigration runs the migration
 // twice through the admin endpoint: it is seeded, the second run is accepted
 // (the key is in rerunnableMigrations), and it writes no agent row.
-func TestAutoExposeEnvNormalizeRerunsThroughExecuteMigration(t *testing.T) {
+func TestAutoExposeEnvNormalize_RerunsThroughExecuteMigration(t *testing.T) {
 	key := entadapter.AutoExposeEnvNormalizeKey
 	ctx := context.Background()
 	srv, s := newTestServerWithStore(t)
@@ -458,4 +458,82 @@ func TestAutoExposeEnvNormalizeRerunsThroughExecuteMigration(t *testing.T) {
 	require.Equal(t, store.MaintenanceStatusCompleted, second.Status, second.Result)
 	assert.Contains(t, second.Result, "re-derived auto-expose on 0 agent(s)")
 	assert.Equal(t, after.StateVersion, reloadAgent(t, s, agent.ID).StateVersion)
+}
+
+// aeConflictOnceStore fails the first agent update with ErrVersionConflict.
+// When concurrentPatch is set, it first makes SCION_AUTO_EXPOSE_PORTS
+// explicit on the stored row, as a configure PATCH racing the migration
+// would.
+type aeConflictOnceStore struct {
+	store.Store
+	concurrentPatch bool
+	conflicted      bool
+}
+
+func (s *aeConflictOnceStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if s.conflicted {
+		return s.Store.UpdateAgent(ctx, a)
+	}
+	s.conflicted = true
+	if s.concurrentPatch {
+		latest, err := s.Store.GetAgent(ctx, a.ID)
+		if err != nil {
+			return err
+		}
+		latest.AppliedConfig.CreateInputs.InlineConfig.Env[aeKey] = "true"
+		if err := s.Store.UpdateAgent(ctx, latest); err != nil {
+			return err
+		}
+	}
+	return store.ErrVersionConflict
+}
+
+// TestAutoExposeEnvNormalize_RetriesVersionConflict covers the
+// optimistic-lock retry: a conflict is retried against the latest row, and a
+// row a concurrent PATCH made explicit is neither written nor counted.
+func TestAutoExposeEnvNormalize_RetriesVersionConflict(t *testing.T) {
+	t.Run("conflict retried", func(t *testing.T) {
+		_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+			appliedEnv:   map[string]string{"KEEP": "1"},
+			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+			createInputs: explicitKeep(),
+		})
+		var buf bytes.Buffer
+		res, err := (&AutoExposeEnvNormalizeExecutor{Store: &aeConflictOnceStore{Store: s}}).run(context.Background(), &buf, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.AgentsNormalized)
+		assert.Equal(t, 0, res.AgentsSkipped)
+		assert.NotContains(t, inlineEnv(reloadAgent(t, s, agent.ID)), aeKey)
+	})
+	t.Run("re-read row no longer needs it", func(t *testing.T) {
+		_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+			appliedEnv:   map[string]string{"KEEP": "1"},
+			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+			createInputs: explicitKeep(),
+		})
+		var buf bytes.Buffer
+		res, err := (&AutoExposeEnvNormalizeExecutor{Store: &aeConflictOnceStore{Store: s, concurrentPatch: true}}).run(context.Background(), &buf, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, res.AgentsNormalized)
+		assert.NotContains(t, buf.String(), "RE-DERIVE")
+		got := reloadAgent(t, s, agent.ID)
+		assert.Equal(t, agent.StateVersion+1, got.StateVersion, "only the concurrent PATCH wrote the row")
+		assert.Equal(t, "true", inlineEnv(got)[aeKey], "an explicit value is left alone")
+	})
+}
+
+// TestAutoExposeEnvNormalize_ScansSoftDeletedAgents pins that soft-deleted
+// agents are normalized too, as the env and TZ cleanups scan them, so a
+// restored agent does not bring a stamp back.
+func TestAutoExposeEnvNormalize_ScansSoftDeletedAgents(t *testing.T) {
+	_, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.DeletedAt = time.Now()
+		a.AppliedConfig.Env = map[string]string{"KEEP": "1"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: map[string]string{"KEEP": "1", aeKey: "true"}}
+		a.AppliedConfig.CreateInputs = explicitKeep()
+	})
+	log := runAENormalize(t, s, nil)
+	assert.Contains(t, log, "RE-DERIVE agent="+agent.ID)
+	assert.NotContains(t, inlineEnv(reloadAgent(t, s, agent.ID)), aeKey)
 }
