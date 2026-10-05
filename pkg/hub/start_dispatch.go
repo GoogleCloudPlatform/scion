@@ -72,7 +72,10 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     fails, including when the stored phase has moved on from the caller's
 //     stale copy (store.ErrPhaseMismatch), a reservation this call created is
 //     released, nothing is dispatched, and an error wrapping
-//     errStartingWrite is returned.
+//     errStartingWrite is returned. If the mismatch is because a delete now
+//     holds the row (or soft-deleted it), the error also wraps
+//     store.ErrDeleteInProgress, so callers answer delete_in_progress
+//     (deleteClaimedDuringDispatch) as for a refused running intent.
 //  3. It does NOT change agent.Phase in memory. DispatchAgentStart reads its
 //     revoke-on-failure decision (isConfirmedNonRunningPhase) from the
 //     in-memory phase, so that decision stays the one the pre-dispatch phase
@@ -88,7 +91,12 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     use AgentStatusUpdate.ClearTerminalRemnants (or, for a full-row write,
 //     clear the message, stalled marker and exit fields in memory): the
 //     store's stopped/error -> running clear no longer fires once the row
-//     reads starting. settle only marks the handle. If the final write
+//     reads starting. Clear while the lifecycle op is still held and before
+//     the new generation can post its own status: the wake clears on its
+//     post-dispatch starting write, before the readiness wait. HTTP start
+//     and restart clear on their final write; a status the new container
+//     posts between the broker's reply and that write is cleared too (a
+//     narrow residual window, accepted). settle only marks the handle. If the final write
 //     fails, the row stays starting with the reservation held, and only a
 //     heartbeat corrects it.
 //   - rollback restores priorPhase with one conditional write (IfPhase
@@ -125,6 +133,12 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 			IfPhase: agent.Phase,
 		}); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if errors.Is(err, store.ErrPhaseMismatch) && s.deleteHoldsRow(ctx, agent.ID) {
+				// A delete claimed the row after the caller's start gate
+				// (the claim moved it to stopping): answer as #2415's
+				// running-intent refusal does (delete_in_progress).
+				return nil, fmt.Errorf("%w: %w: %w", errStartingWrite, store.ErrDeleteInProgress, err)
+			}
 			return nil, fmt.Errorf("%w: %w", errStartingWrite, err)
 		}
 		d.marked = true
@@ -141,12 +155,26 @@ func (s *Server) beginStartDispatchHTTP(ctx context.Context, w http.ResponseWrit
 	if err == nil {
 		return d, true
 	}
+	if refusal := deleteClaimedDuringDispatch(err, agent.ID); refusal != nil {
+		refusal.write(w)
+		return nil, false
+	}
 	if errors.Is(err, errStartingWrite) {
 		writeErrorFromErr(w, err, "")
 	} else {
 		writeQuotaReserveError(w, store.LimitMaxAgentsPerBroker, err)
 	}
 	return nil, false
+}
+
+// deleteHoldsRow reports whether agentID's row is soft-deleted or held by a
+// live delete claim. A read error reports false.
+func (s *Server) deleteHoldsRow(ctx context.Context, agentID string) bool {
+	cur, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return false
+	}
+	return !cur.DeletedAt.IsZero() || cur.DeletionHoldsRow(time.Now())
 }
 
 // rollback undoes beginStartDispatch after a failed dispatch or an early
@@ -184,10 +212,12 @@ func (d *startDispatch) settle() {
 
 // heartbeatPhaseGuarded reports whether a broker heartbeat must not write
 // hbPhase over agent's stored phase. It does so when hbPhase is not counted
-// toward the broker cap (stopped, suspended, error), the stored phase is an
-// active one (for example "starting", written by beginStartDispatch, or
-// "running" between the stop and start legs of a restart), and a lifecycle
-// op for the agent is in flight on this replica. Such a report usually
+// toward the broker cap (stopped, suspended, error) and a lifecycle op for
+// the agent is in flight on this replica, whatever the stored phase: the
+// heartbeat's own snapshot of the row may predate beginStartDispatch's
+// starting write (or read "running" between a restart's legs), and
+// deferring a stopped report over a stopped or suspended row is harmless.
+// Such a report usually
 // describes the old container a start is replacing; applying it would also
 // release the broker slot mid-dispatch through
 // reconcileBrokerQuotaOnPhaseChange. The caller drops only the phase (and
@@ -211,9 +241,6 @@ func (d *startDispatch) settle() {
 // reconcile's age gate is the backstop.
 func (s *Server) heartbeatPhaseGuarded(agent *store.Agent, hbPhase string) bool {
 	if hbPhase == "" || isBrokerQuotaCountedPhase(hbPhase) {
-		return false
-	}
-	if !state.Phase(agent.Phase).IsActivePhase() {
 		return false
 	}
 	return s.lifecycleOps.active(agent.ID)

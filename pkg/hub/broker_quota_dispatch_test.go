@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,8 @@ type hookedStartDispatcher struct {
 	onStop    func(agent *store.Agent)
 	onDelete  func(agent *store.Agent)
 	failStart bool
+	// startErr, when set, is the error a failing start returns.
+	startErr error
 }
 
 func (d *hookedStartDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
@@ -53,6 +56,9 @@ func (d *hookedStartDispatcher) DispatchAgentStart(_ context.Context, agent *sto
 		d.onStart(agent)
 	}
 	if d.failStart {
+		if d.startErr != nil {
+			return d.startErr
+		}
 		return errors.New("simulated broker start failure")
 	}
 	agent.Phase = string(state.PhaseRunning)
@@ -482,8 +488,13 @@ func TestHeartbeatPhaseGuarded(t *testing.T) {
 		{"starting", "stopped", false, false},
 		{"starting", "running", true, false},
 		{"starting", "", true, false},
-		{"stopped", "stopped", true, false},
-		{"suspended", "stopped", true, false},
+		// The heartbeat's snapshot may predate the starting write: an
+		// uncounted stored phase is guarded too while an op is active.
+		{"stopped", "stopped", true, true},
+		{"suspended", "stopped", true, true},
+		{"error", "stopped", true, true},
+		{"stopped", "stopped", false, false},
+		{"stopped", "running", true, false},
 	}
 	for _, tc := range cases {
 		a.Phase = tc.stored
@@ -719,54 +730,242 @@ func TestStartDispatch_FailedDeleteDuringStartRestoresStarting(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the start's rollback restores the prior phase")
 }
 
-// F3 controls: a live launch keeps today's behaviour (the captured starting
-// is restored); a running intent cannot be recorded under the claim.
-func TestStartDispatch_FailedDeleteKeepsStartingWhenStartOutstanding(t *testing.T) {
-	t.Run("running-intent-refused-under-claim", func(t *testing.T) {
-		// A running intent cannot be recorded after the claim: the store
-		// refuses it while the delete holds the row (ptone/scion#2550), so
-		// startNotInFlight's intent check is defensive, and the failed
-		// delete restores stopped.
+// F3: a running intent cannot be recorded after the claim (the store
+// refuses it while the delete holds the row, ptone/scion#2550), so the
+// failed delete restores stopped.
+func TestStartDispatch_FailedDeleteIntentRefusedUnderClaim(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{failStart: true}
+	disp.deleteErr = errors.New("simulated broker delete failure")
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-intent")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-f3-intent", state.PhaseStopped)
+	var plan *agentDeletionPlan
+	disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+	var swapErr error
+	disp.onDelete = func(*store.Agent) {
+		_, _, swapErr = s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
+	}
+	out := <-srv.runAgentDeletion(ctx, plan)
+	require.Equal(t, deletionOutcomeFailed, out.kind)
+	assert.ErrorIs(t, swapErr, store.ErrDeleteInProgress)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase)
+}
+
+// F3 control: a live launch keeps today's behaviour; the captured starting
+// is restored.
+func TestStartDispatch_FailedDeleteKeepsStartingUnderLiveLaunch(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{}
+	disp.deleteErr = errors.New("simulated broker delete failure")
+	srv.SetDispatcher(disp)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-launch")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-f3-launch", state.PhaseProvisioning)
+	_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	plan := claimDeleteInHook(t, srv, a.ID)
+	require.NotEmpty(t, plan.prior.LaunchID)
+	out := <-srv.runAgentDeletion(ctx, plan)
+	require.Equal(t, deletionOutcomeFailed, out.kind)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStarting), got.Phase, "a live launch keeps the prior restore")
+}
+
+// Review round 2 F1: the wake clears the previous generation's leftovers on
+// its post-dispatch starting write, so a status the new container posts
+// during the readiness wait ("Agent started") survives the running write.
+func TestStartDispatch_WakeKeepsNewGenerationStatus(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-wake-newgen")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-wake-newgen", state.PhaseSuspended)
+
+	var wg sync.WaitGroup
+	var oldCleared bool
+	disp.onStart = func(*store.Agent) {
+		// What a guarded heartbeat would leave from the old container.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "Agent crashed with exit code 137"}))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Once the starting write has cleared it, post the new
+			// generation's first status (the readiness signal).
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				got, err := s.GetAgent(ctx, a.ID)
+				if err == nil && got.Message == "" {
+					oldCleared = true
+					_ = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+						Activity: string(state.ActivityWorking), Message: "Agent started",
+					})
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}()
+	}
+	_, dmErr := srv.wakeAgentForDM(ctx, a)
+	wg.Wait()
+	require.Nil(t, dmErr)
+	assert.True(t, oldCleared, "the starting write cleared the old container's message")
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.Equal(t, "Agent started", got.Message, "the new generation's status survives the running write")
+}
+
+// Review round 2 F2: a delete that claimed the row after the caller read it
+// (the claim moved it to stopping) is answered as #2415's delete_in_progress,
+// not as a generic phase conflict, by the helper, the HTTP helper and the
+// wake; nothing is dispatched and the reservation is released.
+func TestStartDispatch_DeleteClaimBeforeStartingWrite(t *testing.T) {
+	setup := func(t *testing.T, name string, snapshot state.Phase) (*Server, store.Store, *store.RuntimeBroker, *store.Agent, *hookedStartDispatcher) {
 		srv, s := testServer(t)
-		disp := &hookedStartDispatcher{failStart: true}
-		disp.deleteErr = errors.New("simulated broker delete failure")
+		disp := &hookedStartDispatcher{}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 2)
 		ctx := context.Background()
-		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-intent")
-		a := newQuotaTestAgent(t, s, broker, project, "sd-f3-intent", state.PhaseStopped)
-		var plan *agentDeletionPlan
-		disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
-		require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-		var swapErr error
-		disp.onDelete = func(*store.Agent) {
-			_, _, swapErr = s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f2-"+name)
+		a := newQuotaTestAgent(t, s, broker, project, "sd-f2-"+name, snapshot)
+		// The row moves on (running) after the caller's snapshot, and a
+		// delete claims it, moving it to stopping.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+		plan, err := srv.claimAgentDeletion(ctx, a.ID, agentDeleteParams{requestedBy: "test"})
+		require.NoError(t, err)
+		require.NotNil(t, plan)
+		return srv, s, broker, a, disp
+	}
+	assertNothingDone := func(t *testing.T, s store.Store, broker *store.RuntimeBroker, disp *hookedStartDispatcher) {
+		assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
+		assert.EqualValues(t, 0, disp.startCount.Load())
+	}
+	t.Run("helper", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "helper", state.PhaseStopped)
+		_, err := srv.beginStartDispatch(context.Background(), a)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, store.ErrDeleteInProgress)
+		assert.ErrorIs(t, err, store.ErrPhaseMismatch)
+		assertNothingDone(t, s, broker, disp)
+	})
+	t.Run("http", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "http", state.PhaseStopped)
+		w := httptest.NewRecorder()
+		_, ok := srv.beginStartDispatchHTTP(context.Background(), w, a)
+		require.False(t, ok)
+		assert.Equal(t, http.StatusConflict, w.Code)
+		var body struct {
+			Error struct {
+				Code    string                 `json:"code"`
+				Details map[string]interface{} `json:"details"`
+			} `json:"error"`
 		}
-		out := <-srv.runAgentDeletion(ctx, plan)
-		require.Equal(t, deletionOutcomeFailed, out.kind)
-		assert.ErrorIs(t, swapErr, store.ErrDeleteInProgress)
-		got, err := s.GetAgent(ctx, a.ID)
-		require.NoError(t, err)
-		assert.Equal(t, string(state.PhaseStopped), got.Phase)
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), w.Body.String())
+		assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
+		assert.Equal(t, a.ID, body.Error.Details["agentId"])
+		assertNothingDone(t, s, broker, disp)
 	})
-	t.Run("live-launch", func(t *testing.T) {
+	t.Run("wake", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "wake", state.PhaseSuspended)
+		_, dmErr := srv.wakeAgentForDM(context.Background(), a)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, ErrCodeDeleteInProgress, dmErr.Code)
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assertNothingDone(t, s, broker, disp)
+	})
+}
+
+// failingStartingStore fails UpdateAgentStatus writes of phase starting, as a
+// store error (not a phase mismatch) would.
+type failingStartingStore struct {
+	store.Store
+}
+
+func (f *failingStartingStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	if su.Phase == string(state.PhaseStarting) {
+		return errors.New("simulated store failure")
+	}
+	return f.Store.UpdateAgentStatus(ctx, id, su)
+}
+
+// Review round 2 F6(a): a starting write that fails for a reason other than
+// a phase mismatch answers 500 over HTTP and ErrCodeRuntimeError from the
+// wake, releases the reservation the call created, leaves the phase as it
+// was, and dispatches nothing.
+func TestStartDispatch_StartingWriteFailure(t *testing.T) {
+	setup := func(t *testing.T, name string, phase state.Phase) (*Server, store.Store, *store.RuntimeBroker, *store.Agent, *hookedStartDispatcher) {
 		srv, s := testServer(t)
+		// Swap the wrapper in after construction: server start-up needs the
+		// concrete store's optional interfaces; the start path reads
+		// srv.store.
+		srv.store = &failingStartingStore{Store: srv.store}
 		disp := &hookedStartDispatcher{}
-		disp.deleteErr = errors.New("simulated broker delete failure")
 		srv.SetDispatcher(disp)
-		ctx := context.Background()
-		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-launch")
-		a := newQuotaTestAgent(t, s, broker, project, "sd-f3-launch", state.PhaseProvisioning)
-		_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+		setBrokerAgentCeiling(t, s, 2)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f6a-"+name)
+		a := newQuotaTestAgent(t, s, broker, project, "sd-f6a-"+name, phase)
+		return srv, s, broker, a, disp
+	}
+	assertUnchanged := func(t *testing.T, s store.Store, broker *store.RuntimeBroker, a *store.Agent, phase state.Phase, disp *hookedStartDispatcher) {
+		got, err := s.GetAgent(context.Background(), a.ID)
 		require.NoError(t, err)
-		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
-		plan := claimDeleteInHook(t, srv, a.ID)
-		require.NotEmpty(t, plan.prior.LaunchID)
-		out := <-srv.runAgentDeletion(ctx, plan)
-		require.Equal(t, deletionOutcomeFailed, out.kind)
-		got, err := s.GetAgent(ctx, a.ID)
-		require.NoError(t, err)
-		assert.Equal(t, string(state.PhaseStarting), got.Phase, "a live launch keeps the prior restore")
+		assert.Equal(t, string(phase), got.Phase)
+		assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID), "the created reservation is released")
+		assert.EqualValues(t, 0, disp.startCount.Load())
+	}
+	t.Run("http-start", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "http", state.PhaseStopped)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assertUnchanged(t, s, broker, a, state.PhaseStopped, disp)
 	})
+	t.Run("wake", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "wake", state.PhaseSuspended)
+		_, dmErr := srv.wakeAgentForDM(context.Background(), a)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, ErrCodeRuntimeError, dmErr.Code)
+		assert.Equal(t, http.StatusInternalServerError, dmErr.HTTPStatus)
+		assertUnchanged(t, s, broker, a, state.PhaseSuspended, disp)
+	})
+}
+
+// Review round 2 F6(b): the F3 delete-engine branch through a restart. The
+// restart's start leg fails because a delete claimed the row mid-dispatch
+// (ErrDeleteInProgress branch); the delete then fails, and the row ends
+// stopped, not starting.
+func TestStartDispatch_RestartFailedUnderClaimThenFailedDeleteEndsStopped(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{failStart: true, startErr: fmt.Errorf("start refused: %w", store.ErrDeleteInProgress)}
+	disp.deleteErr = errors.New("simulated broker delete failure")
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f6b")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-f6b", state.PhaseStopped)
+
+	var plan *agentDeletionPlan
+	disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeDeleteInProgress)
+	assert.EqualValues(t, 1, disp.stopCount.Load())
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the restart's reservation is released")
+
+	out := <-srv.runAgentDeletion(ctx, plan)
+	assert.Equal(t, deletionOutcomeFailed, out.kind)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase)
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
 }

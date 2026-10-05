@@ -142,6 +142,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusTooManyRequests,
 				}
 			}
+			// A delete claimed the row after the start gate: answer as for
+			// a refused running intent (ptone/scion#2550).
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			if errors.Is(err, store.ErrPhaseMismatch) {
 				// The agent left suspended after it was read: nothing was
 				// dispatched.
@@ -209,8 +214,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// reservation from here on, whatever the writes below do.
 		sd.settle()
 
-		// Transition to 'starting' while waiting for readiness.
-		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
+		// Re-assert 'starting' (beginStartDispatch already wrote it) and
+		// clear the previous generation's leftovers here, while the
+		// lifecycle op is still held: a heartbeat guarded during the
+		// dispatch may have stored the old container's exit message, exit
+		// fields and container status. Clearing them now, before the
+		// readiness wait, leaves alone anything the new container posts
+		// later (its first status, which is the readiness signal).
+		statusUpdate := store.AgentStatusUpdate{
+			Phase:                 string(state.PhaseStarting),
+			ClearTerminalRemnants: true,
+			ContainerStatus:       agent.ContainerStatus,
+		}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to starting",
 				"agent_id", agent.ID, "error", err)
@@ -264,16 +279,10 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
-		// Agent is ready — transition to 'running', clearing the prior
-		// generation's message, stalled marker and exit fields (the row
-		// reads starting, so the store's terminal -> running clear does not
-		// fire), and replacing a container status a guarded heartbeat may
-		// have stored for the old container.
-		statusUpdate = store.AgentStatusUpdate{
-			Phase:                 string(state.PhaseRunning),
-			ClearTerminalRemnants: true,
-			ContainerStatus:       agent.ContainerStatus,
-		}
+		// Agent is ready — transition to 'running'. A plain phase write:
+		// the message, stalled marker and exit fields on the row now belong
+		// to the new generation.
+		statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to running",
 				"agent_id", agent.ID, "error", err)
