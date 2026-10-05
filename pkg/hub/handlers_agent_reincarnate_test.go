@@ -3278,6 +3278,52 @@ func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *te
 	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
 }
 
+// failStartingWriteStore fails every agent row write that records the
+// reincarnation's starting step.
+type failStartingWriteStore struct {
+	store.Store
+}
+
+func (f *failStartingWriteStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if a.ReincarnationState == store.ReincarnationStateStarting {
+		return fmt.Errorf("injected starting-step write failure")
+	}
+	return f.Store.UpdateAgent(ctx, a)
+}
+
+// TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig covers
+// ptone/scion#1935 review round 3 F3: the starting-step row write fails after
+// a successful reprovision (no start dispatched, so no container), so
+// previous is re-rendered and, since that succeeded, the row is restored.
+func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &failStartingWriteStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	srv.store = orig
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to record starting state")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls, "no start is dispatched when the starting step cannot be recorded")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
 // TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow covers
 // ptone/scion#1935 review F4(c): after a failed reprovision the row is
 // restored to previous whatever the re-render's outcome, including when the

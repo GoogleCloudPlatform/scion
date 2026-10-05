@@ -656,7 +656,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// Ambiguous outcome (a timeout, a transport error, a lost or
 			// unreadable response, a proxy error, a deferred start, or a
 			// broker failure from inside Manager.Start): a gen N+1
-			// container may exist and use the agent's credentials. Keep
+			// container may exist and use the agent's credentials. A
+			// hub-side failure before the request was sent, which the
+			// classifier does not recognise, is conservatively treated as
+			// ambiguous too, though no container can exist then. Keep
 			// the pre-ptone/scion#1935 behaviour: no re-render (a refused
 			// re-render would revoke those credentials), and the row stays
 			// at gen N+1, so row, disk and any container agree.
@@ -778,6 +781,12 @@ const reincarnationRerenderTimeout = 5 * time.Minute
 // been created). This is the pair shouldRevertRun uses. The worker's stop
 // step already confirmed the previous container is gone, so no container
 // is running for the agent. Every other error is ambiguous.
+//
+// Version skew: a broker that predates the start-attempted marker
+// (ptone/scion#2415) never sets it, so against such a broker a failure from
+// inside Manager.Start reads as definitive, and the re-render (and, if it is
+// refused, the revoke) can run while a container exists. The same fallback
+// shouldRevertRun documents.
 func reincarnationStartLeftNoContainer(err error) bool {
 	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
 }
@@ -801,11 +810,12 @@ func reincarnationStartLeftNoContainer(err error) bool {
 // because buildFreshAppliedConfig already ran adoptLegacyTZ on previous in
 // place.
 //
-// Credentials: like any reprovision dispatch, a failed re-render revokes
-// the agent's credentials by agent (dispatchProvision's create-failed
-// revoke). Callers therefore re-render only when no container can be using
-// them: after a failed reprovision (which already revoked) or a definitive
-// start failure (reincarnationStartLeftNoContainer).
+// Credentials: like any reprovision dispatch, a re-render that fails after
+// minting its credential revokes the agent's credentials by agent
+// (dispatchProvision's create-failed revoke). Callers therefore re-render
+// only when no container can be using them: after a failed reprovision
+// (which already revoked) or a definitive start failure
+// (reincarnationStartLeftNoContainer).
 //
 // The remaining gap, tracked in ptone/scion#3043 (atomic render in
 // Manager.Reprovision is the real fix): the re-render can itself fail, be
