@@ -58,6 +58,11 @@ type ServerConfigDBResponse struct {
 	// SectionMetadata maps section name to its provenance metadata.
 	SectionMeta map[string]SectionMetadata `json:"section_metadata,omitempty"`
 
+	// Layer0Editable is true on workstation hubs, where the PUT writes
+	// Layer-0, unclassified and file-only keys to settings.yaml; false on
+	// hosted hubs, where they are rejected (ptone/scion#1091 option C).
+	Layer0Editable bool `json:"layer0_editable"`
+
 	// SupersededKeys maps section name to bootstrap-material keys whose
 	// merged value differs from the DB value (managed sections only).
 	SupersededKeys map[string][]SupersededKey `json:"superseded_keys,omitempty"`
@@ -179,6 +184,7 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	}
 
 	resp.SettingsTier = "db"
+	resp.Layer0Editable = s.layer0Editable()
 
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
@@ -685,6 +691,16 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
 
+	// Option C (ptone/scion#1091): a workstation hub writes Layer-0 and
+	// unclassified keys to settings.yaml instead of rejecting them; see
+	// admin_settings_workstation.go for the split and its failure semantics.
+	workstation := s.layer0Editable()
+	var fileKeys []string
+	if workstation {
+		fileKeys = append(append(fileKeys, layer0Keys...), unclassifiedKeys...)
+		layer0Keys, unclassifiedKeys = nil, nil
+	}
+
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
 		sort.Strings(layer0Keys)
@@ -719,9 +735,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Keys that never became a koanf key (unknown to the request type, or
 	// mapped nowhere) would otherwise be dropped while the PUT reports
 	// "saved". Reject them unless they echo the GET view.
-	if s.rejectUnpersistedKeys(r.Context(), w, ops, rawBody) {
+	fileOnlyKeys, done := s.rejectUnpersistedKeys(r.Context(), w, ops, rawBody, workstation)
+	if done {
 		return
 	}
+	fileKeys = append(fileKeys, fileOnlyKeys...)
+	sort.Strings(fileKeys)
 
 	// GET masks secrets and clients send the GET body back on save: restore
 	// every still-masked field from the stored config (the same view GET
@@ -909,6 +928,22 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Workstation: validate and stage the settings.yaml part before any DB
+	// write, so a bad file-routed value or an I/O error writes nothing.
+	var staged *stagedSettingsWrite
+	if len(fileKeys) > 0 {
+		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		staged, err = stageServerConfigFileWrite(&req.ServerConfigUpdateRequest, fileKeys)
+		if err != nil {
+			slog.Error("PUT server-config: failed to stage settings.yaml write", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+	}
+
 	// Write sections in sorted order for deterministic partial-apply and CAS
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
@@ -946,6 +981,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				break
 			}
 			slog.Error("Failed to update section", "section", secName, "error", err)
+			if staged != nil {
+				staged.abort()
+			}
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				fmt.Sprintf("Failed to update section %q", secName), nil)
 			return
@@ -954,6 +992,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	if len(conflicted) > 0 {
+		if staged != nil {
+			staged.abort()
+		}
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error":      "revision_conflict",
 			"message":    "One or more sections have been modified since the expected revision.",
@@ -969,13 +1010,33 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	)
 
 	appliedKeys := mapKeys(applied)
+	requiresRestart := []string{}
+
+	if staged != nil {
+		if err := staged.commit(); err != nil {
+			slog.Error("PUT server-config: failed to write settings.yaml after DB sections were written",
+				"error", err, "applied", appliedKeys)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Database settings were saved but settings.yaml could not be written",
+				map[string]interface{}{"applied": applied})
+			return
+		}
+		slog.Info("Server config written to settings.yaml via admin API (workstation)",
+			"user", updatedBy, "keys", fileKeys)
+		live, restart := s.applyServerConfigFileSideEffects(fileKeys)
+		appliedKeys = append(appliedKeys, live...)
+		requiresRestart = restart
+	}
 
 	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
-			"requires_restart": []string{},
+			"requires_restart": requiresRestart,
 		},
+	}
+	if len(fileKeys) > 0 {
+		resp["file_keys"] = fileKeys
 	}
 	if len(saveWarnings) > 0 {
 		resp["warnings"] = saveWarnings

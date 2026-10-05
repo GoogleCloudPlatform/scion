@@ -38,17 +38,22 @@ import (
 // Either kind is accepted only when it is a no-op echo of the GET view, so a
 // client that sends the GET body back keeps getting 200.
 
-// dbUnpersistedRequestPaths lists ServerConfigUpdateRequest JSON paths that
-// decode into the request but are never mapped to a koanf key, so the
-// DB-backed PUT has nowhere to persist them. TestDBUnpersistedRequestPaths_
-// CoverUnmappedFields keeps this list in step with the request types.
-var dbUnpersistedRequestPaths = [][]string{
-	{"auto_inject_gcloud_adc"},
-	// Layer-1 agent_defaults keys that buildSingleSectionDoc does not write
-	// (and GET does not report from the DB); until that is fixed they are
-	// rejected rather than silently dropped.
+// dbUnwrittenLayer1Paths are Layer-1 agent_defaults request fields that the
+// DB path does not write (buildSingleSectionDoc), report (GET) or apply
+// (ApplySnapshot). Writing them to settings.yaml would not help either: the
+// DB-built snapshot never carries them. Until that is fixed they are rejected
+// in every mode rather than silently dropped.
+var dbUnwrittenLayer1Paths = [][]string{
 	{"default_max_agent_role"},
 	{"default_agent_role"},
+}
+
+// dbFileOnlyRequestPaths lists ServerConfigUpdateRequest JSON paths that
+// decode into the request but are never mapped to a koanf key and have no DB
+// home. A workstation hub writes them to settings.yaml; a hosted hub rejects
+// them.
+var dbFileOnlyRequestPaths = [][]string{
+	{"auto_inject_gcloud_adc"},
 	{"server", "shared_dir_storage"},
 	{"server", "maintenance"},
 	{"server", "scheduler"},
@@ -64,6 +69,11 @@ var dbUnpersistedRequestPaths = [][]string{
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
 }
+
+// dbUnpersistedRequestPaths is every request path the DB-backed PUT does not
+// map to a koanf key. TestDBUnpersistedRequestPaths_CoverUnmappedFields keeps
+// it in step with the request types.
+var dbUnpersistedRequestPaths = append(append([][]string{}, dbUnwrittenLayer1Paths...), dbFileOnlyRequestPaths...)
 
 // isEmptySettingsBody reports whether a PUT body carries no settings at all
 // ({} or only expected_revisions).
@@ -82,29 +92,42 @@ func isEmptySettingsBody(rawBody []byte) bool {
 
 // rejectUnpersistedKeys writes a 422 naming every key in rawBody that the
 // DB-backed PUT would drop, unless that key is a no-op echo of the GET view.
-// Returns true if the response has been written.
-func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings, rawBody []byte) bool {
+// With routeFileOnly (workstation hubs) the dbFileOnlyRequestPaths present in
+// the body are not candidates; they are returned as koanf-style keys for the
+// settings.yaml write. done is true if the response has been written.
+func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings, rawBody []byte, routeFileOnly bool) (fileKeys []string, done bool) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
-		return false
+		return nil, false
 	}
 
 	candidates := unknownJSONPaths(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil)
-	for _, p := range dbUnpersistedRequestPaths {
+	for _, p := range dbUnwrittenLayer1Paths {
 		if v, ok := rawAtPath(top, p); ok {
 			candidates = append(candidates, rawPath{path: p, value: v})
 		}
 	}
+	for _, p := range dbFileOnlyRequestPaths {
+		if v, ok := rawAtPath(top, p); ok {
+			if routeFileOnly {
+				fileKeys = append(fileKeys, strings.Join(p, "."))
+			} else {
+				candidates = append(candidates, rawPath{path: p, value: v})
+			}
+		}
+	}
+	// Unknown keys under a file-routed path (server.scheduler.bogus) stay
+	// candidates: the decoder drops them, so the file write would too.
 	candidates = dropNestedPaths(candidates)
 	if len(candidates) == 0 {
-		return false
+		return fileKeys, false
 	}
 
 	view, err := s.serverConfigDBView(ctx, ops)
 	if err != nil {
 		slog.Error("PUT server-config: failed to build GET view for echo check", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
-		return true
+		return nil, true
 	}
 
 	var rejected []string
@@ -114,7 +137,7 @@ func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWrite
 		}
 	}
 	if len(rejected) == 0 {
-		return false
+		return fileKeys, false
 	}
 	sort.Strings(rejected)
 	slog.Warn("PUT server-config: rejecting keys that cannot be persisted", "keys", rejected)
@@ -123,7 +146,7 @@ func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWrite
 		"message": "These settings are not recognised or cannot be saved through the server config API.",
 		"keys":    rejected,
 	})
-	return true
+	return nil, true
 }
 
 // serverConfigDBView returns the GET /api/v1/admin/server-config body as a
