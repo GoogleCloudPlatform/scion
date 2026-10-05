@@ -445,4 +445,42 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeMessageDenied, "")
 		})
 	})
+
+	t.Run("routed inbound message sender", func(t *testing.T) {
+		send := func(t *testing.T, sender string) *httptest.ResponseRecorder {
+			return env.do(t, http.MethodPost, "/api/v1/broker/inbound/routed", noUser, routedInboundRequest{
+				ProjectID:    env.projectID,
+				DefaultAgent: env.agentSlug,
+				Message: &messages.StructuredMessage{
+					Version:   messages.Version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Channel:   "slack",
+					Sender:    sender,
+					Msg:       "hello from chat",
+					Type:      messages.TypeInstruction,
+				},
+			})
+		}
+		t.Run("sender without the user prefix is rejected", func(t *testing.T) {
+			w := send(t, "slack:U123")
+			assertChatMatrixError(t, w, http.StatusBadRequest, ErrCodeValidationError, "sender must use user: prefix")
+		})
+		t.Run("unknown user sender is denied", func(t *testing.T) {
+			w := send(t, "user:nobody-chat-matrix@test.com")
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "sender identity could not be resolved")
+		})
+		t.Run("suspended user sender is denied", func(t *testing.T) {
+			w := send(t, "user:"+env.suspendedEmail)
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "sender identity is not active")
+		})
+		t.Run("owner sender passes the sender check", func(t *testing.T) {
+			w := send(t, "user:"+env.ownerEmail)
+			// The agent is stopped, so an allowed sender gets 409.
+			assertChatMatrixError(t, w, http.StatusConflict, ErrCodeAgentNotRunning, "")
+		})
+		t.Run("outsider sender is denied", func(t *testing.T) {
+			w := send(t, "user:"+env.outsiderEmail)
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeMessageDenied, "")
+		})
+	})
 }
