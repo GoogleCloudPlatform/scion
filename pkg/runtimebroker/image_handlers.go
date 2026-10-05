@@ -43,7 +43,7 @@ type ImageDeleteRequest struct {
 
 func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -96,7 +96,7 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -121,7 +121,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImageDeleteLocal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
