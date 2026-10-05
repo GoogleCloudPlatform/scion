@@ -483,3 +483,23 @@ func TestAggregator_SessionStartSameIDAfterFinalizeResets(t *testing.T) {
 		t.Errorf("got id=%q api=%d in=%d, want s1/0/0", summary.SessionID, summary.APICallCount, summary.TokensInput)
 	}
 }
+
+// Two explicit session-starts with no ID are two sessions, not one: an
+// empty ID never matches the open session's empty ID.
+func TestAggregator_RepeatedSessionStartEmptyIDResets(t *testing.T) {
+	a := newTestAggregator()
+
+	a.StartSession("")
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.RecordToolEnd("Bash", "")
+	a.RecordTurn()
+	a.StartSession("")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.APICallCount != 0 || summary.TokensInput != 0 || summary.TurnCount != 0 {
+		t.Errorf("api=%d in=%d turns=%d, want 0/0/0", summary.APICallCount, summary.TokensInput, summary.TurnCount)
+	}
+	if len(summary.ToolCalls) != 0 {
+		t.Errorf("ToolCalls = %v, want none", summary.ToolCalls)
+	}
+}

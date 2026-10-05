@@ -26,14 +26,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
-// Pins today's wiring for ptone/scion#3248: the init daemon registers
-// NewLifecycleTelemetryHandler on the LifecycleManager for lifecycle
-// events only (registerLifecycleTelemetryHandler in
-// cmd/sciontool/commands/init.go), so its aggregator never sees a
-// harness hook event. The session-end it gets
+// Pins the lifecycle handler's outcome for ptone/scion#3248: a
+// NewLifecycleTelemetryHandler fed only the four lifecycle events (as
+// registerLifecycleTelemetryHandler in cmd/sciontool/commands/init.go
+// does today) never sees a harness hook event. The session-end it gets
 // has no session ID, and the report is refused before any request.
-// When ptone/scion#3248 is fixed, this test should change to expect a
-// report with a session ID.
+// The test copies the event list and the OnSessionEnd closure rather
+// than calling the daemon code, so it does not fail when that wiring
+// moves. ptone/scion#3253 should delete or rewrite it.
 func TestLifecycleTelemetryHandler_CurrentWiringSendsNoReport(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
