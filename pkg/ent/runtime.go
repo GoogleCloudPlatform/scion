@@ -12,6 +12,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -20,6 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
@@ -281,6 +283,26 @@ func init() {
 	agentDescDeletionRequest := agentFields[64].Descriptor()
 	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
 	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
+	// agentDescStartClaimKind is the schema descriptor for start_claim_kind field.
+	agentDescStartClaimKind := agentFields[68].Descriptor()
+	// agent.DefaultStartClaimKind holds the default value on creation for the start_claim_kind field.
+	agent.DefaultStartClaimKind = agentDescStartClaimKind.Default.(string)
+	// agentDescStartClaimState is the schema descriptor for start_claim_state field.
+	agentDescStartClaimState := agentFields[69].Descriptor()
+	// agent.DefaultStartClaimState holds the default value on creation for the start_claim_state field.
+	agent.DefaultStartClaimState = agentDescStartClaimState.Default.(string)
+	// agentDescStartClaimOwner is the schema descriptor for start_claim_owner field.
+	agentDescStartClaimOwner := agentFields[70].Descriptor()
+	// agent.DefaultStartClaimOwner holds the default value on creation for the start_claim_owner field.
+	agent.DefaultStartClaimOwner = agentDescStartClaimOwner.Default.(string)
+	// agentDescStartClaimTarget is the schema descriptor for start_claim_target field.
+	agentDescStartClaimTarget := agentFields[71].Descriptor()
+	// agent.DefaultStartClaimTarget holds the default value on creation for the start_claim_target field.
+	agent.DefaultStartClaimTarget = agentDescStartClaimTarget.Default.(string)
+	// agentDescStartClaimLaunchID is the schema descriptor for start_claim_launch_id field.
+	agentDescStartClaimLaunchID := agentFields[76].Descriptor()
+	// agent.DefaultStartClaimLaunchID holds the default value on creation for the start_claim_launch_id field.
+	agent.DefaultStartClaimLaunchID = agentDescStartClaimLaunchID.Default.(string)
 	// agentDescID is the schema descriptor for id field.
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.
@@ -317,6 +339,28 @@ func init() {
 	agentidentitykeyDescID := agentidentitykeyFields[0].Descriptor()
 	// agentidentitykey.DefaultID holds the default value on creation for the id field.
 	agentidentitykey.DefaultID = agentidentitykeyDescID.Default.(func() uuid.UUID)
+	agentrecoveryFields := schema.AgentRecovery{}.Fields()
+	_ = agentrecoveryFields
+	// agentrecoveryDescBrokerID is the schema descriptor for broker_id field.
+	agentrecoveryDescBrokerID := agentrecoveryFields[1].Descriptor()
+	// agentrecovery.DefaultBrokerID holds the default value on creation for the broker_id field.
+	agentrecovery.DefaultBrokerID = agentrecoveryDescBrokerID.Default.(string)
+	// agentrecoveryDescObservedState is the schema descriptor for observed_state field.
+	agentrecoveryDescObservedState := agentrecoveryFields[2].Descriptor()
+	// agentrecovery.DefaultObservedState holds the default value on creation for the observed_state field.
+	agentrecovery.DefaultObservedState = agentrecoveryDescObservedState.Default.(string)
+	// agentrecoveryDescObservedTarget is the schema descriptor for observed_target field.
+	agentrecoveryDescObservedTarget := agentrecoveryFields[3].Descriptor()
+	// agentrecovery.DefaultObservedTarget holds the default value on creation for the observed_target field.
+	agentrecovery.DefaultObservedTarget = agentrecoveryDescObservedTarget.Default.(string)
+	// agentrecoveryDescObservedInFlight is the schema descriptor for observed_in_flight field.
+	agentrecoveryDescObservedInFlight := agentrecoveryFields[6].Descriptor()
+	// agentrecovery.DefaultObservedInFlight holds the default value on creation for the observed_in_flight field.
+	agentrecovery.DefaultObservedInFlight = agentrecoveryDescObservedInFlight.Default.(bool)
+	// agentrecoveryDescID is the schema descriptor for id field.
+	agentrecoveryDescID := agentrecoveryFields[0].Descriptor()
+	// agentrecovery.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	agentrecovery.IDValidator = agentrecoveryDescID.Validators[0].(func(string) error)
 	agentreincarnationFields := schema.AgentReincarnation{}.Fields()
 	_ = agentreincarnationFields
 	// agentreincarnationDescAgentID is the schema descriptor for agent_id field.
@@ -503,6 +547,20 @@ func init() {
 	brokersettingDescID := brokersettingFields[0].Descriptor()
 	// brokersetting.DefaultID holds the default value on creation for the id field.
 	brokersetting.DefaultID = brokersettingDescID.Default.(func() uuid.UUID)
+	brokertargetinventoryFields := schema.BrokerTargetInventory{}.Fields()
+	_ = brokertargetinventoryFields
+	// brokertargetinventoryDescBrokerID is the schema descriptor for broker_id field.
+	brokertargetinventoryDescBrokerID := brokertargetinventoryFields[1].Descriptor()
+	// brokertargetinventory.BrokerIDValidator is a validator for the "broker_id" field. It is called by the builders before save.
+	brokertargetinventory.BrokerIDValidator = brokertargetinventoryDescBrokerID.Validators[0].(func(string) error)
+	// brokertargetinventoryDescTarget is the schema descriptor for target field.
+	brokertargetinventoryDescTarget := brokertargetinventoryFields[2].Descriptor()
+	// brokertargetinventory.TargetValidator is a validator for the "target" field. It is called by the builders before save.
+	brokertargetinventory.TargetValidator = brokertargetinventoryDescTarget.Validators[0].(func(string) error)
+	// brokertargetinventoryDescID is the schema descriptor for id field.
+	brokertargetinventoryDescID := brokertargetinventoryFields[0].Descriptor()
+	// brokertargetinventory.DefaultID holds the default value on creation for the id field.
+	brokertargetinventory.DefaultID = brokertargetinventoryDescID.Default.(func() uuid.UUID)
 	chatlinkcodeFields := schema.ChatLinkCode{}.Fields()
 	_ = chatlinkcodeFields
 	// chatlinkcodeDescCodeHash is the schema descriptor for code_hash field.
@@ -1635,15 +1693,15 @@ func init() {
 	// runtimebroker.DefaultConnectionState holds the default value on creation for the connection_state field.
 	runtimebroker.DefaultConnectionState = runtimebrokerDescConnectionState.Default.(string)
 	// runtimebrokerDescAutoProvide is the schema descriptor for auto_provide field.
-	runtimebrokerDescAutoProvide := runtimebrokerFields[18].Descriptor()
+	runtimebrokerDescAutoProvide := runtimebrokerFields[19].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[24].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[25].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[25].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[26].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.
