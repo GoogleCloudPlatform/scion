@@ -240,6 +240,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/conversations/": "authenticated", // Chat conversation routes
 	"/api/v1/chat/topics/":        "authenticated", // Chat topic routes
 	"/api/v1/chat/dms":            "authenticated", // Chat direct messages
+	"/api/v1/chat/unread-count":   "authenticated", // Chat unread conversation count
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search

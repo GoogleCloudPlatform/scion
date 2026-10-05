@@ -238,9 +238,6 @@ func (e *agentKeysEventSpy) PublishBrokerStatus(_ context.Context, _, _ string) 
 func (e *agentKeysEventSpy) PublishNotification(_ context.Context, _ *store.Notification) {
 	e.record("PublishNotification")
 }
-func (e *agentKeysEventSpy) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
-	e.record("PublishChatNotification")
-}
 func (e *agentKeysEventSpy) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 	e.record("PublishUserMessage")
 }

@@ -3777,6 +3777,7 @@
 | http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/chat/topics/{id}` |
 | http_route | GET | `/api/v1/chat/dms` |
+| http_route | GET | `/api/v1/chat/unread-count` |
 | http_route | GET | `/api/v1/chat/search` |
 | http_route | POST | `/api/v1/chat/attachments` |
 | http_route | GET | `/api/v1/chat/attachments/{id}` |

@@ -16,136 +16,20 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-// These tests pin the disclosure boundary for chat notifications.
-//
-// The defect they exist to prevent, measured on this branch before the fix:
-// PublishNotification fanned chat notifications out on the unscoped subject
-// "notification.created", and authorizeSSESubjects (web.go) only constrains
-// subjects whose first token is "project" or "user" — so a subscription to
-// "notification.>" was granted to every logged-in session, and every browser
-// on the deployment received every other user's sender name and 100-character
-// message preview.
-//
-// Revert PublishChatNotification's subject to "notification.created" and
-// TestChatNotification_NotDeliveredToBystander fails with eve holding alice's
-// DM preview.
+// These tests pin the SSE subject boundaries for notifications: agent-status
+// notifications keep their subjects, and per-user subjects are only granted
+// to their own user. Chat messages no longer create notifications.
 
-const bystanderSubjects = "notification.>"
-
-// newChatNotificationForTest builds a DM notification addressed to subscriberID.
-func newChatNotificationForTest(subscriberID, projectID, message string) *store.Notification {
-	return &store.Notification{
-		ID:             "notif-under-test",
-		SubscriptionID: "00000000-0000-0000-0000-000000000000",
-		AgentID:        "00000000-0000-0000-0000-000000000000",
-		ProjectID:      projectID,
-		SubscriberType: store.SubscriberTypeUser,
-		SubscriberID:   subscriberID,
-		Status:         ChatNotificationDMReceived,
-		Message:        message,
-		CreatedAt:      time.Now(),
-	}
-}
-
-// chatContextForTest is the conversation/sender context that rides along with
-// a chat notification event.
-func chatContextForTest() ChatMessageContext {
-	return ChatMessageContext{
-		SenderID:        "user-bob",
-		SenderName:      "Bob",
-		ConversationKey: "dm:user:user-bob:user:user-alice",
-		Preview:         "the merger closes friday, keep it quiet",
-		ProjectID:       "proj-1",
-	}
-}
-
-// TestChatNotification_NotDeliveredToBystander is the regression test for the
-// disclosure. Eve subscribes to every subject a session is allowed to request
-// without being the recipient — the unscoped notification subject, and the
-// project subject for the project the DM belongs to — and must receive nothing.
-func TestChatNotification_NotDeliveredToBystander(t *testing.T) {
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-
-	const projectID = "proj-1"
-	const secret = "bob sent you a message: the merger closes friday, keep it quiet"
-
-	eve, unsubEve := pub.Subscribe(
-		bystanderSubjects,
-		"project."+projectID+".notification",
-	)
-	defer unsubEve()
-
-	pub.PublishChatNotification(context.Background(),
-		newChatNotificationForTest("user-alice", projectID, secret), chatContextForTest())
-
-	select {
-	case evt := <-eve:
-		t.Fatalf("chat notification leaked to a bystander on subject %q: %s", evt.Subject, evt.Data)
-	case <-time.After(250 * time.Millisecond):
-		// Correct: nothing reached a subscriber who is not the recipient.
-	}
-}
-
-// TestChatNotification_DeliveredToSubscriber is the positive half: scoping the
-// subject must not silence the notification for the person it is for.
-func TestChatNotification_DeliveredToSubscriber(t *testing.T) {
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-
-	const secret = "bob sent you a message: the merger closes friday, keep it quiet"
-
-	alice, unsub := pub.Subscribe("user.user-alice.notification")
-	defer unsub()
-
-	pub.PublishChatNotification(context.Background(),
-		newChatNotificationForTest("user-alice", "proj-1", secret), chatContextForTest())
-
-	select {
-	case evt := <-alice:
-		assert.Equal(t, "user.user-alice.notification", evt.Subject)
-		var payload NotificationCreatedEvent
-		require.NoError(t, json.Unmarshal(evt.Data, &payload))
-		assert.Equal(t, secret, payload.Message)
-		assert.Equal(t, ChatNotificationDMReceived, payload.Status)
-	case <-time.After(2 * time.Second):
-		t.Fatal("recipient did not receive their own chat notification")
-	}
-}
-
-// TestChatNotification_NoSubscriberIsDropped pins the fail-closed branch: a
-// notification with no subscriber has no subject that can be scoped to it, so
-// it must be dropped rather than fall back to a broadcast subject.
-func TestChatNotification_NoSubscriberIsDropped(t *testing.T) {
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-
-	everything, unsub := pub.Subscribe(">")
-	defer unsub()
-
-	notif := newChatNotificationForTest("", "proj-1", "alice sent you a message: hi")
-	pub.PublishChatNotification(context.Background(), notif, chatContextForTest())
-
-	select {
-	case evt := <-everything:
-		t.Fatalf("unaddressed chat notification was published on %q: %s", evt.Subject, evt.Data)
-	case <-time.After(250 * time.Millisecond):
-	}
-}
-
-// TestAgentStatusNotification_SubjectsUnchanged pins the bound on the fix:
-// agent-status notifications are a separate, pre-existing problem with
-// different consumers, and this change must not alter their subjects.
+// TestAgentStatusNotification_SubjectsUnchanged pins the subjects agent-status
+// notifications are published on.
 func TestAgentStatusNotification_SubjectsUnchanged(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	t.Cleanup(pub.Close)

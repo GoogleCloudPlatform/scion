@@ -16,11 +16,11 @@
 
 package hub
 
-// DEF-162: agent-authored mentions must notify humans.
+// DEF-162: agent-authored mentions of humans.
 //
 // This file tests that an agent posting to a group conversation with @mentions
-// in the body creates mention notifications for the mentioned human members,
-// on both broker and non-broker topologies.
+// in the body makes the mentioned human members members of the thread, on both
+// broker and non-broker topologies, and creates no notification rows.
 
 import (
 	"bytes"
@@ -49,7 +49,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // def162Setup creates a server, project, agent, and human user wired for
-// mention notification tests. The human is added as a project member via a
+// agent mention tests. The human is added as a project member via a
 // role binding (PM1) with an unambiguous display name ("UniqueHuman162") that
 // resolves to exactly one member (AC-3).
 func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, human *store.User, topicID string) {
@@ -97,18 +97,18 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	})
 	require.NoError(t, err)
 
-	// Set up WebChatStore + ChatNotifier.
+	// Set up WebChatStore.
 	//
 	// A bare ":memory:" DSN gives every new *sql.DB connection its own
 	// private, empty database -- sqlite3's in-memory mode is per-connection,
 	// not shared, unless cache=shared is used. database/sql's pool opens a
 	// second connection whenever one is already checked out, which happens
 	// on the broker path here: the eventbus delivery goroutine and the
-	// mention-notification goroutine can both reach into wcs concurrently.
+	// thread-membership goroutine can both reach into wcs concurrently.
 	// When that races, the second connection lands on a fresh DB with no
-	// tables ("no such table: webchat_read_state"), NotifyMention aborts
-	// silently on that error, and the test then spins out its full deadline
-	// waiting for a notification that was never going to arrive. Pinning the
+	// tables, the background write aborts on that error, and the test then
+	// spins out its full deadline waiting for a write that was never going
+	// to happen. Pinning the
 	// pool to one connection forces all access through the single connection
 	// Init() populated, removing that race deterministically.
 	db, err := sql.Open("sqlite3", ":memory:")
@@ -165,37 +165,34 @@ func postOutboundConvRef(t *testing.T, srv *Server, projectID, agentID, msg, con
 	return rr
 }
 
-// def162MentionWaitTimeout is the deadline used by waitForMentionNotification
-// callers that expect a notification to eventually appear (a positive wait).
-// The mention notification is fired from a background goroutine
-// (handlers_agent_messaging.go, handlers_chat_v2.go), so this must give that
-// goroutine enough wall-clock time to be scheduled and complete its DB writes
-// even on a heavily loaded CI runner. 30s is generous headroom over the local
-// ~0.2s completion time; a passing run still returns as soon as the
-// notification appears, since waitForMentionNotification polls and returns
-// early. Callers that assert *absence* of a notification (AC-2, AC-4, AC-5,
-// AC-7, AC-9) intentionally keep a short deadline -- lengthening those would
-// only slow down passing runs without reducing flake risk, since they are not
-// waiting on this goroutine to complete before asserting.
+// def162MentionWaitTimeout is the deadline for a positive wait on the
+// background thread-membership write (handlers_agent_messaging.go). 30s is
+// generous headroom for a loaded CI runner; a passing run returns as soon as
+// the row appears. Absence checks keep a short settle delay instead.
 const def162MentionWaitTimeout = 30 * time.Second
 
-// waitForMentionNotification polls the store for a mention notification for the
-// given user, up to the timeout. Returns the notification if found.
-func waitForMentionNotification(t *testing.T, s store.Store, userID string, timeout time.Duration) *store.Notification {
+// def162Settle is how long absence checks wait for any background write.
+const def162Settle = 500 * time.Millisecond
+
+// waitForMember polls until userID is an active user participant of convID.
+func waitForMember(t *testing.T, s store.Store, convID, userID string) bool {
 	t.Helper()
-	ctx := t.Context()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(def162MentionWaitTimeout)
 	for time.Now().Before(deadline) {
-		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, userID, false)
-		require.NoError(t, err)
-		for i := range notifs {
-			if notifs[i].Status == ChatNotificationMention {
-				return &notifs[i]
-			}
+		if isUserParticipant(t, s, convID, userID) {
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return nil
+	return false
+}
+
+// requireNoNotifications asserts userID has no notification rows.
+func requireNoNotifications(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	notifs, err := s.GetNotifications(t.Context(), store.SubscriberTypeUser, userID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "chat messages must not create notification rows")
 }
 
 // waitForBrokerMessage polls the store for at least one persisted message in
@@ -205,10 +202,8 @@ func waitForMentionNotification(t *testing.T, s store.Store, userID string, time
 // On the broker path, persistence happens in the eventbus subscriber callback
 // (proxy.deliverToUser), which runs asynchronously relative to the publish
 // call in the handler -- the same class of goroutine-scheduling exposure as
-// waitForMentionNotification, so it uses the same def162MentionWaitTimeout
-// headroom. Asserting on s.ListMessages immediately after the mention
-// notification appears wrongly assumes the two independent async paths
-// (notification fire vs. broker persistence) complete in a fixed order.
+// the membership write, so it uses the same def162MentionWaitTimeout
+// headroom.
 func waitForBrokerMessage(t *testing.T, s store.Store, conversationID string, timeout time.Duration) []store.Message {
 	t.Helper()
 	ctx := t.Context()
@@ -254,10 +249,10 @@ func TestDEF162_AC3_MentionFixtureIsUnambiguous(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-1: agent posts to group with @mention -> notification exists
+// AC-1: agent posts to group with @mention -> human becomes a member
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
+func TestDEF162_AC1_AgentMention_MakesMember(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
 
 	convID := def162GroupConv(t, s, project.ID, topicID)
@@ -265,46 +260,16 @@ func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
 		"Hey @UniqueHuman162 check this out", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code, "send must succeed: %s", rr.Body.String())
 
-	// The mention fires in a goroutine -- poll for the notification.
-	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
-	require.NotNil(t, notif, "AC-1: mention notification must exist for the mentioned user")
-	assert.Equal(t, ChatNotificationMention, notif.Status)
-	assert.Contains(t, notif.Message, "@NotifyBot mentioned you",
-		"notification must name the agent")
-	assert.Contains(t, notif.Message, "Hey @UniqueHuman162 check this out",
-		"notification must include the message preview")
+	require.True(t, waitForMember(t, s, convID, human.ID),
+		"AC-1: the mentioned human must become a member of the thread")
+	requireNoNotifications(t, s, human.ID)
 }
 
 // ---------------------------------------------------------------------------
-// AC-2: muted conversation -> no notification
+// AC-4: no mention token -> no membership
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC2_AgentMention_MutedConversation_NoNotification(t *testing.T) {
-	srv, s, project, agent, human, topicID := def162Setup(t)
-	ctx := context.Background()
-
-	// Mute the conversation for the human.
-	srv.mu.RLock()
-	wcs := srv.webChatStore
-	srv.mu.RUnlock()
-	require.NotNil(t, wcs)
-	require.NoError(t, wcs.SetMuted(ctx, human.ID, topicID, true))
-
-	convID := def162GroupConv(t, s, project.ID, topicID)
-	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
-		"Hey @UniqueHuman162 muted test", "conv:"+convID)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	// Wait briefly -- no notification should appear.
-	notif := waitForMentionNotification(t, s, human.ID, 1*time.Second)
-	assert.Nil(t, notif, "AC-2: no notification when conversation is muted")
-}
-
-// ---------------------------------------------------------------------------
-// AC-4: no mention token -> no notification
-// ---------------------------------------------------------------------------
-
-func TestDEF162_AC4_NoMentionToken_NoNotification(t *testing.T) {
+func TestDEF162_AC4_NoMentionToken_NoMember(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
 
 	convID := def162GroupConv(t, s, project.ID, topicID)
@@ -312,15 +277,16 @@ func TestDEF162_AC4_NoMentionToken_NoNotification(t *testing.T) {
 		"This message has no mentions at all", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, 1*time.Second)
-	assert.Nil(t, notif, "AC-4: no notification when message has no mention token")
+	time.Sleep(def162Settle)
+	assert.False(t, isUserParticipant(t, s, convID, human.ID),
+		"AC-4: no membership when the message has no mention token")
 }
 
 // ---------------------------------------------------------------------------
-// AC-5: agent slug mention -> no human notification (pin existing behaviour)
+// AC-5: agent slug mention -> no human membership
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC5_AgentSlugMention_NoHumanNotification(t *testing.T) {
+func TestDEF162_AC5_AgentSlugMention_NoHumanMember(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
 
 	convID := def162GroupConv(t, s, project.ID, topicID)
@@ -328,136 +294,49 @@ func TestDEF162_AC5_AgentSlugMention_NoHumanNotification(t *testing.T) {
 		"Hey @notifybot check yourself", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	// No notification for the agent's own ID (agents are not project human members).
-	notif := waitForMentionNotification(t, s, agent.ID, 1*time.Second)
-	assert.Nil(t, notif, "AC-5: agent slug mention must not create human notification")
-
-	// Also no notification for the human -- the human was not mentioned.
-	humanNotif := waitForMentionNotification(t, s, human.ID, 500*time.Millisecond)
-	assert.Nil(t, humanNotif, "human should not be notified when only agent slug was mentioned")
+	time.Sleep(def162Settle)
+	assert.False(t, isUserParticipant(t, s, convID, human.ID),
+		"AC-5: an agent slug mention must not make a human a member")
+	requireNoNotifications(t, s, agent.ID)
 }
 
 // ---------------------------------------------------------------------------
-// AC-6: sender label is agent.Name (fallback Slug), never UUID
-// ---------------------------------------------------------------------------
-
-func TestDEF162_AC6_SenderLabel_IsAgentName_NotUUID(t *testing.T) {
-	srv, s, project, agent, human, topicID := def162Setup(t)
-
-	convID := def162GroupConv(t, s, project.ID, topicID)
-	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
-		"Hey @UniqueHuman162 label check", "conv:"+convID)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
-	require.NotNil(t, notif, "notification must exist for label check")
-
-	// Positive assertion: the notification uses agent.Name ("NotifyBot").
-	assert.Contains(t, notif.Message, "@NotifyBot mentioned you",
-		"AC-6: sender label must be agent.Name")
-
-	// Negative assertion: the notification must NOT contain the agent's UUID.
-	assert.NotContains(t, notif.Message, agent.ID,
-		"AC-6: notification must never contain agent UUID as sender label")
-}
-
-func TestDEF162_AC6_SenderLabel_FallsBackToSlug(t *testing.T) {
-	// The ent schema enforces Agent.Name NotEmpty(), so we test the slug
-	// fallback by calling fireHumanMentionNotifications directly with an
-	// empty senderName replaced by slug -- mirroring the production logic.
-	srv, s, project, _, human, topicID := def162Setup(t)
-	ctx := context.Background()
-
-	agentID := api.NewUUID()
-	slug := "slug-only-agent"
-
-	// Simulate the production fallback: when agent.Name is "", use agent.Slug.
-	senderName := ""
-	if senderName == "" {
-		senderName = slug
-	}
-
-	srv.fireHumanMentionNotifications(ctx,
-		[]string{"UniqueHuman162"},
-		project.ID,
-		topicID,    // conversationKey -- the topic we created
-		"",         // senderUserID -- empty for agents
-		senderName, // slug fallback
-		"Hey @UniqueHuman162 slug fallback",
-	)
-
-	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
-	require.NoError(t, err)
-	require.Len(t, notifs, 1, "notification must exist for slug fallback test")
-	assert.Contains(t, notifs[0].Message, "@slug-only-agent mentioned you",
-		"AC-6: sender label must fall back to Slug when Name is empty")
-	assert.NotContains(t, notifs[0].Message, agentID,
-		"AC-6: notification must never contain agent UUID")
-}
-
-// ---------------------------------------------------------------------------
-// AC-7: DM with mention -> only DM notification, not also a mention notification
+// AC-7: DM with mention -> no notification rows
 //
-// Driven through the handler on the conv-ref DM backfill path
-// (handlers_agent_messaging.go:773-786). When a direct conversation is
-// resolved via ConversationRef with no ThreadID, the handler backfills
-// req.ThreadID from convResult.ExternalRef -- a dm:-prefixed key. The
-// mention guard at :934 must exclude it.
+// Driven through the handler on the conv-ref DM backfill path. When a direct
+// conversation is resolved via ConversationRef with no ThreadID, the handler
+// backfills req.ThreadID from convResult.ExternalRef -- a dm:-prefixed key,
+// which the thread-membership guard excludes.
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC7_DM_WithMention_OnlyDMNotification(t *testing.T) {
+func TestDEF162_AC7_DM_WithMention_NoNotification(t *testing.T) {
 	srv, s, project, agent, human, _ := def162Setup(t)
 	ctx := context.Background()
 
-	// Build a canonical dm: key for this agent->human pair.
 	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", human.ID)
 	require.NoError(t, err)
-
-	// Create a direct conversation whose ExternalRef is the DM key.
-	conv := &store.Conversation{
+	created, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
 		Kind:        "direct",
 		Surface:     "native",
 		ExternalRef: dmKey,
 		DriftState:  "active",
-	}
-	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	})
 	require.NoError(t, err)
 
-	// POST with ConversationRef and NO ThreadID. The handler hits the
-	// def152DerivedRecipient path (handlers_agent_messaging.go:547-608)
-	// and then the ThreadID backfill at :773-784, setting req.ThreadID to
-	// the dm:-prefixed ExternalRef. The mention guard at :934 must then
-	// exclude it.
 	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
 		"Hey @UniqueHuman162 this is a DM via conv-ref", "conv:"+created.ID)
 	require.Equal(t, http.StatusOK, rr.Code, "DM send must succeed: %s", rr.Body.String())
 
-	// Wait for any notifications to settle.
-	time.Sleep(500 * time.Millisecond)
-
-	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
-	require.NoError(t, err)
-
-	// Count mention-type notifications -- there should be zero.
-	mentionCount := 0
-	for _, n := range notifs {
-		if n.Status == ChatNotificationMention {
-			mentionCount++
-		}
-	}
-	assert.Equal(t, 0, mentionCount,
-		"AC-7: DM with mention must NOT produce a mention notification (DM notification is sufficient)")
+	time.Sleep(def162Settle)
+	requireNoNotifications(t, s, human.ID)
 }
 
 // ---------------------------------------------------------------------------
-// AC-8: mention fires on BOTH broker and non-broker topologies
+// AC-8: membership is recorded on BOTH broker and non-broker topologies
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC8_NonBroker_MentionFires(t *testing.T) {
-	// Non-broker topology: no MessageBrokerProxy configured.
+func TestDEF162_AC8_NonBroker_MentionMakesMember(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
-
-	// Verify no broker is configured (default from testServer).
 	assert.Nil(t, srv.GetMessageBrokerProxy(), "precondition: no broker configured")
 
 	convID := def162GroupConv(t, s, project.ID, topicID)
@@ -465,17 +344,14 @@ func TestDEF162_AC8_NonBroker_MentionFires(t *testing.T) {
 		"Hey @UniqueHuman162 non-broker path", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
-	require.NotNil(t, notif, "AC-8: mention must fire on non-broker path")
-	assert.Contains(t, notif.Message, "@NotifyBot mentioned you")
+	require.True(t, waitForMember(t, s, convID, human.ID),
+		"AC-8: mention must make a member on the non-broker path")
+	requireNoNotifications(t, s, human.ID)
 }
 
-func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
-	// Broker topology: MessageBrokerProxy configured and wired.
+func TestDEF162_AC8_Broker_MentionMakesMember(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
 
-	// Wire up a broker proxy (pattern from def141BrokerSetup and
-	// handlers_agent_messaging_test.go:446-450).
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	bus := eventbus.NewInProcessEventBus(slog.Default())
@@ -483,19 +359,13 @@ func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(bus, s, events,
 		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
-
-	// Wire ChatNotifier and WebChatStore into the proxy so the broker path
-	// handles DM watermarks and notifications correctly.
 	srv.mu.RLock()
-	proxy.chatNotifier = srv.chatNotifier
 	proxy.webChatStore = srv.webChatStore
 	srv.mu.RUnlock()
-
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
 
-	// Subscribe the broker to this project's user messages so deliverToUser fires.
 	sub, err := bus.Subscribe(
 		eventbus.TopicAllUserMessages(project.ID),
 		func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
@@ -505,44 +375,29 @@ func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	// Create the group conversation.
 	convID := def162GroupConv(t, s, project.ID, topicID)
-
 	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
 		"Hey @UniqueHuman162 broker path", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
-	require.NotNil(t, notif, "AC-8: mention must fire on broker path")
-	assert.Contains(t, notif.Message, "@NotifyBot mentioned you")
+	require.True(t, waitForMember(t, s, convID, human.ID),
+		"AC-8: mention must make a member on the broker path")
 
-	// Also verify the message was persisted through the broker (not directly).
-	// Persistence happens in the eventbus subscriber callback, asynchronously
-	// relative to the mention notification above, so poll rather than assume
-	// it has already landed by the time the notification appears.
 	msgs := waitForBrokerMessage(t, s, convID, def162MentionWaitTimeout)
 	require.GreaterOrEqual(t, len(msgs), 1, "broker must persist the message")
+	requireNoNotifications(t, s, human.ID)
 }
 
 // ---------------------------------------------------------------------------
-// AC-9: agent:-prefixed ThreadID must not fire mentions
+// AC-9: agent:-prefixed ThreadID must not record membership
 //
-// Driven through the handler. ThreadID is caller-settable
-// (OutboundMessageRequest, thread_id at :45). An agent:-prefixed ThreadID
-// is a legacy agent thread, not a topic; the mention guard at
-// handlers_agent_messaging.go:934 must exclude it
-// (mirrors messagebroker.go:591).
+// ThreadID is caller-settable. An agent:-prefixed ThreadID is a legacy agent
+// thread, not a topic; the guard in handlers_agent_messaging.go excludes it.
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AC9_AgentPrefixThreadID_NoMention(t *testing.T) {
+func TestDEF162_AC9_AgentPrefixThreadID_NoMember(t *testing.T) {
 	srv, s, project, agent, human, _ := def162Setup(t)
-	ctx := context.Background()
 
-	// Wire a broker proxy so that Channel:"web" passes
-	// validateChannelRegistered (handlers_agent_messaging.go:2686-2712).
-	// ValidateLegacyMessage (validate_compat.go:42) requires Channel when
-	// ThreadID is set, and validateChannelRegistered requires a broker when
-	// Channel is non-empty.
 	inproc := eventbus.NewInProcessEventBus(slog.Default())
 	t.Cleanup(func() { _ = inproc.Close() })
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
@@ -554,21 +409,13 @@ func TestDEF162_AC9_AgentPrefixThreadID_NoMention(t *testing.T) {
 	proxy := NewMessageBrokerProxy(fanout, s, events,
 		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	srv.mu.RLock()
-	proxy.chatNotifier = srv.chatNotifier
 	proxy.webChatStore = srv.webChatStore
 	srv.mu.RUnlock()
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
 
-	// POST with an explicit agent:-prefixed ThreadID, a user recipient,
-	// and Channel:"web". The handler derives a "group" conversation via
-	// DeriveConversationKey (Rules 2/3 at :482) and proceeds to the mention
-	// guard at :934, which must exclude the agent:-prefixed ThreadID.
-	// ptone/scion#2026: the hub no longer mints a conversation for an
-	// unknown free-text thread_id, so seed the thread conversation; this
-	// test is about the mention guard, not about thread creation.
-	seedThreadConversation(t, s, project.ID, "agent:"+agent.ID)
+	threadConv := seedThreadConversation(t, s, project.ID, "agent:"+agent.ID)
 	body, _ := json.Marshal(OutboundMessageRequest{
 		Recipient: "user:" + human.Email,
 		Msg:       "Hey @UniqueHuman162 via agent thread",
@@ -586,43 +433,8 @@ func TestDEF162_AC9_AgentPrefixThreadID_NoMention(t *testing.T) {
 	srv.handleAgentOutboundMessage(rr, req, agent.ID)
 	require.Equal(t, http.StatusOK, rr.Code, "agent-thread send must succeed: %s", rr.Body.String())
 
-	// Wait for any notifications to settle.
-	time.Sleep(500 * time.Millisecond)
-
-	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
-	require.NoError(t, err)
-
-	// Count mention-type notifications -- there should be zero.
-	mentionCount := 0
-	for _, n := range notifs {
-		if n.Status == ChatNotificationMention {
-			mentionCount++
-		}
-	}
-	assert.Equal(t, 0, mentionCount,
-		"AC-9: agent:-prefixed ThreadID must NOT produce a mention notification")
-
-	// Verify the guard is load-bearing: call fireHumanMentionNotifications
-	// directly with an agent:-prefixed key. It DOES fire a notification,
-	// proving the handler-level guard is necessary (the underlying function
-	// does not guard on key prefix).
-	srv.fireHumanMentionNotifications(ctx,
-		[]string{"UniqueHuman162"},
-		project.ID,
-		"agent:"+agent.ID,
-		"",
-		agent.Name,
-		"Hey @UniqueHuman162 direct-call proof",
-	)
-	directNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
-	require.NoError(t, err)
-	directMentions := 0
-	for _, n := range directNotifs {
-		if n.Status == ChatNotificationMention {
-			directMentions++
-		}
-	}
-	require.Greater(t, directMentions, 0,
-		"fireHumanMentionNotifications with agent:-prefixed key must fire -- "+
-			"this proves the handler guard is load-bearing")
+	time.Sleep(def162Settle)
+	assert.False(t, isUserParticipant(t, s, threadConv.ID, human.ID),
+		"AC-9: an agent:-prefixed ThreadID must not record membership")
+	requireNoNotifications(t, s, human.ID)
 }

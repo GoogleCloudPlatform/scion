@@ -149,6 +149,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/chat/conversations/":                    "policy:chat",
 	"/api/v1/chat/topics/":                           "policy:chat",
 	"/api/v1/chat/dms":                               "policy:chat",
+	"/api/v1/chat/unread-count":                      "policy:chat",
 	"/api/v1/chat/user-prefs":                        "authenticated:chat-prefs",
 	"/api/v1/chat/presence":                          "authenticated:chat-presence",
 	"/api/v1/chat/search":                            "policy:chat",

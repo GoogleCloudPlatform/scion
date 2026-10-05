@@ -2632,6 +2632,7 @@ var Catalog = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/dms", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/unread-count", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/search", Method: "GET"},
 			// handleChatAttachments (upload) is POST-only; only the
 			// by-ID download route (handleChatAttachmentByID) is GET.

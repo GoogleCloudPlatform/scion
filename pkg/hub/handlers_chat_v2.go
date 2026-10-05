@@ -579,6 +579,13 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	// Publish topic created event.
 	s.events.PublishChatTopicEvent(r.Context(), projectID, "created", topic)
 
+	// The creator is a member of the thread they created.
+	s.recordThreadMembersAsync(threadMembership{
+		ProjectID: projectID,
+		ThreadKey: topicID,
+		UserID:    user.ID(),
+	})
+
 	writeJSON(w, http.StatusCreated, topic)
 }
 
@@ -1901,11 +1908,19 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
 
-	// --- W6: Human mention notifications ---
-	// Resolve @mentions that didn't match agents — they may be human members.
-	// Fire in a goroutine to avoid blocking the response.
-	if cn := s.getChatNotifier(); cn != nil && len(mentionNames) > 0 && projectID != "" {
-		go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+	// Thread membership: the sender and any mentioned human project members
+	// become members of the thread. Background and best effort.
+	if !strings.HasPrefix(key, "dm:") {
+		m := threadMembership{
+			ProjectID:    projectID,
+			ThreadKey:    key,
+			UserID:       user.ID(),
+			MentionNames: mentionNames,
+		}
+		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
+			m.ConversationID = chatV2ConvResult.ConversationID
+		}
+		s.recordThreadMembersAsync(m)
 	}
 
 	resp := chatMessageResponse{
@@ -2148,26 +2163,19 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	// unreachable" too, not a false "Delivered".
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
-	// --- W6: Chat notifications ---
-	// Shared unconditionally with the unreachable-default override (R1): a
-	// human @mention in a topic whose default agent was deleted must still
-	// notify, exactly as it would for an ordinary human-to-human message in
-	// that topic.
-	if cn := s.getChatNotifier(); cn != nil {
-		// DM received notification: notify the peer when a DM is sent.
-		if isDM && recipientID != "" && recipientID != user.ID() {
-			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
-				SenderID:        user.ID(),
-				SenderName:      senderLabel,
-				ConversationKey: key,
-				Preview:         content,
-				ProjectID:       projectID,
-			})
-		}
-		// Human mention notifications.
-		if len(mentionNames) > 0 && projectID != "" {
-			go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
-		}
+	// Thread membership. Shared unconditionally with the unreachable-default
+	// override (R1): posting in, or being @mentioned in, a topic whose
+	// default agent was deleted makes members exactly as an ordinary
+	// human-to-human message in that topic does. DMs need no membership
+	// row: the DM key names its members.
+	if !isDM {
+		s.recordThreadMembersAsync(threadMembership{
+			ProjectID:      projectID,
+			ThreadKey:      key,
+			ConversationID: storeMsg.ConversationID,
+			UserID:         user.ID(),
+			MentionNames:   mentionNames,
+		})
 	}
 
 	resp := chatMessageResponse{
@@ -4703,90 +4711,155 @@ func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 }
 
 // ---------------------------------------------------------------------------
-// W6: Chat notification helpers
+// Thread membership
 // ---------------------------------------------------------------------------
 
-// fireHumanMentionNotifications resolves @mention names against project members
-// (humans, not agents) and fires a notification for each match. The sender is
-// excluded from notifications. Agent slugs are skipped — they already get
-// type:mention messages through the existing pipeline.
-func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
-	cn := s.getChatNotifier()
-	if cn == nil {
+// threadMembershipTimeout bounds the background participant writes made by
+// recordThreadMembersAsync, so a slow store cannot pile up goroutines.
+const threadMembershipTimeout = 10 * time.Second
+
+// threadMembership describes who became a member of a thread, and how.
+//
+// A user is a member of a thread when they hold an active user row in
+// conversation_participants for the thread's conversation. The row is a
+// listing index only: project read access remains the authority for
+// reading a thread, and readers of the index must still apply it.
+type threadMembership struct {
+	// ProjectID is the thread's project; mentions resolve against its
+	// human members.
+	ProjectID string
+	// ThreadKey is the topic ID. dm: keys are ignored — DM membership is
+	// the DM key itself.
+	ThreadKey string
+	// ConversationID is the thread's conversation, when the caller already
+	// has it. Empty means look it up from the topic.
+	ConversationID string
+	// UserID is the user who created the thread or posted in it. Empty for
+	// agent senders.
+	UserID string
+	// MentionNames are the @-mention names in the message. Names that
+	// resolve to human project members make those users members.
+	MentionNames []string
+}
+
+// recordThreadMembersAsync runs recordThreadMembers in the background. The
+// send and create paths call it after their own writes have succeeded; it
+// never blocks or fails them.
+func (s *Server) recordThreadMembersAsync(m threadMembership) {
+	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") {
+		return
+	}
+	if m.UserID == "" && len(m.MentionNames) == 0 {
+		return
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("thread membership: panic recording members",
+					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), threadMembershipTimeout)
+		defer cancel()
+		s.recordThreadMembers(ctx, m)
+	}()
+}
+
+// recordThreadMembers writes an active user participant row for the thread's
+// conversation for m.UserID and for every mentioned human project member.
+// It is idempotent and best effort: failures are logged, never returned.
+// EnsureParticipant leaves an existing row untouched, so a user who left
+// the thread is not re-added by a later post or mention.
+func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
+	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") {
+		return
+	}
+	userIDs := make([]string, 0, 1+len(m.MentionNames))
+	if m.UserID != "" {
+		userIDs = append(userIDs, m.UserID)
+	}
+	if len(m.MentionNames) > 0 && m.ProjectID != "" {
+		userIDs = append(userIDs, s.resolveMentionedHumanIDs(ctx, m.MentionNames, m.ProjectID)...)
+	}
+	if len(userIDs) == 0 {
 		return
 	}
 
-	// Resolve human members for the project.
-	humanMembers := s.resolveProjectHumanMembers(ctx, projectID)
-	if len(humanMembers) == 0 {
-		return
-	}
-
-	// Build a lookup by lowercase display name and email.
-	type memberInfo struct {
-		ID          string
-		DisplayName string
-	}
-	lookup := make(map[string]memberInfo)
-	for _, m := range humanMembers {
-		info := memberInfo{ID: m.ID, DisplayName: m.DisplayName}
-		if m.DisplayName != "" {
-			lookup[strings.ToLower(m.DisplayName)] = info
-			// Also match the hyphenated slug that the frontend autocomplete
-			// generates (e.g. "John Smith" → "john-smith"). Without this,
-			// multi-word display names never match the autocomplete output.
-			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != strings.ToLower(m.DisplayName) {
-				lookup[slug] = info
-			}
-		}
-		if m.Email != "" {
-			// Also match by email prefix (before @).
-			lookup[strings.ToLower(m.Email)] = info
-			if at := strings.IndexByte(m.Email, '@'); at > 0 {
-				lookup[strings.ToLower(m.Email[:at])] = info
-			}
-		}
-	}
-
-	// Resolve the conversation name for the notification message.
-	conversationName := ""
-	if !strings.HasPrefix(conversationKey, "dm:") {
+	convID := m.ConversationID
+	if convID == "" {
 		s.mu.RLock()
 		wcs := s.webChatStore
 		s.mu.RUnlock()
-		if wcs != nil {
-			if topic, err := wcs.GetTopic(ctx, conversationKey); err == nil && topic != nil {
-				conversationName = topic.Name
+		if wcs == nil {
+			return
+		}
+		id, err := wcs.GetTopicConversationID(ctx, m.ThreadKey)
+		if err != nil || id == "" {
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				slog.Warn("thread membership: topic conversation lookup failed",
+					"thread", m.ThreadKey, "error", err)
+			}
+			return
+		}
+		convID = id
+	}
+
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if err := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: convID,
+			PrincipalKind:  "user",
+			PrincipalID:    id,
+			Role:           "member",
+		}); err != nil {
+			slog.Warn("thread membership: ensure participant failed",
+				"conversationID", convID, "userID", id, "error", err)
+		}
+	}
+}
+
+// resolveMentionedHumanIDs resolves @mention names against the project's
+// human members (not agents) and returns the matched user IDs, without
+// duplicates. A name matches a member's display name, its hyphenated slug
+// (the form the web autocomplete inserts), their email, or the email's
+// local part, case-insensitively.
+func (s *Server) resolveMentionedHumanIDs(ctx context.Context, mentionNames []string, projectID string) []string {
+	humanMembers := s.resolveProjectHumanMembers(ctx, projectID)
+	if len(humanMembers) == 0 {
+		return nil
+	}
+
+	lookup := make(map[string]string)
+	for _, m := range humanMembers {
+		if m.DisplayName != "" {
+			lookup[strings.ToLower(m.DisplayName)] = m.ID
+			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != strings.ToLower(m.DisplayName) {
+				lookup[slug] = m.ID
+			}
+		}
+		if m.Email != "" {
+			lookup[strings.ToLower(m.Email)] = m.ID
+			if at := strings.IndexByte(m.Email, '@'); at > 0 {
+				lookup[strings.ToLower(m.Email[:at])] = m.ID
 			}
 		}
 	}
 
+	var out []string
 	seen := make(map[string]bool)
 	for _, name := range mentionNames {
-		lower := strings.ToLower(name)
-		member, ok := lookup[lower]
-		if !ok {
+		id, ok := lookup[strings.ToLower(name)]
+		if !ok || seen[id] {
 			continue
 		}
-		// Skip the sender — don't notify yourself.
-		if member.ID == senderUserID {
-			continue
-		}
-		// Deduplicate.
-		if seen[member.ID] {
-			continue
-		}
-		seen[member.ID] = true
-
-		cn.NotifyMention(ctx, member.ID, ChatMessageContext{
-			SenderID:         senderUserID,
-			SenderName:       senderName,
-			ConversationKey:  conversationKey,
-			ConversationName: conversationName,
-			Preview:          messageContent,
-			ProjectID:        projectID,
-		})
+		seen[id] = true
+		out = append(out, id)
 	}
+	return out
 }
 
 // resolveProjectHumanMembers returns the human members of a project by

@@ -779,9 +779,6 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
 		CreatedAt: time.Now().UTC(),
 	}, nil)
-	pub.PublishChatNotification(ctx,
-		&store.Notification{ID: "n2", ProjectID: "p1", Status: "COMPLETED", SubscriberID: "u2"},
-		ChatMessageContext{})
 
 	drain := func() []Event {
 		var got []Event
@@ -811,7 +808,6 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		"project.p1.broker.status", "project.p1.broker.status",
 		"notification.created", "project.p1.notification",
 		"user.u1.message", "project.p1.user.message",
-		"user.u2.notification",
 	}
 
 	events := drain()

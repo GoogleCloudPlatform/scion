@@ -1798,9 +1798,8 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		case "broker", "notification":
 			// Explicit, deliberate pass-through: neither category carries a
 			// per-resource authorization check today. notification.* is
-			// already known to over-share across projects (see
-			// PublishChatNotification in events.go) — narrowing it to
-			// user.<subscriberId>.notification is left for a follow-up.
+			// already known to over-share across projects — narrowing it
+			// to user.<subscriberId>.notification is left for a follow-up.
 			// TODO(ptone/scion#1934): scope notification.created per-user
 			// and drop this pass-through.
 		case "system":

@@ -1284,8 +1284,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		extRef := result.ConvResult.ExternalRef
 		storeMsg.ThreadID = extRef
 		structuredMsg.ThreadID = extRef
-		// Backfill req.ThreadID so the W6 DM notification guard fires
-		// on the non-broker path.
+		// Backfill req.ThreadID so later thread-key guards see the DM key.
 		req.ThreadID = extRef
 
 		// Default Channel to "web" only when no channel was determined
@@ -1393,34 +1392,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		HumanMembers:       humanMembers,
 	})
 
-	// Fire notifications (both broker and non-broker paths).
-	// W6-mention: mention notifications for agent → group messages.
+	// Thread membership: human project members an agent @mentions in a
+	// thread become members of it (both broker and non-broker paths).
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
-		names := messages.ExtractMentions(req.Msg)
-		if len(names) > 0 {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
+		if names := messages.ExtractMentions(req.Msg); len(names) > 0 {
+			m := threadMembership{
+				ProjectID:    agent.ProjectID,
+				ThreadKey:    req.ThreadID,
+				MentionNames: names,
 			}
-			go s.fireHumanMentionNotifications(context.Background(), names, agent.ProjectID,
-				req.ThreadID, "", senderName, req.Msg)
-		}
-	}
-
-	// W6: DM notification for agent → human replies (non-broker path only).
-	if bp := s.GetMessageBrokerProxy(); bp == nil {
-		if cn := s.getChatNotifier(); cn != nil && req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && result.RecipientID != "" {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
+			if result.ConvResult != nil && result.ConvResult.Kind == "group" {
+				m.ConversationID = result.ConversationID
 			}
-			go cn.NotifyDMReceived(context.Background(), result.RecipientID, ChatMessageContext{
-				SenderID:        agent.ID,
-				SenderName:      senderName,
-				ConversationKey: req.ThreadID,
-				Preview:         req.Msg,
-				ProjectID:       agent.ProjectID,
-			})
+			s.recordThreadMembersAsync(m)
 		}
 	}
 

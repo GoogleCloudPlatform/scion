@@ -58,7 +58,7 @@ func def158BrokerSetup(t *testing.T) (
 	srv, s, project, agent, user = def138Setup(t)
 	ctx := context.Background()
 
-	// WebChatStore — also sets up ChatNotifier.
+	// WebChatStore.
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -90,10 +90,9 @@ func def158BrokerSetup(t *testing.T) (
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
-	// Wire the WebChatStore and ChatNotifier into the broker.
+	// Wire the WebChatStore into the broker.
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
-	proxy.chatNotifier = srv.chatNotifier
 	srv.mu.RUnlock()
 
 	// Subscribe the project so deliverToUser actually fires.
@@ -258,7 +257,6 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv.SetMessageBrokerProxy(proxy)
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
-	proxy.chatNotifier = srv.chatNotifier
 	srv.mu.RUnlock()
 	proxy.subscribeProjectUserMessages(project.ID)
 
@@ -408,11 +406,11 @@ func TestDEF158_AC4_InvalidChannel_Rejected_ConvRefPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-6: TouchDMActivity and NotifyDMReceived fire for the conv-ref direct
-// case. Behavioural assertion, not field inspection.
+// AC-6: TouchDMActivity fires for the conv-ref direct case and no DM
+// notification row is created. Behavioural assertion, not field inspection.
 // ---------------------------------------------------------------------------
 
-func TestDEF158_AC6_Notification_And_Watermark_Fire(t *testing.T) {
+func TestDEF158_AC6_Watermark_Fires_NoNotificationRow(t *testing.T) {
 	srv, s, wcs, project, agent, user, dmConv, dmKey := def158BrokerSetup(t)
 	ctx := context.Background()
 
@@ -462,24 +460,12 @@ func TestDEF158_AC6_Notification_And_Watermark_Fire(t *testing.T) {
 	require.True(t, found,
 		"AC-6: TouchDMActivity did not fire — no DM watermark for user+dmKey")
 
-	// C2: prove NotifyDMReceived fires — it creates a notification in the
-	// store. NotifyDMReceived runs in its own goroutine, separate from the
-	// user.message event awaited above, so it is still exposed to the same
-	// scheduling delay under contention; this budget is intentionally kept
-	// time-bounded (10s, matching the event wait above) rather than event-gated.
-	require.Eventually(t, func() bool {
-		notifs, err := s.GetNotifications(ctx, "user", user.ID, false)
-		if err != nil {
-			return false
-		}
-		for _, n := range notifs {
-			if n.Status == ChatNotificationDMReceived {
-				return true
-			}
-		}
-		return false
-	}, 10*time.Second, 50*time.Millisecond,
-		"AC-6: NotifyDMReceived did not fire — no DM notification for recipient")
+	// Chat messages no longer create notification rows: the agent reply
+	// into the DM must leave the recipient's bell empty. The user.message
+	// event above is published after every write deliverToUser makes.
+	notifs, err := s.GetNotifications(ctx, "user", user.ID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "AC-6: an agent DM reply must not create a notification row")
 }
 
 // ---------------------------------------------------------------------------
@@ -554,12 +540,10 @@ func TestDEF158_AC7_OriginalValidation_StillRejects(t *testing.T) {
 //       message is absent from every read path.
 //   (2) ThreadID="" — TouchDMActivity (messagebroker.go:583) is gated on
 //       storeMsg.ThreadID != "", so no unread-dot watermark fires.
-//   (3) ThreadID="" — NotifyDMReceived (messagebroker.go:606) is gated on
-//       storeMsg.ThreadID != "", so no notification fires.
 // There is no single suppression point; the lived experience is "invisible."
 //
 // Correct behaviour: Channel and ThreadID should be populated so the message
-// is visible in history, generates a watermark, and produces a notification —
+// is visible in history and generates a watermark —
 // the same shape sendAgentRouted writes for user→agent DMs
 // (handlers_chat_v2.go:1059).
 //
