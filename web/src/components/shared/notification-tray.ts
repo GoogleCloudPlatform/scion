@@ -53,6 +53,8 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushPermission: PushPermissionState = 'default';
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
   private boundOnPushPreference = (): void => this.syncPushState();
@@ -73,34 +75,48 @@ export class ScionNotificationTray extends LitElement {
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
-    if (this.user) {
-      void this.fetchNotifications();
-      this.startPolling();
-      this.listenForNotifications();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchNotifications();
-        this.startPolling();
-        this.listenForNotifications();
-      } else {
-        this.stopPolling();
-        this.stopListeningForNotifications();
-        this.notifications = [];
-      }
-    }
+    if (changed.has('user')) this.syncUser();
     this.detectTruncation();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchNotifications();
+      this.startPolling();
+      this.listenForNotifications();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForNotifications();
+      this.notifications = [];
+    }
   }
 
   // ---------------------------------------------------------------------------

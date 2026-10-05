@@ -41,6 +41,8 @@ export class ScionInboxTray extends LitElement {
   @state() private open = false;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnUserMessage = this.onUserMessageEvent.bind(this);
 
@@ -50,31 +52,45 @@ export class ScionInboxTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (this.user) {
-      void this.fetchMessages();
-      this.startPolling();
-      this.listenForMessages();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForMessages();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchMessages();
-        this.startPolling();
-        this.listenForMessages();
-      } else {
-        this.stopPolling();
-        this.stopListeningForMessages();
-        this.messages = [];
-      }
+    if (changed.has('user')) this.syncUser();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchMessages();
+      this.startPolling();
+      this.listenForMessages();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForMessages();
+      this.messages = [];
     }
   }
 
