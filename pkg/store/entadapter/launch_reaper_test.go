@@ -44,6 +44,21 @@ var testReaperParams = store.ReaperParams{
 	ReaperInterval:    20 * time.Millisecond,
 }
 
+// wideWindowReaperParams is for tests that assert the cluster is *not*
+// armed yet (or that DisarmedFor is small). It makes the arming threshold
+// (8x keepalive = 8 minutes) and the stale-ok_at re-disarm window
+// (ReaperInterval + 5s margin) far longer than any CI scheduling delay.
+// With testReaperParams' 160ms threshold, a "still disarmed" check is a
+// wall-clock upper bound: under CPU load more than 160ms can pass between
+// the storeNow that set armed_since and the storeNow of the checking tick,
+// and the cluster legitimately re-arms (ptone/scion#3002). Tests using these
+// params simulate elapsed time by backdating armed_since on the store clock
+// instead of sleeping.
+var wideWindowReaperParams = store.ReaperParams{
+	KeepaliveInterval: time.Minute,
+	ReaperInterval:    time.Minute,
+}
+
 // setAgentLaunchDeadline backdates a row's launch_deadline directly through
 // the ent client (white-box test setup: production code only ever sets it via
 // BeginLaunch's now+timeout).
@@ -84,6 +99,22 @@ func setLaunchReaperArmedSince(t *testing.T, ctx context.Context, s *AgentStore,
 	t.Helper()
 	_, err := s.client.LaunchReaperState.UpdateOneID(launchReaperStateID).SetArmedSince(at).Save(ctx)
 	require.NoError(t, err)
+}
+
+// shiftLaunchReaperArmedSince moves the persisted armed_since back by d,
+// relative to whatever value the product code last wrote, and returns the
+// new value. This simulates d of elapsed time since the cluster was last
+// disarmed without sleeping, while still depending on the product having
+// written (or kept) the right armed_since: if a tick wrongly reset it, or
+// failed to reset it, the shifted value is wrong too.
+func shiftLaunchReaperArmedSince(t *testing.T, ctx context.Context, s *AgentStore, d time.Duration) time.Time {
+	t.Helper()
+	rs, err := s.client.LaunchReaperState.Get(ctx, launchReaperStateID)
+	require.NoError(t, err)
+	require.NotNil(t, rs.ArmedSince)
+	shifted := rs.ArmedSince.Add(-d)
+	setLaunchReaperArmedSince(t, ctx, s, shifted)
+	return shifted
 }
 
 // readStoreNow reads the store clock exactly the way RunLaunchReaperTick does
@@ -152,8 +183,9 @@ func TestReaper_ArmsAfterFirstTick_ThenReapsStaleness(t *testing.T) {
 	require.NoError(t, err)
 
 	// Tick 1: no due rows, but it completes and writes ok_at, starting the
-	// arming clock.
-	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
+	// arming clock. wideWindowReaperParams (8-minute arming threshold) keep
+	// the "not yet armed" check below independent of scheduling delay.
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	assert.Empty(t, result.Reaped)
@@ -161,13 +193,15 @@ func TestReaper_ArmsAfterFirstTick_ThenReapsStaleness(t *testing.T) {
 	// Not yet armed: staleness must not fire even if last_report_at looks
 	// old, because 8x keepalive hasn't elapsed since arming.
 	setAgentLastReportAt(t, ctx, s, a.ID, time.Now().Add(-time.Hour))
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err = s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
+	assert.False(t, result.Armed)
 	assert.Empty(t, result.Reaped, "staleness must not reap before the cluster has been armed for 8x keepalive")
 
-	// Wait past the 8x keepalive arming window (8*20ms=160ms) and tick again.
-	time.Sleep(300 * time.Millisecond)
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	// Move the arming clock past the 8x keepalive window (8 minutes) on the
+	// store clock instead of sleeping, and tick again.
+	shiftLaunchReaperArmedSince(t, ctx, s, 9*time.Minute)
+	result, err = s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.True(t, result.Armed)
 	assert.Equal(t, time.Duration(0), result.DisarmedFor, "DisarmedFor must be 0 once armed")
@@ -181,45 +215,40 @@ func TestReaper_ArmsAfterFirstTick_ThenReapsStaleness(t *testing.T) {
 // until the cluster would re-arm. armed_since is backdated relative to the
 // store's own clock (readStoreNow), not the test process's time.Now(), so
 // clock skew between the test host and a remote Postgres server can't
-// inflate the observed DisarmedFor. The assertion is a one-sided band rather
-// than a tight InDelta: a lower bound (DisarmedFor must be at least elapsed)
-// that query latency only ever pushes up, never down, and an upper bound
-// chosen to stay clear of the wrong formula's value even under latency.
+// inflate the observed DisarmedFor. It uses wideWindowReaperParams (8-minute
+// arming threshold) so the two candidate formulas are minutes apart and no
+// assertion depends on how fast the test runs.
 func TestReaper_DisarmedForReflectsElapsedSinceArmedSince(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	_ = createLaunchableAgent(t, ctx, s, projectID, "reaper-disarmedfor-elapsed")
 
 	// First tick creates the row and arms it at this tick's storeNow.
-	_, err := s.RunLaunchReaperTick(ctx, testReaperParams)
+	_, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 
-	// Use a small elapsed (1x keepalive = 20ms), well under the 8x keepalive
-	// arming threshold (160ms), so the two candidate formulas land far apart:
-	// the correct formula (storeNow - armed_since) reports ~20ms plus
-	// whatever latency elapses before the next tick's storeNow read, while
-	// the wrong formula (8*KeepaliveInterval - elapsed) would report a fixed
-	// ~140ms regardless of latency.
-	elapsed := testReaperParams.KeepaliveInterval
+	// Use a small elapsed (1x keepalive = 1 minute), well under the 8x
+	// keepalive arming threshold (8 minutes), so the two candidate formulas
+	// land far apart: the correct formula (storeNow - armed_since) reports
+	// ~1 minute plus whatever latency elapses before the next tick's storeNow
+	// read, while the wrong formula (8*KeepaliveInterval - elapsed) would
+	// report ~7 minutes.
+	elapsed := wideWindowReaperParams.KeepaliveInterval
 	dbNow := readStoreNow(t, ctx, s)
 	setLaunchReaperArmedSince(t, ctx, s, dbNow.Add(-elapsed))
 
-	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	require.False(t, result.Armed, "setup: elapsed must stay under the 8x keepalive arming threshold")
-	// Lower bound: DisarmedFor = storeNow - armed_since can only grow from
-	// elapsed as latency between readStoreNow above and this tick's own
-	// storeNow read adds on top of it; allow a couple of ms of slack for
-	// timestamp quantization. The wrong formula does not satisfy this bound
-	// (it would read ~140ms high, which does pass >= elapsed, but is caught
-	// by the upper bound below instead).
-	assert.GreaterOrEqual(t, result.DisarmedFor.Milliseconds(), elapsed.Milliseconds()-2,
+	// Lower bound: latency between readStoreNow above and this tick's own
+	// storeNow read only adds to elapsed; allow a couple of ms of slack for
+	// timestamp quantization.
+	assert.GreaterOrEqual(t, result.DisarmedFor, elapsed-2*time.Millisecond,
 		"DisarmedFor must be at least elapsed since armed_since (storeNow - armed_since), not time remaining until arming")
-	// Upper bound: stay comfortably below the wrong formula's ~140ms
-	// (8*20ms - 20ms) so ordinary query latency on the correct formula can't
-	// cross into the wrong formula's range and make the two indistinguishable.
-	assert.Less(t, result.DisarmedFor.Milliseconds(), int64(100),
-		"DisarmedFor must stay far below the wrong formula's value (8*KeepaliveInterval-elapsed ~= 140ms); a value this high suggests the wrong formula is in effect")
+	// Upper bound: halfway between the correct (~1m) and wrong (~7m)
+	// formulas. Only minutes of latency could cross it.
+	assert.Less(t, result.DisarmedFor, 4*time.Minute,
+		"DisarmedFor must stay far below the wrong formula's value (8*KeepaliveInterval-elapsed ~= 7m); a value this high suggests the wrong formula is in effect")
 }
 
 // TestReaper_DisarmedForZeroWhenArmed proves DisarmedFor is 0 once the
@@ -467,32 +496,20 @@ func withLaunchReaperFailureHook(t *testing.T, fn func(point string) error) {
 	t.Cleanup(func() { launchReaperFailureHook = prev })
 }
 
-// disarmObserveParams is used by the "a failed tick disarms" tests
-// (R10_4, R10_5). It makes the arming threshold (8x keepalive = 8 minutes)
-// and the stale-ok_at re-disarm window (ReaperInterval + 5s margin) far
-// longer than any CI scheduling delay. With testReaperParams' 160ms
-// threshold, the tick that checks "now disarmed" could itself see the
-// cluster re-armed: under CPU load, more than 160ms can pass between the
-// best-effort disarm's storeNow and that tick's storeNow (ptone/scion#3002).
-var disarmObserveParams = store.ReaperParams{
-	KeepaliveInterval: time.Minute,
-	ReaperInterval:    time.Minute,
-}
-
 // armLaunchReaperForDisarmTest arms the cluster without relying on real
 // sleeps: one tick creates the arming row, then armed_since is backdated an
-// hour on the store clock, well past disarmObserveParams' 8-minute arming
+// hour on the store clock, well past wideWindowReaperParams' 8-minute arming
 // threshold. It returns the backdated armed_since. A later tick using
-// disarmObserveParams then reports Armed == false only if something reset
+// wideWindowReaperParams then reports Armed == false only if something reset
 // armed_since to a recent value, such as the best-effort disarm write.
 func armLaunchReaperForDisarmTest(t *testing.T, ctx context.Context, s *AgentStore) time.Time {
 	t.Helper()
-	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	armedSince := readStoreNow(t, ctx, s).Add(-time.Hour)
 	setLaunchReaperArmedSince(t, ctx, s, armedSince)
-	result, err = s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	result, err = s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	require.True(t, result.Armed, "setup: the cluster must be armed before this test exercises disarming it")
@@ -510,7 +527,7 @@ func requireDisarmedAfterFailedTick(t *testing.T, ctx context.Context, s *AgentS
 	require.NotNil(t, rs.ArmedSince)
 	assert.True(t, rs.ArmedSince.After(armedBefore.Add(30*time.Minute)), "%s: armed_since must be reset to the disarm write's storeNow (was %v, now %v)", msg, armedBefore, *rs.ArmedSince)
 
-	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	assert.False(t, result.Armed, msg)
@@ -531,7 +548,7 @@ func TestReaper_R10_4_TickLevelFailureDisarms(t *testing.T) {
 		}
 		return nil
 	})
-	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickFailed, result.Outcome)
 	launchReaperFailureHook = nil
@@ -786,7 +803,7 @@ func TestReaper_R10_5_CommitFailureDisarms(t *testing.T) {
 		}
 		return nil
 	})
-	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickFailed, result.Outcome)
 	launchReaperFailureHook = nil
@@ -802,10 +819,13 @@ func TestReaper_R10_5_CommitFailureDisarms(t *testing.T) {
 // 120s) — the same technique setAgentLaunchDeadline already uses for
 // launch_deadline, and consistent with this file's clock-basis note above:
 // timings are stored timestamps relative to the store clock, not a faked Go
-// clock. testReaperParams' short KeepaliveInterval/ReaperInterval (20ms) make
-// the actual arming/staleness thresholds (8x keepalive = 160ms) fast in real
-// time; what is backdated is only the *history* (ok_at, armed_since) a real
-// 180s outage or a real 60s stuck lock holder would have produced.
+// clock. What is backdated is only the *history* (ok_at, armed_since) a real
+// 180s outage or a real 60s stuck lock holder would have produced. The
+// outage case uses wideWindowReaperParams and also simulates the time
+// elapsed since recovery by shifting armed_since, because it asserts the
+// cluster is still disarmed partway through the post-recovery window; the
+// two-replica case only ever waits for arming (a lower bound), so it keeps
+// testReaperParams' 160ms threshold and a real sleep.
 
 // TestReaper_H2_OutageRecovery_ResumingAndSilentBroker covers the design's
 // "180s store outage" case: after a store outage longer than the staleness
@@ -819,33 +839,35 @@ func TestReaper_H2_OutageRecovery_ResumingAndSilentBroker(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	resuming := createLaunchableAgent(t, ctx, s, projectID, "reaper-outage-resuming")
 	silent := createLaunchableAgent(t, ctx, s, projectID, "reaper-outage-silent")
+	p := wideWindowReaperParams // 8-minute arming/staleness window
 
 	_, err := s.BeginLaunch(ctx, resuming.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
 	_, err = s.BeginLaunch(ctx, silent.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
 
-	// Steady state before the outage: armed, both agents' last report already
-	// older than the staleness window would normally require — but not yet
-	// stale relative to armed_since, since arming just happened.
-	preOutage := time.Now().Add(-time.Hour)
-	setAgentLastReportAt(t, ctx, s, resuming.ID, preOutage)
-	setAgentLastReportAt(t, ctx, s, silent.ID, preOutage)
-
-	result, err := s.RunLaunchReaperTick(ctx, testReaperParams) // creates the arming row
+	result, err := s.RunLaunchReaperTick(ctx, p) // creates the arming row
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 
-	// Simulate the outage: no tick has completed for far longer than
-	// reaperInterval + the arming margin, as a real 180s outage would leave
-	// ok_at.
-	setLaunchReaperOkAt(t, ctx, s, time.Now().Add(-time.Hour))
+	// Steady state before the outage: the cluster has been armed for a long
+	// time, and both brokers reported right up to the moment the outage
+	// began an hour ago. The outage then left ok_at an hour old, as a real
+	// 180s outage would leave it far beyond reaperInterval + the arming
+	// margin. Without the recovery re-disarm, the next tick would be armed
+	// and reap both agents immediately.
+	storeNow := readStoreNow(t, ctx, s)
+	outageStart := storeNow.Add(-time.Hour)
+	setLaunchReaperArmedSince(t, ctx, s, storeNow.Add(-2*time.Hour))
+	setLaunchReaperOkAt(t, ctx, s, outageStart)
+	setAgentLastReportAt(t, ctx, s, resuming.ID, outageStart)
+	setAgentLastReportAt(t, ctx, s, silent.ID, outageStart)
 
 	// Recovery tick: the arm check sees a stale ok_at and re-disarms
 	// (armed_since = this tick's storeNow), so this very tick must not reap
 	// either agent for staleness, no matter how long their last report has
 	// been silent.
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err = s.RunLaunchReaperTick(ctx, p)
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	assert.False(t, result.Armed, "the recovery tick itself must be disarmed")
@@ -855,22 +877,31 @@ func TestReaper_H2_OutageRecovery_ResumingAndSilentBroker(t *testing.T) {
 	// The resuming broker starts reporting again right after recovery.
 	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now())
 
-	// A tick partway through the post-recovery staleness window (well under
-	// 8x keepalive = 160ms) must still not reap the silent agent: it is not
-	// "earlier" relief from the outage, it is the normal arming gate.
-	time.Sleep(60 * time.Millisecond)
+	// A tick halfway through the post-recovery staleness window must still
+	// not reap the silent agent: it is not "earlier" relief from the outage,
+	// it is the normal arming gate. Elapsed time since recovery is simulated
+	// by shifting the recovery tick's armed_since back 4 minutes, so the
+	// check does not depend on how long this test takes to reach the tick.
+	partwayArmedSince := shiftLaunchReaperArmedSince(t, ctx, s, 4*time.Minute)
 	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now()) // the resumed broker keeps reporting on schedule
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err = s.RunLaunchReaperTick(ctx, p)
 	require.NoError(t, err)
+	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	assert.False(t, result.Armed, "still within the post-recovery arming window")
+	assert.GreaterOrEqual(t, result.DisarmedFor, 4*time.Minute, "DisarmedFor must count from the recovery tick")
 	assert.Empty(t, result.Reaped, "the silent agent must not be reaped before a full staleness window has elapsed since recovery")
+	rs, err := s.client.LaunchReaperState.Get(ctx, launchReaperStateID)
+	require.NoError(t, err)
+	require.NotNil(t, rs.ArmedSince)
+	assert.True(t, partwayArmedSince.Equal(*rs.ArmedSince), "a healthy tick inside the arming window must not move armed_since (was %v, now %v)", partwayArmedSince, *rs.ArmedSince)
 
-	// Past the full post-recovery staleness window: the cluster is armed
-	// again, and only the silent agent (last report still from before the
-	// outage) is reaped. The resuming agent's fresh reports keep it safe.
-	time.Sleep(150 * time.Millisecond)
+	// Past the full post-recovery staleness window (4 + 5 = 9 minutes > 8):
+	// the cluster is armed again, and only the silent agent (last report
+	// still from before the outage) is reaped. The resuming agent's fresh
+	// reports keep it safe.
+	shiftLaunchReaperArmedSince(t, ctx, s, 5*time.Minute)
 	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now()) // still on schedule right up to this tick
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err = s.RunLaunchReaperTick(ctx, p)
 	require.NoError(t, err)
 	assert.True(t, result.Armed, "the cluster must be armed again a full staleness window after recovery")
 	require.Len(t, result.Reaped, 1, "only the silent agent should be reaped")
