@@ -119,7 +119,11 @@ func TestProcessHookData_SessionMetricsReportedAcrossHookRuns(t *testing.T) {
 	t.Setenv("SCION_TELEMETRY_CLOUD_ENABLED", "false")
 	t.Setenv("SCION_OTEL_GRPC_PORT", strconv.Itoa(startDiscardingReceiver(t)))
 
-	// Init daemon side, as RunInit sets it up.
+	// Init daemon side, as RunInit sets it up. This check covers only
+	// registerLifecycleTelemetryHandler: it cannot catch an OnSessionEnd
+	// assignment re-added inline in RunInit. What prevents a second report
+	// in that case is the empty-ID check in hub/metrics.go ReportMetrics,
+	// since init's session-end carries no session ID.
 	manager := hooks.NewLifecycleManager()
 	manager.HooksDirs = []string{t.TempDir()} // no script hooks
 	lifecycle := registerLifecycleTelemetryHandler(manager, nil, nil)
