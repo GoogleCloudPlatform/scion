@@ -159,7 +159,9 @@ type ControlChannelClient struct {
 	// gives up waiting past its own dispatch timeout, or the original
 	// caller's request was itself cancelled) can abort the request's
 	// context instead of letting it run to completion uncancellably.
-	cancels  map[string]context.CancelFunc
+	// Entries are added before the request waits for a dispatch slot and
+	// removed when it finishes (see trackRequest).
+	cancels  map[string]*requestCancel
 	cancelMu sync.Mutex
 
 	// writePing sends one keepalive ping on conn. It is nil in production
@@ -203,7 +205,7 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 		log:            log,
 		streams:        make(map[string]*StreamHandler),
 		dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
-		cancels:        make(map[string]context.CancelFunc),
+		cancels:        make(map[string]*requestCancel),
 	}
 }
 
@@ -578,36 +580,77 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 	}
 
 	conn := c.conn
+	// Register the request's cancel synchronously, on the read loop, before
+	// the dispatch goroutine starts. The read loop handles frames in order,
+	// so a "cancel" frame the Hub sends for this RequestID always finds it,
+	// including while the request is still queued for a dispatch slot
+	// (ptone/scion#2877).
+	ctx, done := c.trackRequest(req.RequestID)
 	c.wg.Add(1)
-	go c.dispatchRequest(conn, req)
+	go c.runRequest(ctx, done, conn, req)
 	return nil
 }
 
-// dispatchRequest runs the HTTP handler for a tunneled request and sends the
-// response back over the WebSocket. It acquires the dispatch semaphore to
-// bound concurrency and releases it when done.
+// dispatchRequest registers req's cancel and runs it. handleRequest uses
+// trackRequest and runRequest directly so registration happens on the read
+// loop; this wrapper is for callers that dispatch a single request
+// themselves. The caller must have called c.wg.Add(1).
 func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req wsprotocol.RequestEnvelope) {
+	ctx, done := c.trackRequest(req.RequestID)
+	c.runRequest(ctx, done, conn, req)
+}
+
+// trackRequest derives the per-request cancellable context and registers its
+// CancelFunc under requestID, so a "cancel" message from the Hub (sent when
+// it gives up waiting, e.g. its own dispatch timeout elapsed or the original
+// caller's request was itself cancelled) can abort the request: while it is
+// queued for a dispatch slot, or while its handler runs. Without this, a
+// slow create (e.g. a cold-start container/sandbox build) keeps running and
+// can leak a started sandbox the Hub no longer knows about, and a queued
+// request keeps its place in the queue after nobody is waiting for it.
+//
+// The returned done func unregisters and cancels the context; call it
+// exactly once, when the request has finished.
+func (c *ControlChannelClient) trackRequest(requestID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	entry := c.registerCancel(requestID, cancel)
+	return ctx, func() {
+		c.unregisterCancel(requestID, entry)
+		cancel()
+	}
+}
+
+// runRequest runs the HTTP handler for a tunneled request and sends the
+// response back over the WebSocket. It acquires the dispatch semaphore to
+// bound concurrency and releases it when done. ctx is the request's own
+// context from trackRequest; done is called when runRequest returns.
+//
+// A request whose ctx is cancelled before it obtains a dispatch slot leaves
+// the queue at once: its handler never runs, so nothing it would have done
+// (for keys, terminal injection) can happen, and no response is sent — the
+// Hub has already stopped waiting for this RequestID. This never reports
+// non-execution to the Hub; the Hub decides its own outcome when it gives up
+// (for keys, keys_outcome_unknown unless non-execution is proven otherwise).
+func (c *ControlChannelClient) runRequest(ctx context.Context, done func(), conn *wsprotocol.Connection, req wsprotocol.RequestEnvelope) {
 	defer c.wg.Done()
+	defer done()
 
 	// Acquire dispatch semaphore to limit concurrent goroutines.
 	select {
 	case c.dispatchSem <- struct{}{}:
 		defer func() { <-c.dispatchSem }()
+	case <-ctx.Done():
+		c.logQueuedCancel(req)
+		return
 	case <-c.ctx.Done():
 		return
 	}
-
-	// Derive a per-request cancellable context so a "cancel" message from
-	// the Hub (sent when it gives up waiting, e.g. its own dispatch timeout
-	// elapsed or the original caller's request was itself cancelled) can
-	// abort this request instead of letting it run to completion after
-	// nobody is listening for the result. Without this, a slow create
-	// (e.g. a cold-start container/sandbox build) keeps running and can
-	// leak a started sandbox the Hub no longer knows about.
-	ctx, cancel := context.WithCancel(context.Background())
-	c.registerCancel(req.RequestID, cancel)
-	defer c.unregisterCancel(req.RequestID)
-	defer cancel()
+	// select picks at random when a slot and the cancel are both ready:
+	// recheck so a request cancelled while queued never runs its handler.
+	if ctx.Err() != nil {
+		c.logQueuedCancel(req)
+		return
+	}
 
 	// Extract trace context from request envelope headers for cross-component propagation.
 	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(req.Headers))
@@ -675,26 +718,62 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	}
 }
 
-// registerCancel records the CancelFunc for an in-flight dispatched request
-// so a later "cancel" message from the Hub can abort it.
-func (c *ControlChannelClient) registerCancel(requestID string, cancel context.CancelFunc) {
+// logQueuedCancel records, at debug level, that req was cancelled by the Hub
+// before it obtained a dispatch slot and so never ran.
+func (c *ControlChannelClient) logQueuedCancel(req wsprotocol.RequestEnvelope) {
+	if c.config.Debug {
+		c.log.Debug("Control channel request cancelled while queued; not dispatched",
+			"requestID", req.RequestID, "method", req.Method, "path", req.Path)
+	}
+}
+
+// requestCancel is one registration in ControlChannelClient.cancels. Its
+// pointer identity lets unregisterCancel remove only its own entry.
+type requestCancel struct {
+	cancel context.CancelFunc
+}
+
+// registerCancel records the CancelFunc for a dispatched request so a later
+// "cancel" message from the Hub can abort it, and returns the registration
+// for unregisterCancel.
+//
+// RequestIDs are unique in practice (the Hub generates a UUID per request).
+// If one is reused while an earlier request with the same ID is still
+// tracked, the new entry replaces the old one and a cancel for that ID
+// cancels both requests, so neither becomes uncancellable.
+//
+// cancelMu guards only the map: it is never held while calling a handler or
+// a CancelFunc, so the read loop cannot block on a running handler here.
+func (c *ControlChannelClient) registerCancel(requestID string, cancel context.CancelFunc) *requestCancel {
 	c.cancelMu.Lock()
+	defer c.cancelMu.Unlock()
 	if c.cancels == nil {
 		// Defensive lazy-init: NewControlChannelClient always sets this up,
 		// but tests and other callers sometimes build a ControlChannelClient
 		// via struct literal.
-		c.cancels = make(map[string]context.CancelFunc)
+		c.cancels = make(map[string]*requestCancel)
 	}
-	c.cancels[requestID] = cancel
-	c.cancelMu.Unlock()
+	entry := &requestCancel{cancel: cancel}
+	if prev, ok := c.cancels[requestID]; ok {
+		prevCancel := prev.cancel
+		entry.cancel = func() {
+			cancel()
+			prevCancel()
+		}
+	}
+	c.cancels[requestID] = entry
+	return entry
 }
 
-// unregisterCancel removes the CancelFunc once the request has completed
-// (successfully, with an error, or via cancellation), so handleCancel can
-// no longer find and re-invoke it.
-func (c *ControlChannelClient) unregisterCancel(requestID string) {
+// unregisterCancel removes entry once its request has finished
+// (successfully, with an error, or via cancellation, whether it ran or was
+// cancelled while queued), so handleCancel can no longer find it. It leaves
+// a newer registration for the same RequestID in place.
+func (c *ControlChannelClient) unregisterCancel(requestID string, entry *requestCancel) {
 	c.cancelMu.Lock()
-	delete(c.cancels, requestID)
+	if c.cancels[requestID] == entry {
+		delete(c.cancels, requestID)
+	}
 	c.cancelMu.Unlock()
 }
 
@@ -714,7 +793,7 @@ func (c *ControlChannelClient) handleCancel(data []byte) error {
 	}
 
 	c.cancelMu.Lock()
-	cancel, ok := c.cancels[msg.RequestID]
+	entry, ok := c.cancels[msg.RequestID]
 	c.cancelMu.Unlock()
 
 	if !ok {
@@ -727,7 +806,7 @@ func (c *ControlChannelClient) handleCancel(data []byte) error {
 	if c.config.Debug {
 		c.log.Debug("Cancelling in-flight request", "requestID", msg.RequestID)
 	}
-	cancel()
+	entry.cancel()
 	return nil
 }
 

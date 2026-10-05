@@ -585,6 +585,16 @@ deadline. The broker cannot extend the resulting deadline; it must enforce
 expiration at broker admission, after any control-channel semaphore/target-lock wait, and
 immediately before runtime execution. Hub/broker clocks are assumed reasonably synchronized.
 
+**Early cancellation (ptone/scion#2877).** When the Hub gives up on a tunneled keys request
+(caller disconnect, its own deadline, or dispatch timeout), it sends a control-channel `cancel`
+frame for that RequestID. The broker registers each tunneled request's cancel on the read
+loop before the request waits for a dispatch slot, so a cancelled request leaves the queue at
+once without running its handler or sending a response. A cancel during the target-lock wait
+ends the wait (`ErrKeysNotStarted`, so nothing ran). A cancel after delivery may have begun
+stays ambiguous (the "any other error" row in §4.3). Cancellation never extends the deadline,
+never retries, and never acknowledges non-execution to the Hub. The Hub classifies its own
+abandoned request as `keys_outcome_unknown`, as before.
+
 ### 4.3 Error classification
 
 `BrokerClient.ExecuteKeys` and `Dispatcher.DispatchAgentKeys` both return `(BrokerResult, error)`.

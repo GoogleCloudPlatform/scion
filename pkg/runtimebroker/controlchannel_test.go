@@ -460,7 +460,7 @@ func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
 		log:         slog.Default(),
 		streams:     make(map[string]*StreamHandler),
 		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		cancels:     make(map[string]context.CancelFunc),
+		cancels:     make(map[string]*requestCancel),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -518,7 +518,7 @@ func TestHandleCancel_UnknownRequestIDIsNoop(t *testing.T) {
 	client := &ControlChannelClient{
 		config:  ControlChannelConfig{Debug: true},
 		log:     slog.Default(),
-		cancels: make(map[string]context.CancelFunc),
+		cancels: make(map[string]*requestCancel),
 	}
 
 	cancelMsg, err := json.Marshal(wsprotocol.NewCancelMessage("no-such-request"))
@@ -528,6 +528,247 @@ func TestHandleCancel_UnknownRequestIDIsNoop(t *testing.T) {
 	if err := client.handleMessage(cancelMsg); err != nil {
 		t.Fatalf("handleMessage(cancel) returned error: %v", err)
 	}
+}
+
+// newCancelTestClient builds a client with the given handler and dispatch
+// slot count, for the cancel-registration tests below.
+func newCancelTestClient(t *testing.T, handler http.Handler, slots int) (*ControlChannelClient, *wsprotocol.Connection) {
+	t.Helper()
+	brokerConn, hubConn, cleanup := newWSPair(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &ControlChannelClient{
+		config:      ControlChannelConfig{Debug: true},
+		conn:        brokerConn,
+		handlers:    handler,
+		log:         slog.Default(),
+		streams:     make(map[string]*StreamHandler),
+		dispatchSem: make(chan struct{}, slots),
+		cancels:     make(map[string]*requestCancel),
+		ctx:         ctx,
+		cancel:      cancel,
+	}, hubConn
+}
+
+func feed(t *testing.T, client *ControlChannelClient, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := client.handleMessage(data); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+}
+
+func cancelCount(client *ControlChannelClient) int {
+	client.cancelMu.Lock()
+	defer client.cancelMu.Unlock()
+	return len(client.cancels)
+}
+
+func waitWG(t *testing.T, client *ControlChannelClient) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { client.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch goroutines did not finish")
+	}
+}
+
+// TestHandleRequest_CancelWhileQueued_AnyRequest covers ptone/scion#2877 for
+// every tunneled request, not only keys: a cancel for a request still
+// waiting for a dispatch slot removes it from the queue without running its
+// handler, and leaves no cancel registration behind.
+func TestHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T) {
+	var ran atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	client, hubConn := newCancelTestClient(t, handler, 1)
+	client.dispatchSem <- struct{}{} // saturate
+
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-1", Method: "POST", Path: "/api/v1/agents"})
+	feed(t, client, wsprotocol.NewCancelMessage("queued-1"))
+	waitWG(t, client)
+
+	<-client.dispatchSem
+	if got := ran.Load(); got != 0 {
+		t.Errorf("handler ran %d times, want 0", got)
+	}
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("tracked cancels = %d, want 0", got)
+	}
+	_ = hubConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	var resp wsprotocol.ResponseEnvelope
+	if err := hubConn.ReadJSON(&resp); err == nil {
+		t.Errorf("unexpected response for a request cancelled while queued: %+v", resp)
+	}
+}
+
+// TestHandleRequest_UnregistersOnEveryExitPath checks the cancel map is
+// empty after a request completes normally, after one is cancelled while
+// queued, after one is cancelled mid-handler, and after the client itself
+// shuts down while a request is queued.
+func TestHandleRequest_UnregistersOnEveryExitPath(t *testing.T) {
+	release := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/block" {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	client, hubConn := newCancelTestClient(t, handler, 1)
+	go func() {
+		for {
+			var resp wsprotocol.ResponseEnvelope
+			if err := hubConn.ReadJSON(&resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Completed normally.
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "done-1", Method: "GET", Path: "/ok"})
+	waitWG(t, client)
+	if got := cancelCount(client); got != 0 {
+		t.Fatalf("after normal completion: tracked cancels = %d, want 0", got)
+	}
+
+	// Cancelled mid-handler, with a second request queued behind it and
+	// cancelled while queued.
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "run-1", Method: "GET", Path: "/block"})
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-2", Method: "GET", Path: "/ok"})
+	if got := cancelCount(client); got != 2 {
+		t.Fatalf("tracked cancels while running/queued = %d, want 2", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	feed(t, client, wsprotocol.NewCancelMessage("queued-2"))
+	feed(t, client, wsprotocol.NewCancelMessage("run-1"))
+	waitWG(t, client)
+	if got := cancelCount(client); got != 0 {
+		t.Fatalf("after cancels: tracked cancels = %d, want 0", got)
+	}
+
+	// Client shutdown while a request is queued.
+	client.dispatchSem <- struct{}{}
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-3", Method: "GET", Path: "/ok"})
+	client.cancel()
+	waitWG(t, client)
+	if got := cancelCount(client); got != 0 {
+		t.Fatalf("after client shutdown: tracked cancels = %d, want 0", got)
+	}
+	close(release)
+}
+
+// TestHandleRequest_DuplicateRequestIDIsHarmless checks that reusing a
+// RequestID while the first request is still tracked neither strands a
+// request (a cancel for the ID reaches both) nor lets the first request's
+// cleanup drop the second one's registration.
+func TestHandleRequest_DuplicateRequestIDIsHarmless(t *testing.T) {
+	var cancelled atomic.Int32
+	started := make(chan struct{}, 2)
+	finish := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			cancelled.Add(1)
+		case <-finish:
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	client, hubConn := newCancelTestClient(t, handler, 2)
+	go func() {
+		for {
+			var resp wsprotocol.ResponseEnvelope
+			if err := hubConn.ReadJSON(&resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Cancel by ID reaches both requests.
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "dup", Method: "GET", Path: "/x"})
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "dup", Method: "GET", Path: "/x"})
+	<-started
+	<-started
+	feed(t, client, wsprotocol.NewCancelMessage("dup"))
+	waitWG(t, client)
+	if got := cancelled.Load(); got != 2 {
+		t.Errorf("requests cancelled = %d, want 2", got)
+	}
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("tracked cancels = %d, want 0", got)
+	}
+
+	// The first request finishing must not unregister the second.
+	ctx1, done1 := client.trackRequest("dup2")
+	ctx2, done2 := client.trackRequest("dup2")
+	done1()
+	if ctx1.Err() == nil {
+		t.Error("first request's ctx not cancelled by its own done")
+	}
+	if got := cancelCount(client); got != 1 {
+		t.Fatalf("after first done: tracked cancels = %d, want 1 (second must stay registered)", got)
+	}
+	feed(t, client, wsprotocol.NewCancelMessage("dup2"))
+	if ctx2.Err() == nil {
+		t.Error("cancel after the first duplicate finished did not reach the second")
+	}
+	done2()
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("after both done: tracked cancels = %d, want 0", got)
+	}
+	close(finish)
+}
+
+// TestHandleMessage_NotBlockedByRunningHandler checks that registering a
+// new request and processing a cancel on the read loop never wait for a
+// running handler, including when every dispatch slot is held by handlers
+// that are blocked.
+func TestHandleMessage_NotBlockedByRunningHandler(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-block
+		w.WriteHeader(http.StatusOK)
+	})
+	client, hubConn := newCancelTestClient(t, handler, 1)
+	go func() {
+		for {
+			var resp wsprotocol.ResponseEnvelope
+			if err := hubConn.ReadJSON(&resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "busy", Method: "GET", Path: "/x"})
+	<-started
+
+	loopDone := make(chan struct{})
+	go func() {
+		feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "next", Method: "GET", Path: "/x"})
+		feed(t, client, wsprotocol.NewCancelMessage("next"))
+		feed(t, client, wsprotocol.NewCancelMessage("unknown"))
+		close(loopDone)
+	}()
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop blocked behind a running handler")
+	}
+	close(block)
+	waitWG(t, client)
 }
 
 func TestBuildWebSocketURL_Normalization(t *testing.T) {
