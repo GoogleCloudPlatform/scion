@@ -177,9 +177,11 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		notCalled []string
 	}{
 		{
-			name:   "workspace mode",
-			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.WorkspaceModeError = "worktree workspaces cannot move" },
-			check:  moveCheckWorkspaceMode, status: http.StatusBadRequest, code: ErrCodeValidationError,
+			name: "workspace mode",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.WorkspaceModeError = "worktree workspaces cannot move"
+			},
+			check: moveCheckWorkspaceMode, status: http.StatusBadRequest, code: ErrCodeValidationError,
 			msgContain: "worktree workspaces cannot move",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
@@ -248,9 +250,11 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
-			name:   "gcs-synced workspace",
-			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.AppliedConfig.WorkspaceStoragePath = "gs://bucket/ws" },
-			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
+			name: "gcs-synced workspace",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.Agent.AppliedConfig.WorkspaceStoragePath = "gs://bucket/ws"
+			},
+			check: moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: "GCS-synced",
 		},
 		{
@@ -261,9 +265,11 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
-			name:   "workspace placement local",
-			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.WorkspacePlacement = api.WorkspacePlacementLocal },
-			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
+			name: "workspace placement local",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.Agent.WorkspacePlacement = api.WorkspacePlacementLocal
+			},
+			check: moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: `not on the shared NFS export on broker src-name (placement "local")`,
 		},
 		{
