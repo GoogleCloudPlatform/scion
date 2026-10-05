@@ -381,16 +381,13 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
-	// an admin sets it, and clearing it returns to the bootstrap name, or,
-	// with none, to the startup default (os.Hostname). Resolve it here, with
-	// the helper startup uses, rather than leaving "" (which ApplySnapshot
-	// would skip, keeping a stale managed name in use).
-	if snap.HubName == "" {
-		bootstrapName := ""
-		if o.bootstrapKoanf != nil {
-			bootstrapName = o.bootstrapKoanf.String("server.hub.hub_name")
-		}
-		snap.HubName = config.ResolveHubNameOrDefault(bootstrapName)
+	// an admin sets it, and clearing it returns to the bootstrap name. The
+	// snapshot holds the configured value only; "" means unset, and
+	// ApplySnapshot then uses this replica's own startup default
+	// (config.ResolveHubNameOrDefault). A replica's hostname must not appear
+	// here: GET returns this value and clients echo it back to any replica.
+	if snap.HubName == "" && o.bootstrapKoanf != nil {
+		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
 	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
@@ -987,6 +984,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		TelemetryEnabled:   gc.TelemetryEnabled,
 		AdminMode:          gc.AdminMode,
 		MaintenanceMessage: gc.MaintenanceMessage,
+		// The configured hub_name ("" when unset); ApplySnapshot resolves
+		// "" to the startup default, as at startup.
+		HubName: gc.Hub.HubName,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1181,9 +1181,12 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
-	// Hub name
-	if snap.HubName != "" {
-		s.config.HubName = snap.HubName
+	// Hub name: the configured value, or when unset this replica's startup
+	// default (os.Hostname), so a cleared hub_name does not leave a stale
+	// managed name in use. Reported as applied only when it changes.
+	hubName := config.ResolveHubNameOrDefault(snap.HubName)
+	if s.config.HubName != hubName {
+		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
 	}
 
@@ -1241,10 +1244,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
-	if snap.HubName != "" {
-		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
-			gcpBackend.SetHubName(snap.HubName)
-		}
+	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+		gcpBackend.SetHubName(hubName)
 	}
 
 	// Runtimes, profiles, and harness configs: update the global settings

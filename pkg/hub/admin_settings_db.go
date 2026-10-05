@@ -429,9 +429,10 @@ func bootstrapAppliesWhenAbsent(section, key string) bool {
 	return section == "endpoints" && key == "hub_name"
 }
 
-// effectiveHubName returns the hub_name in effect: the snapshot value, which
-// is the DB value or, when the endpoints row has none, the bootstrap value,
-// or else the startup default (config.ResolveHubNameOrDefault).
+// effectiveHubName returns the configured hub_name: the DB value or, when
+// the endpoints row has none, the bootstrap value. "" means unset (each
+// replica then runs under its own startup default, which is deliberately
+// not returned: GET serves this value and clients echo it to any replica).
 // GET server-config returns this value.
 func effectiveHubName(ops *OperationalSettings) string {
 	return ops.Snapshot().HubName
@@ -470,11 +471,9 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 // request onto d, presence-aware (N6):
 //   - public_url: non-empty sets it; an explicit "" clears it.
 //   - image_registry: set when present (an explicit "" clears it).
-//   - hub_name: set when the request changes it (hubNameChanged); a change
-//     to "" clears it, so the bootstrap name applies again. An echo of the
-//     effective value was already dropped by dropEchoedHubName. With
-//     hubNameChanged false, a non-empty request value is still applied (the
-//     replace-semantics form in buildSingleSectionDoc).
+//   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
+//     an echo of the configured value); a change to "" clears it, so the
+//     bootstrap name, or with none each replica's startup default, applies.
 //
 // Omitted fields keep whatever d already holds.
 func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigUpdateRequest, fp *fieldPresence, hubNameChanged bool) {
@@ -485,7 +484,7 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 		} else if hubFP.has("public_url") {
 			d.PublicURL = "" // explicitly cleared
 		}
-		if req.Server.Hub.HubName != "" || hubNameChanged {
+		if hubNameChanged {
 			d.HubName = req.Server.Hub.HubName
 		}
 	}
@@ -1637,10 +1636,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		doc = d
 
 	case "endpoints":
-		// handlePutServerConfigDB rebuilds this doc on the current row
-		// (buildEndpointsDocOnCurrent); this is the replace-semantics form.
+		// Standalone callers get replace semantics: exactly the request's
+		// endpoints fields. handlePutServerConfigDB rebuilds the doc on the
+		// current row (buildEndpointsDocOnCurrent) after dropping an echoed
+		// hub_name, so here any hub_name the request still carries counts
+		// as a change.
 		d := &opsettings.EndpointsSettings{}
-		overlayEndpointsRequest(d, req, fp, false)
+		overlayEndpointsRequest(d, req, fp, true)
 		doc = d
 
 	case "github_app":

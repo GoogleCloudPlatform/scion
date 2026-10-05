@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,28 +233,159 @@ func TestServerConfigDB_HubName_InvalidChangeRejected(t *testing.T) {
 	assert.Equal(t, before, after)
 }
 
-// With no bootstrap hub_name, clearing a managed hub_name returns the
-// running hub, the snapshot and GET to the startup default
-// (config.ResolveHubNameOrDefault: os.Hostname), the name a restart uses.
-func TestServerConfigDB_HubName_ClearWithoutBootstrapUsesStartupDefault(t *testing.T) {
-	srv, _, ops := newHubNameDBServer(t, "")
+// Round-3 finding 1: with no hub_name configured anywhere, GET returns ""
+// (unset), not this replica's hostname, so an echoed GET body sent to any
+// replica is a no-op; a hostname-shaped name in a PUT is a real change; and
+// set, clear, ApplySnapshot leaves the running hub on its own startup
+// default (config.ResolveHubNameOrDefault), as a restart would.
+func TestServerConfigDB_HubName_UnsetStaysUnsetAndRunsStartupDefault(t *testing.T) {
+	srv, fakeStore, ops := newHubNameDBServer(t, "")
 	startupDefault := config.ResolveHubNameOrDefault("")
 	require.NotEmpty(t, startupDefault)
 
+	resp := getServerConfigDB(t, srv, ops)
+	assert.Equal(t, "", resp.Server.Hub.HubName, "GET must not present a replica hostname as the configured hub_name")
 	running := &Server{}
 	ApplySnapshot(running, ops.Snapshot())
-	assert.Equal(t, startupDefault, running.HubName(), "before any write")
+	assert.Equal(t, startupDefault, running.HubName())
 
-	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
+	// Echo of the GET view: no-op.
+	before, beforeOrigin := endpointsRow(t, fakeStore)
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":""}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	ApplySnapshot(running, ops.Snapshot())
-	assert.Equal(t, "new-hub", running.HubName())
+	after, afterOrigin := endpointsRow(t, fakeStore)
+	assert.Equal(t, before, after)
+	assert.Equal(t, beforeOrigin, afterOrigin, "an echo must not make the row managed")
 
+	// Another replica's hostname is a real change, written cluster-wide.
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"scion-hub-7d9f8-abcde"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, _ := endpointsRow(t, fakeStore)
+	assert.Equal(t, "scion-hub-7d9f8-abcde", row.HubName)
+	ApplySnapshot(running, ops.Snapshot())
+	assert.Equal(t, "scion-hub-7d9f8-abcde", running.HubName())
+
+	// Clear: GET is unset again and the running hub returns to its default.
 	rr = putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":""}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, "", ops.Snapshot().HubName)
+	resp = getServerConfigDB(t, srv, ops)
+	assert.Equal(t, "", resp.Server.Hub.HubName)
+	assert.NotContains(t, supersededKeyNames(resp, "endpoints"), "server.hub.hub_name")
 	ApplySnapshot(running, ops.Snapshot())
-	assert.Equal(t, startupDefault, running.HubName(), "after the clear")
-	assert.Equal(t, startupDefault, ops.Snapshot().HubName)
-	assert.Equal(t, startupDefault, getServerConfigDB(t, srv, ops).Server.Hub.HubName)
-	assert.NotContains(t, supersededKeyNames(getServerConfigDB(t, srv, ops), "endpoints"), "server.hub.hub_name")
+	assert.Equal(t, startupDefault, running.HubName())
+}
+
+// Round-3 finding 2: ApplySnapshot reports hub_name as applied only when the
+// running name changes, including the reset to the startup default.
+func TestApplySnapshot_HubNameAppliedOnlyOnChange(t *testing.T) {
+	appliedKeys := func(res map[string]interface{}) []string {
+		keys, _ := res["applied"].([]string)
+		return keys
+	}
+	running := &Server{}
+	assert.Contains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{HubName: "a-hub"})), "hub_name")
+	assert.NotContains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{HubName: "a-hub"})), "hub_name")
+	assert.Contains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{})), "hub_name", "reset to the startup default")
+	assert.Equal(t, config.ResolveHubNameOrDefault(""), running.HubName())
+	assert.NotContains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{})), "hub_name")
+}
+
+// Round-3 finding 3: on a seeded (non-managed) endpoints row, fields this
+// node overrides by env are not carried into the shared row; without the
+// env override they are carried.
+func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
+	seeded := json.RawMessage(`{"public_url":"https://seed.example.com","image_registry":"seed.example.com","hub_name":"seed-hub"}`)
+	newSrv := func(envK map[string]interface{}) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+		fakeStore := newFakeHubSettingStore()
+		fakeStore.seedWithOrigin("endpoints", seeded, "seeded")
+		env := emptyKoanf()
+		if envK != nil {
+			env = newEnvKoanf(t, envK)
+		}
+		ops := NewOperationalSettings(fakeStore, emptyKoanf(), env)
+		_, err := ops.Refresh(context.Background())
+		require.NoError(t, err)
+		srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+		srv.SetOperationalSettings(ops)
+		return srv, fakeStore, ops
+	}
+
+	// No env override: public_url and image_registry carry forward; the
+	// seeded hub_name does not (it is bootstrap material).
+	srv, fakeStore, ops := newSrv(nil)
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, _ := endpointsRow(t, fakeStore)
+	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://seed.example.com", ImageRegistry: "seed.example.com", HubName: "new-hub"}, row)
+
+	// Both keys env-overridden on this node: neither is carried.
+	srv, fakeStore, ops = newSrv(map[string]interface{}{
+		"server.hub.public_url": "https://env.example.com",
+		"image_registry":        "env.example.com",
+	})
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, _ = endpointsRow(t, fakeStore)
+	assert.Equal(t, opsettings.EndpointsSettings{HubName: "new-hub"}, row)
+}
+
+// Round-3 finding 3: with no endpoints row, the base is the effective
+// (bootstrap) public_url and image_registry.
+func TestServerConfigDB_Endpoints_NoRowBaseFromSnapshot(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.public_url": "https://boot.example.com",
+		"image_registry":        "boot.example.com",
+		"server.hub.hub_name":   "boot-hub",
+	})
+	ops := NewOperationalSettings(fakeStore, bootstrapK, emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"image_registry":"admin.example.com"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, origin := endpointsRow(t, fakeStore)
+	assert.Equal(t, "managed", origin)
+	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://boot.example.com", ImageRegistry: "admin.example.com"}, row,
+		"bootstrap public_url carries forward; the bootstrap hub_name is not written")
+}
+
+// endpointsRaceStore simulates another replica writing the endpoints row
+// between the PUT handler's read of the current row and its write.
+type endpointsRaceStore struct {
+	*fakeHubSettingStore
+	reads int
+}
+
+func (c *endpointsRaceStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	row, err := c.fakeHubSettingStore.GetHubSetting(ctx, section)
+	if err == nil && section == "endpoints" {
+		snapshot := *row
+		c.reads++
+		if c.reads == 1 {
+			_, _ = c.UpsertHubSetting(ctx, "endpoints",
+				json.RawMessage(`{"public_url":"https://other.example.com"}`), "other-replica", -1, "managed")
+		}
+		return &snapshot, nil
+	}
+	return row, err
+}
+
+// Round-3 finding 3: the endpoints carry-forward write is CAS-guarded on the
+// revision it read, so a concurrent write yields 409 and nothing is written.
+func TestServerConfigDB_Endpoints_ConcurrentWrite409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://admin.example.com"}`), "managed")
+	raceStore := &endpointsRaceStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"image_registry":"admin.example.com"}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	row, _ := endpointsRow(t, fake)
+	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://other.example.com"}, row, "the concurrent writer's row must stand")
 }
