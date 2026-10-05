@@ -2213,6 +2213,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// pattern — that would let the server accept traffic without authoritative
 	// settings, silently bypassing a DB-persisted admin_mode=true.
 	// See TestInitOperationalSettings_FailClosed for the regression test.
+	//
+	// Warn once (outside the retry loop) about SCION_SERVER_* / SCION_SEED_*
+	// names that no loader maps to a setting, so a misspelled override is
+	// not silently ignored (ptone/scion#1081). Names only, never values.
+	config.WarnUnmatchedSettingsEnv(slog.Default(), os.Environ(), opsettings.IsLayer1Key)
 	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)

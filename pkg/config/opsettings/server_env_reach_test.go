@@ -91,21 +91,6 @@ func collectSchemaEnvVars(t *testing.T) []schemaEnvVarEntry {
 	return out
 }
 
-// versionedSettingsReadServerKeys lists the Layer-0 server.* keys whose
-// effective value the hub takes from LoadVersionedSettings rather than from
-// GlobalConfig: broker identity, resolved in cmd/server_foreground.go
-// (resolveBrokerID, resolveBrokerName, the auto_provide lookup) and
-// convertVersionedToLegacy (broker_token -> settings.Hub.BrokerToken). Every
-// other Layer-0 key is read from GlobalConfig, and every Layer-1 key from
-// the opsettings env/bootstrap koanf.
-var versionedSettingsReadServerKeys = map[string]bool{
-	"server.broker.broker_id":       true,
-	"server.broker.broker_name":     true,
-	"server.broker.broker_nickname": true,
-	"server.broker.broker_token":    true,
-	"server.broker.auto_provide":    true,
-}
-
 // globalConfigReadLayer1Keys lists registry (Layer-1) keys whose live value
 // the hub still takes from GlobalConfig at startup rather than from the
 // opsettings snapshot: server.hub.public_url is Hub.Endpoint, consumed by
@@ -168,7 +153,7 @@ func jsonPathValue(t *testing.T, v interface{}, path string) (interface{}, bool)
 // settings schema advertises (x-env-var) and checks the value reaches the
 // config the hub actually reads for that key: the opsettings env koanf for
 // Layer-1 keys, LoadVersionedSettings for broker identity
-// (versionedSettingsReadServerKeys), and GlobalConfig for every other
+// (config.VersionedSettingsReadServerKeys), and GlobalConfig for every other
 // Layer-0 key. The list of names is derived from the schema, so a new
 // x-env-var whose spelling no loader maps to the field fails here
 // (ptone/scion#1081).
@@ -187,9 +172,9 @@ func TestSchemaServerEnvVars_ReachHubConfig(t *testing.T) {
 	if len(server) < 30 {
 		t.Fatalf("found only %d SCION_SERVER_* x-env-var entries; schema walker is broken", len(server))
 	}
-	for k := range versionedSettingsReadServerKeys {
+	for k := range config.VersionedSettingsReadServerKeys {
 		if !seenPaths[k] {
-			t.Errorf("versionedSettingsReadServerKeys entry %q has no x-env-var in the schema; remove it", k)
+			t.Errorf("config.VersionedSettingsReadServerKeys entry %q has no x-env-var in the schema; remove it", k)
 		}
 	}
 	for k := range globalConfigReadLayer1Keys {
@@ -225,7 +210,7 @@ func TestSchemaServerEnvVars_ReachHubConfig(t *testing.T) {
 						e.EnvVar, v, e.Path, got, k.Keys())
 				}
 
-			case versionedSettingsReadServerKeys[e.Path]:
+			case config.VersionedSettingsReadServerKeys[e.Path]:
 				v := samples[0]
 				t.Setenv(e.EnvVar, v)
 				vs, err := config.LoadVersionedSettings("")
