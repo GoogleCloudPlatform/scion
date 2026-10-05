@@ -111,12 +111,12 @@ export class ScionPageDiagnostics extends LitElement {
     }
 
     .status-problems {
-      color: var(--scion-status-warning, #f59e0b);
+      color: var(--scion-badge-warning-text, #92400e);
       font-size: 0.8125rem;
     }
 
     .status-problems.unhealthy {
-      color: var(--scion-status-danger, #ef4444);
+      color: var(--scion-badge-danger-text, #991b1b);
     }
 
     .status-dot.unknown {
