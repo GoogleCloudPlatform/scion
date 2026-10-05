@@ -325,8 +325,19 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-missing-c")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 
+		assert.Empty(t, agentDelegatorEdges(t, f.store, parent.ID), "the child's edge is deactivated")
+		failed, _, err := f.store.ListMutationAudits(context.Background(),
+			store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+		require.NoError(t, err)
+		require.Len(t, failed, 1, "the failed create is compensated")
+		sum := assertCompensated(t, f.store, failed[0].TargetID)
+
+		// Reactivate the compensated edge to inspect the ceiling it carried.
+		_, err = f.store.ReactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent,
+			failed[0].TargetID, store.EdgeDeactivationCreateCompensation, sum.OpID)
+		require.NoError(t, err)
 		edges := agentDelegatorEdges(t, f.store, parent.ID)
-		require.Len(t, edges, 1, "the edge written for the child is left in place")
+		require.Len(t, edges, 1)
 		left := edges[0]
 		assert.Equal(t, store.EffectCeilingBounded, left.Kind)
 		assert.Empty(t, deliverOf(left.PermissionIDs), "no delivery permission")
@@ -505,45 +516,6 @@ func TestDevAuthGrandchildBoundedByParent(t *testing.T) {
 	assert.Equal(t, store.EffectCeilingBounded, edges[0].Kind)
 	assert.Equal(t, parent.ID, edges[0].DelegatorID)
 	assert.Equal(t, rowFiveIDs(t, mf.srv, parent), withoutDeliver(edges[0].PermissionIDs))
-}
-
-// A create whose broker dispatch fails leaves the child's edge in place but
-// no usable authority: the token sent to the broker creates nothing and
-// refreshes nothing, and the child is not a valid ceiling source.
-func TestDispatchFailureLeavesNoUsableAuthority(t *testing.T) {
-	f := newChainFixture(t, "chain-dispatch")
-	parent, _ := f.sessionParent(t, "chain-dispatch-p")
-	f.client.returnErr = errors.New("broker unavailable")
-
-	rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "chain-dispatch-c"})
-	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-c")
-	require.ErrorIs(t, err, store.ErrNotFound, "no agent row")
-
-	edges := agentDelegatorEdges(t, f.store, parent.ID)
-	require.Len(t, edges, 1)
-	assert.True(t, edges[0].Active, "the edge is left in place")
-	childID := edges[0].DelegateID
-
-	require.NotNil(t, f.client.lastCreateReq)
-	childToken := f.client.lastCreateReq.AgentToken
-	require.NotEmpty(t, childToken)
-	f.client.returnErr = nil
-
-	rec = f.createAsParent(t, childToken, CreateAgentRequest{Name: "chain-dispatch-gc"})
-	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err = f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-gc")
-	assert.ErrorIs(t, err, store.ErrNotFound, "no grandchild row")
-
-	mf := f.mint()
-	claims := mf.tokenClaims(t, childToken)
-	refresh := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(refresh, buildAgentRefreshRequest(childID, claims, "", false), childID)
-	assert.NotEqual(t, http.StatusOK, refresh.Code, refresh.Body.String())
-
-	_, _, err = f.srv.authzService.sourceEffectCeiling(context.Background(), &agentIdentityWrapper{AgentTokenClaims: claims})
-	assert.ErrorIs(t, err, ErrProvenanceChain)
-	assert.Contains(t, err.Error(), "not found")
 }
 
 // Authority from a relationship is checked at use, not frozen: a child of

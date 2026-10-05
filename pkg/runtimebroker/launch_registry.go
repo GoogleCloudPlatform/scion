@@ -201,9 +201,19 @@ func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
 	rec.CancelLocal()
 }
 
-// inFlightOtherRun reports whether a launch labelled with a run other than
-// runID is in flight under key, and that launch's run. A launch without a
-// run ID, or an empty runID, never counts (ptone/scion#2550).
+// OtherRunInFlight reports whether a launch of a run other than runID is
+// registered under key (ptone/scion#2675). Such a launch is provisioning, or
+// about to provision, the agent's files under this name, so a delete naming
+// runID must leave them alone even before the launch has recorded its run
+// on disk. False without a run ID on either side, matching
+// CancelLocalForRun.
+func (r *launchRegistry) OtherRunInFlight(key launchKey, runID string) bool {
+	_, ok := r.inFlightOtherRun(key, runID)
+	return ok
+}
+
+// inFlightOtherRun is OtherRunInFlight that also returns the other run, for
+// a run-scoped stop to report which run holds the name (ptone/scion#2550).
 func (r *launchRegistry) inFlightOtherRun(key launchKey, runID string) (string, bool) {
 	if r == nil || runID == "" {
 		return "", false

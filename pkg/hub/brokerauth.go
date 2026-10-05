@@ -255,6 +255,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.EmptyPerAgentWorkspace = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
+		case "startsinflight", "starts_in_flight":
+			caps.StartsInFlight = true
 		}
 	}
 	return caps

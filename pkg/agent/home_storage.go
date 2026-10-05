@@ -45,7 +45,7 @@ import (
 // homeStorageNFSAvailable reports whether this build can start agents with
 // an NFS home. While it is false, a start that resolves to an NFS home
 // fails with a clear error instead of starting with a different home.
-var homeStorageNFSAvailable = false
+var homeStorageNFSAvailable = true
 
 // homeStorageRecordFile is the per-agent file, in the agent directory next
 // to scion-agent.json and the shared-dir storage record, that records the
@@ -440,13 +440,13 @@ func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSett
 	return gs, nil
 }
 
-// nfsSubPathRoot is the subpath root of an nfs block, with the same default
-// the NFS backend uses.
+// nfsSubPathRoot is the subpath root of an nfs block, with the shared
+// default (config.SubPathRootOrDefault).
 func nfsSubPathRoot(nfs *config.V1NFSConfig) string {
-	if nfs == nil || nfs.SubPathRoot == "" {
-		return "projects"
+	if nfs == nil {
+		return config.SubPathRootOrDefault("")
 	}
-	return nfs.SubPathRoot
+	return config.SubPathRootOrDefault(nfs.SubPathRoot)
 }
 
 // firstNFSShare returns the first share of a shared-dir storage nfs block.

@@ -842,6 +842,13 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	if err == nil {
 		return true, created
 	}
+	writeQuotaReserveError(w, limitName, err)
+	return false, false
+}
+
+// writeQuotaReserveError writes the response for a failed quota reservation
+// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
@@ -852,7 +859,6 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 	}
-	return false, false
 }
 
 // releaseAgentQuotas releases resourceID's create-time quota reservations:
@@ -904,13 +910,6 @@ const (
 	createCleanupRuntimeTimeout = 30 * time.Second
 )
 
-// Values for cleanupFailedCreate's revokeCredentials argument, so call sites
-// read as intent rather than a bare bool.
-const (
-	cleanupRevokeCredentials = true
-	cleanupSkipRevoke        = false
-)
-
 // detachedCleanupContext returns a context that keeps ctx's values but not
 // its cancellation or deadline, bounded instead by timeout. It is for cleanup
 // that must run to completion even when the request that triggered it has
@@ -919,43 +918,81 @@ func detachedCleanupContext(ctx context.Context, timeout time.Duration) (context
 	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
+// createRollback describes a committed create to roll back with
+// cleanupFailedCreate.
+type createRollback struct {
+	Agent           *store.Agent
+	RuntimeBrokerID string
+	// CreateAuditID is the ID of the create's audit record; empty when
+	// unknown.
+	CreateAuditID string
+	// Stage is the create stage that failed (one of the createStage*
+	// values); it is recorded in the compensation audit record.
+	Stage string
+	// Cause is the failure that triggered the rollback.
+	Cause error
+	// RevokeCredentials must be false when the failure surfaced as an error
+	// from a dispatcher call that minted the credential: those calls
+	// (DispatchAgentCreateWithGather and friends) revoke on their own error
+	// return, and revoking again here would be a redundant second revoke.
+	// It is true for a failure the dispatcher reported as success (missing
+	// env vars), where no such revoke fired.
+	RevokeCredentials bool
+	// DeleteRuntime deletes the agent's runtime-side resources; nil when
+	// the create has none.
+	DeleteRuntime func(context.Context) error
+}
+
 // cleanupFailedCreate is the single best-effort cleanup for a create that
-// failed after its agent row was written and its quota reservations taken
-// (ptone/scion#2087, ptone/scion#1986). In order it:
+// failed after commitAgentCreate wrote its rows and its quota reservations
+// were taken (ptone/scion#2087, ptone/scion#1986). In order it:
 //
-//  1. revokes the agent's credentials, when revokeCredentials is set;
-//  2. deletes the agent's runtime-side resources via deleteRuntime, when
+//  1. revokes the agent's credentials, when rb.RevokeCredentials is set;
+//  2. deletes the agent's runtime-side resources via rb.DeleteRuntime, when
 //     non-nil (DispatchAgentDelete for a broker agent, managedAgentDelete for
 //     a managed one);
-//  3. deletes the agent row; and
+//  3. compensates the committed create (compensateAgentCreate): one
+//     transaction that deletes the agent row, deactivates its delegation
+//     edge with cause create_compensation and writes an
+//     agent_create_dispatch_failed audit record naming rb.CreateAuditID and
+//     rb.Stage; and
 //  4. releases its quota reservations.
 //
 // Every step runs on a context detached from ctx with its own short budget,
 // so a canceled request cannot skip any of them. The cleanup runs
 // synchronously, before the caller writes its error response, so it may delay
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
-// delete + 5s row delete + 5s release). That can exceed a client's own
-// timeout (the CLI's is 30s), in which case the client sees a timeout rather
-// than the create error — a deliberate trade for not leaking the agent's
-// row, runtime resources and reservations. Failures are logged and
-// otherwise ignored: the caller has already decided the create failed and is
-// about to report that error, which a cleanup failure must not replace.
+// delete + 5s compensation + 5s release), plus 5s for the fallback below.
+// That can exceed a client's own timeout (the CLI's is 30s), in which case
+// the client sees a timeout rather than the create error — a deliberate
+// trade for not leaking the agent's row, runtime resources and reservations.
 //
-// revokeCredentials must be false when the failure surfaced as an error from
-// a dispatcher call that minted the credential: those calls
-// (DispatchAgentCreateWithGather and friends) already revoke on their own
-// error return, and revoking again here would be a redundant second revoke.
-// It is true for a failure the dispatcher reported as success (missing env
-// vars), where no such revoke fired.
-func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, runtimeBrokerID string, revokeCredentials bool, deleteRuntime func(context.Context) error) {
-	if revokeCredentials {
+// Failures of steps 1, 2 and 4 are logged and otherwise ignored. When the
+// compensation transaction fails, the failure is logged at ERROR with a
+// correlation ID and the compensation's op ID, and a fallback runs: a
+// standalone best-effort deactivation of the agent's edges (same cause and
+// op ID), then a delete of the agent row on its own. The correlation ID is
+// returned so the caller can report it (writeCreateFailure). The return
+// value is "" when the compensation committed.
+func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
+	agent := rb.Agent
+	if agent == nil {
+		// Nothing identifies the records to roll back. Report it like a
+		// failed compensation, so writeCreateFailure answers 500 with the
+		// correlation ID.
+		compensationFailureCorrelationID = compensationFailureID(ctx)
+		logCompensationFailure(ctx, "", compensationFailureCorrelationID, "",
+			fmt.Errorf("%w: no agent in create rollback (stage %q)", errAgentCreateWriteInvalid, rb.Stage))
+		return compensationFailureCorrelationID
+	}
+	if rb.RevokeCredentials {
 		// Detaches from ctx and applies its own timeout internally.
 		revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 	}
 	// Each step's detached context is scoped to its own closure so its
 	// deferred cancel fires when that step ends, not when the whole cleanup
 	// does.
-	if deleteRuntime != nil {
+	if rb.DeleteRuntime != nil {
 		func() {
 			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer cancel()
@@ -966,7 +1003,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
-			if err := deleteRuntime(rctx); err != nil {
+			if err := rb.DeleteRuntime(rctx); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
 			}
 		}()
@@ -974,12 +1011,64 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 	func() {
 		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 		defer cancel()
-		if err := s.store.DeleteAgent(sctx, agent.ID); err != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", err)
+		opID := api.NewUUID()
+		err := s.compensateAgentCreate(sctx, createCompensation{
+			Agent:           agent,
+			OriginalAuditID: rb.CreateAuditID,
+			OpID:            opID,
+			Stage:           rb.Stage,
+			Cause:           rb.Cause,
+		})
+		if err == nil {
+			return
+		}
+		compensationFailureCorrelationID = compensationFailureID(ctx)
+		logCompensationFailure(ctx, agent.ID, compensationFailureCorrelationID, opID, err)
+		// Fallback, sharing one store budget. First remove the row so a
+		// failed compensation does not also leave the agent in place. Only
+		// once the row is gone, deactivate its edges on their own (this
+		// succeeds when the transaction failed on another write, for example
+		// the audit insert). When the delete fails, the row keeps its active
+		// edge, so it stays held to its recorded ceiling. When the
+		// deactivation fails, the edge stays active with a deleted delegate,
+		// which nothing reads as authority (the walk, the provenance lookup
+		// and the mint all need the agent row).
+		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+		defer fcancel()
+		if derr := s.store.DeleteAgent(fctx, agent.ID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
+			return
+		}
+		now := time.Now()
+		if _, derr := s.store.DeactivateDelegationEdgesForDelegate(fctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
+			Cause: store.EdgeDeactivationCreateCompensation,
+			At:    &now,
+			OpID:  opID,
+		}); derr != nil {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
 	}()
 	// Detaches from ctx and applies its own timeout internally.
-	s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+	s.releaseAgentQuotas(ctx, agent.ID, rb.RuntimeBrokerID)
+	return compensationFailureCorrelationID
+}
+
+// writeCreateFailure writes a create-failure response. When the create's
+// compensation failed (correlationID != ""), it writes a 500 that carries the
+// correlation ID, because the create's records may be left behind;
+// otherwise it writes the failure's own response.
+//
+// The 500 takes precedence over every original response, including a 409
+// delete_in_progress: when the rollback is incomplete, the caller needs the
+// correlation ID to report the leftover records.
+func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOriginal func()) {
+	if correlationID == "" {
+		writeOriginal()
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		"The agent could not be created, and rolling back its records did not complete; report the correlation ID to an administrator",
+		map[string]interface{}{"correlation_id": correlationID})
 }
 
 // dispatchDeleteFailedCreate returns cleanupFailedCreate's deleteRuntime step
@@ -1017,14 +1106,6 @@ var errInvalidDisplayName = errors.New("invalid display name")
 // include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
 // for reasons unrelated to the display name itself.
 func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
-	return s.createAgentWithIdentityKeyAndEdge(ctx, agent, slug, nil)
-}
-
-// createAgentWithIdentityKeyAndEdge is createAgentWithIdentityKey with the
-// agent's delegation edge written in the same transaction. When edge is
-// non-nil its DelegateID is set to agent.ID, and a failed edge write rolls
-// back the agent row and its identity keys. A nil edge writes no edge.
-func (s *Server) createAgentWithIdentityKeyAndEdge(ctx context.Context, agent *store.Agent, slug string, edge *store.DelegationEdge) error {
 	if _, err := api.ValidateDisplayName(slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
 	}
@@ -1036,14 +1117,7 @@ func (s *Server) createAgentWithIdentityKeyAndEdge(ctx context.Context, agent *s
 		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
 		// {slug} row -- the same function rename, restore, and the backfill
 		// migration use, rather than a separately-maintained literal here.
-		if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name)); err != nil {
-			return err
-		}
-		if edge == nil {
-			return nil
-		}
-		edge.DelegateID = agent.ID
-		return tx.CreateDelegationEdge(ctx, edge)
+		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
 	})
 }
 
@@ -1904,48 +1978,61 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
-	// The delegation edge records who delegated authority to this agent,
-	// with the frozen provenance and ceiling. It is written in the same
-	// transaction as the agent row, so a failed edge write leaves no agent.
+	// The agent row, identity keys, delegation edge (with the frozen
+	// provenance and ceiling), the create audit record and the optional
+	// notification subscription commit in one transaction, or none do.
 	edgeDelegatorType := store.DelegationPrincipalUser
 	if GetAgentIdentityFromContext(ctx) != nil {
 		edgeDelegatorType = store.DelegationPrincipalAgent
 	}
-	edge := &store.DelegationEdge{
-		DelegatorType:       edgeDelegatorType,
-		DelegatorID:         createdBy,
-		DelegateType:        store.DelegationPrincipalAgent,
-		ScopeType:           store.RoleScopeProject,
-		ScopeID:             projectID,
-		Role:                string(effectiveRole),
-		Active:              true,
-		AuthorityProvenance: edgeProvenance,
-		EffectCeiling:       edgeCeiling,
+	createAudit := &store.MutationAuditRecord{
+		MutationType:      mutationTypeAgentDelegation,
+		CanDelegateResult: "allow",
+		CanDelegateReason: delegateDecision.Reason,
 	}
-
-	if err := s.createAgentWithIdentityKeyAndEdge(ctx, agent, slug, edge); err != nil {
+	var subscription *store.NotificationSubscription
+	if req.Notify {
+		subscription = newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy)
+	}
+	if err := s.commitAgentCreate(ctx, agentCreateWrite{
+		Ceiling:    edgeCeiling,
+		Provenance: edgeProvenance,
+		Agent:      agent,
+		Slug:       slug,
+		Edge: &store.DelegationEdge{
+			DelegatorType: edgeDelegatorType,
+			DelegatorID:   createdBy,
+			DelegateType:  store.DelegationPrincipalAgent,
+			ScopeType:     store.RoleScopeProject,
+			ScopeID:       projectID,
+			Role:          string(effectiveRole),
+			Active:        true,
+		},
+		Audit:        createAudit,
+		Subscription: subscription,
+	}); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
 			return
 		}
+		if errors.Is(err, errAgentCreateWriteInvalid) {
+			slog.ErrorContext(ctx, "agent create: incomplete create write", "error", err)
+			InternalError(w)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	if delegateDecision.Allowed {
-		s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-			MutationType:      "agent_delegation",
-			TargetType:        "agent",
-			TargetID:          agent.ID,
-			CanDelegateResult: "allow",
-			CanDelegateReason: delegateDecision.Reason,
-		})
-	}
-
-	// Create notification subscription if requested
-	if req.Notify {
-		s.createNotifySubscription(ctx, agent.ID, projectID, notifySubscriberType, notifySubscriberID, createdBy)
+	// cleanup rolls back the committed create through compensateAgentCreate
+	// (see cleanupFailedCreate) and reports a compensation correlation ID,
+	// or "" when the rollback succeeded.
+	// The caller supplies the stage, the cause and the per-site steps.
+	cleanup := func(rb createRollback) string {
+		rb.Agent = agent
+		rb.RuntimeBrokerID = runtimeBrokerID
+		rb.CreateAuditID = createAudit.ID
+		return s.cleanupFailedCreate(ctx, rb)
 	}
 
 	// Empty-per-agent agents start in an empty private directory (design
@@ -1987,16 +2074,16 @@ func (s *Server) createAgentInProject(
 			// (nil deleteRuntime) and no credential minted yet (minting happens
 			// in the dispatcher), so no revoke.
 			if stor == nil {
-				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-				RuntimeError(w, "Storage not configured for workspace bootstrap")
+				corrID := cleanup(createRollback{Stage: createStageStorage, Cause: errors.New("storage not configured for workspace bootstrap")})
+				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Storage not configured for workspace bootstrap") })
 				return
 			}
 
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
-				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-				RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+				corrID := cleanup(createRollback{Stage: createStageUploadURL, Cause: err})
+				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
 				return
 			}
 
@@ -2006,7 +2093,7 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Warn("Failed to update agent status to provisioning", "agent_id", agent.ID, "error", err)
 			}
 
-			s.events.PublishAgentCreated(ctx, agent)
+			s.publishAgentCreatedIfLive(ctx, agent)
 
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
@@ -2080,10 +2167,10 @@ func (s *Server) createAgentInProject(
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
 			// managedAgentCreate mints no agent credential: nothing to revoke.
-			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
+			corrID := cleanup(createRollback{Stage: createStageManaged, Cause: err, DeleteRuntime: func(cctx context.Context) error {
 				return s.managedAgentDelete(cctx, agent)
-			})
-			RuntimeError(w, "Failed to create managed agent: "+err.Error())
+			}})
+			writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to create managed agent: "+err.Error()) })
 			return
 		}
 
@@ -2097,7 +2184,7 @@ func (s *Server) createAgentInProject(
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 		}
 
-		s.events.PublishAgentCreated(ctx, agent)
+		s.publishAgentCreatedIfLive(ctx, agent)
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -2122,8 +2209,8 @@ func (s *Server) createAgentInProject(
 			intent = store.RunIntentStopped
 		}
 		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-			writeRunIntentError(w, err, agent.ID)
+			corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+			writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 			return
 		}
 		if !req.ProvisionOnly {
@@ -2146,8 +2233,8 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
-					dispatchCreateErrorResponse(w, err, agent.ID)
+					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2160,7 +2247,7 @@ func (s *Server) createAgentInProject(
 						s.agentLifecycleLog.Warn("Failed to update agent phase for env-gather", "agent_id", agent.ID, "error", err)
 					}
 
-					s.events.PublishAgentCreated(ctx, agent)
+					s.publishAgentCreatedIfLive(ctx, agent)
 
 					s.enrichAgent(ctx, agent, project, nil)
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
@@ -2195,8 +2282,8 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
-					dispatchCreateErrorResponse(w, err, agent.ID)
+					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2210,11 +2297,11 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather returned this as a value, not
 					// an error, so its own revoke-on-failure defer did not fire —
 					// the cleanup revokes the credential it minted instead
-					// (cleanupRevokeCredentials), before the row is deleted
+					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupRevokeCredentials, dispatchDeleteFailedCreate(dispatcher, agent))
-					MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs))
+					corrID := cleanup(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
 					s.preserveTerminalPhase(ctx, agent)
@@ -2239,8 +2326,8 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
-					dispatchCreateErrorResponse(w, err, agent.ID)
+					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
@@ -2267,11 +2354,8 @@ func (s *Server) createAgentInProject(
 	// and since the frontend may have already dropped the earlier "status" event
 	// (it ignores status events for agents not yet in state), the UI would never
 	// reflect the error.
-	if latest, err := s.store.GetAgent(ctx, agent.ID); err == nil {
-		s.events.PublishAgentCreated(ctx, latest)
-	} else {
-		s.events.PublishAgentCreated(ctx, agent)
-	}
+	// A delete that claimed the row meanwhile suppresses it (ptone/scion#2972).
+	s.publishAgentCreatedIfLive(ctx, agent)
 
 	// Enrich agent with project and broker names for display
 	s.enrichAgent(ctx, agent, project, nil)
@@ -2324,7 +2408,10 @@ func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
 // failure) while the broker dispatch is still in flight.
 func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) {
 	current, err := s.store.GetAgent(ctx, agent.ID)
-	if err != nil {
+	// A soft-deleted row is left alone: adopting its StateVersion would let
+	// the caller's write (zero DeletedAt in memory) win the CAS and clear
+	// deleted_at. The write then conflicts and the retry merges into the row.
+	if err != nil || !current.DeletedAt.IsZero() {
 		return
 	}
 	p := state.Phase(current.Phase)
@@ -2399,6 +2486,11 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	if src.Phase == string(state.PhaseRunning) {
 		dst.ExitReason = src.ExitReason
 		dst.ExitCode = src.ExitCode
+		// Likewise the caller's clear of the prior generation's message
+		// and stalled marker (empty values included), so the retry writes
+		// what the first attempt would have (ptone/scion#2014).
+		dst.Message = src.Message
+		dst.StalledFromActivity = src.StalledFromActivity
 	}
 }
 
@@ -2776,6 +2868,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
 		agents[i].Deletion = store.ComputeAgentDeletion(&agents[i], now)
+		agents[i].ProvisionedOnly = store.ComputeAgentProvisionedOnly(&agents[i])
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -2816,6 +2909,7 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	agent.Launch = store.ComputeAgentLaunch(agent, now)
 	// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
 	agent.Deletion = store.ComputeAgentDeletion(agent, now)
+	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {
@@ -4368,7 +4462,7 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 // specified delegator type. Used by the scheduled dispatch path, where the
 // caller resolves the creator type. Best-effort: errors are logged but do not
 // fail the operation. The interactive create path writes its edge inside the
-// agent-create transaction instead (createAgentWithIdentityKeyAndEdge).
+// agent-create transaction instead (commitAgentCreate).
 func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, projectID, role, delegatorType, delegatorID string) {
 	edge := &store.DelegationEdge{
 		DelegatorType: delegatorType,
