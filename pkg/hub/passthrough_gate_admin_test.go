@@ -129,8 +129,8 @@ func TestPassthroughEmbeddedBroker_UnscopedAdminPasses(t *testing.T) {
 
 // TestPassthroughEmbeddedBroker_AdminArmRequiresUnscopedAdmin pins that a
 // user access token held by an administrator does not count as owning the
-// embedded broker, even with a hub boundary and agent create/update
-// selectors: it is refused at the broker-ownership check.
+// embedded broker, even with a hub boundary and the agent:create selector:
+// it is refused at the broker-ownership check.
 func TestPassthroughEmbeddedBroker_AdminArmRequiresUnscopedAdmin(t *testing.T) {
 	adminID := tid("user-pt-adm-uat")
 	owner := ptUser(tid("user-pt-adm-uat-owner"), "pt-adm-uat-owner@test.com", store.UserRoleMember)
@@ -141,11 +141,15 @@ func TestPassthroughEmbeddedBroker_AdminArmRequiresUnscopedAdmin(t *testing.T) {
 		UserID:   adminID,
 		Name:     "pt-adm-uat",
 		Boundary: TokenBoundary{Kind: BoundaryKindHub},
-		Scopes:   []string{"agent:create", "agent:update"},
+		Scopes:   []string{"agent:create"},
 	})
 	require.NoError(t, err)
 
-	rec := doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/agents", f.createReq("pt-adm-uat"))
+	// role=none satisfies the token's delegation ceiling, so the request
+	// reaches the passthrough gate.
+	req := f.createReq("pt-adm-uat")
+	req.AgentRole = string(AgentRoleNone)
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/agents", req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "broker ownership")
