@@ -55,6 +55,8 @@ import {
   WAKE_OUTCOME_UNKNOWN_MESSAGE,
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
+  WakeOutcomeUnknownError,
+  isAnswerAboutThisSend,
   isGatewayDrop,
   isSendInProgressBody,
   jsonResponse,
@@ -2716,25 +2718,36 @@ export class ScionChatThread extends LitElement {
   ): Promise<Response> {
     if (!wake) return apiFetch(url, init);
     const giveUpAt = Date.now() + budgetMs;
+    // Set once an attempt may have reached the hub without telling us its
+    // outcome (a dropped connection, a gateway drop, or send_in_progress).
+    // From then on, an answer the hub gives before looking at this send
+    // (maintenance, rate limit, re-authentication) says nothing about that
+    // earlier attempt, so the outcome is unknown rather than "not sent".
+    let mayHaveReachedHub = false;
     for (;;) {
       let lastError: unknown = null;
       try {
         const res = await apiFetch(url, init);
-        if (res.status === 409) {
-          const data: unknown = await res.json().catch(() => null);
-          // Any other conflict is a real answer: hand it back intact.
-          if (!isSendInProgressBody(data)) return jsonResponse(data, 409);
-        } else if (res.status >= 502 && res.status <= 504) {
-          const data: unknown = await res.json().catch(() => null);
-          if (!isGatewayDrop(res.status, data)) return jsonResponse(data, res.status);
+        if (res.ok) return res;
+        const data: unknown = await res.json().catch(() => null);
+        if (res.status === 409 && isSendInProgressBody(data)) {
+          mayHaveReachedHub = true;
+        } else if (isGatewayDrop(res.status, data)) {
+          mayHaveReachedHub = true;
         } else {
-          return res;
+          if (mayHaveReachedHub && !isAnswerAboutThisSend(res.status, data)) {
+            throw new WakeOutcomeUnknownError();
+          }
+          // A real answer about this send: hand it back intact.
+          return jsonResponse(data, res.status);
         }
       } catch (err) {
+        if (err instanceof WakeOutcomeUnknownError) throw err;
         lastError = err;
+        mayHaveReachedHub = true;
       }
       if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
-        throw lastError ?? new Error(WAKE_OUTCOME_UNKNOWN_MESSAGE);
+        throw lastError ?? new WakeOutcomeUnknownError();
       }
       await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
     }

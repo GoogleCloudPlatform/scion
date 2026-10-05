@@ -25,6 +25,7 @@ const {
   confirmWake,
   WAKE_CONFIRM_MAX_MS,
   errorMessageFromBody,
+  isAnswerAboutThisSend,
   isGatewayDrop,
   isSendInProgressBody,
   jsonResponse,
@@ -155,5 +156,19 @@ describe('isGatewayDrop', () => {
   it('ignores other statuses', () => {
     expect(isGatewayDrop(500, null)).toBe(false);
     expect(isGatewayDrop(409, null)).toBe(false);
+  });
+});
+
+describe('isAnswerAboutThisSend', () => {
+  it('rejects answers given before the hub looks at the send', () => {
+    expect(isAnswerAboutThisSend(503, { error: 'system_maintenance' })).toBe(false);
+    expect(isAnswerAboutThisSend(429, { error: { code: 'rate_limited' } })).toBe(false);
+    expect(isAnswerAboutThisSend(401, null)).toBe(false);
+  });
+
+  it('accepts structured answers about the send', () => {
+    expect(isAnswerAboutThisSend(502, { error: { code: 'runtime_error' } })).toBe(true);
+    expect(isAnswerAboutThisSend(403, { error: { code: 'forbidden' } })).toBe(true);
+    expect(isAnswerAboutThisSend(500, null)).toBe(true);
   });
 });

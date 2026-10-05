@@ -168,6 +168,30 @@ export function isGatewayDrop(status: number, data: unknown): boolean {
   return !(err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string');
 }
 
+/** Thrown when a wake send's outcome cannot be confirmed. */
+export class WakeOutcomeUnknownError extends Error {
+  constructor() {
+    super(WAKE_OUTCOME_UNKNOWN_MESSAGE);
+    this.name = 'WakeOutcomeUnknownError';
+  }
+}
+
+/**
+ * Whether an error answer to a wake-send retry is about this send, i.e.
+ * the hub got as far as the send's idempotency key. Answers the hub gives
+ * before that say nothing about an earlier attempt that may have reached
+ * it: maintenance mode (503 with a top-level string `error`), a rate limit
+ * (429) and re-authentication (401).
+ */
+export function isAnswerAboutThisSend(status: number, data: unknown): boolean {
+  if (status === 401 || status === 429) return false;
+  if (data && typeof data === 'object') {
+    const err = (data as { error?: unknown }).error;
+    if (typeof err === 'string' && err) return false;
+  }
+  return true;
+}
+
 /** Whether a parsed 409 body says a send with the same key is still running. */
 export function isSendInProgressBody(data: unknown): boolean {
   if (!data || typeof data !== 'object') return false;

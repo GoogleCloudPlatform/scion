@@ -866,6 +866,59 @@ describe('scion-chat-thread wake on send', () => {
     expect(sendBodies()).toHaveLength(2);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(internals.sendError).not.toContain('Could not confirm');
+    // extractApiError (mocked to 'error') read the maintenance answer.
+    expect(internals.sendError).toBe('error');
+  });
+
+  /** Wake send whose first attempt drops, then gets `answer` on retry. */
+  async function dropThenAnswer(answer: Response): Promise<{
+    internals: Internals;
+    onError: ReturnType<typeof vi.fn>;
+    onSuccess: ReturnType<typeof vi.fn>;
+  }> {
+    const el = await mountFastRetry();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    apiFetch.mockResolvedValueOnce(answer);
+    const onError = vi.fn();
+    const onSuccess = vi.fn();
+    await send(internals, { onSuccess, onError });
+    return { internals, onError, onSuccess };
+  }
+
+  it('reports an unknown outcome for maintenance after a dropped attempt', async () => {
+    const { internals, onError, onSuccess } = await dropThenAnswer({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ error: 'system_maintenance', message: 'Down for maintenance' }),
+    } as unknown as Response);
+    expect(sendBodies()).toHaveLength(3);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(internals.sendError).toContain('Could not confirm whether the message was delivered');
+  });
+
+  it('reports an unknown outcome for a rate limit after a dropped attempt', async () => {
+    const { internals } = await dropThenAnswer({
+      ok: false,
+      status: 429,
+      json: () => Promise.resolve({ error: { code: 'rate_limited', message: 'slow down' } }),
+    } as unknown as Response);
+    expect(internals.sendError).toContain('Could not confirm whether the message was delivered');
+  });
+
+  it("keeps the hub's answer about this send after a dropped attempt", async () => {
+    const { internals, onError } = await dropThenAnswer({
+      ok: false,
+      status: 502,
+      json: () =>
+        Promise.resolve({ error: { code: 'runtime_error', message: 'Failed to wake agent: x' } }),
+    } as unknown as Response);
+    expect(onError).toHaveBeenCalledTimes(1);
+    // extractApiError is mocked to 'error' in this file: the answer was used.
+    expect(internals.sendError).toBe('error');
   });
 
   it('sizes the confirmation budget from the recipient count', async () => {
@@ -1028,12 +1081,15 @@ describe('scion-chat-thread wake on send', () => {
       const internals = el as unknown as ReplyInternals;
       showToastMock.mockReset();
       const pending = holdNextPost();
-      const done = sendReply(internals, vi.fn());
+      const onError = vi.fn();
+      const done = sendReply(internals, onError);
       await vi.waitFor(() => expect(sendBodies()).toHaveLength(1));
       await switchConversation(el);
       pending.answer(failure());
       await done;
       expect(internals.composerReplyTo).toBeNull();
+      // The composer's onError would restore its own reply bar: not called.
+      expect(onError).not.toHaveBeenCalled();
       localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
     });
 
@@ -1042,12 +1098,14 @@ describe('scion-chat-thread wake on send', () => {
       const internals = el as unknown as ReplyInternals;
       showToastMock.mockReset();
       const pending = holdNextPost();
-      const done = sendReply(internals, vi.fn());
+      const onError = vi.fn();
+      const done = sendReply(internals, onError);
       await vi.waitFor(() => expect(sendBodies()).toHaveLength(1));
       await switchConversation(el);
       pending.drop(new TypeError('Failed to fetch'));
       await done;
       expect(internals.composerReplyTo).toBeNull();
+      expect(onError).not.toHaveBeenCalled();
       localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
     });
   });
