@@ -413,23 +413,9 @@ describe('hub members: live updates from the store', () => {
       });
       expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.activity).toBe('working');
 
-      // Back on the hub view after a space view, agents-updated reads the
-      // same kept rows.
-      vi.mocked(apiFetch).mockImplementation(() =>
-        Promise.resolve(
-          new Response(JSON.stringify({ humans: [], agents: [] }), {
-            status: 200,
-          })
-        )
-      );
-      page.v2Conversation = {
-        conversationKey: 'p1',
-        projectId: 'p1',
-        isDM: false,
-      };
-      await page.loadV2Members('p1');
-      expect(page.v2AgentMembers).toEqual([]);
-      page.v2Conversation = null;
+      // agents-updated in the hub view reads the same kept rows (after
+      // something else rewrote the sidebar's agents).
+      page.v2AgentMembers = [];
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
     } finally {
@@ -546,6 +532,67 @@ describe('hub members: live updates from the store', () => {
         projectId: 'p9',
       });
       expect(ids(page.v2AgentMembers)).toEqual(['proj-agent']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: a space claiming the sidebar with no conversation', () => {
+  it('a mobile expanded space keeps its members on hub SSE changes and agents-updated', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      // On mobile, selecting a space expands it in the rail and loads its
+      // members without opening a conversation.
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+              agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+            }),
+            { status: 200 }
+          )
+        )
+      );
+      await page.loadV2Members('p1');
+      await settle();
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+
+      await harness.emitAgent('status', { agentId: 'a2', projectId: 'p9', activity: 'thinking' });
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      await settle();
+
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+      expect(ids(page.v2Members)).toEqual(['h1', 'sp1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the hub view claiming it back shows the hub list again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+              agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+            }),
+            { status: 200 }
+          )
+        )
+      );
+      await page.loadV2Members('p1');
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+
+      serveUsers(() => usersPage(['u1']));
+      page.loadHubMembers();
+      await settle();
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
     } finally {
       unmount(page);
     }

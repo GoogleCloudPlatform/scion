@@ -419,6 +419,11 @@ export class ScionPageChat extends LitElement {
    */
   private _agentMembersSource: 'none' | 'hub' | 'space' = 'none';
   /**
+   * The view that last claimed the members sidebar: `loadHubMembers` (the
+   * hub view) or `loadV2Members` (a space). See {@link _sidebarShowsHubView}.
+   */
+  private _sidebarOwner: 'none' | 'hub' | 'space' = 'none';
+  /**
    * Bumped on `disconnectedCallback` and whenever `v2Conversation` is
    * assigned a truthy value (see `updated()`'s `v2Conversation` branch);
    * both retire any hub-members load started before them. The latter also
@@ -1961,11 +1966,13 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Whether the members sidebar shows the hub view: no conversation is
-   * open, or a DM opened from the hub view (a DM keeps the previous view's
-   * members) whose hub list is live.
+   * Whether the members sidebar shows the hub view: the hub view claimed it
+   * last (not a space, which on mobile can be expanded with no conversation
+   * open), and either no conversation is open or a DM opened from the hub
+   * view (a DM keeps the previous view's members) whose hub list is live.
    */
   private _sidebarShowsHubView(): boolean {
+    if (this._sidebarOwner !== 'hub') return false;
     if (!this.v2Conversation) return true;
     return !this.v2Conversation.projectId && this._hubAgentsLive;
   }
@@ -2622,6 +2629,7 @@ export class ScionPageChat extends LitElement {
     // or presence response still in flight from the view the user just left
     // is discarded even when this call only joins a load.
     ++this._membersViewSeq;
+    this._sidebarOwner = 'hub';
     const generation = this._hubMembersGeneration;
     const loadAgents =
       !options?.refresh ||
@@ -2910,6 +2918,7 @@ export class ScionPageChat extends LitElement {
     if (!projectId) return;
     const seq = ++this._membersViewSeq;
     // The sidebar is this project's now: the hub list stops updating it.
+    this._sidebarOwner = 'space';
     this._hubAgentsLive = false;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
