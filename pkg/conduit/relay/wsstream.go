@@ -158,17 +158,23 @@ func (s *wsStream) readLoop() {
 			s.end(errLinkLost, false)
 			return
 		}
+		f := &conduitv1.Frame{}
+		uerr := proto.Unmarshal(b, f)
 		s.mu.Lock()
 		closing := s.localClose
 		s.mu.Unlock()
 		if closing {
 			// We sent StreamClose. Keep reading until the peer closes the
 			// link, discarding what it sent before it saw the close, so
-			// the link is never closed with frames still arriving.
+			// the link is never closed with frames still arriving. The
+			// peer's own StreamClose (both sides closed at once) or a
+			// malformed frame ends the wait: return and close the link.
+			if uerr != nil || f.GetStreamClose() != nil {
+				return
+			}
 			continue
 		}
-		f := &conduitv1.Frame{}
-		if err := proto.Unmarshal(b, f); err != nil {
+		if uerr != nil {
 			s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "malformed frame"))
 			return
 		}

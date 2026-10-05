@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -124,7 +125,8 @@ type peerConn struct {
 }
 
 func newPeerConn() *peerConn {
-	return &peerConn{in: make(chan []byte, 4), writes: make(chan []byte, 16), peer: make(chan struct{}), closed: make(chan struct{})}
+	// in is unbuffered: a send returns only once the stream has read it.
+	return &peerConn{in: make(chan []byte), writes: make(chan []byte, 16), peer: make(chan struct{}), closed: make(chan struct{})}
 }
 
 func (c *peerConn) ReadFrame() ([]byte, error) {
@@ -217,8 +219,9 @@ func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 			if _, err := s.Write([]byte("x")); !errors.Is(err, conduit.ErrStreamClosed) {
 				t.Fatalf("Write after close = %v, want ErrStreamClosed", err)
 			}
-			// The peer had not seen the close yet: its frame is read and
-			// discarded, and the link stays open.
+			// The peer had not seen the close yet: its frame is read (the
+			// unbuffered send returns once it is) and discarded, and the
+			// link stays open.
 			c.in <- window
 			if isClosed(c.closed) || isClosed(s.linkClosed()) {
 				t.Fatal("link closed while waiting for the peer")
@@ -236,5 +239,34 @@ func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 				t.Fatalf("%d timers still armed", n)
 			}
 		})
+	}
+}
+
+// TestWSStreamSimultaneousClose: when both ends call CloseWithCode before
+// reading each other's StreamClose, each takes the peer's close as the end
+// of its wait, so both links close at once, without the close wait.
+func TestWSStreamSimultaneousClose(t *testing.T) {
+	clk := clock.NewFake(time.Now())
+	ca, cb := transport.Pipe(transport.MemoryOptions{Buffer: 4})
+	a := newWSStream(ca, 8, 8, clk, conduit.DefaultHandshakeTimeout)
+	b := newWSStream(cb, 8, 8, clk, conduit.DefaultHandshakeTimeout)
+	var wg sync.WaitGroup
+	for _, s := range []*wsStream{a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.CloseWithCode(conduit.CloseNormal, "")
+		}()
+	}
+	wg.Wait()
+	for name, s := range map[string]*wsStream{"a": a, "b": b} {
+		select {
+		case <-s.linkClosed():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: link still open without advancing the clock", name)
+		}
+	}
+	if n := clk.Pending(); n != 0 {
+		t.Fatalf("%d timers still armed", n)
 	}
 }
