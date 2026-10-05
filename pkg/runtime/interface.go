@@ -271,12 +271,12 @@ type SharedDirRealization struct {
 	SubPaths map[string]string
 }
 
-// RunRef identifies the runtime entry a Stop or Delete targets. ID is the backend
-// handle returned by Run or reported by List (a container ID on Docker,
-// Podman and Apple; a pod or instance name on k8s, Cloud Run and Sandbox).
-// RunID is the scion.run_id label of the run the caller intends to stop or
-// remove;
-// it is empty for legacy entries created before run IDs existed.
+// RunRef identifies the runtime entry a Stop or Delete targets. ID is the
+// backend handle returned by Run or reported by List (a container ID on
+// Docker, Podman and Apple; a pod or instance name on k8s, Cloud Run and
+// Sandbox). RunID is the scion.run_id label of the run the caller intends
+// to stop or remove; it is empty for legacy entries created before run IDs
+// existed.
 //
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name

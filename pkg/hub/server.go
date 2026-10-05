@@ -791,21 +791,60 @@ func stopAgentQuery(ctx context.Context, projectID, runID string) string {
 }
 
 // ErrStopRunNotFound reports that a run-scoped stop found no entry of the
-// requested run on the broker (a 404): the run is already gone, and any
-// entry holding the agent's name belongs to a different run, which the
-// broker left untouched (ptone/scion#2550). Callers must not record the
-// current run as stopped because of it; the error still unwraps to the
-// broker's status error.
+// requested run on the broker: the broker answered 404 with error code
+// api.BrokerErrorCodeRunMismatch, because a different run holds the
+// agent's name and was left untouched (ptone/scion#2550). Callers must not
+// record the current run as stopped because of it. The error still unwraps
+// to the broker's status error; brokerStopCurrentRunID reads the run the
+// broker reported holding the name.
 var ErrStopRunNotFound = errors.New("runtime broker has no entry for the requested run")
 
-// stopAgentError marks a broker 404 on a run-scoped stop as
-// ErrStopRunNotFound, on both transports. Other errors, and a 404 on a
-// legacy stop without a run ID, are returned unchanged.
+// stopAgentError marks the broker's run-mismatch 404 on a run-scoped stop
+// as ErrStopRunNotFound, on both transports. It keys on the broker's error
+// code, not the status alone, so a 404 from anything else (a proxy, an
+// unknown route) is returned unchanged, as is any error on a legacy stop
+// without a run ID.
 func stopAgentError(err error, runID string) error {
 	if err == nil || runID == "" || !isBrokerStatus(err, http.StatusNotFound) {
 		return err
 	}
-	return fmt.Errorf("%w (run %s): %w", ErrStopRunNotFound, runID, err)
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
+		return err
+	}
+	if current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string); ok && current != "" {
+		return fmt.Errorf("%w (requested run %s; the broker holds run %s): %w", ErrStopRunNotFound, runID, current, err)
+	}
+	return fmt.Errorf("%w (requested run %s): %w", ErrStopRunNotFound, runID, err)
+}
+
+// brokerStopCurrentRunID returns the run the broker reported holding the
+// agent's name when it refused a run-scoped stop (ErrStopRunNotFound), so
+// a hub/broker run drift can be logged. ok is false for any other error or
+// when the broker did not know the run.
+func brokerStopCurrentRunID(err error) (string, bool) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return "", false
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return "", false
+	}
+	current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
+	return current, ok && current != ""
+}
+
+// logStopRunMismatch logs a run-scoped stop the broker refused because a
+// different run holds the agent's name, naming both runs, so the operator
+// can see a hub/broker run drift behind the failed stop or suspend. It is a
+// no-op for any other error.
+func (s *Server) logStopRunMismatch(agent *store.Agent, action string, err error) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return
+	}
+	current, _ := brokerStopCurrentRunID(err)
+	s.agentLifecycleLog.Warn("Agent "+action+": broker holds a different run than the hub recorded; nothing was stopped",
+		"agent_id", agent.ID, "agent", agent.Slug, "hub_run_id", agent.RunID, "broker_run_id", current)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.

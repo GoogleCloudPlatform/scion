@@ -24,12 +24,16 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/google/uuid"
 )
 
 // Tests for run-scoped stop on the hub side (ptone/scion#2550 P3): the
@@ -79,12 +83,18 @@ func TestStopAgentQuery_RunID(t *testing.T) {
 	}
 }
 
+// runMismatchBody is the broker's run-mismatch 404 body for a stop naming
+// run-1 while run-2 holds the name (runtimebroker.StopRunMismatch).
+const runMismatchBody = `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"Agent not found for the requested run","details":{"runId":"run-1","currentRunId":"run-2"}}}`
+
 func TestHTTPRuntimeBrokerClient_StopAgentRunID(t *testing.T) {
 	var gotQuery url.Values
 	status := http.StatusAccepted
+	body := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
 	client := NewHTTPRuntimeBrokerClient()
@@ -97,10 +107,24 @@ func TestHTTPRuntimeBrokerClient_StopAgentRunID(t *testing.T) {
 	}
 
 	status = http.StatusNotFound
+	body = runMismatchBody
 	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "a", "p1", "run-1")
 	if !errors.Is(err, ErrStopRunNotFound) || !isBrokerStatus(err, http.StatusNotFound) {
 		t.Errorf("run-scoped 404: err = %v, want ErrStopRunNotFound wrapping the 404", err)
 	}
+	if current, ok := brokerStopCurrentRunID(err); !ok || current != "run-2" {
+		t.Errorf("broker current run = (%q, %v), want (run-2, true)", current, ok)
+	}
+
+	// A 404 without the run-mismatch code (a proxy, an unknown route) is
+	// not read as a run mismatch.
+	body = `{"error":{"code":"agent_not_found","message":"Agent not found"}}`
+	err = client.StopAgent(context.Background(), tid("host-1"), server.URL, "a", "p1", "run-1")
+	if err == nil || errors.Is(err, ErrStopRunNotFound) {
+		t.Errorf("404 without the run-mismatch code: err = %v, want a plain broker error", err)
+	}
+
+	body = runMismatchBody
 	err = client.StopAgent(context.Background(), tid("host-1"), server.URL, "a", "p1", "")
 	if err == nil || errors.Is(err, ErrStopRunNotFound) {
 		t.Errorf("legacy 404: err = %v, want a plain broker error", err)
@@ -125,10 +149,20 @@ func TestControlChannelBrokerClient_StopAgentRunID(t *testing.T) {
 	}
 
 	tunnel.status = http.StatusNotFound
+	tunnel.body = []byte(runMismatchBody)
 	err = client.StopAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "run-1")
 	if !errors.Is(err, ErrStopRunNotFound) || !isBrokerStatus(err, http.StatusNotFound) {
 		t.Errorf("run-scoped 404: err = %v, want ErrStopRunNotFound wrapping the 404", err)
 	}
+	if current, ok := brokerStopCurrentRunID(err); !ok || current != "run-2" {
+		t.Errorf("broker current run = (%q, %v), want (run-2, true)", current, ok)
+	}
+	tunnel.body = nil
+	err = client.StopAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "run-1")
+	if err == nil || errors.Is(err, ErrStopRunNotFound) {
+		t.Errorf("404 without the run-mismatch code: err = %v, want a plain broker error", err)
+	}
+	tunnel.body = []byte(runMismatchBody)
 	err = client.StopAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "")
 	if err == nil || errors.Is(err, ErrStopRunNotFound) {
 		t.Errorf("legacy 404: err = %v, want a plain broker error", err)
@@ -281,6 +315,9 @@ func TestRunID_E2E_StaleStopSparesRecreatedAgent(t *testing.T) {
 	if !errors.Is(err, ErrStopRunNotFound) {
 		t.Fatalf("stale stop for run A: err = %v, want ErrStopRunNotFound", err)
 	}
+	if current, ok := brokerStopCurrentRunID(err); !ok || current != runB {
+		t.Errorf("broker current run = (%q, %v), want (%s, true)", current, ok, runB)
+	}
 	entries, stops := mgr.stopSnapshot()
 	if len(stops) != 0 {
 		t.Fatalf("stale stop reached the runtime: %v", stops)
@@ -361,5 +398,73 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 				t.Errorf("current stop: stops = %v, want one stop of run-b", stops)
 			}
 		})
+	}
+}
+
+// B1 (review round 1): the producers of queued stop intents write the run.
+// An offline-broker stop queues a dispatch row whose args carry the row's
+// run ID.
+func TestQueueOfflineStop_IntentCarriesRunID(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetDispatcher(&runIntentDispatcher{})
+	srv.commandBus = &recordingCommandBus{}
+	_, broker, agent := setupOfflineBrokerAgent(t, s, "stop-q-run")
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-q"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("offline stop: status %d: %s", rec.Code, rec.Body.String())
+	}
+	assertStopIntentRunID(t, s, broker.ID, "run-q")
+}
+
+// A cross-node stop (DispatchAgentStop → ErrLifecycleDeferred) writes a
+// stop dispatch row whose args carry the row's run ID.
+func TestDeferredStop_IntentCarriesRunID(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	remoteBroker := uuid.NewString()
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	dispatcher := NewHTTPAgentDispatcherWithClient(cs, &deferredTestClient{localBroker: "local-broker"}, false, slog.Default())
+	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
+
+	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
+	if _, err := cs.SetAgentRunID(ctx, agent.ID, "run-d"); err != nil {
+		t.Fatal(err)
+	}
+	agent.RunID = "run-d"
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		stopped := *agent
+		stopped.Phase = "stopped"
+		events.PublishAgentStatus(ctx, &stopped)
+	}()
+	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		t.Fatalf("deferred stop: %v", err)
+	}
+	assertStopIntentRunID(t, cs, remoteBroker, "run-d")
+}
+
+func assertStopIntentRunID(t *testing.T, s store.Store, brokerID, want string) {
+	t.Helper()
+	pending, err := s.ListPendingDispatch(context.Background(), brokerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Op != "stop" {
+		t.Fatalf("pending dispatch rows = %+v, want one stop", pending)
+	}
+	args, err := UnmarshalStopArgs(pending[0].Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.RunID != want {
+		t.Errorf("stop intent runId = %q, want %q", args.RunID, want)
 	}
 }

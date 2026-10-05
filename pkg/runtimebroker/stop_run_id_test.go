@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -300,27 +301,84 @@ func TestStopAgent_RunIDOrderingAgainstRuntimeUnavailable(t *testing.T) {
 func TestLaunchRegistry_InFlightOtherRun(t *testing.T) {
 	r := newLaunchRegistry()
 	key := launchKey{ProjectID: "p", Slug: "dev"}
-	if r.inFlightOtherRun(key, "run-a") {
+	if _, ok := r.inFlightOtherRun(key, "run-a"); ok {
 		t.Fatal("empty registry reported a launch")
 	}
 	rec := newLaunchRecord("1", "dev", "create", "", time.Time{}, func() {})
 	rec.RunID = "run-b"
 	r.Begin(key, rec)
-	if !r.inFlightOtherRun(key, "run-a") {
-		t.Error("launch of run-b not reported for run-a")
+	if current, ok := r.inFlightOtherRun(key, "run-a"); !ok || current != "run-b" {
+		t.Errorf("launch of run-b reported as (%q, %v) for run-a, want (run-b, true)", current, ok)
 	}
-	if r.inFlightOtherRun(key, "run-b") {
+	if _, ok := r.inFlightOtherRun(key, "run-b"); ok {
 		t.Error("launch of the requested run reported as another run")
 	}
-	if r.inFlightOtherRun(key, "") {
+	if _, ok := r.inFlightOtherRun(key, ""); ok {
 		t.Error("an empty run ID must never count")
 	}
 	rec.RunID = ""
-	if r.inFlightOtherRun(key, "run-a") {
+	if _, ok := r.inFlightOtherRun(key, "run-a"); ok {
 		t.Error("a launch without a run ID must never count")
 	}
 	var nilReg *launchRegistry
-	if nilReg.inFlightOtherRun(key, "run-a") {
+	if _, ok := nilReg.inFlightOtherRun(key, "run-a"); ok {
 		t.Error("nil registry reported a launch")
+	}
+}
+
+// The mismatch 404 carries api.BrokerErrorCodeRunMismatch and names both
+// the requested run and the run holding the name, whether that is a runtime
+// entry or an in-flight launch (review N3, nit 1).
+func TestStopAgent_RunMismatch404Details(t *testing.T) {
+	check := func(t *testing.T, rec *httptest.ResponseRecorder, wantCurrent string) {
+		t.Helper()
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body ErrorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Error.Code != api.BrokerErrorCodeRunMismatch {
+			t.Errorf("code = %q, want %q", body.Error.Code, api.BrokerErrorCodeRunMismatch)
+		}
+		if got := body.Error.Details[api.BrokerErrorDetailRunID]; got != "run-old" {
+			t.Errorf("details runId = %v, want run-old", got)
+		}
+		if got := body.Error.Details[api.BrokerErrorDetailCurrentRunID]; got != wantCurrent {
+			t.Errorf("details currentRunId = %v, want %s", got, wantCurrent)
+		}
+	}
+	t.Run("runtime entry", func(t *testing.T) {
+		f := newStopRunFixture(t, "")
+		check(t, f.stop(t, "projectId="+scopeProjB+"&runId=run-old"), "run-new")
+	})
+	t.Run("in-flight launch", func(t *testing.T) {
+		f := newStopRunFixture(t, "run-launching")
+		f.mgr.agents = nil
+		check(t, f.stop(t, "projectId="+scopeProjB+"&runId=run-old"), "run-launching")
+	})
+}
+
+// A project-blind run-scoped stop with nothing of the requested run never
+// passes the bare slug to the runtime (review N1): it takes the not-found
+// path. Without a runId the legacy bare-slug pass-through is unchanged.
+func TestStopAgent_RunIDWithoutProjectNeverStopsBareSlug(t *testing.T) {
+	f := newStopRunFixture(t, "")
+	f.mgr.agents = nil
+	rec := f.stop(t, "runId=run-old")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := f.stopCalls(); n != 0 {
+		t.Fatalf("run-scoped stop reached the runtime with %q (%d calls)", f.mgr.lastStopAgentID, n)
+	}
+
+	rec = f.stop(t, "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("legacy stop: expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "dev" {
+		t.Errorf("legacy stop: calls = %d, last = %q; want the bare slug passed through as before", f.stopCalls(), f.mgr.lastStopAgentID)
 	}
 }

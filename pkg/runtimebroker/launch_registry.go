@@ -202,16 +202,19 @@ func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
 }
 
 // inFlightOtherRun reports whether a launch labelled with a run other than
-// runID is in flight under key. A launch without a run ID, or an empty
-// runID, never counts (ptone/scion#2550).
-func (r *launchRegistry) inFlightOtherRun(key launchKey, runID string) bool {
+// runID is in flight under key, and that launch's run. A launch without a
+// run ID, or an empty runID, never counts (ptone/scion#2550).
+func (r *launchRegistry) inFlightOtherRun(key launchKey, runID string) (string, bool) {
 	if r == nil || runID == "" {
-		return false
+		return "", false
 	}
 	r.mu.Lock()
 	rec := r.records[key]
 	r.mu.Unlock()
-	return rec != nil && rec.RunID != "" && rec.RunID != runID
+	if rec != nil && rec.RunID != "" && rec.RunID != runID {
+		return rec.RunID, true
+	}
+	return "", false
 }
 
 // Finish closes rec's done channel and removes it from the registry if it is

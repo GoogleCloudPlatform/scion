@@ -296,6 +296,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		s.syncWorkspaceOnStop(ctx, agent)
 		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+			s.logStopRunMismatch(agent, "suspend", err)
 			return err
 		}
 	}
@@ -522,6 +523,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+			s.logStopRunMismatch(agent, "stop", dispatchErr)
 		}
 		if dispatchErr == nil {
 			// A stopped agent has no running container: release its
