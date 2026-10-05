@@ -60,7 +60,9 @@ type outboundSpokeFixture struct {
 }
 
 // newOutboundSpokeFixture wires the broker delivery path with the given
-// inprocess spoke and a non-observer "web" plugin spoke that always fails.
+// inprocess spoke (nil for none) and a non-observer "chatplugin" spoke that
+// always fails. The plugin spoke handles the "web" channel through
+// ChannelID, so the dm: backfill (Channel "web") targets it.
 func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSpokeFixture {
 	t.Helper()
 	srv, s := testServer(t)
@@ -80,10 +82,14 @@ func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSp
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
-		{Name: eventbus.InProcessBusName, Bus: inproc},
-		{Name: "web", Bus: errSpokeBus{err: errPluginSpokeDown}},
-	}, slog.Default())
+	var spokes []eventbus.NamedEventBus
+	if inproc != nil {
+		spokes = append(spokes, eventbus.NamedEventBus{Name: eventbus.InProcessBusName, Bus: inproc})
+	}
+	spokes = append(spokes, eventbus.NamedEventBus{
+		Name: "chatplugin", ChannelID: "web", Bus: errSpokeBus{err: errPluginSpokeDown},
+	})
+	fanout := eventbus.NewFanOutEventBus(spokes, slog.Default())
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(fanout, s, events,
@@ -95,7 +101,12 @@ func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSp
 
 func (f *outboundSpokeFixture) send(t *testing.T, msg string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{Recipient: "user:" + f.user.Email, Msg: msg})
+	return f.sendRequest(t, OutboundMessageRequest{Recipient: "user:" + f.user.Email, Msg: msg})
+}
+
+func (f *outboundSpokeFixture) sendRequest(t *testing.T, outReq OutboundMessageRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(outReq)
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -118,26 +129,90 @@ func (f *outboundSpokeFixture) storedRows(t *testing.T) int {
 	return len(res.Items)
 }
 
+// requireSentOnce asserts the normal success response (status "sent" and a
+// message_id) and that exactly one row is stored, with no duplicate write.
+func (f *outboundSpokeFixture) requireSentOnce(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rr.Code, "handler response: %s", rr.Body.String())
+	var resp struct {
+		MessageID string `json:"message_id"`
+		Status    string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "sent", resp.Status)
+	require.NotEmpty(t, resp.MessageID)
+
+	require.Eventually(t, func() bool { return f.storedRows(t) >= 1 },
+		3*time.Second, 20*time.Millisecond, "expected a stored row")
+	require.Never(t, func() bool { return f.storedRows(t) > 1 },
+		200*time.Millisecond, 20*time.Millisecond, "expected exactly one stored row")
+	require.Equal(t, 1, f.storedRows(t))
+}
+
 // TestHandleAgentOutboundMessage_PluginSpokeFailureIsDelivered covers
 // ptone/scion#2757: when only a non-observer plugin spoke fails, the
 // inprocess spoke has already queued the persisting deliverToUser, so the
 // handler must report success (a retry would duplicate the stored row).
+// The dm: backfill sets Channel "web", so this pins FanOut's
+// channel-targeted branch.
 func TestHandleAgentOutboundMessage_PluginSpokeFailureIsDelivered(t *testing.T) {
 	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
 	f.proxy.Start()
 	t.Cleanup(f.proxy.Stop)
-	require.True(t, f.proxy.subscribeProjectUserMessages(f.project.ID))
 
 	rr := f.send(t, "hello despite a failing plugin")
-	require.Equal(t, http.StatusOK, rr.Code, "handler response: %s", rr.Body.String())
+	f.requireSentOnce(t, rr)
+}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for f.storedRows(t) == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+// TestHandleAgentOutboundMessage_PluginSpokeFailureNoChannelIsDelivered
+// pins the same outcome through FanOut's default branch (no channel, every
+// spoke published). An explicit group conversation_id skips the dm:
+// backfill, so the message carries no channel.
+func TestHandleAgentOutboundMessage_PluginSpokeFailureNoChannelIsDelivered(t *testing.T) {
+	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	projectID := f.project.ID
+	conv := &store.Conversation{
+		ID:        api.NewUUID(),
+		ProjectID: &projectID,
+		Kind:      "group",
+		Surface:   "native",
 	}
-	// Give any duplicate write a chance to land before counting.
-	time.Sleep(100 * time.Millisecond)
-	require.Equal(t, 1, f.storedRows(t), "expected exactly one stored row")
+	require.NoError(t, f.store.CreateConversation(context.Background(), conv))
+
+	rr := f.sendRequest(t, OutboundMessageRequest{
+		Recipient:      "user:" + f.user.Email,
+		Msg:            "hello in a group despite a failing plugin",
+		ConversationID: conv.ID,
+	})
+	f.requireSentOnce(t, rr)
+
+	res, err := f.store.ListMessages(context.Background(), store.MessageFilter{
+		ProjectID:   f.project.ID,
+		RecipientID: f.user.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	require.Empty(t, res.Items[0].Channel, "expected the channel-less FanOut branch")
+}
+
+// TestHandleAgentOutboundMessage_PluginSpokeFailureWithoutSubscriberFails
+// pins that the plugin-failure success branch needs the persisting
+// user-message subscription: without an inprocess spoke nothing is stored,
+// so the failure is still reported as 502.
+func TestHandleAgentOutboundMessage_PluginSpokeFailureWithoutSubscriberFails(t *testing.T) {
+	f := newOutboundSpokeFixture(t, nil)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.send(t, "hello with no persisting subscriber")
+	require.Equal(t, http.StatusBadGateway, rr.Code, "handler response: %s", rr.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
+	require.Equal(t, 0, f.storedRows(t))
 }
 
 // TestHandleAgentOutboundMessage_InProcessFailureStillFails pins that a

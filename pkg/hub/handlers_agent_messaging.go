@@ -1322,14 +1322,22 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			// Ensure the persisting user-message subscription first, as the
+			// notification path does: it is otherwise only created on agent
+			// lifecycle events.
+			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
-			if err != nil && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
-				// Only a non-observer plugin spoke failed: the inprocess spoke
-				// already queued the persisting deliverToUser, so the message is
-				// stored. Reporting failure would make the sender retry and
-				// duplicate the row and the plugin card (ptone/scion#2757).
-				s.messageLog.Warn("Outbound message stored; plugin spoke publish failed",
-					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
+				// The inprocess spoke queued the persisting deliverToUser, so
+				// the message is stored; only channel spoke delivery failed (a
+				// non-observer spoke returned an error, or no spoke is
+				// registered for the channel). Reporting failure would make
+				// the sender retry and duplicate the row and the plugin card
+				// (ptone/scion#2757). Without the persisting subscription
+				// nothing was stored, so the error is still returned.
+				s.messageLog.Warn("Outbound message stored; channel spoke delivery failed",
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "error", err)
 				err = nil
 			}
 			if err != nil {
