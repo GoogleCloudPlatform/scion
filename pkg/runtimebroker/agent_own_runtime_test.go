@@ -1095,3 +1095,58 @@ func TestHandleAgentAttach_PassesProjectPathHint(t *testing.T) {
 		t.Fatalf("requests sent to the default namespace: %v", got)
 	}
 }
+
+// Two same-named pods of the agent in two other namespaces, and none in the
+// agent's own runtime: they are two candidates (not one by pod name), so
+// restart fails as ambiguous without stopping or starting anything, and
+// delete fails without removing either.
+func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
+	setup := func(t *testing.T) (*ownRTFixture, *atomic.Int32) {
+		f := newOwnRTFixture(t, "agents", false)
+		writeRestartTemplates(t, f.projectDir)
+		labels := map[string]string{
+			"scion.name": ownRTAgent, "scion.agent": "true",
+			projectkeys.LabelProjectID: ownRTProjectID,
+		}
+		for _, ns := range []string{"scion-old-a", "scion-old-b"} {
+			f.registerOldRuntime(ns)
+			f.createPod(t, ns, labels, map[string]string{projectkeys.LabelProjectPath: f.projectDir})
+		}
+		var runs atomic.Int32
+		f.wrapOwn = func(k *runtime.KubernetesRuntime) runtime.Runtime {
+			return &startRecordingRuntime{KubernetesRuntime: k, runs: &runs}
+		}
+		return f, &runs
+	}
+	bothRemain := func(t *testing.T, f *ownRTFixture) {
+		t.Helper()
+		for _, ns := range []string{"scion-old-a", "scion-old-b"} {
+			if !f.podExistsIn(t, ns) {
+				t.Errorf("pod in %s was removed", ns)
+			}
+		}
+	}
+
+	t.Run("restart", func(t *testing.T) {
+		f, runs := setup(t)
+		w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
+		// The HTTP body is the generic runtime-op message; the logged error
+		// carries the reason.
+		if w.Code < 400 || !strings.Contains(f.logs.String(), "ambiguous") {
+			t.Fatalf("restart status = %d, body %s; want an ambiguity failure; logs:\n%s", w.Code, w.Body.String(), f.logs.String())
+		}
+		if n := runs.Load(); n != 0 {
+			t.Fatalf("starts = %d, want 0", n)
+		}
+		bothRemain(t, f)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		f, _ := setup(t)
+		w := f.do(t, http.MethodDelete, ownRTDeletePath)
+		if w.Code < 400 || !strings.Contains(w.Body.String(), "ambiguous") {
+			t.Fatalf("delete status = %d, body %s; want an ambiguity failure", w.Code, w.Body.String())
+		}
+		bothRemain(t, f)
+	})
+}

@@ -2663,8 +2663,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	agentName := id
 	var projectPath string
 	match, matchErr := s.lookupAgentMatch(ctx, id, projectID)
-	ownHasNoContainer := errors.Is(matchErr, ErrAgentNotFound) || (matchErr == nil && match.entry.ContainerID == "")
-	if own := s.ownRuntimeFor(ctx); own != nil && ownHasNoContainer {
+	if own := s.ownRuntimeFor(ctx); own != nil && errors.Is(matchErr, ErrAgentNotFound) {
 		// Restart starts the agent in the runtime its saved profile selects
 		// now, which can differ from the one it is running in (the
 		// profile's runtime or namespace was changed). If the agent's own
@@ -5139,7 +5138,8 @@ func candidatesHaveContainer(cs []agentCandidate) bool {
 // to projectID the way a delete resolves its target: entries labelled with
 // the project, else legacy (unlabelled) containers whose recorded path
 // identifies as projectID. With no projectID, every entry of the name.
-// Entries are de-duplicated by container ID (or path, for file-only
+// Entries are de-duplicated by operation ID (scionrt.AgentOperationID: the
+// container ID, namespace-qualified for Kubernetes pods; or path, for file-only
 // entries). The error is the last List failure; the candidates from the
 // managers that listed are still returned.
 func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Manager, id, projectID, logMsg string) ([]agentCandidate, error) {
@@ -5161,7 +5161,10 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 				if !agentNameMatches(a, id) || !accept(a) {
 					continue
 				}
-				key := a.ContainerID
+				// Keyed by the operation ID, so same-named Kubernetes pods
+				// in different namespaces stay distinct candidates (and
+				// make the result ambiguous) instead of collapsing into one.
+				key := scionrt.AgentOperationID(a)
 				if key == "" {
 					key = "path:" + a.ProjectPath + "|" + a.Name
 				}
