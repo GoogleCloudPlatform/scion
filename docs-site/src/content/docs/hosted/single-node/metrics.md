@@ -201,6 +201,8 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 
 The `sciontool` receiver enforces authoritative identity on all incoming telemetry. Reserved identity attributes (`scion.agent.id`, `scion.agent.slug`, `scion.project.id`, `scion.harness`, `scion.model`, `scion.broker.name`, and related keys) are stripped from agent-submitted resource attributes and replaced with Hub-sourced values. This prevents agents from spoofing their identity in exported telemetry.
 
+`sciontool`'s own telemetry (hook, lifecycle, usage-derived and pipeline self-metrics) carries only the resource attributes that `sciontool` sets itself: `service.name=sciontool`, the agent and project identity, the harness, the model, the broker, and the GCP project. `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME` in `sciontool`'s environment are ignored for this telemetry with every backend, including generic OTLP. Otherwise they would add attributes outside the GCP resource allowlist and the data would be rejected. Telemetry that a harness emits natively is not affected.
+
 In addition to the resource attributes above, every exported metric **point** carries three canonical labels, stamped from that same authoritative identity by the exporter (GCP-native and generic OTLP alike), never by a producer:
 
 - `scion_agent_id`

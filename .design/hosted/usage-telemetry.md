@@ -211,6 +211,7 @@ See §5's copilot row for the concrete counters, key formula and edge-case handl
   - set `SCION_NATIVE_TELEMETRY_POLICY` so the env guard applies;
   - set `SCION_USAGE_SOURCE=native`;
   - no `OTEL_RESOURCE_ATTRIBUTES` and no forced cumulative temporality (D5).
+  - Related, on the sciontool side (ptone/scion#2249): sciontool's own loopback providers ignore `OTEL_RESOURCE_ATTRIBUTES` / `OTEL_SERVICE_NAME` from their environment. The OTel SDK always merges `resource.Environment()` into a provider resource, so a gRPC client interceptor (`pkg/sciontool/telemetry/loopback_resource.go`) drops every resource key that `buildResource` does not set. This keeps hook, lifecycle, usage-derived and self-metrics inside the GCP resource allowlist.
 - **grok-build:** the same local-receiver routing fix (a privacy fix: today it bypasses redaction and identity), subject to D8. `SCION_USAGE_SOURCE` stays unset. Usage is deferred.
 - **opencode (hooks), revised after checking the source:** the source code shows the current bridge is largely non-functional. Only `tool.execute.before/after` are real plugin hook keys, and they are read with the wrong fields. `message.updated`, `session.idle` and the other keys are never invoked, so opencode publishes **zero** model-end events today; the earlier "inflated calls" concern turned out to be based on a misreading of the bridge.
   - **Rewrite `scion-bridge.js`** to subscribe through the generic `event` hook, filtering in JS *before* `execSync`, because `message.part.delta` fires per chunk.

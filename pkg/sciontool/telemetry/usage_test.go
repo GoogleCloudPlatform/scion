@@ -734,6 +734,19 @@ func TestPipelineStartConstructsUsageDeriverFromEnv(t *testing.T) {
 // loopback (measured at 10s before this fix; hook-mode Stop is
 // sub-millisecond).
 func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
+	t.Run("fixed port", func(t *testing.T) {
+		testPipelineStopFlushesFinalUsageIncrementQuickly(t, availableTCPPort(t))
+	})
+	// ptone/scion#2247: with SCION_OTEL_GRPC_PORT=0 the receiver binds an
+	// ephemeral port, and the deriver must dial that bound port rather than
+	// the configured 0, or its final flush never lands and Stop waits out
+	// the export timeout.
+	t.Run("ephemeral port", func(t *testing.T) {
+		testPipelineStopFlushesFinalUsageIncrementQuickly(t, 0)
+	})
+}
+
+func testPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T, grpcPort int) {
 	t.Setenv("SCION_AGENT_ID", "agent-stop-1")
 	t.Setenv("SCION_PROJECT_ID", "project-stop-1")
 	t.Setenv("SCION_HARNESS", "claude")
@@ -760,10 +773,23 @@ func TestPipelineStopFlushesFinalUsageIncrementQuickly(t *testing.T) {
 	}
 	defer func() { _ = sdkExporter.Shutdown(context.Background()) }()
 
-	cfg := &Config{Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0}
+	cfg := &Config{Enabled: true, CloudProvider: "gcp", GRPCPort: grpcPort, HTTPPort: 0}
 	p := NewWithConfig(cfg)
 	if err := p.Start(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	bound, boundHTTP := p.receiver.BoundPorts()
+	if bound == 0 || (grpcPort != 0 && bound != grpcPort) {
+		t.Fatalf("receiver bound gRPC port = %d, configured %d", bound, grpcPort)
+	}
+	// Config() is what init.go's lifecycle providers (and initSelfMetrics)
+	// build their loopback exporters from: it must carry the bound ports,
+	// while the configured ports stay untouched for a restart.
+	if got := p.Config(); got.GRPCPort != bound || got.HTTPPort != boundHTTP || boundHTTP == 0 {
+		t.Fatalf("Config() ports = %d/%d, want bound %d/%d", got.GRPCPort, got.HTTPPort, bound, boundHTTP)
+	}
+	if cfg.GRPCPort != grpcPort || cfg.HTTPPort != 0 {
+		t.Fatalf("configured ports mutated to %d/%d", cfg.GRPCPort, cfg.HTTPPort)
 	}
 	// Cloud isn't configured (no ProjectID), so Start did not create a real
 	// exporter; point it at the capture server, as the other Pipeline.Start
