@@ -349,6 +349,11 @@ func TestCreateAgentPublish_SyncDispatchRacesDelete(t *testing.T) {
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 				require.NotEmpty(t, race.agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
 				assert.Zero(t, pub.count("created"), "no created after the delete claimed: %v", pub.kinds())
+				if site.name == "dispatch" {
+					// A synchronous broker create that lost to the
+					// delete answers 409 (ptone/scion#3099).
+					requireDeletedDuringCreate(t, rec, race.agentID)
+				}
 
 				race.finish()
 				assert.Zero(t, pub.count("created"), "no created at all: %v", pub.kinds())
@@ -418,6 +423,9 @@ func TestCreateAgentPublish_AsyncLaunchRacesDelete(t *testing.T) {
 			})
 			require.NotNil(t, sent, "dispatch ran: %s", rec.Body.String())
 			assert.Zero(t, pub.count("created"), "no created after the delete claimed: %v", pub.kinds())
+			// The accepted launch is unaffected by ptone/scion#3099: it
+			// still answers 201; the launch report settles the delete.
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 			if tc.mode == deleteClaimed {
 				close(release)
