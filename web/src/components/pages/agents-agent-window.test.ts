@@ -2228,6 +2228,15 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       return badge?.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '';
     }
 
+    /** The failure banner's title in that row (ptone/scion#2483 phase 2), if shown. */
+    async function bannerText(row: Element | null): Promise<string> {
+      const banner = row?.querySelector('scion-deletion-banner') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      await banner?.updateComplete;
+      return banner?.shadowRoot?.querySelector('.title')?.textContent?.trim() ?? '';
+    }
+
     function icons(row: Element | null, name: string): number {
       return row?.querySelectorAll(`sl-icon[name="${name}"]`).length ?? 0;
     }
@@ -2486,6 +2495,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
 
       // Fake clock only after mount (mount waits on real timers).
       let badge: string;
+      let banner: string;
       let trash: number;
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
       try {
@@ -2509,11 +2519,15 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         vi.advanceTimersByTime(1_000);
         await el.updateComplete;
         badge = await badgeText(rowOf(el, id));
+        banner = await bannerText(rowOf(el, id));
         trash = icons(rowOf(el, id), 'trash');
       } finally {
         vi.useRealTimers();
       }
-      expect(badge).toBe('Delete interrupted');
+      // Phase 2: a failed (here client-flipped) view shows the failure
+      // banner; the badge is for a live delete only.
+      expect(badge).toBe('');
+      expect(banner).toBe('Delete interrupted');
       expect(trash).toBe(1);
     });
   });

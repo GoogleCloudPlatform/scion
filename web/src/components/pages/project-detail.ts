@@ -32,6 +32,7 @@ import type {
   Capabilities,
   ProjectSessionMetricsSummary,
   AgentLifecycleAction,
+  DeletionInfo,
 } from '../../shared/types.js';
 import {
   can,
@@ -73,7 +74,9 @@ import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
-import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
+import '../shared/deletion-banner.js';
+import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
+import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
@@ -655,6 +658,14 @@ export class ScionPageProjectDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .agent-card scion-deletion-banner {
+      margin-top: 0.75rem;
+    }
+
+    td scion-deletion-banner {
+      margin-top: 0.25rem;
+    }
+
     .agent-card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1164,6 +1175,7 @@ export class ScionPageProjectDetail extends LitElement {
     const storedPhase = localStorage.getItem(`scion-filter-project-agents-phase-${this.projectId}`);
     if (
       storedPhase === 'running' ||
+      storedPhase === 'stopping' ||
       storedPhase === 'stopped' ||
       storedPhase === 'suspended' ||
       storedPhase === 'error'
@@ -2046,6 +2058,64 @@ export class ScionPageProjectDetail extends LitElement {
     this.refreshActiveFileBrowser();
   }
 
+  /**
+   * Delete through the shared helper (ptone/scion#2483 phase 2): the
+   * card/row Delete button (`event` for the Alt-key bypass), and the
+   * failure banner's Retry (no confirm) and Force. On 204 the card goes
+   * now; on 202 the helper has applied "Deleting…" and the SSE `deleted`
+   * removes it in place. A 502/503 now offers the same force fallback as
+   * the other pages (the helper owns it).
+   */
+  private async deleteAgent(agentId: string, opts: AgentDeleteRequest = {}): Promise<void> {
+    // `this.agents` is empty while paged: `findShownAgent` falls back to
+    // the window's current page, then to state (an off-page agent, e.g.
+    // acted on right after a chip click elsewhere).
+    const outcome = await runAgentDelete({
+      agentId,
+      agentName: this.findShownAgent(agentId)?.name,
+      ...opts,
+      onBusy: (busy): void => {
+        this.actionLoading = { ...this.actionLoading, [agentId]: busy };
+      },
+    });
+    if (outcome.kind === 'deleted') {
+      // Drops the card from the held set now; on a paged page the
+      // background refresh drops it (GoogleCloudPlatform/scion#2451).
+      this.applyOptimisticAgents([], [agentId]);
+      this.backgroundRefresh();
+    } else if (outcome.kind === 'failed') {
+      showToast(outcome.message);
+    }
+  }
+
+  /**
+   * The badge shows only a live delete; a failed one (abandoned included)
+   * shows the failure banner instead.
+   */
+  private deletingView(agent: Agent): DeletionInfo | null {
+    const view = this.deletionLease.view(agent);
+    return view?.state === 'deleting' ? view : null;
+  }
+
+  /**
+   * Failure banner with Retry and Force. Cards get the full form; table
+   * rows the compact one, which fits the status cell.
+   */
+  private renderDeletionBanner(agent: Agent, compact: boolean): TemplateResult | typeof nothing {
+    const view = this.deletionLease.view(agent);
+    if (view?.state !== 'failed') return nothing;
+    return html`<scion-deletion-banner
+      class="deletion-banner"
+      .deletion=${view}
+      agent-name=${agent.name}
+      ?can-delete=${can(agent._capabilities, 'delete')}
+      ?busy=${this.actionLoading[agent.id] || false}
+      ?compact=${compact}
+      @deletion-retry=${(): void => void this.deleteAgent(agent.id, { confirm: false })}
+      @deletion-force=${(): void => void this.deleteAgent(agent.id, { force: true })}
+    ></scion-deletion-banner>`;
+  }
+
   private async handleAgentAction(
     agentId: string,
     action: AgentLifecycleAction,
@@ -2064,44 +2134,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     if (action === 'delete') {
-      // `this.agents` is empty while paged: `findShownAgent` falls back to
-      // the window's current page, then to state (an off-page agent, e.g.
-      // acted on right after a chip click elsewhere).
-      const agentName = this.findShownAgent(agentId)?.name ?? 'this agent';
-      if (
-        !event?.altKey &&
-        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
-      ) {
-        return;
-      }
-      this.actionLoading = { ...this.actionLoading, [agentId]: true };
-      this.requestUpdate();
-
-      try {
-        const response = await apiFetch(`/api/v1/agents/${agentId}`, {
-          method: 'DELETE',
-        });
-
-        if (!response.ok) {
-          throw new Error(await extractApiError(response, 'Failed to delete agent'));
-        }
-
-        if (response.status === 202) {
-          // Still deleting (ptone/scion#2483): keep the card, show
-          // "Deleting…" now, and let the SSE `deleted` remove it in place.
-          stateManager.applyDeleteAccepted(agentId, await readAcceptedDeletion(response));
-          return;
-        }
-
-        // Server confirmed — remove from local list
-        this.applyOptimisticAgents([], [agentId]);
-        this.backgroundRefresh();
-      } catch (err) {
-        console.error('Failed to delete agent:', err);
-        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
-      } finally {
-        this.actionLoading = { ...this.actionLoading, [agentId]: false };
-      }
+      await this.deleteAgent(agentId, { event });
       return;
     }
 
@@ -2130,7 +2163,7 @@ export class ScionPageProjectDetail extends LitElement {
       const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `Failed to ${action} agent`));
+        throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
       }
 
       this.backgroundRefresh();
@@ -2207,6 +2240,12 @@ export class ScionPageProjectDetail extends LitElement {
             @click=${() => this.setPhaseFilter('running')}
           >
             Running
+          </button>
+          <button
+            class=${this.phaseFilter === 'stopping' ? 'active' : ''}
+            @click=${(): void => this.setPhaseFilter('stopping')}
+          >
+            Stopping
           </button>
           <button
             class=${this.phaseFilter === 'stopped' ? 'active' : ''}
@@ -3265,9 +3304,10 @@ export class ScionPageProjectDetail extends LitElement {
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge
-            .deletion=${this.deletionLease.view(agent)}
+            .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
+          ${this.renderDeletionBanner(agent, true)}
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
@@ -3445,11 +3485,12 @@ export class ScionPageProjectDetail extends LitElement {
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge
-            .deletion=${this.deletionLease.view(agent)}
+            .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
         </div>
 
+        ${this.renderDeletionBanner(agent, false)}
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
 
         <div class="agent-actions">
