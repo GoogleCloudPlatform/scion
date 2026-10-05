@@ -113,6 +113,55 @@ func TestProjectRenameSlugMigratesLegacyMembersGroup(t *testing.T) {
 	}
 }
 
+// TestProjectRenameSlugMigratesUnmarkedAgentsGroup checks that this
+// project's project_agents group is re-slugged even when it has lost the
+// agents marker (for example after a group PATCH replaced its annotations).
+// Skipping it left the new slug free, so the next GET of the project made
+// createProjectGroup create a second project_agents group and
+// GetGroupByProjectID failed with "not singular".
+func TestProjectRenameSlugMigratesUnmarkedAgentsGroup(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := createSlugMigrationProject(t, s, tid("project_slugmig_unmarked"), "unmarked-old", "Unmarked Project")
+	agents := &store.Group{
+		ID:          tid("group_slugmig_unmarked_agents"),
+		Name:        "Unmarked Project Agents",
+		Slug:        "project:unmarked-old:agents",
+		GroupType:   store.GroupTypeProjectAgents,
+		ProjectID:   project.ID,
+		Annotations: map[string]string{"team": "platform"},
+	}
+	if err := s.CreateGroup(ctx, agents); err != nil {
+		t.Fatalf("create group %s: %v", agents.Slug, err)
+	}
+
+	renameProjectSlug(t, srv, project.ID, "unmarked-new", "Unmarked Renamed")
+
+	got, err := s.GetGroup(ctx, agents.ID)
+	if err != nil {
+		t.Fatalf("get group %s: %v", agents.ID, err)
+	}
+	if got.Slug != "project:unmarked-new:agents" {
+		t.Errorf("unmarked agents group slug = %q, want %q", got.Slug, "project:unmarked-new:agents")
+	}
+
+	// GET runs createProjectGroup, which must not create a second
+	// project_agents group at the new slug.
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s", project.ID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get project: expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	byProject, err := s.GetGroupByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetGroupByProjectID: %v", err)
+	}
+	if byProject.ID != agents.ID {
+		t.Errorf("GetGroupByProjectID returned group %s, want %s", byProject.ID, agents.ID)
+	}
+}
+
 // TestProjectRenameSlugSkipsLookAlikeGroups checks that a slug rename leaves
 // a group at the old agents or members slug untouched when it is not this
 // project's system group, and that the rename itself still succeeds
@@ -120,6 +169,7 @@ func TestProjectRenameSlugMigratesLegacyMembersGroup(t *testing.T) {
 func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 	agentsMarker := map[string]string{store.AnnotationProjectAgentsGroup: "true"}
 	membersMarker := map[string]string{store.AnnotationProjectMembersGroup: "true"}
+	explicitType := func(string) string { return store.GroupTypeExplicit }
 
 	cases := []struct {
 		name string
@@ -127,7 +177,10 @@ func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 		// "members" look-alike group.
 		annotations func(kind string) map[string]string
 		// groupType overrides the GroupType of the look-alike group;
-		// empty means the type the real system group would have.
+		// nil means the type the real system group would have. The
+		// no-marker cases use explicit for both kinds: a same-project
+		// project_agents group is renamed whether or not it is marked
+		// (see TestProjectRenameSlugMigratesUnmarkedAgentsGroup).
 		groupType  func(kind string) string
 		otherOwner bool
 		// kinds limits which look-alike groups are created; nil means both.
@@ -136,10 +189,12 @@ func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 		{
 			name:        "nil annotations",
 			annotations: func(string) map[string]string { return nil },
+			groupType:   explicitType,
 		},
 		{
 			name:        "unrelated annotation only",
 			annotations: func(string) map[string]string { return map[string]string{"team": "platform"} },
+			groupType:   explicitType,
 		},
 		{
 			name: "marker set to false",
@@ -152,6 +207,7 @@ func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 					store.LegacyAnnotationProjectMembersGroup: "false",
 				}
 			},
+			groupType: explicitType,
 		},
 		{
 			name: "other kind's marker",
@@ -161,6 +217,7 @@ func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 				}
 				return agentsMarker
 			},
+			groupType: explicitType,
 		},
 		{
 			name: "marker for another project",

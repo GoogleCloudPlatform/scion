@@ -2811,10 +2811,17 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 
 // isRenamableProjectAgentsGroup reports whether group, found at the
 // project's old agents slug, is this project's system agents group and may be
-// re-slugged on rename: canonical marker, matching ProjectID and the agents
-// GroupType (the same checks createProjectGroup applies before adopting).
+// re-slugged on rename: matching ProjectID and the agents GroupType. The
+// marker is deliberately not required. Only the system writes project_agents
+// groups with a ProjectID (POST /groups rejects that type and no group API
+// sets ProjectID or GroupType), so ProjectID + GroupType already identify the
+// genuine group. Requiring the marker stranded an unmarked genuine group (for
+// example after a PATCH replaced its annotations) at the old slug, and the
+// next createProjectGroup then created a second project_agents group for the
+// project, breaking every GroupType+ProjectID .Only() lookup.
 func isRenamableProjectAgentsGroup(group *store.Group, projectID string) bool {
-	return isSystemProjectAgentsGroup(group, projectID) &&
+	return group != nil &&
+		group.ProjectID == projectID &&
 		group.GroupType == store.GroupTypeProjectAgents
 }
 
