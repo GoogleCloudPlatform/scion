@@ -2487,15 +2487,25 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 }
 
 // authorizeProviderUnlink decides DELETE /api/v1/projects/{id}/providers/{brokerId}:
-// the caller must hold project.update on the project, or broker.update on
-// the named broker (its owner or a super-admin, see brokerProvideDecision),
-// which withdraws the owner's consent to the association. On denial it logs
-// and writes the project.update 403, and returns false.
+// the request credential must be a user credential admitted for broker
+// association (an interactive session, a dev credential or a user access
+// token, see brokerUserCredentialKindAdmitted); a broker acting on a user's
+// behalf, and any other non-user credential, is not admitted by either arm.
+// The caller must then hold project.update on the project, or broker.update
+// on the named broker (its owner or a super-admin, see
+// brokerProvideDecision), which withdraws the owner's consent to the
+// association. On denial it logs and writes the project.update 403, and
+// returns false.
 func (s *Server) authorizeProviderUnlink(w http.ResponseWriter, r *http.Request, project *store.Project, brokerID string) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	if !brokerUserCredentialKindAdmitted(ctx, identity, true) {
+		logAuthzDenial(r, identity, projectResource(project), ActionUpdate, "credential kind not admitted for broker association")
+		writeForbiddenStructuredDenial(w, "", "project", ActionUpdate, "")
 		return false
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
