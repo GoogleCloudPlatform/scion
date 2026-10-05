@@ -38,6 +38,12 @@ import {
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 
+/**
+ * Statuses of the chat rows the hub used to write into the bell (mentions
+ * and DMs). It writes none now, but rows made before that can remain.
+ */
+const RETIRED_CHAT_STATUSES: ReadonlySet<string> = new Set(['MENTION', 'DM_RECEIVED']);
+
 /** The nil UUID some older notification rows carry in place of an agent. */
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -259,7 +265,9 @@ export class ScionNotificationTray extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
       if (!this.isForCurrentUser(requestUserId)) return;
-      const incoming = data ?? [];
+      // Older chat rows can still be unacknowledged; chat no longer belongs
+      // in the bell, so they are neither listed, counted nor popped.
+      const incoming = (data ?? []).filter((n) => !RETIRED_CHAT_STATUSES.has(n.status));
 
       // Detect new notifications (IDs not previously seen) and dispatch
       // browser push for them — but only after the first fetch so we don't

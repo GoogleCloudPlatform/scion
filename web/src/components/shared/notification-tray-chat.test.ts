@@ -125,6 +125,66 @@ describe('notification tray: agent event popups', () => {
   });
 });
 
+describe('notification tray: retired chat rows', () => {
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    popups = [];
+    FakeNotification.permission = 'granted';
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem(AGENT_KEY, 'true');
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('[]', { status: 200 }))
+    );
+  });
+
+  function serve(rows: unknown[]): void {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify(rows), { status: 200 }))
+    );
+  }
+
+  it('leaves old mention and DM rows out of the list and the bell count', async () => {
+    const tray = createTray();
+    tray.user = { id: 'u1', email: 'u1@example.com', name: 'u1' };
+    const counts: number[] = [];
+    tray.addEventListener('scion:tray-count', (e: Event) => {
+      counts.push((e as CustomEvent<{ count: number }>).detail.count);
+    });
+    document.body.appendChild(tray);
+    serve([
+      notification('MENTION'),
+      notification('DM_RECEIVED'),
+      notification('COMPLETED', 'agent-1'),
+    ]);
+
+    await tray.fetchNotifications();
+    await tray.updateComplete;
+
+    expect(tray.notifications.map((n: any) => n.status)).toEqual(['COMPLETED']);
+    expect(counts.at(-1)).toBe(1);
+    tray.remove();
+  });
+
+  it('never pops for a new mention or DM row', async () => {
+    const tray = createTray();
+    tray.user = { id: 'u1', email: 'u1@example.com', name: 'u1' };
+    serve([]);
+    await tray.fetchNotifications();
+
+    serve([notification('MENTION'), notification('WAITING_FOR_INPUT', 'agent-1')]);
+    await tray.fetchNotifications();
+
+    expect(popups.map((p) => p.title)).toEqual(['Agent Needs Input']);
+  });
+});
+
 describe('notification tray: agent alerts toggle', () => {
   beforeAll(async () => {
     await import('./notification-tray.js');
