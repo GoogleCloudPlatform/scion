@@ -17,6 +17,10 @@
 package hub
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,8 +34,9 @@ import (
 
 // hangReadDirFor makes workspaceReadDir block for any path under hungPrefix
 // until the test ends, and shortens workspaceContentTimeout. Other paths use
-// os.ReadDir. Tests in this package do not run in parallel, so mutating the
-// package-level seams is safe.
+// os.ReadDir. These tests mutate package-level seams and must not call
+// t.Parallel(); parallel tests in this package run only after the serial
+// ones, so they cannot observe the swapped values.
 func hangReadDirFor(t *testing.T, hungPrefix string) {
 	t.Helper()
 	release := make(chan struct{})
@@ -72,7 +77,6 @@ func TestProbeWorkspaceContent(t *testing.T) {
 func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 	dir := t.TempDir()
 	hangReadDirFor(t, dir)
-	logs := captureSlog(t)
 
 	start := time.Now()
 	has, err := probeWorkspaceContent(dir)
@@ -81,63 +85,165 @@ func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.False(t, has)
 	assert.Less(t, elapsed, 5*time.Second, "probe must not block on a hung read")
-	assert.Contains(t, logs.String(), "Workspace content check timed out")
-	assert.Contains(t, logs.String(), "path="+dir)
-
-	assert.False(t, hasWorkspaceContent(dir), "a timed-out read counts as no content")
 }
 
-// A hung NFS mount must not send the project to the legacy local path, even
-// when the local path has content: the durable path is returned.
-func TestServerHubManagedProjectPath_NFSHungMountDoesNotFallBackToLocal(t *testing.T) {
+// hungPathFixture is a temp HOME with a legacy local project dir that has
+// content.
+type hungPathFixture struct {
+	tmpHome  string
+	slug     string
+	localDir string
+}
+
+func newHungPathFixture(t *testing.T, slug string) hungPathFixture {
+	t.Helper()
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-
-	slug := "hung-project"
 	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
 	require.NoError(t, os.MkdirAll(localDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
+	return hungPathFixture{tmpHome: tmpHome, slug: slug, localDir: localDir}
+}
 
-	mountRoot := filepath.Join(tmpHome, "nfs-mount")
-	hangReadDirFor(t, mountRoot)
-
-	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+func nfsConfig(mountRoot string) *config.V1WorkspaceStorageConfig {
+	return &config.V1WorkspaceStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: mountRoot,
 			Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
 		},
 	}
-
-	path, err := srv.hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(mountRoot, "share1", "hub-projects", slug), path)
 }
 
-// Same guarantee for the volume-backed (Cloud Run / GKE) branch.
-func TestServerHubManagedProjectPath_VolumeHungMountDoesNotFallBackToLocal(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+// A hung NFS mount must not resolve to either path: the legacy local path
+// might be wrong (the project may live on NFS), and the empty-looking NFS
+// path might be wrong (a legacy project lives locally). It returns an error
+// wrapping errWorkspaceContentTimeout, and logs on the projects logger.
+func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
+	f := newHungPathFixture(t, "hung-project")
+	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+	hangReadDirFor(t, mountRoot)
 
-	slug := "hung-vol-project"
-	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
-	require.NoError(t, os.MkdirAll(localDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
+	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
 
-	mountBase := filepath.Join(tmpHome, "mnt")
+	path, err := srv.hubManagedProjectPath(f.slug)
+	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Empty(t, path)
+	nfsPath := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
+	assert.Contains(t, logs.String(), "Workspace storage did not respond")
+	assert.Contains(t, logs.String(), "path="+nfsPath)
+}
+
+// N2: durable NFS path empty, legacy local path hangs. The project might
+// live locally, so this is an error too, not the durable path.
+func TestServerHubManagedProjectPath_NFSEmptyLocalHungReturnsError(t *testing.T) {
+	f := newHungPathFixture(t, "local-hung-project")
+	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1", "hub-projects", f.slug), 0755))
+	hangReadDirFor(t, f.localDir)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+
+	path, err := srv.hubManagedProjectPath(f.slug)
+	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Empty(t, path)
+}
+
+// NFS has content: the local path is never probed, so a hung local path
+// does not matter.
+func TestServerHubManagedProjectPath_NFSContentSkipsHungLocal(t *testing.T) {
+	f := newHungPathFixture(t, "nfs-content-project")
+	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+	nfsDir := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
+	require.NoError(t, os.MkdirAll(nfsDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(nfsDir, "nfs.txt"), []byte("nfs"), 0644))
+	hangReadDirFor(t, f.localDir)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+
+	path, err := srv.hubManagedProjectPath(f.slug)
+	require.NoError(t, err)
+	assert.Equal(t, nfsDir, path)
+}
+
+func cloudRunVolumeConfig() *config.V1WorkspaceStorageConfig {
+	return &config.V1WorkspaceStorageConfig{
+		Backend:        "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
+	}
+}
+
+// Same guarantees for the volume-backed (Cloud Run / GKE) branch.
+func TestServerHubManagedProjectPath_VolumeHungMountReturnsError(t *testing.T) {
+	f := newHungPathFixture(t, "hung-vol-project")
+	mountBase := filepath.Join(f.tmpHome, "mnt")
 	setVolumeMountBase(t, mountBase)
 	hangReadDirFor(t, mountBase)
 
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
-		Backend: "cloudrun-volume",
-		CloudRunVolume: &config.V1CloudRunVolumeConfig{
-			VolumeName: "workspace-vol",
-		},
-	}
+	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
 
-	path, err := srv.hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(mountBase, "workspace-vol", "projects", "hub-projects", slug), path)
+	path, err := srv.hubManagedProjectPath(f.slug)
+	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Empty(t, path)
+}
+
+func TestServerHubManagedProjectPath_VolumeEmptyLocalHungReturnsError(t *testing.T) {
+	f := newHungPathFixture(t, "local-hung-vol-project")
+	mountBase := filepath.Join(f.tmpHome, "mnt")
+	setVolumeMountBase(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol", "projects", "hub-projects", f.slug), 0755))
+	hangReadDirFor(t, f.localDir)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
+
+	path, err := srv.hubManagedProjectPath(f.slug)
+	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Empty(t, path)
+}
+
+func TestWriteWorkspaceStorageUnavailable(t *testing.T) {
+	rec := httptest.NewRecorder()
+	assert.False(t, writeWorkspaceStorageUnavailable(rec, fmt.Errorf("other")))
+	assert.Equal(t, http.StatusOK, rec.Code, "nothing written for other errors")
+
+	rec = httptest.NewRecorder()
+	wrapped := fmt.Errorf("workspace content check for /mnt/x: %w", errWorkspaceContentTimeout)
+	assert.True(t, writeWorkspaceStorageUnavailable(rec, wrapped))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "/mnt/x", "response must not leak the path")
+}
+
+func TestProjectPathResolveError(t *testing.T) {
+	err := projectPathResolveError(fmt.Errorf("check /mnt/x: %w", errWorkspaceContentTimeout), "failed to resolve project path")
+	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.NotContains(t, err.Error(), "/mnt/x")
+
+	err = projectPathResolveError(fmt.Errorf("slug /etc: bad"), "failed to resolve project path")
+	assert.NotErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.Equal(t, "failed to resolve project path", err.Error())
+}
+
+// End to end: the project workspace files endpoint answers 503 (not 409 or
+// 500, and not a hang) when the workspace storage mount does not respond.
+func TestProjectWorkspaceList_HungStorageReturns503(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	srv, _ := testServer(t)
+	project, _ := createTestHubManagedProject(t, srv, "WS Hung Storage")
+
+	mountRoot := filepath.Join(tmpHome, "nfs-mount")
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	hangReadDirFor(t, mountRoot)
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
 }

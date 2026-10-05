@@ -549,7 +549,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			statusCode := http.StatusInternalServerError
 			var details map[string]interface{}
 			var gitErr *util.GitError
-			if errors.As(err, &gitErr) {
+			if errors.Is(err, errWorkspaceContentTimeout) {
+				statusCode = http.StatusServiceUnavailable
+			} else if errors.As(err, &gitErr) {
 				if guidance := gitErr.UserGuidance(); guidance != "" {
 					details = map[string]interface{}{"guidance": guidance}
 				}
@@ -865,7 +867,9 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 // "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
 // returned instead. A backward-compatible fallback checks the durable path
 // first, then the legacy local path, so existing local deployments continue to
-// work when durable storage is first configured.
+// work when durable storage is first configured. If either check times out,
+// it returns an error wrapping errWorkspaceContentTimeout and no path (see
+// resolveDurableOrLegacyPath); HTTP handlers map that to 503.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -876,27 +880,13 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
 		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
-		has, err := probeWorkspaceContent(nfsPath)
-		if has {
-			return nfsPath, nil
-		}
-		if errors.Is(err, errWorkspaceContentTimeout) {
-			// The durable mount did not answer. Do not fall back to the
-			// local path: content there would route this request to
-			// ephemeral storage and split the project between two places.
-			// The durable path is where the project belongs.
-			return nfsPath, nil
-		}
-		// Fallback: check legacy local path for backward compatibility
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		// Neither has content — return NFS path (new projects go to NFS)
-		return nfsPath, nil
+		return s.resolveDurableOrLegacyPath(slug, nfsPath, false)
 	}
 
 	// --- Cloud Run volume and GKE shared volume backends ---
-	if volPath, ok := s.volumeBackedProjectPath(wsCfg, slug); ok {
+	if volPath, ok, err := s.volumeBackedProjectPath(wsCfg, slug); err != nil {
+		return "", err
+	} else if ok {
 		return volPath, nil
 	}
 
@@ -947,8 +937,10 @@ var workspaceContentTimeout = 2 * time.Second
 var workspaceReadDir = os.ReadDir
 
 // errWorkspaceContentTimeout is returned by probeWorkspaceContent when the
-// directory read does not finish within workspaceContentTimeout.
-var errWorkspaceContentTimeout = errors.New("workspace content check timed out")
+// directory read does not finish within workspaceContentTimeout. It reaches
+// hubManagedProjectPath's callers wrapped; HTTP handlers map it to 503 with
+// writeWorkspaceStorageUnavailable.
+var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
 
 // probeWorkspaceContent reports whether dir exists and contains meaningful
 // workspace files beyond just infrastructure directories.
@@ -959,11 +951,10 @@ var errWorkspaceContentTimeout = errors.New("workspace content check timed out")
 // workspaceContentTimeout. This is the same guard checkWorkspaceStorageHealth
 // applies to os.Stat on the same mount.
 //
-// On timeout it logs a warning with the path and returns
-// (false, errWorkspaceContentTimeout). The goroutine stays blocked until the
-// read returns. The buffered channel lets it exit then without a receiver.
-// A read error (missing dir, permission) is not an error here. It means
-// "no content" and returns (false, nil).
+// On timeout it returns (false, errWorkspaceContentTimeout). The goroutine
+// stays blocked until the read returns. The buffered channel lets it exit
+// then without a receiver. A read error (missing dir, permission) is not an
+// error here. It means "no content" and returns (false, nil).
 func probeWorkspaceContent(dir string) (bool, error) {
 	type readResult struct {
 		entries []os.DirEntry
@@ -976,16 +967,13 @@ func probeWorkspaceContent(dir string) (bool, error) {
 		ch <- readResult{entries: entries, err: err}
 	}()
 
-	timeout := workspaceContentTimeout
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(workspaceContentTimeout)
 	defer timer.Stop()
 
 	var res readResult
 	select {
 	case res = <-ch:
 	case <-timer.C:
-		slog.Warn("Workspace content check timed out; the storage mount may be hung",
-			"path", dir, "timeout", timeout)
 		return false, errWorkspaceContentTimeout
 	}
 	if res.err != nil {
@@ -1002,12 +990,61 @@ func probeWorkspaceContent(dir string) (bool, error) {
 	return false, nil
 }
 
-// hasWorkspaceContent returns true if dir exists and contains meaningful
-// workspace files beyond just infrastructure directories. A timed-out read
-// (see probeWorkspaceContent) counts as no content.
-func hasWorkspaceContent(dir string) bool {
-	has, _ := probeWorkspaceContent(dir)
-	return has
+// resolveDurableOrLegacyPath picks between a project's durable path and its
+// legacy local path: the durable path if it has content, else the legacy
+// local path if that has content, else the durable path (new projects go to
+// durable storage). warnEphemeral logs when the legacy local path is chosen
+// on a platform where it is container-ephemeral.
+//
+// If either probe times out, the right answer is unknown: a legacy project
+// may live at the local path, and returning the durable path would route it
+// to an empty directory (a write splits the project, a delete removes the
+// wrong directory). It also would not unblock the request, because callers
+// do I/O on the returned path right away. So a timeout is an error and no
+// path is returned.
+func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
+	has, err := probeWorkspaceContent(durablePath)
+	if err != nil {
+		return "", s.workspaceProbeError(slug, durablePath, err)
+	}
+	if has {
+		return durablePath, nil
+	}
+	// Fallback: check legacy local path for backward compatibility.
+	if localPath, lerr := localProjectPath(slug); lerr == nil {
+		has, err := probeWorkspaceContent(localPath)
+		if err != nil {
+			return "", s.workspaceProbeError(slug, localPath, err)
+		}
+		if has {
+			if warnEphemeral {
+				s.warnEphemeralProjectPath(slug, localPath, durablePath)
+			}
+			return localPath, nil
+		}
+	}
+	// Neither has content: return the durable path.
+	return durablePath, nil
+}
+
+// workspaceProbeError logs a timed-out workspace probe and wraps err with
+// the path. The wrapped error still matches errWorkspaceContentTimeout.
+func (s *Server) workspaceProbeError(slug, path string, err error) error {
+	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
+		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
+	return fmt.Errorf("workspace content check for %s: %w", path, err)
+}
+
+// writeWorkspaceStorageUnavailable writes a 503 and returns true when err is
+// a workspace storage timeout (errWorkspaceContentTimeout). Otherwise it
+// writes nothing and returns false. The response does not include the path.
+func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errWorkspaceContentTimeout) {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+		"Workspace storage is not responding; try again later", nil)
+	return true
 }
 
 // initHubManagedProject initializes the filesystem workspace for a hub-managed project.

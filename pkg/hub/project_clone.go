@@ -378,6 +378,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		if err := s.cloneSharedWorkspaceProject(ctx, clone); err != nil {
 			slog.Error("project clone: shared workspace clone failed",
 				"clone_id", clone.ID, "error", err)
+			if writeWorkspaceStorageUnavailable(w, err) {
+				return
+			}
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to initialize workspace: "+err.Error(), nil)
 			return
