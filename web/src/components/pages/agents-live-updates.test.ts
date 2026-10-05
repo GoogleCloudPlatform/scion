@@ -819,8 +819,8 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
         actionable('a3', { phase: 'stopped' }),
       ]);
       const el = await mount();
-      const internals = el as unknown as Internals & { displayAgents: Agent[] };
-      const shown = (): string[] => internals.displayAgents.map((a) => a.id).sort();
+      const internals = el as unknown as Internals & { agentWindow: { items: Agent[] } };
+      const shown = (): string[] => internals.agentWindow.items.map((a) => a.id).sort();
 
       const button = [...(el.shadowRoot?.querySelectorAll('.filter-bar button') ?? [])].find(
         (b) => b.textContent?.trim() === 'Stopping'
@@ -843,12 +843,37 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     });
 
     it('a persisted stopping filter is restored', async () => {
+      // Since the bounded agent list (GoogleCloudPlatform/scion#2451) the
+      // filter is applied by the hub: the restored filter must reach the
+      // agents request as phase=stopping, and the Stopping button is active.
       localStorage.setItem('scion-filter-agents-phase', 'stopping');
-      stub([actionable('a1', { phase: 'stopping' }), actionable('a2')]);
+      const urls: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request) => {
+          urls.push(typeof input === 'string' ? input : input.toString());
+          return Promise.resolve(
+            jsonResponse({
+              agents: [actionable('a1', { phase: 'stopping' })],
+              totalCount: 1,
+              complete: true,
+              stats: { total: 1, running: 0, agents: [['a1', 'stopping']] },
+              _capabilities: { actions: [] },
+            })
+          );
+        })
+      );
       const el = await mount();
-      expect((el as unknown as { displayAgents: Agent[] }).displayAgents.map((a) => a.id)).toEqual([
-        'a1',
-      ]);
+      const agentsRequests = urls.filter((u) => u.startsWith('/api/v1/agents'));
+      expect(agentsRequests.length).toBeGreaterThan(0);
+      for (const u of agentsRequests) {
+        expect(new URL(u, 'http://x').searchParams.get('phase')).toBe('stopping');
+      }
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.filter-bar button.active')?.textContent?.trim()).toBe(
+          'Stopping'
+        )
+      );
     });
   });
 });
