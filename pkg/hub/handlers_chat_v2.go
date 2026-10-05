@@ -2787,7 +2787,19 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 			return
 		}
 		seen[m.ID] = true
-		if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
+		if isCrossProjectRow(&m) {
+			// Participation is checked against the row's conversation. A
+			// cross-project row with no conversation ID cannot be checked,
+			// so its body is cleared (fail closed).
+			if m.ConversationID == "" {
+				m.Msg = ""
+			} else if decision := s.AuthorizeCrossProjectContentAccess(
+				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
+			); !decision.Allowed {
+				// Strip body — viewer is not a participant.
+				m.Msg = ""
+			}
+		} else if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
 			decision := s.AuthorizeCrossProjectContentAccess(
 				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
 			)
