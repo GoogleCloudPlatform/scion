@@ -747,6 +747,7 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	previousFiles := hc.Files
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
@@ -766,22 +767,41 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// The manifest is the complete file list, so storage objects it no longer
-	// names (files deleted locally before a sync) are removed. Brokers with
-	// local storage hydrate the whole storage directory, so a stale object
-	// would otherwise still reach agents. This matches the reconcile done by
-	// ResourceStore.Bootstrap. manifest.json is a storage-level artifact
-	// checked by validation, not a config file, so it is kept.
-	if hc.StoragePath != "" {
-		keep := make(map[string]struct{}, len(req.Manifest.Files)+1)
-		for _, f := range req.Manifest.Files {
-			keep[hc.StoragePath+"/"+f.Path] = struct{}{}
-		}
-		keep[hc.StoragePath+"/manifest.json"] = struct{}{}
-		reconcileResourceStorage(ctx, stor, hc.StoragePath, hc.Name, keep, s.resourceLog, "harness-config finalize")
-	}
+	// The manifest is the complete file list, so files the previous record
+	// listed but the manifest does not (deleted locally before a sync) are
+	// removed from storage. Brokers with local storage hydrate the whole
+	// storage directory, so a stale object would otherwise still reach agents.
+	s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
 
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// deleteRemovedHarnessConfigFiles deletes the storage objects of files listed
+// in previousFiles but no longer in hc.Files. Only those exact paths are
+// deleted, never a prefix sweep: other harness-configs (clones, or a config
+// whose slug was renamed) can live under hc.StoragePath. Failures are logged
+// and do not fail the request, because the record is already updated.
+func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, previousFiles []store.TemplateFile) {
+	if hc.StoragePath == "" {
+		return
+	}
+	current := make(map[string]struct{}, len(hc.Files))
+	for _, f := range hc.Files {
+		current[f.Path] = struct{}{}
+	}
+	var failed []string
+	for _, f := range previousFiles {
+		if _, ok := current[f.Path]; ok {
+			continue
+		}
+		if err := stor.Delete(ctx, hc.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			failed = append(failed, f.Path)
+		}
+	}
+	if len(failed) > 0 {
+		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
+	}
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.

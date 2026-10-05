@@ -367,12 +367,28 @@ func TestHandleHarnessConfigFinalize_PersistsModelAliases(t *testing.T) {
 	}
 }
 
-// TestHandleHarnessConfigFinalize_DeletesObjectsMissingFromManifest verifies
-// that finalize removes storage objects the manifest no longer lists (files
-// deleted locally before a sync, ptone/scion#3161). Brokers with local storage
-// hydrate the whole storage directory, so a stale object would still reach
-// agents if only the record's file list were updated.
-func TestHandleHarnessConfigFinalize_DeletesObjectsMissingFromManifest(t *testing.T) {
+// finalizeHarnessConfigWith posts a finalize request whose manifest lists
+// paths, and fails the test unless it succeeds.
+func finalizeHarnessConfigWith(t *testing.T, srv *Server, hcID string, paths ...string) {
+	t.Helper()
+	files := make([]map[string]interface{}, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, map[string]interface{}{"path": p, "size": 1, "hash": "sha256:placeholder"})
+	}
+	body := map[string]interface{}{"manifest": map[string]interface{}{"files": files}}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hcID+"/finalize", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleHarnessConfigFinalize_DeletesFilesMissingFromManifest verifies
+// that finalize removes the storage objects of files the previous record
+// listed but the manifest does not (files deleted locally before a sync,
+// ptone/scion#3161). Brokers with local storage hydrate the whole storage
+// directory, so a stale object would still reach agents if only the record's
+// file list were updated.
+func TestHandleHarnessConfigFinalize_DeletesFilesMissingFromManifest(t *testing.T) {
 	srv, s, stor := testHarnessConfigFileServer(t)
 
 	hc := createTestHarnessConfigWithFiles(t, s, stor, map[string]string{
@@ -380,36 +396,41 @@ func TestHandleHarnessConfigFinalize_DeletesObjectsMissingFromManifest(t *testin
 		"removed.yaml":         "gone: true\n",
 		"scripts/provision.py": "print()\n",
 	})
-	manifestObj := hc.StoragePath + "/manifest.json"
-	stor.content[manifestObj] = []byte("{}")
-	stor.objects[manifestObj] = &storage.Object{Name: manifestObj, Size: 2}
-	// An object belonging to a different config that shares the path prefix
-	// must not be touched.
-	otherObj := hc.StoragePath + "-other/removed.yaml"
-	stor.content[otherObj] = []byte("other\n")
-	stor.objects[otherObj] = &storage.Object{Name: otherObj, Size: 6}
 
-	body := map[string]interface{}{
-		"manifest": map[string]interface{}{
-			"files": []map[string]interface{}{
-				{"path": "config.yaml", "size": 16, "hash": "sha256:placeholder"},
-			},
-		},
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
+	finalizeHarnessConfigWith(t, srv, hc.ID, "config.yaml")
 
 	for _, gone := range []string{"removed.yaml", "scripts/provision.py"} {
 		if _, ok := stor.objects[hc.StoragePath+"/"+gone]; ok {
 			t.Errorf("expected %s to be deleted from storage after finalize", gone)
 		}
 	}
-	for _, kept := range []string{hc.StoragePath + "/config.yaml", manifestObj, otherObj} {
-		if _, ok := stor.objects[kept]; !ok {
-			t.Errorf("expected %s to be kept in storage after finalize", kept)
-		}
+	if _, ok := stor.objects[hc.StoragePath+"/config.yaml"]; !ok {
+		t.Error("expected config.yaml to be kept in storage after finalize")
+	}
+}
+
+// TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord verifies
+// that finalize deletes only files the previous record listed, never other
+// objects under the storage path: clones live at <scope>/<slug>/<cloneID>,
+// and a slug rename leaves StoragePath unchanged, so another config's objects
+// can sit below this one's storage path.
+func TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord(t *testing.T) {
+	srv, s, stor := testHarnessConfigFileServer(t)
+
+	hc := createTestHarnessConfigWithFiles(t, s, stor, map[string]string{
+		"config.yaml": "harness: claude\n",
+	})
+	nested := hc.StoragePath + "/hc-other-id/config.yaml"
+	stor.content[nested] = []byte("harness: codex\n")
+	stor.objects[nested] = &storage.Object{Name: nested, Size: 15}
+
+	finalizeHarnessConfigWith(t, srv, hc.ID, "config.yaml")
+
+	if _, ok := stor.objects[nested]; !ok {
+		t.Errorf("expected %s (another config's object) to survive finalize", nested)
+	}
+	if _, ok := stor.objects[hc.StoragePath+"/config.yaml"]; !ok {
+		t.Error("expected config.yaml to be kept in storage after finalize")
 	}
 }
 
