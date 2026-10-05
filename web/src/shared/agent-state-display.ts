@@ -23,7 +23,7 @@
  * across the web UI.
  */
 
-import type { AgentPhase, AgentActivity } from './types.js';
+import type { Agent, AgentPhase, AgentActivity } from './types.js';
 
 /**
  * Color variant for status badge rendering
@@ -125,4 +125,25 @@ export function getStateDisplay(status: string): StateDisplay {
  */
 export function stateLabel(status: string): string {
   return getStateDisplay(status).label ?? status;
+}
+
+// ---------------------------------------------------------------------------
+// Provisioned, not started (ptone/scion#2929)
+// ---------------------------------------------------------------------------
+
+/** Badge text for an agent that was provisioned but never started. */
+export const PROVISIONED_ONLY_LABEL = 'provisioned, not started';
+
+/**
+ * Whether to show `agent` as provisioned but not started. The hub computes
+ * `provisionedOnly`; the phase check hides a stale flag as soon as an SSE
+ * delta moves the agent out of `created` (a start is under way).
+ */
+export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'>): boolean {
+  return agent.provisionedOnly === true && agent.phase === 'created';
+}
+
+/** The next step for a provisioned agent, shown as the badge's hint. */
+export function provisionedStartHint(name: string): string {
+  return `Not started yet. Use Start, or run: scion start ${name}`;
 }

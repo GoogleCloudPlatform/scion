@@ -644,6 +644,10 @@ export interface Agent {
   // sends this key on REST agents and SSE status deltas; an explicit `null`
   // means no delete is active and must clear any earlier value.
   deletion?: DeletionInfo | null;
+
+  // Computed by the hub: provisioned but never asked to run
+  // (ptone/scion#2929). Absent means false.
+  provisionedOnly?: boolean;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
