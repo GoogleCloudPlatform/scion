@@ -1,6 +1,6 @@
 # Flat Runtime Brokers: P1 contract appendix
 
-Status: Stage A of ptone/scion#3267 (P1.1). **Revision 5** answers review rounds 1–4 and the cross-lane guard-test conditions; the change log is at the end. Parent phase: ptone/scion#3266. Delivery tracker: ptone/scion#2926.
+Status: Stage A of ptone/scion#3267 (P1.1). **Revision 6** answers review rounds 1–5 and the cross-lane guard-test conditions; the change log is at the end. Parent phase: ptone/scion#3266. Delivery tracker: ptone/scion#2926.
 
 This appendix fixes the names and rules that P1.2 (ptone/scion#3268), P1.3 (ptone/scion#3269) and later phases build on. Changing a frozen name after acceptance requires another review of this document. Where this document differs from the original illustrative design (for example its `schema_version: "2"` and top-level `runtime_brokers` list), this document wins.
 
@@ -241,6 +241,7 @@ A scope change always means a new target. That requires a new identity, either a
 - It is carried on:
   - Hub `CreateBrokerRegistrationRequest` and `BrokerJoinRequest` (`pkg/hub/brokerauth.go`);
   - hubclient `CreateBrokerRequest` and `JoinBrokerRequest` (`pkg/hubclient/runtime_brokers.go`);
+  - **the registration and join responses:** Hub `CreateBrokerRegistrationResponse` and `BrokerJoinResponse`, hubclient `CreateBrokerResponse` and `JoinBrokerResponse`, each gaining `RuntimeTarget *api.RuntimeTargetDescriptor` (`runtimeTarget,omitempty`). A Hub implementing this contract always echoes the **stored** descriptor for a flat row, and none for a legacy row;
   - the Runtime Broker API object as `runtimeTarget`: store `RuntimeBroker.RuntimeTarget` (P1.1) and the hubclient response type `hubclient.RuntimeBroker` (`pkg/hubclient/types.go`), which gains `RuntimeTarget *api.RuntimeTargetDescriptor` in P1.3.
 - **Naming:** on Runtime Broker objects `runtimeTarget` is this opaque descriptor. Inside `appliedConfig`, `runtimeTarget`/`runtimeTargetCandidate` stay the inventory target key strings. P1.1 adds `GLOSSARY.md` entries for **Runtime target ID** (opaque, stable, from the registration descriptor) and **Inventory target key** (the `auxiliaryRuntimeIdentity` string used by heartbeats, start claims and recovery), so the two aren't confused.
 - The scope record, endpoint, kubeconfig path and credentials are never sent.
@@ -275,6 +276,15 @@ All flat registration goes through **one Hub implementation**, `(*hub.Server).re
   - P1.2 gives `FindExistingBroker` the descriptor. With a descriptor, it matches by ID only and never matches a flat row by name. The handler uses that one result for both the authorization decision and the pinned mutation.
   - Flat re-registration keeps the existing re-register permission gate.
 - **R8 Auto-provide.** `autoProvide` on a flat registration is stored as sent. When a new project is created, the auto-provide link (`handlers_env_secrets.go`, provider plus default) **skips flat rows while `hub.flat_runtime_brokers` is off**, so an auto-provided flat row never becomes the default of new projects whose creates would all get 412. With the experiment on it behaves as today.
+- **R9 Instance-side acceptance (reverse negotiation; P1.2).** A Hub that predates this contract (today's Hub, a Hub with only P1.1, or an older replica during a rolling Hub upgrade) decodes registration leniently. It drops `runtimeTarget`, matches by name first, and either re-registers an existing legacy row (rewriting its auto-provide, GCP host fields and labels) or creates a legacy row with the flat ID. **A flat instance refuses such a Hub:**
+  - Registration counts as accepted only if the response `brokerId` equals the identity's `runtimeBrokerId` **and** the response echoes a `runtimeTarget` equal to the identity's target (ID and type).
+  - Otherwise, including when the echo is missing, the instance **stops before join**. It sends no join, saves no credentials and never uses a different Runtime Broker ID. It reports "the Hub did not accept the runtime target for Runtime Broker <id>; upgrade the Hub before enabling flat Runtime Brokers" as a startup error, or through `EmbeddedBrokerRegistrationFailed` on the embedded path.
+  - The join response gets the same check. On a mismatch the instance discards the returned secret and stops.
+  - **Upgrade order:** upgrade the Hub (all replicas) before configuring a flat instance.
+  - **What an unaware Hub leaves behind, and recovery:**
+    - (i) A **legacy row with the flat ID** (no secret, because join never ran). After the Hub upgrade, re-registration gets 409 `runtime_broker_not_flat` (R3). Recovery: an administrator deletes that row (admin delete of the Runtime Broker), then the instance restarts and registers with the same identity. There is no automatic exception to R3. Converting a row is never implicit.
+    - (ii) An **existing legacy row adopted by name**, whose auto-provide, GCP host fields and labels were overwritten. The instance never joined, so it holds no credentials for that row. Recovery: an administrator restores that row's metadata, and the flat instance's `name` is changed if it collides (R2 at creation).
+  - This decision was confirmed in the architecture consultation for this workstream.
 - **R7 Embedded side duties.** The embedded flat path (`RegisterEmbeddedFlatRuntimeBroker`, called from startup in place of `registerGlobalProjectAndBroker`):
   - creates the global project and its provider link for the flat ID if they are missing;
   - sets the project's default Runtime Broker only when it has none;
@@ -286,10 +296,11 @@ All flat registration goes through **one Hub implementation**, `(*hub.Server).re
 | Writer | Code (28eb4f0) | Flat rule | Phase |
 |---|---|---|---|
 | brokerauth create | `createBrokerRegistration` (`handlers_brokers.go`), `FindExistingBroker` (name first) | With `runtimeTarget`: R1–R3 and R6. Without it (legacy): `FindExistingBroker`'s name match uses `GetLegacyRuntimeBrokerByName` (flat rows are never candidates); an ID match on a flat row gets R4; **creating a row whose name/slug collides with a flat row gets 409 `runtime_broker_name_conflict`** | P1.2 |
-| brokerauth join | `CompleteBrokerJoin` | The descriptor must equal the stored target (else 409 `runtime_target_changed`). For a flat row, `profiles`/`defaultProfile` are written empty | P1.2 |
+| brokerauth join | `CompleteBrokerJoin` | The descriptor check (the descriptor must equal the stored target; a flat row joined without a descriptor, or a legacy row joined with one, gets 409 `runtime_target_changed`) reads the row and runs **right after the token, broker-ID and expiry checks, before `DeleteBrokerSecret`/`CreateBrokerSecret`**, so a refused join leaves the existing secret untouched. For a flat row, `profiles`/`defaultProfile` are written empty. The response echoes the stored descriptor (R9) | P1.2 |
 | Embedded legacy registration | `cmd/server_broker.go registerGlobalProjectAndBroker` | Not run when `instances` is non-empty. When it runs (legacy process), its name lookup uses the filtered store query `GetLegacyRuntimeBrokerByName` (case-insensitive name **and** `runtime_target_id IS NULL`, P1.1). It never calls `GetRuntimeBrokerByName` and then skips, because that method's `First()` could return a flat row and hide a legacy row of the same name. an ID match on a flat row is a startup error naming R4, and **creating a row whose name/slug collides with a flat row is a startup error** | P1.2 |
 | Embedded flat registration | new, `RegisterEmbeddedFlatRuntimeBroker` | R1–R7. No orphan reassignment, no profile write | P1.2 |
-| Deprecated `RegisterProject` with `broker` | `pkg/hub/handlers_projects_core.go` (ID then name lookup, name/slug/profile overwrite) | Decided **in the pre-mutation lookup and authorization block**, before any project is created or changed: a flat row found by ID gets 409 `runtime_target_changed`; a name/slug collision with a flat row gets 409 `runtime_broker_name_conflict` (no adoption, no duplicate). It never writes profiles to a flat row | P1.2 |
+| Deprecated `RegisterProject` with `broker` | `pkg/hub/handlers_projects_core.go` (ID then name lookup, name/slug/profile overwrite) | Its name lookup uses `GetLegacyRuntimeBrokerByName`, not `GetRuntimeBrokerByName`, so the result doesn't depend on row order. Decided **in the pre-mutation lookup and authorization block**, before any project is created or changed: a flat row found by ID gets 409 `runtime_target_changed`; a name/slug collision with a flat row gets 409 `runtime_broker_name_conflict` (no adoption, no duplicate). It never writes profiles to a flat row | P1.2 |
+| Status/connection-only writers | `UpdateRuntimeBrokerHeartbeat`, `ClaimRuntimeBrokerConnection`, `ReleaseRuntimeBrokerConnection`, `ReleaseAndMarkBrokerOffline`, `ReapStaleBrokerAffinity`, `MarkStaleBrokersOffline`, `MarkBrokerOffline`, `SetRuntimeBrokerCreatedByIfEmpty` | Unaffected. They write only status, heartbeat, connection-affinity or created-by columns, never the target, name or profiles | — |
 | Messaging-plugin Runtime Broker rows | `cmd/server_foreground.go runServerStart` (`CreateRuntimeBroker` for `plugin-<type>` with a deterministic ID, only when that ID is missing) | Unchanged. These are legacy rows created by ID with a reserved name pattern; no name lookup and no profiles. A flat registration whose name or slug collides with one gets R2's 409 at its own creation | — |
 | Admin PATCH `updateRuntimeBroker` | `pkg/hub/handlers_runtime_brokers.go` (rename, labels; read-modify-write) | A rename that would make a flat row's name/slug collide with another row, or another row's with a flat row, gets 409 `runtime_broker_name_conflict`. Profiles are handled by the store strip | P1.2 |
 | Heartbeat refresh | `pkg/hub/handlers_runtime_brokers.go` (capabilities, workspace storage, default profile, profile attach) | For a flat row, `DefaultProfile`/`ProfileAttach` from a heartbeat are dropped with a warning log. Capabilities and workspace storage refresh as today | P1.2/P1.3 |
@@ -305,9 +316,9 @@ The registration and control channel are not Conduit-fenced. Section 13 puts no 
 | Orphan reassignment | `AgentStore.ReassignAgentsToBroker` | Refuses a destination row with a stored target (`store.ErrFlatRuntimeBrokerReassign`). Its update also filters out pinned agents (`pinned_runtime_broker_id IS NULL`) | **P1.1** |
 | Project default repoint | `AgentStore.ReassignProjectBroker` | No-op (0, nil) when either the old or the new row is flat. **A missing old row counts as legacy** (today's behaviour is unchanged) | **P1.1** |
 | Mark old Runtime Broker offline | `MarkBrokerOffline` from the orphan path | Not reached for flat rows, because their agents are never in the orphan set | — |
-| Reincarnate move | `handlers_agent_reincarnate.go`, `reincarnate_move.go` | Today a non-dry-run move already returns 501 `not_implemented`. **That stays unchanged in P1**: a flat or pinned move still gets 501. A `--dry-run` move of a pinned agent, or onto a flat Runtime Broker, reports a failed eligibility check with code `runtime_target_move_unsupported` in the plan, not an error response. When moves are implemented, the flat refusal (409 `runtime_target_move_unsupported`) must come before any move work, and a permitted explicit move re-pins in the same write as the `runtime_broker_id` change (`SetAgentPinnedRuntimeTarget`) | P1.2 |
-| **Scheduled create** | `server.go dispatchAgentEventHandler` (Runtime Broker = `providers[0].BrokerID`, builds `store.Agent`, applies the Hub-default passthrough pin, then `createAgentWithIdentityKey` → `recordRunIntent` → `DispatchAgentCreate`) | The **same new-create rules** as an interactive create, through the shared helper in section 9 (`flatCreatePlacement`). They run after choosing `providers[0]` and before `createAgentWithIdentityKey`: the experiment check. A scheduled request carries no explicit profile (its only profile source is the Hub-default passthrough pin, a default), so there is no profile refusal, and default profiles are not applied. On success the pin goes on the model and is written in the `CreateAgent` transaction. On refusal the handler returns the `*hub.RuntimeTargetRefusal` as its error before any write, so the scheduler records a failed run (existing failure path). Nothing is created, and there is no retry beyond the schedule's own next occurrence | P1.2 |
-| Reincarnate (in place) | `handleReincarnateAgent` → `runReincarnationWorker` (stop → applied-config write → `DispatchAgentReprovision` → `DispatchAgentStart`) | `checkPinnedPlacement` runs in `handleReincarnateAgent` **before** the reincarnation record and the worker, next to the existing empty-`RuntimeBrokerID` checks, and is relayed as 409. A refused reincarnation stops nothing, reprovisions nothing and mints no credential. Reprovision of a validly pinned agent sends `expectedRuntimeTargetId` through `buildCreateRequest` | P1.2 |
+| Reincarnate move | `handlers_agent_reincarnate.go`, `reincarnate_move.go` | Today a non-dry-run move already returns 501 `not_implemented`. **That stays unchanged in P1**: a flat or pinned move still gets 501. A `--dry-run` move of a pinned agent, or onto a flat Runtime Broker, follows the existing convention. `evaluateMoveEligibility` gains a **first** check named `runtime_target` (constant `moveCheckRuntimeTarget`, ahead of `workspace_mode`), and its failure returns `writeMoveRefusal` with **409 `runtime_target_move_unsupported`**, the verdict listing `runtime_target` as failed and the rest as not evaluated. When moves are implemented, the flat refusal (409 `runtime_target_move_unsupported`) must come before any move work, and a permitted explicit move re-pins in the same write as the `runtime_broker_id` change (`SetAgentPinnedRuntimeTarget`) | P1.2 |
+| **Scheduled create** | `server.go dispatchAgentEventHandler` (Runtime Broker = `providers[0].BrokerID`, builds `store.Agent`, applies the Hub-default passthrough pin, then `createAgentWithIdentityKey` → `recordRunIntent` → `DispatchAgentCreate`) | The **same new-create rules** as an interactive create, through the shared helper in section 9 (`flatCreatePlacement`). The scheduler loads the `providers[0]` row with `GetRuntimeBroker`; a missing row keeps today's behaviour (treated as legacy, no pin). `flatCreatePlacement` runs right after that and **before `applyScheduledProjectDefaultGCPIdentity` and `deriveAgentConfig`**, which consume its flat/legacy decision. Its check is the experiment. A scheduled request carries no explicit profile, so there is no profile refusal. Both of its profile sources are defaults and both are skipped for a flat target: the Hub-default passthrough pin (`applyScheduledProjectDefaultGCPIdentity`) and the project `scion.io/active-profile` (`applyProjectDefaults` via `deriveAgentConfig`). There is no HTTP response, so the dropped-default warning goes to a structured warning log line carrying the schedule and agent IDs. On success the pin goes on the model and is written in the `CreateAgent` transaction. On refusal the handler returns the `*hub.RuntimeTargetRefusal` as its error before any write, so the scheduler records a failed run (existing failure path). Nothing is created, and there is no retry beyond the schedule's own next occurrence | P1.2 |
+| Reincarnate (in place) | `handleReincarnateAgent` → `runReincarnationWorker` (stop → applied-config write → `DispatchAgentReprovision` → `DispatchAgentStart`) | `checkPinnedPlacement` runs in `handleReincarnateAgent` at the **in-place** empty-`RuntimeBrokerID` check (after the move branch has returned, so a dry-run move gets the plan answer, not `runtime_target_pin_stale`), **before** the reincarnation record and the worker, and is relayed as 409. A refused reincarnation stops nothing, reprovisions nothing and mints no credential. Reprovision of a validly pinned agent sends `expectedRuntimeTargetId` through `buildCreateRequest` | P1.2 |
 | Create-on-existing | `handleExistingAgent` (resumes/starts on `existingAgent.RuntimeBrokerID`; has delete-and-recreate branches) | Uses the check order in section 9. Resuming or starting in place is a lifecycle operation, checked against `existingAgent.RuntimeBrokerID` and its pin, and not refused when the experiment is off. A delete-and-recreate branch is a new create, and the new-create checks run before the delete | P1.2 |
 
 **Stale pin.** A pin is valid only while `pinned_runtime_broker_id == runtime_broker_id`. With the guards above, no current-binary automatic writer can create a stale pin. Only an older binary can (for example an older Hub's move or orphan reassignment).
@@ -320,7 +331,7 @@ The registration and control channel are not Conduit-fenced. Section 13 puts no 
   - The same type carries the Hub's other flat refusals (`runtime_target_mismatch` on the lifecycle branch, `runtime_profile_unsupported`, `experiment_disabled`).
 - **Where `checkPinnedPlacement` is called:**
   - **User restart** (`handlers_agent_lifecycle.go`, stop + start): before `beginStartDispatchHTTP`, `recordRunIntent` and **the stop leg**, next to the existing `requireEmptyPerAgentBrokerCapabilityForAgent` pre-check. A refused restart never stops the agent and leaves the run intent and reservation unchanged.
-  - **Lifecycle start, wake-on-DM and create-on-existing:** before `beginStartDispatch`/`beginStartDispatchHTTP` and `recordRunIntent`. After the ptone/scion#3081 rebase (which P1.2 rebases onto), this means inside `startAgentCore`, **before the start claim**, the lifecycle op and the capacity hold.
+  - **Lifecycle start, wake-on-DM and create-on-existing:** before `beginStartDispatch`/`beginStartDispatchHTTP` and `recordRunIntent`. After the ptone/scion#3081 rebase (which P1.2 rebases onto), this means inside `startAgentCore`, **before the start claim**, the lifecycle op and the capacity hold. The user restart takes its own claim and capacity hold before its stop leg (outside `startAgentCore`), so its pre-check goes **before the restart's own claim and hold**.
   - **Reincarnation:** in `handleReincarnateAgent`, before the worker (section 7 table).
   - **Backstop:** also at the very top of `HTTPAgentDispatcher.DispatchAgentStart` and `DispatchAgentRestart`, before `launchGuardError`, `buildStartEnv` (agent credential mint) and `beginRun`. It is defence in depth for every caller, including the cross-node executor and the start-claim runner once wired.
   - **Cross-node execution** (`reconcile.go execDispatch*`, which runs a dispatch that another node's handler queued): the requesting node's own top-of-`DispatchAgentStart` backstop runs before anything is queued, so a stale pin is refused on the requesting node. If the executing node's backstop refuses (state changed in between), P1.2 adds `*hub.RuntimeTargetRefusal` to the `dispatchFailureResult` envelope (code, status, details), so the requesting node rebuilds the typed error instead of a generic 502.
@@ -331,7 +342,7 @@ The registration and control channel are not Conduit-fenced. Section 13 puts no 
   - at 28eb4f0, the handler's existing start-failure handling;
   - after the ptone/scion#3081/ptone/scion#3091 rebase, `startAgentCore`'s outcome settlement. A provisioned agent then returns to rest through #3091's provisioned-start settlement.
   - The cross-node executor (`reconcile.go`) is not a retry loop: it executes one queued dispatch and returns the result. No hot retry loop exists or is added.
-- Stop and delete still go to the current `runtime_broker_id`, so the agent can be cleaned up.
+- Stop, delete and the other per-agent operations that don't change placement (message delivery, exec, logs, keys, reset-auth, check-prompt, attach) still go to the current `runtime_broker_id` exactly as today, so the agent can be cleaned up. They are unaffected by the pin.
 - There is no automatic re-pin. Repair is an explicit operator action (P5 tooling, or delete and recreate).
 - `SetAgentPinnedRuntimeTarget` has exactly two callers: the first placement of an existing agent with an empty Runtime Broker (section 9 step 4) and a future explicit move. No other start path calls it.
 
@@ -352,6 +363,16 @@ Store model: `RuntimeBroker.RuntimeTarget *api.RuntimeTargetDescriptor`, JSON `r
 - `pinned_runtime_target_type`: string, Optional, Default "".
 
 Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedRuntimeTargetType`, all `json:"-"` like the run/launch columns, so they can't be patched through the API. P1.3 exposes them read-only as `"pinnedRuntimeTarget": {"id","type","runtimeBrokerId"}`. That name avoids `appliedConfig.runtimeTarget`, the observed heartbeat key.
+
+**Frozen P1.1 store signatures** (`pkg/store`):
+- `type PinnedPlacement struct { RuntimeBrokerID, RuntimeTargetID, RuntimeTargetType string }`. An empty `RuntimeTargetID` means a NULL pin (and NULL `pinned_runtime_broker_id`).
+- `SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)`.
+  - The conditional update matches `runtime_broker_id = expected.RuntimeBrokerID` (a non-null string, `""` for none). It also matches the pin columns against the rest of `expected`: NULL when `expected.RuntimeTargetID == ""`, otherwise `pinned_runtime_broker_id = expected.RuntimeBrokerID` and an equal target ID and type.
+  - It writes `runtime_broker_id` and `pinned_runtime_broker_id` from `next.RuntimeBrokerID`, the target columns from `next`, and `state_version + 1`.
+  - `next.RuntimeTargetID` must be non-empty (it never unpins); otherwise `store.ErrInvalidPinnedPlacement`.
+  - A compare miss returns **`store.ErrPinnedPlacementChanged`**; a missing agent returns `store.ErrNotFound`.
+- `SetRuntimeBrokerTarget(ctx context.Context, brokerID string, desc api.RuntimeTargetDescriptor) (*RuntimeBroker, error)`. Errors: `store.ErrRuntimeBrokerNotFlat`, `store.ErrRuntimeTargetChanged`, `store.ErrNotFound`.
+- `GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)`. Case-insensitive name and `runtime_target_id IS NULL`. When several legacy rows match, it returns the oldest by `created` (deterministic). None: `store.ErrNotFound`.
 
 **Writers (P1.1 store surface):**
 - `CreateAgent` sets the pinned columns when the model carries them.
@@ -381,7 +402,7 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 - **Hub public create API** (`POST /api/v1/projects/{id}/agents` and the hubclient create request): optional. Clients normally send only `runtimeBrokerId`. A client that showed a specific target sends it as a staleness guard.
   - **New-create branch only** (section 9 step 4): field present and resolved Runtime Broker legacy → 409 `runtime_target_mismatch` with an empty `actualRuntimeTargetId`; field present and experiment off → 412 `experiment_disabled`.
   - **Lifecycle branch** (existing agent kept): the field is compared with the agent's valid pin (step 4 rule), and the experiment state plays no part. With the experiment off, a matching value against a pinned agent is accepted.
-- **Hub → Runtime Broker create** (`RemoteCreateAgentRequest` and Runtime Broker `CreateAgentRequest`): a top-level key, not inside `config`. The Hub always sets it to the pinned target ID when dispatching to a flat Runtime Broker, and never sets it toward a legacy one. **`buildCreateRequest` (`httpdispatcher.go`) is the single place it is set**, so every create-shaped dispatch carries it: `DispatchAgentCreate`, `DispatchAgentCreateWithGather`, `DispatchAgentProvision`, `DispatchAgentReprovision` (reincarnation) and `DispatchFinalizeEnv`.
+- **Hub → Runtime Broker create** (`RemoteCreateAgentRequest` and Runtime Broker `CreateAgentRequest`): a top-level key, not inside `config`. The Hub always sets it to the pinned target ID when dispatching to a flat Runtime Broker, and never sets it toward a legacy one. **`buildCreateRequest` (`httpdispatcher.go`) is the single place it is set**, from **any non-NULL pin** (not only a valid one). A stale pin therefore sends the old pinned target, and the receiving Runtime Broker answers 409 `runtime_target_mismatch` (a flat row with a different target, or a current legacy binary rejecting a non-empty value). An agent on a flat row with a NULL pin sends no field and gets 412 `runtime_target_required`. Both are safe refusals before side effects on the Runtime Broker. It is set so every create-shaped dispatch carries it: `DispatchAgentCreate`, `DispatchAgentCreateWithGather`, `DispatchAgentProvision`, `DispatchAgentReprovision` (reincarnation) and `DispatchFinalizeEnv`.
   - A current-binary **legacy** Runtime Broker that receives a non-empty value rejects it with 409 `runtime_target_mismatch` (empty actual); it never ignores it. Older binaries ignore unknown keys, but a current Hub never sends the key to a legacy row.
 - **Hub → Runtime Broker start/restart:** `StartExtras.ExpectedRuntimeTargetID`, written by `applyStartExtras` as the top-level key `expectedRuntimeTargetId`, so both transports stay in parity. It is set from the agent's valid pin in `DispatchAgentStart`/`DispatchAgentRestart` (section 7, P1.2/P1.3).
 - **The Hub sends `expectedRuntimeTargetId` to a flat row whatever the experiment state.** The experiment gates new flat registrations and new creates. It never removes the field from dispatches to an existing flat row, so experiment-off lifecycle operations that reach a Runtime Broker create (the create-on-existing provisioning branch) don't hit 412 `runtime_target_required`.
@@ -404,7 +425,7 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 | `runtime_target_changed` | 409 | `ErrCodeRuntimeTargetChanged` | hub | `runtimeBrokerId`, `storedRuntimeTargetId`, `reportedRuntimeTargetId` | Registration R3/R4 |
 | `runtime_broker_not_flat` | 409 | `ErrCodeRuntimeBrokerNotFlat` | hub | `runtimeBrokerId` | Flat registration against a legacy row (R3) |
 | `runtime_broker_name_conflict` | 409 | `ErrCodeRuntimeBrokerNameConflict` | hub | `name`, `slug`, `existingRuntimeBrokerId` | R2 (flat creation), R4 (legacy creation colliding with a flat row), admin PATCH rename |
-| `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | `agentId`, `runtimeBrokerId` | Move eligibility: a dry-run plan check in P1 (non-dry-run moves stay 501), and an error once moves exist (section 7) |
+| `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | `agentId`, `runtimeBrokerId` | Move eligibility: a dry-run move refused through `writeMoveRefusal` (verdict check `runtime_target`) in P1 (non-dry-run moves stay 501), and the same refusal once moves exist (section 7) |
 | `runtime_target_pin_stale` | 409 | `ErrCodeRuntimeTargetPinStale` | hub | `agentId`, `pinnedRuntimeBrokerId`, `runtimeBrokerId` | Stale pin (section 7) |
 | `experiment_disabled` | 412 | `ErrCodeExperimentDisabled` | hub | `experiment` | Flat registration/create with `hub.flat_runtime_brokers` off |
 
@@ -432,7 +453,7 @@ Notes on the codes:
   4. **Branch:**
      - **Resume or start in place** (an existing agent with a non-empty `RuntimeBrokerID` kept): apply the *lifecycle* rules against `existingAgent.RuntimeBrokerID` and its pin: `checkPinnedPlacement`, the expected target taken from the pin, an explicit profile against a flat row refused (422), and **no experiment refusal**.
        - A client-supplied `expectedRuntimeTargetId` here is compared with the agent's **valid pin**. A mismatch, including an unpinned agent or an agent on a legacy row, gets 409 `runtime_target_mismatch`.
-     - **Existing agent with an empty `RuntimeBrokerID`** (which today adopts the resolved Runtime Broker, `handleExistingAgent`): when the resolved Runtime Broker is flat, it takes the *new-create* checks (experiment, expected target, profile). On success its pin and `runtime_broker_id` are written together by `SetAgentPinnedRuntimeTarget` (expected: empty placement), which bumps `state_version`. The write comes after the checks and **before** `beginStartDispatchHTTP`/`recordRunIntent`, and the handler replaces `existingAgent` with the returned row. So the dispatcher sees the pin and sends `expectedRuntimeTargetId`, and the handler's post-dispatch `UpdateAgent`/`updateAgentAfterDispatch` carries the current `state_version` (no conflict). It never sits on a flat row unpinned. When the resolved Runtime Broker is legacy, today's behaviour is unchanged.
+     - **Existing agent with an empty `RuntimeBrokerID`** (which today adopts the resolved Runtime Broker, `handleExistingAgent`): when the resolved Runtime Broker is flat, it takes the *new-create* checks (experiment, expected target, profile). On success its pin and `runtime_broker_id` are written together by `SetAgentPinnedRuntimeTarget` (expected: empty placement), which bumps `state_version`. The write comes after the checks and **before** `beginStartDispatchHTTP`/`recordRunIntent`, and the handler replaces `existingAgent` with the returned row. So the dispatcher sees the pin and sends `expectedRuntimeTargetId`, and the handler's post-dispatch `UpdateAgent`/`updateAgentAfterDispatch` carries the current `state_version` (no conflict). It never sits on a flat row unpinned. On `store.ErrPinnedPlacementChanged` (a concurrent placement), the handler answers 409 `conflict` (existing code), "agent placement changed concurrently; retry", before any dispatch. **The first placement stays persisted if the subsequent start fails** (quota refusal or start error): the agent now belongs to that flat Runtime Broker, exactly as if it had been created there. This differs from today's in-memory adoption, deliberately. When the resolved Runtime Broker is legacy, today's behaviour is unchanged.
      - **New create** (no existing agent, or a delete-and-recreate branch): apply the *new-create* checks against the resolved Runtime Broker, before any write including that delete.
   - **Shared helper:** the new-create checks and the pin are computed by one function, `(*hub.Server).flatCreatePlacement(ctx, broker *store.RuntimeBroker, explicitProfile, expectedRuntimeTargetID string) (store.PinnedPlacement, error)`. It returns the placement to set on the model (zero for a legacy row) or a `*hub.RuntimeTargetRefusal`. The same component decides whether default profiles apply (`flatTarget := broker.RuntimeTarget != nil`). `createAgentInProject`, the scheduler's `dispatchAgentEventHandler` and the empty-Runtime-Broker existing-agent case all call it, so the create paths cannot drift.
   5. **Link**, then the existing flow continues unchanged.
@@ -452,7 +473,7 @@ Notes on the codes:
 | Project defaults | `project_settings_handlers.go applyProjectDefaults` (`scion.io/active-profile`) | Not applied |
 | Hub-default passthrough pin | `handlers_agents_core.go` and the scheduler copy in `server.go` (`dispatchAgentEventHandler`, via `applyScheduledProjectDefaultGCPIdentity`/`hubDefaultPassthroughAllowed`); both write `AppliedConfig.Profile` and `CreateInputs.Profile` | Not applied. The gate `hubDefaultPassthroughAllowed` evaluates the runtime type from `RuntimeTarget.Type` instead of broker profiles or `DefaultProfile` |
 | Reincarnation re-derivation | `handlers_agent_reincarnate.go` and `default_gcp_identity.go` (re-derive the project active profile) | Not applied for a pinned agent. The GCP-identity gate uses the target type |
-| Dispatcher write-back of a reported profile | `httpdispatcher.go` (writes a Runtime Broker-reported profile onto the agent) | Not written for a pinned agent. A flat instance reports none anyway |
+| Runtime Broker-reported profile write-backs | `httpdispatcher.go` (create/start response profile), heartbeat backfill `agent.AppliedConfig.Profile = agentHB.Profile` (`handlers_runtime_brokers.go`), reincarnation echo `copyBrokerEcho` (`reincarnate_worker.go`) | General rule: **no Runtime Broker-reported profile is ever written onto a pinned agent.** A flat instance reports none anyway |
 
 When a project or Hub default profile is dropped because the target is flat, the Hub adds a dispatch warning through the existing `addDispatchWarnings` mechanism: "default Runtime Broker Profile \"<p>\" was not applied: Runtime Broker <id> serves a single runtime target". Placement can also be selected implicitly (project default Runtime Broker, single provider), so dropping the default silently would hide a change.
 
@@ -465,12 +486,39 @@ When a project or Hub default profile is dropped because the target is flat, the
 | Experiment on, flat target, **explicit** non-empty `profile` in the request | Hub: 422 `runtime_profile_unsupported`, before side effects |
 | Experiment on, flat target, profile only from defaults | Not applied. Dispatch warning (above) |
 | Flat instance receives create with non-empty `config.profile` (e.g. an older Hub) | 422 `runtime_profile_unsupported`, before side effects |
-| Flat instance receives create without `expectedRuntimeTargetId` | 412 `runtime_target_required`: "this Runtime Broker serves a single runtime target and requires expectedRuntimeTargetId; upgrade the Hub or enable hub.flat_runtime_brokers" |
+| Flat instance receives create without `expectedRuntimeTargetId` | 412 `runtime_target_required`: "this Runtime Broker serves a single runtime target and requires expectedRuntimeTargetId; upgrade the Hub" |
 | Flat instance create, start or restart with an **empty** profile | The flat instance **bypasses `resolveManagerForOpts`/`ResolveRuntime` entirely**. It never consults the saved agent profile or the settings `active_profile`, and always uses its single manager |
 | Flat instance start/restart | The start wire has no profile field. The profile today comes from the saved agent profile or settings, and the flat instance ignores both (row above). A body that fails to decode (invalid JSON or a type error) is rejected with 400 `invalid_request`, not treated as "no `expectedRuntimeTargetId`". **Unknown keys stay ignored**: no `DisallowUnknownFields`, per the start/restart version-skew contract for GoogleCloudPlatform/scion#1931. A start without the field is accepted, since it can only use the one target |
 | Rolled-back legacy binary re-registers a flat identity without a descriptor | 409 `runtime_target_changed` (R4) |
 
 Managed agents (`ManagedAgentsProfile`) don't use a Runtime Broker and are unaffected.
+
+### Version pairings
+
+Terms used in the table:
+- **New Hub:** a Hub implementing this contract (P1.2 and later).
+- **Old Hub:** a Hub that predates this contract: today's Hub, a P1.1-only Hub, or an older replica during a rolling upgrade. It has no `hub.flat_runtime_brokers` experiment, so its two columns are identical.
+- **Old Runtime Broker:** a binary that predates this contract. A new binary with no `server.broker.instances` behaves the same, except that it rejects a non-empty `expectedRuntimeTargetId`, which a new Hub never sends to a legacy row.
+- **New Runtime Broker:** a binary hosting a flat instance.
+
+The new-Hub/new-Runtime Broker pairing is specified in sections 6–10.
+
+For the old-Hub columns there are two cases:
+- **fresh:** the flat instance meets the old Hub at first registration;
+- **rollback:** the flat instance was registered under a new Hub, which was then downgraded.
+
+| Exchange | New Hub + old Runtime Broker, experiment on | New Hub + old Runtime Broker, experiment off | Old Hub + new Runtime Broker (experiment on) | Old Hub + new Runtime Broker (experiment off) |
+|---|---|---|---|---|
+| Registration | Legacy path (no descriptor). The name match uses `GetLegacyRuntimeBrokerByName`, so a flat row is never adopted. An ID match on a flat row gets 409 `runtime_target_changed` (R4). Creating a row whose name/slug collides with a flat row gets 409 `runtime_broker_name_conflict`. No echo (legacy row) | Same as experiment on: legacy registration is not gated | Fresh: the Hub drops the descriptor, adopts by name or creates a legacy row, and returns no echo. The instance **stops before join** (R9); leftovers and recovery as in R9. Rollback: re-registration on restart returns no echo, so the instance stops (it can't restart under a downgraded Hub) | Same as experiment on |
+| Join | Legacy join, unchanged. A join without a descriptor on a flat row gets 409 before any secret change | Same | Fresh: not reached (stopped before join). Rollback: not reached on restart, for the same reason | Same |
+| Heartbeat | Unchanged for legacy rows | Unchanged | Fresh: not reached (never joined). Rollback, while the process keeps running with its existing credentials: the old Hub records status as today; the instance reports no profiles, so nothing is backfilled; old full-row writes leave the target columns intact | Same |
+| Create (interactive) | Legacy rows only: unchanged, no pin, no field sent. A client-supplied `expectedRuntimeTargetId` gets 409 `runtime_target_mismatch` (empty actual) | Unchanged. A client-supplied `expectedRuntimeTargetId` gets 412 `experiment_disabled` | Fresh: unreachable (not registered). Rollback: the old Hub sends no `expectedRuntimeTargetId` and gets 412 `runtime_target_required` (before any profile check), a loud failure with no side effects on the instance; the old Hub's own create rollback applies | Same |
+| Start | Legacy rows: unchanged (no pin, so no pre-check refusal, and no field sent) | Unchanged | Rollback: accepted. The start wire has no profile, the instance uses its single target, and a missing `expectedRuntimeTargetId` is accepted on start | Same |
+| Restart | Legacy rows: unchanged (user stop + start; cross-node restart) | Unchanged | Rollback: accepted, as for start (the stop leg goes to the same instance) | Same |
+| Reincarnate | Legacy rows: unchanged; reprovision carries no field | Unchanged | Rollback: the worker stops the agent, then the reprovision (create-shaped, no field) gets 412 `runtime_target_required`. The worker's existing failure path re-renders the previous config, and the agent is left stopped. This is a known limitation of a Hub rollback while flat agents exist | Same |
+| Scheduler dispatch | `providers[0]` legacy: unchanged. If `providers[0]` is flat, section 7 rules apply (not an old-Runtime Broker case) | Same. A flat `providers[0]` gets the refusal as a failed run | Rollback: the create gets 412 `runtime_target_required`, recorded as a failed scheduled run, with no side effects on the instance | Same |
+
+Runtime Broker binary rollback (a new Hub with an old binary started where a flat instance ran): the old binary uses the legacy identity and credential paths, not `runtime-brokers/<key>/`, so it registers as the legacy Runtime Broker. Flat agents stay pinned to the flat row, which shows offline. Their starts go to that row and fail as the Runtime Broker being unavailable. Nothing is retargeted.
 
 ## 11. Interaction with run ID, start claims, run intent and recovery
 
@@ -479,7 +527,7 @@ Managed agents (`ManagedAgentsProfile`) don't use a Runtime Broker and are unaff
 | Pinned placement columns | Set in the same `CreateAgent` transaction as the row (interactive and scheduled creates), or for an existing agent with an empty Runtime Broker by `SetAgentPinnedRuntimeTarget` before its start dispatch (section 9 step 4); in both cases before run intent, start claim, `beginRun` and launch. Never cleared by `forgetRuntimeTarget`, run-ID writes, launch end, start-claim settlement or reaper actions. Never used as a start-claim target |
 | `runtime_brokers.runtime_target_*` | Written only by `CreateRuntimeBroker` and `SetRuntimeBrokerTarget`. Heartbeat write-backs can't roll it back. Independent of `BrokerTargetInventory` |
 | `expectedRuntimeTargetId` and the flat refusals | Checked before claim/intent/run-ID writes on the Hub and before any launch bookkeeping on the Runtime Broker. No start marker is set, so a claimed start (once ptone/scion#3081 wires claims) settles as "did not act" through `isConfirmedStartNotActedOnError`. A create rolls back with nothing to compensate |
-| Stale-pin refusal | Through the handler pre-checks (user restart before its stop leg; lifecycle start, wake and create-on-existing before reservation and run intent; after the ptone/scion#3081 rebase, in `startAgentCore` before the claim), it happens before any claim, intent, reservation, credential or run-ID write. Through the dispatcher backstop (reconcile, reincarnation), the intent was already recorded, and the refusal happens before credential mint and run ID and settles under the terminal-for-intent rule (section 7). Either way it is classified as confirmed not-acted-on |
+| Stale-pin refusal | Through the handler pre-checks (user restart before its stop leg; lifecycle start, wake and create-on-existing before reservation and run intent; after the ptone/scion#3081 rebase, in `startAgentCore` before the claim), it happens before any claim, intent, reservation, credential or run-ID write. Through the dispatcher backstop (cross-node execution), the intent was already recorded, and the refusal happens before credential mint and run ID and settles under the terminal-for-intent rule (section 7). Reincarnation is guarded by its handler pre-check. Its backstop can fire only after the worker's stop and reprovision, and only if state changed after the pre-check (only an older binary can cause that). It is then classified through `reincarnationStartLeftNoContainer` as confirmed not-acted-on, and the worker's existing failure path, which re-renders the previous config, applies. Either way it is classified as confirmed not-acted-on |
 | Runtime target ID vs inventory target key | Distinct. `start_claim_target`, `InventoryTarget.id`, `BrokerTargetInventory` and `applied_config.runtimeTarget`/`runtimeTargetCandidate` keep the inventory key. No mapping in P1 |
 | Run ID | Unchanged: minted per create/start/restart, sent as `runId`, labelled `scion.run_id` |
 | Queued stops and recovery (ptone/scion#3091) | Unchanged. A flat Runtime Broker has one inventory target |
@@ -541,7 +589,7 @@ Group F tests are the dispatch half:
   - the real error-code constants (added in P1.1, section 9);
   - the store with pins and targets (P1.1);
   - existing test harnesses (Hub test server, store fixtures, Runtime Broker test server);
-  - raw-JSON request bodies for fields that P1.2 adds to request structs (`expectedRuntimeTargetId`, `runtimeTarget`).
+  - raw-JSON request bodies for fields that are not added in P1.1 (the Hub public `CreateAgentRequest` in `handlers_agents_core.go`, `RemoteCreateAgentRequest`, Runtime Broker `CreateAgentRequest`, `StartExtras`).
 - Where the thing under test has no P1.1 API (constructing a flat Runtime Broker instance, `RegisterEmbeddedFlatRuntimeBroker`, `StartExtras.ExpectedRuntimeTargetID`), the arrange step goes through a helper in the same test file: `newFlatInstanceTestServer` in pkg/runtimebroker, `registerEmbeddedFlatForTest` in pkg/hub. Its P1.1 body builds as much as the current code allows. Such tests are marked **F‑arrange** below.
 - **P1.2 removes the constant and may change only the bodies of those named arrange helpers.** Assertions and the act steps must pass unchanged, or come with a reviewed amendment to this appendix. The P1.2 review checks both.
 
@@ -604,6 +652,7 @@ Group F tests are the dispatch half:
 - `TestSetRuntimeBrokerTarget_SameTargetUpdatesDisplayName`
 - `TestSetRuntimeBrokerTarget_DifferentTargetRejected`
 - `TestSetAgentPinnedRuntimeTarget_CompareAndSet`: moves the pin and `runtime_broker_id` together and bumps `state_version`.
+- `TestSetAgentPinnedRuntimeTarget_MissReturnsPlacementChanged`
 - `TestSetAgentPinnedRuntimeTarget_StaleUpdateAgentConflicts`: read the agent, move it, then `UpdateAgent` with the stale model returns a version conflict. The pin and `runtime_broker_id` stay equal.
 - `TestRuntimeTargetCandidate_DoesNotTouchPin`
 - `TestPinnedPlacement_StaleWhenBrokerMoved`
@@ -641,7 +690,7 @@ Hub (`pkg/hub/flat_runtime_broker_contract_test.go`, plus one new file in `cmd/`
 - `TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks`: create-on-existing resume with no `runtimeBrokerId` (resolved default differs from the agent's Runtime Broker); the expected target is still sent; a client-supplied matching `expectedRuntimeTargetId` is accepted with the experiment off.
 - `TestFlatCreate_ExistingAgentChecksUseAgentBrokerNotResolved`
 - `TestFlatCreate_DeleteAndRecreateChecksBeforeDelete`: the new-create checks fail and the existing agent is not deleted.
-- `TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate`: checks run; on success the pin and Runtime Broker are written together with a `state_version` bump before the start dispatch; `expectedRuntimeTargetId` is sent; the post-dispatch update lands without a version conflict.
+- `TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate`: checks run; on success the pin and Runtime Broker are written together with a `state_version` bump before the start dispatch; `expectedRuntimeTargetId` is sent; the post-dispatch update lands without a version conflict; when the start fails, the placement stays persisted; a concurrent placement gets 409 `conflict`.
 - `TestFlatCreate_LifecycleClientExpectedTargetComparedWithPin`
 - `TestFlatCreate_RuntimeBrokerRejectionRelayed`: 409/422/412 relayed with code and details, start markers stripped, create rolled back.
 - `TestFlatCreate_AccessCheckBeforeLink`
@@ -655,13 +704,16 @@ Hub (`pkg/hub/flat_runtime_broker_contract_test.go`, plus one new file in `cmd/`
 - `TestFlatReincarnate_ReprovisionSendsExpectedTarget`: covers `buildCreateRequest` on the reprovision path.
 - `TestFlatFinalizeEnv_SendsExpectedTarget`
 - `TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope`: an executing-node refusal reaches the requesting node as the typed 409, not 502.
-- `TestFlatScheduledCreate_PinsPlacement`: a scheduled create on a flat `providers[0]` is pinned in the `CreateAgent` transaction, sends the expected target, and doesn't apply the passthrough default profile.
+- `TestFlatScheduledCreate_PinsPlacement`: a scheduled create on a flat `providers[0]` is pinned in the `CreateAgent` transaction and sends the expected target. Neither the passthrough nor the project active profile is applied, and `flatCreatePlacement` runs before `applyScheduledProjectDefaultGCPIdentity`/`deriveAgentConfig`.
 - `TestFlatScheduledCreate_ExperimentOffRefused`: refused before any write, and the scheduler records a failed run.
 - `TestFlatAutoProvide_SkippedWhileExperimentOff`
 - `TestFlatReincarnate_MoveStillNotImplemented`: a non-dry-run move of a pinned agent gets 501, unchanged.
-- `TestFlatReincarnate_MoveDryRunReportsPinnedIneligible`: the plan check carries code `runtime_target_move_unsupported`.
+- `TestFlatReincarnate_MoveDryRunReportsPinnedIneligible`: 409 `runtime_target_move_unsupported` through `writeMoveRefusal`; the verdict's first check `runtime_target` failed and the rest not evaluated.
+- `TestFlatReincarnate_DryRunMoveOfStalePinGetsPlanAnswer`: a stale-pinned agent's dry-run move gets the move refusal, not `runtime_target_pin_stale`.
 - `TestFlatReincarnate_ProfileNotRederived`
 - `TestFlatRegistration_TargetChangeRejected`
+- `TestFlatRegistration_JoinDescriptorMismatchKeepsSecret`: the existing secret is unchanged after a refused join.
+- `TestFlatRegistration_ResponseEchoesRuntimeTarget`: the registration and join responses echo the stored descriptor for a flat row, and none for a legacy row.
 - `TestFlatRegistration_LegacyRowNotConverted`
 - `TestFlatRegistration_LegacyReRegistrationOfFlatIDRejected`
 - `TestFlatRegistration_NameOrSlugCollisionOnCreateRejected`
@@ -690,6 +742,9 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 - `TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget`
 - `TestFlatInstanceStart_IgnoresSavedProfile`
 - `TestFlatInstanceStart_MismatchKeepsRunIDFencing`
+- `TestFlatInstanceRegistration_UnawareHubRefusedBeforeJoin` (F‑arrange): a response without the echo means no join is sent and no credentials are saved; a startup error.
+- `TestFlatInstanceRegistration_BrokerIDMismatchRefused` (F‑arrange): a response with a different `brokerId` (name adoption) means no join; a startup error.
+- `TestFlatInstanceJoin_EchoMismatchDiscardsSecret` (F‑arrange)
 - `TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected`: a full body using the existing test server and raw JSON.
 
 ## 16. Scope
@@ -714,12 +769,21 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 - The store query `GetLegacyRuntimeBrokerByName` (filtered name lookup, T3).
 - `GLOSSARY.md`: the two terms in section 6.
 - `pkg/experiments/registry.go`.
-- Additive fields on the hubclient registration/create request types and on the Hub `CreateBrokerRegistrationRequest`/`BrokerJoinRequest` structs (the type definitions only, no handler logic).
+- Additive struct fields only (no handler logic), exactly:
+  - `RuntimeTarget *api.RuntimeTargetDescriptor` (`runtimeTarget,omitempty`) on Hub `CreateBrokerRegistrationRequest`, `BrokerJoinRequest`, `CreateBrokerRegistrationResponse` and `BrokerJoinResponse` (`pkg/hub/brokerauth.go`), and on hubclient `CreateBrokerRequest`, `JoinBrokerRequest`, `CreateBrokerResponse` and `JoinBrokerResponse` (`pkg/hubclient/runtime_brokers.go`);
+  - `ExpectedRuntimeTargetID string` (`expectedRuntimeTargetId,omitempty`) on hubclient `CreateAgentRequest` (`pkg/hubclient/agents.go`);
+  - store `RuntimeBroker.RuntimeTarget` and the `Agent` pin fields.
+  - Not in P1.1 (P1.2, raw JSON in group F): the Hub public `CreateAgentRequest`, `RemoteCreateAgentRequest`, Runtime Broker `CreateAgentRequest` and `StartExtras`.
 - The Makefile regex for `test-launch-store-postgres`.
 - New test files.
 
 ## Change log
 
+- **r6 (review round 5):**
+  - B1: registration and join responses echo the stored `runtimeTarget`; R9 instance-side acceptance (stop before join on a missing or mismatched echo or a different `brokerId`; join response checked too); upgrade order; leftovers and recovery; decision recorded as confirmed in the architecture consultation.
+  - N1: §11 reincarnation sentence corrected. N2: dry-run move via `writeMoveRefusal` with the `runtime_target` check; pre-check at the in-place site. N3: frozen store signatures and sentinels; step-4 placement persists on a failed start; concurrent miss gets 409. N4: join check before secret rotation. N5: scheduler row (profile sources, ordering, broker row load, warning sink).
+  - T1: Runtime Broker-reported profile write-backs (general rule). T2: 412 message. T3: `buildCreateRequest` uses any non-NULL pin. T4: restart claim and hold after the #3081 rebase. T5: exact P1.1 struct list. T6: filtered name lookup in `RegisterProject`. T7: status-only writers and placement-neutral per-agent operations listed as unaffected.
+  - Version-pairing table for every wire exchange (§10).
 - **r5 (review round 4, plus a full writer sweep):**
   - B1: the scheduler create path (`dispatchAgentEventHandler`) follows the new-create rules through a shared `flatCreatePlacement` helper; its passthrough pin is in §10; tests added.
   - N1: `checkPinnedPlacement` in `handleReincarnateAgent` before the worker (in scope, no postponement).
