@@ -186,75 +186,21 @@ func validateDecodedKeys(keys string) error {
 // ValidateKeys applies ValidateBody's field-level rules (non-empty, valid
 // UTF-8, no NUL byte, size ceiling) directly to an already-decoded string,
 // for callers that assemble a Request from a source other than a raw HTTP
-// body — e.g. the temporary raw-message bridge (task 2.3) normalizing a
-// legacy envelope, or a local-mode CLI path. It never trims, splits or
-// otherwise normalizes s.
+// body — e.g. a local-mode CLI path or the runtime broker's keys handler.
+// It never trims, splits or otherwise normalizes s.
 //
 // Unlike ValidateBody, this function cannot detect a lone surrogate escape
 // that some upstream `encoding/json` decode already silently replaced with
 // U+FFFD before s reached here — there is no raw JSON left to inspect. It
 // can and does still reject s if it is not valid UTF-8 at all (e.g. built
 // programmatically rather than JSON-decoded). A caller that still has the
-// raw JSON bytes available (not just the lenient-decoded string) should use
-// ValidateKeysJSON instead, which does not have this gap.
+// raw JSON request body should use ValidateBody instead, which does not have
+// this gap.
 func ValidateKeys(s string) error {
 	if !utf8.ValidString(s) {
 		return invalid("keys must be valid UTF-8")
 	}
 	return validateDecodedKeys(s)
-}
-
-// ValidateKeysJSON decodes raw as a JSON string using the same strict rules
-// ValidateBody applies to its own "keys" field value, then validates the
-// decoded string with the same field-level rules (non-empty, no NUL byte,
-// size ceiling). It closes ValidateKeys's gap for a caller that still has
-// the raw JSON bytes: it rejects invalid UTF-8 and a lone UTF-16 surrogate
-// escape instead of silently accepting the U+FFFD a lenient decode would
-// have already substituted.
-//
-// raw must be the exact bytes of a single JSON value as captured into a
-// json.RawMessage field by some other already-performed encoding/json
-// decode — e.g. the temporary raw-message bridge (task 2.3), which must
-// re-decode a legacy `message`/`structured_message.msg` value without
-// reusing the lenient string that decode already produced for raw-selection
-// classification (the contract's §6.1 "Keys-content parity"). Sourcing raw
-// from a second Decoder.Decode into a shadow struct whose JSON tags match
-// the field being re-extracted gives field selection — case-insensitive
-// matching, scalar overwrite, object merge — identical to whatever decode
-// located raw in the first place, by construction, the same guarantee
-// classification parity gives raw selection itself.
-//
-// A JSON `null` is not a valid input to this function: the contract treats
-// an absent or null candidate as "no value from this source" before ever
-// calling it. Pass it only a present, non-null candidate.
-//
-// raw is checked with json.Valid (after the UTF-8 check) before
-// decodeJSONString looks at it: decodeJSONString only checks the
-// surrounding quotes and the escapes it recognizes, relying on
-// ValidateBody's own token-stream Decoder.Decode having already rejected a
-// structurally invalid value (an unescaped control byte, an unescaped
-// interior quote) before decodeJSONString ever runs. This function has no
-// such prior scan of its own, so it runs one explicitly — otherwise it
-// would silently accept input that is not valid JSON at all, contradicting
-// its own doc that it applies ValidateBody's strict rules.
-func ValidateKeysJSON(raw json.RawMessage) (string, error) {
-	if !utf8.Valid(raw) {
-		return "", invalid("invalid JSON: body is not valid UTF-8")
-	}
-	if !json.Valid(raw) {
-		return "", invalid("invalid JSON")
-	}
-	if len(raw) == 0 || raw[0] != '"' {
-		return "", invalid("field must be a string")
-	}
-	s, err := decodeJSONString(raw)
-	if err != nil {
-		return "", err
-	}
-	if err := validateDecodedKeys(s); err != nil {
-		return "", err
-	}
-	return s, nil
 }
 
 // AsValidationError extracts the Outcome from err if it (or something it

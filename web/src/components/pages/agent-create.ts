@@ -97,6 +97,11 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
+  // Set once the user operates the auto-expose toggle or a sub-field. Only
+  // then does buildConfig send the auto-expose env keys, as explicit values,
+  // even when they equal the seeded hub default. Left unsent, the agent
+  // inherits the project, then template, then hub default value.
+  @state() private autoExposeTouched = false;
 
   // ── Additional Options > Auth & Security Tab ────────────────────────
   @state() private agentRole = '';
@@ -141,9 +146,10 @@ export class ScionPageAgentCreate extends LitElement {
    * The GCP identity mode that applies when nothing has been explicitly
    * chosen, *before* any Kubernetes-only display substitution: this page's
    * own "block" placeholder, or the project's configured default. Set only
-   * in loadGCPServiceAccounts, in lockstep with the same assignments that
-   * seed gcpMetadataMode's initial value, so the two can never drift apart
-   * from each other even if other state changes mid-request.
+   * in loadGCPServiceAccounts, which always records the project default it
+   * found here; the current value (gcpMetadataMode) is seeded from it only
+   * when !gcpIdentityUserSet, so an explicit user pick made while the load
+   * was in flight is left in place (ptone/scion#2548).
    *
    * normalizeGcpModeForTarget derives the untouched display value fresh from
    * this field on every relevant change, rather than remembering "the
@@ -158,8 +164,9 @@ export class ScionPageAgentCreate extends LitElement {
   /**
    * The service account ID that goes with defaultGcpMetadataMode === 'assign'
    * (empty otherwise). Set only in loadGCPServiceAccounts, alongside
-   * defaultGcpMetadataMode and gcpServiceAccountId's own initial value, for
-   * the same reason: so normalizeGcpModeForTarget can restore the correct
+   * defaultGcpMetadataMode: it always records the project default, and
+   * gcpServiceAccountId is seeded from it only when !gcpIdentityUserSet. It
+   * exists so normalizeGcpModeForTarget can restore the correct
    * service account, not just the correct mode, if an explicit choice that
    * cleared gcpServiceAccountId is later undone by the Kubernetes Block
    * constraint (see normalizeGcpModeForTarget).
@@ -424,6 +431,11 @@ export class ScionPageAgentCreate extends LitElement {
       align-items: center;
       gap: 0.5rem;
       margin-bottom: 1.25rem;
+    }
+
+    .notify-field .source-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .notify-field sl-checkbox::part(label) {
@@ -713,7 +725,9 @@ export class ScionPageAgentCreate extends LitElement {
           defaultModel?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
-        this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        if (!this.autoExposeTouched) {
+          this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        }
         this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
         this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
         this.hubDefaultTemplate = data.defaultTemplate ?? '';
@@ -949,7 +963,22 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented at the start of every loadGCPServiceAccounts call. Each call
+   * captures its own value and, after every await, drops its results if a
+   * newer call has started since (ptone/scion#2548): project switches fire
+   * the load unawaited, so a slow response for the previous project must not
+   * overwrite the current project's accounts or default.
+   */
+  private gcpLoadSeq = 0;
+
   private async loadGCPServiceAccounts(): Promise<void> {
+    const seq = ++this.gcpLoadSeq;
+    const projectId = this.projectId;
+    // True when a newer load has started or the project changed under this
+    // one; a stale load must not touch any state after that point.
+    const isStale = (): boolean => seq !== this.gcpLoadSeq || this.projectId !== projectId;
+
     this.gcpServiceAccounts = [];
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
@@ -958,48 +987,59 @@ export class ScionPageAgentCreate extends LitElement {
     // Recomputing defaults from scratch (initial load, or a project change):
     // whatever this method assigns below is a default, not a user choice,
     // and any suspended explicit Block pick belonged to the previous
-    // project's context, not this one.
+    // project's context, not this one. This reset runs synchronously, before
+    // any await, so it is always performed by the newest load.
     this.gcpIdentityUserSet = false;
     this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
 
-    if (this.projectId) {
+    if (projectId) {
+      let accounts: GCPServiceAccount[] = [];
       try {
         const res = await apiFetch(
-          `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+          `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
         );
         if (res.ok) {
           const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-          this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
+          accounts = Array.isArray(data) ? data : data.items || [];
         }
       } catch {
         // Non-critical
       }
+      if (isStale()) return;
+      this.gcpServiceAccounts = accounts;
 
-      // Apply project default GCP identity if configured. gcpMetadataMode and
-      // defaultGcpMetadataMode are always assigned together here, so they can
-      // never drift apart — normalizeGcpModeForTarget relies on
-      // defaultGcpMetadataMode staying exactly in sync with whatever default
-      // this method applied, no matter what renders happen during the awaits
-      // above and below.
-      const settings = await this.fetchProjectSettings(this.projectId);
+      // Apply project default GCP identity if configured. defaultGcpMetadataMode
+      // (and defaultGcpServiceAccountId) always record the project default, so
+      // normalizeGcpModeForTarget stays in sync with whatever default this
+      // method found. The *current* value (gcpMetadataMode/gcpServiceAccountId)
+      // is only seeded from the default when the user has not already made an
+      // explicit pick while the fetches were in flight: an arriving default
+      // must never overwrite a user choice.
+      const settings = await this.fetchProjectSettings(projectId);
+      if (isStale()) return;
       if (settings?.defaultGCPIdentityMode) {
         this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
+        const applyToCurrent = !this.gcpIdentityUserSet;
         if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
           const verified = this.verifiedGCPServiceAccounts;
           const match = verified.find(
             (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
           );
           if (match) {
-            this.gcpMetadataMode = 'assign';
             this.defaultGcpMetadataMode = 'assign';
-            this.gcpServiceAccountId = match.id;
             this.defaultGcpServiceAccountId = match.id;
+            if (applyToCurrent) {
+              this.gcpMetadataMode = 'assign';
+              this.gcpServiceAccountId = match.id;
+            }
           }
         } else if (mode === 'passthrough' || mode === 'block') {
-          this.gcpMetadataMode = mode;
           this.defaultGcpMetadataMode = mode;
+          if (applyToCurrent) {
+            this.gcpMetadataMode = mode;
+          }
         }
       }
     }
@@ -1166,14 +1206,18 @@ export class ScionPageAgentCreate extends LitElement {
     // Telemetry (use structured config property, matching agent-configure.ts)
     config.telemetry = { enabled: this.telemetryEnabled };
 
-    // Auto-expose ports
-    env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-    if (this.autoExposePortsEnabled) {
-      env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-      if (this.autoExposePortsList) {
+    // Auto-expose ports: sent, as explicit values, only when the user operated
+    // the control. Otherwise the hub resolves the project, then template,
+    // then hub default value. The list is always sent with the control, as
+    // in agent-configure.ts: an empty list means "no list" and, as an
+    // explicit value, overrides a template's list.
+    if (this.autoExposeTouched) {
+      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
+      if (this.autoExposePortsEnabled) {
+        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
         env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
-      env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
     }
 
     if (Object.keys(env).length > 0) {
@@ -1810,16 +1854,22 @@ export class ScionPageAgentCreate extends LitElement {
           ?checked=${this.autoExposePortsEnabled}
           @sl-change=${(e: Event) => {
             this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
+            this.autoExposeTouched = true;
           }}
         >
           Enable Auto-Expose Ports
         </sl-checkbox>
         <sl-tooltip
-          content="Automatically detect and expose TCP listening ports from this agent's container."
+          content="Automatically detect and expose TCP listening ports from this agent's container. Until you change this control, the agent inherits the project setting, then the template, then the hub default; only the hub default is shown here."
           hoist
         >
           <span class="help-badge">?</span>
         </sl-tooltip>
+        <span class="source-label" data-testid="auto-expose-source">
+          ${this.autoExposeTouched
+            ? 'Source: explicit'
+            : 'Source: inherited (hub default shown; project or template may override)'}
+        </span>
       </div>
 
       <!-- Auto-Expose Sub-fields (conditional) -->
@@ -1831,6 +1881,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.autoExposePortsMode}
                 @sl-change=${(e: Event) => {
                   this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposeTouched = true;
                 }}
               >
                 <sl-option value="allowlist">Allowlist</sl-option>
@@ -1849,6 +1900,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.autoExposePortsList}
                 @sl-input=${(e: Event) => {
                   this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposeTouched = true;
                 }}
               ></sl-input>
               <div class="hint">
@@ -1865,6 +1917,7 @@ export class ScionPageAgentCreate extends LitElement {
                   this.autoExposePortsInterval = (
                     e.target as HTMLElement & { value: string }
                   ).value;
+                  this.autoExposeTouched = true;
                 }}
               ></sl-input>
               <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>

@@ -316,8 +316,13 @@ func (s *ProjectStore) NextAvailableSlug(ctx context.Context, baseSlug string) (
 	}
 }
 
-// UpdateProject updates an existing project.
+// UpdateProject updates an existing project. It never writes owner_id:
+// SetProjectOwnerID is the only writer of that column (ptone/scion#2597).
+// p.OwnerID is ignored on input and refreshed from the stored row on success.
 func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) error {
+	if p == nil {
+		return fmt.Errorf("UpdateProject: nil project: %w", store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(p.ID)
 	if err != nil {
 		return err
@@ -325,8 +330,7 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 
 	update := s.client.Project.UpdateOneID(uid).
 		SetName(p.Name).
-		SetSlug(p.Slug).
-		SetOwnerID(p.OwnerID)
+		SetSlug(p.Slug)
 
 	if p.GitRemote != "" {
 		update.SetGitRemote(p.GitRemote)
@@ -379,6 +383,9 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 		return mapError(err)
 	}
 	p.Updated = updated.Updated
+	// owner_id is not written here, so report the stored value rather than
+	// leaving the caller holding a possibly stale owner.
+	p.OwnerID = updated.OwnerID
 	return nil
 }
 
