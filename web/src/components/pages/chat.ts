@@ -5497,13 +5497,24 @@ export class ScionPageChat extends LitElement {
     message: string,
     variant: 'success' | 'warning' | 'danger' = 'success'
   ): void {
-    // Use the Shoelace alert/toast pattern if available, else console
+    // Build the content from DOM nodes and text so the message is never
+    // parsed as HTML.
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant,
       closable: true,
       duration: 4000,
-      innerHTML: `<sl-icon name="${variant === 'success' ? 'check-circle' : variant === 'warning' ? 'exclamation-triangle' : 'exclamation-circle'}" slot="icon"></sl-icon>${message}`,
     });
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute(
+      'name',
+      variant === 'success'
+        ? 'check-circle'
+        : variant === 'warning'
+          ? 'exclamation-triangle'
+          : 'exclamation-circle'
+    );
+    icon.setAttribute('slot', 'icon');
+    alert.append(icon, document.createTextNode(message));
     document.body.appendChild(alert);
     void (alert as unknown as { toast(): Promise<void> }).toast();
   }
