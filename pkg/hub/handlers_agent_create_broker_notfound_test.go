@@ -289,7 +289,8 @@ func TestResolveRuntimeBroker_ExplicitBrokerErrors_ListOnlyUsableBrokers(t *test
 	}
 	offline := &store.RuntimeBroker{ID: tid("nf-usable-off"), Name: "Usable Offline", Slug: "usable-offline", Status: store.BrokerStatusOffline}
 	shared := &store.RuntimeBroker{ID: tid("nf-usable-shared"), Name: "Shared Broker", Slug: "shared-broker", Status: store.BrokerStatusOnline, AutoProvide: true}
-	private := &store.RuntimeBroker{ID: tid("nf-usable-private"), Name: "Private Broker", Slug: "private-broker", Status: store.BrokerStatusOnline}
+	// Owned by another user and linked without its owner's consent.
+	private := &store.RuntimeBroker{ID: tid("nf-usable-private"), Name: "Private Broker", Slug: "private-broker", Status: store.BrokerStatusOnline, CreatedBy: tid("nf-usable-owner")}
 	addProvider(offline)
 	addProvider(shared)
 	addProvider(private)
@@ -420,6 +421,11 @@ func TestResolveRuntimeBroker_NoRuntimeBroker_ListsOnlyUsableBrokers(t *testing.
 		t.Helper()
 		b := &store.RuntimeBroker{ID: tid("nrb-broker-" + name), Name: "NRB " + name, Slug: "nrb-" + name,
 			Status: store.BrokerStatusOnline, AutoProvide: autoProvide}
+		if !autoProvide {
+			// Owned by another user, and linked without its owner's
+			// consent, so the caller may not use it.
+			b.CreatedBy = tid("nrb-broker-owner")
+		}
 		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
 		return b
 	}
