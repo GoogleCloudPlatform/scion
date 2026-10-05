@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package authzop
 
 // identityOperations lists the catalog operations for users, groups, roles, role bindings, access constraints and tokens.
