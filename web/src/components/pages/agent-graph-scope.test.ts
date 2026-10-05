@@ -33,7 +33,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Agent } from '../../shared/types.js';
+import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
@@ -1455,6 +1455,153 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         ALL_PAGE(1500),
       ]);
       expect(g(el).agents.some((a) => a.id === victim)).toBe(false);
+    });
+  });
+
+  describe('an agent whose delete the hub accepted', () => {
+    const deletingView = (): DeletionInfo => ({
+      state: 'deleting',
+      soft: false,
+      claim: 1,
+      startedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+
+    function member(el: TestEl, id: string): Agent | undefined {
+      return g(el).agents.find((a) => a.id === id);
+    }
+
+    it('stays in the graph with its deletion view through a re-drain of compact rows; the live delete removes it and a later drain keeps it out', async () => {
+      // Compact rows carry no deletion field, and the hub keeps listing an
+      // agent whose delete it accepted until the delete finishes.
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph();
+      expect(graphRequests(fake)).toEqual([ALL_PAGE()]);
+      const id = fake.agents[4].id;
+
+      expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      (stateManager as unknown as { flush(): void }).flush();
+      await el.updateComplete;
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+      expect(g(el).agents).toHaveLength(25);
+      expect(treeNode(el, id)).not.toBeNull();
+
+      reconnect();
+      await el.updateComplete;
+      await clickBanner(el, 'stale');
+      expect(graphRequests(fake, 1)).toEqual([ALL_PAGE()]);
+      expect(g(el).agents).toHaveLength(25);
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+      // The compact merge keeps the store's deletion view for every page.
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+
+      liveUpdate(`agent.${id}.deleted`, { agentId: id });
+      await el.updateComplete;
+      expect(member(el, id)).toBeUndefined();
+      expect(g(el).agents).toHaveLength(24);
+      expect(treeNode(el, id)).toBeNull();
+
+      // The server still lists the row: a drain after the delete leaves it out.
+      reconnect();
+      await el.updateComplete;
+      await clickBanner(el, 'stale');
+      expect(graphRequests(fake, 2)).toEqual([ALL_PAGE()]);
+      expect(member(el, id)).toBeUndefined();
+      expect(g(el).agents).toHaveLength(24);
+      expect(stateManager.getAgent(id)).toBeUndefined();
+    });
+
+    it('a deletion view that arrives live during an unscoped drain is kept on the row; the live delete then removes it', async () => {
+      const fake = newFake(1200);
+      const h = holdable(fakeFetch(fake), (u) => u.searchParams.get('cursor') === '500');
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      h.hold(1);
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      const id = fake.agents[3].id;
+      liveUpdate(`agent.${id}.status`, { agentId: id, deletion: deletingView() });
+      h.release();
+      await settle(el);
+      expect(g(el).agents).toHaveLength(1200);
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+
+      liveUpdate(`agent.${id}.deleted`, { agentId: id });
+      await el.updateComplete;
+      expect(member(el, id)).toBeUndefined();
+      expect(g(el).agents).toHaveLength(1199);
+    });
+
+    it('a deletion view that arrives live during a project drain is kept on the row', async () => {
+      const fake = newFake(1200);
+      const h = holdable(fakeFetch(fake), (u) => u.searchParams.has('projectId'));
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      h.hold(1);
+      const el = await mountUnsettled('?project=p-1');
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      const id = projectIds(fake, 'p-1')[2];
+      liveUpdate(`agent.${id}.status`, { agentId: id, deletion: deletingView() });
+      h.release();
+      await settle(el);
+      expect(ids(g(el).agents)).toEqual(projectIds(fake, 'p-1'));
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+    });
+
+    it('a deletion view that arrives live during the fit probe is kept on the row; the live delete then removes it', async () => {
+      const fake = newFake(25);
+      const h = holdable(fakeFetch(fake), (u) => u.searchParams.has('fit'));
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      h.hold(1);
+      const el = await mountUnsettled('?project=p-1');
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      const id = projectIds(fake, 'p-1')[0];
+      liveUpdate(`agent.${id}.status`, { agentId: id, deletion: deletingView() });
+      h.release();
+      await settle(el);
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+
+      liveUpdate(`agent.${id}.deleted`, { agentId: id });
+      await el.updateComplete;
+      expect(member(el, id)).toBeUndefined();
+      expect(g(el).visibleAgents.some((a) => a.id === id)).toBe(false);
+    });
+
+    it('a held complete set shows the row with its deletion view, with no request', async () => {
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      holdInState(fake.agents, true);
+      const id = fake.agents[6].id;
+      expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      (stateManager as unknown as { flush(): void }).flush();
+      const el = await mountGraph();
+      expect(fake.requests).toEqual([]);
+      expect(g(el).agents).toHaveLength(25);
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+    });
+  });
+
+  describe('a live delete followed by a live create of the same ID', () => {
+    it('the store drops the create, and a drain whose server still lists the row keeps it out', async () => {
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph();
+      const victim = fake.agents[4];
+      liveUpdate(`agent.${victim.id}.deleted`, { agentId: victim.id });
+      liveUpdate(`agent.${victim.id}.created`, { ...victim, phase: 'stopped' });
+      await el.updateComplete;
+      expect(stateManager.getAgent(victim.id)).toBeUndefined();
+      expect(g(el).agents.some((a) => a.id === victim.id)).toBe(false);
+
+      reconnect();
+      await el.updateComplete;
+      await clickBanner(el, 'stale');
+      expect(graphRequests(fake, 1)).toEqual([ALL_PAGE()]);
+      expect(g(el).agents.some((a) => a.id === victim.id)).toBe(false);
+      expect(g(el).agents).toHaveLength(24);
+      expect(stateManager.getAgent(victim.id)).toBeUndefined();
     });
   });
 });
