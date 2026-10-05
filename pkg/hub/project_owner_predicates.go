@@ -123,7 +123,10 @@ func usableOwnerPrincipals(ctx context.Context, s store.Store, projectID string,
 	}
 	byPrincipal := make(map[string][]*store.RoleBinding)
 	for _, b := range bindings {
-		if b == nil || (excludeUserID != "" && b.PrincipalID == excludeUserID) {
+		// Skip bindings bindingIsUsableOwner would reject without a store
+		// lookup (non-owner role, non-user principal), and excludeUserID.
+		if b == nil || b.RoleDefinitionID != ownerRDID || b.PrincipalType != store.RoleBindingPrincipalUser ||
+			(excludeUserID != "" && b.PrincipalID == excludeUserID) {
 			continue
 		}
 		byPrincipal[b.PrincipalID] = append(byPrincipal[b.PrincipalID], b)
