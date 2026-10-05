@@ -717,3 +717,29 @@ func TestPrepare_StaleLinkRecordRemovesNothing(t *testing.T) {
 		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
 	})
 }
+
+// A link record supplied by the image (copied with the skeleton at the
+// first seed, with no start ID) is ignored: no file it names is replaced
+// and no link it names is removed.
+func TestPrepare_ImageLinkRecordIgnored(t *testing.T) {
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		sk := func(rel string) string { return filepath.Join(e.skeleton, rel) }
+		require.NoError(t, os.MkdirAll(sk(".scion"), 0o755))
+		require.NoError(t, os.WriteFile(sk(LinksRecordPath), []byte(`{"start_id":"","links":[".config/gcloud/creds.json",".old/token"]}`), 0o644))
+		require.NoError(t, os.MkdirAll(sk(".config/gcloud"), 0o755))
+		require.NoError(t, os.WriteFile(sk(credLink.Target), []byte("image"), 0o600))
+		require.NoError(t, os.MkdirAll(sk(".old"), 0o755))
+		require.NoError(t, os.Symlink("/image/own", sk(".old/token")))
+
+		_, err := Prepare(e.opts("s1", credLink))
+		require.NoError(t, err)
+		data, err := os.ReadFile(filepath.Join(e.home, credLink.Target))
+		require.NoError(t, err)
+		assert.Equal(t, "image", string(data), "a file named by an image-supplied record is not replaced")
+		assert.Equal(t, "/image/own", readlink(t, filepath.Join(e.home, ".old/token")), "a link named by an image-supplied record is not removed")
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
+	})
+}
