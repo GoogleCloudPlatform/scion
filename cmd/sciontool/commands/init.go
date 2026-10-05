@@ -875,12 +875,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// captures hubClient, which is already initialized above.
 	if telemetryHandler != nil && hubClient != nil && hubClient.IsConfigured() {
 		telemetryHandler.OnSessionEnd = func(summary telemetry.SessionSummary) {
-			if summary.SessionID == "" {
-				// The Hub requires session.id; no hook event of this
-				// session carried one, so the request cannot succeed.
-				log.Warn("Skipping session metrics report: no session ID was seen on any hook event")
-				return
-			}
 			payload := hub.SummaryToMetricsPayload(summary)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
