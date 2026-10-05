@@ -34,7 +34,8 @@ const (
 
 // FailureMemo remembers recent resolution failures by key for
 // FailureMemoTTL, in memory only, holding at most FailureMemoMaxEntries
-// unexpired entries. Both the broker's GitHubResolutionCache and the Hub's
+// entries; expired ones are kept until a lookup or an at-limit sweep drops
+// them, and are never served. Both the broker's GitHubResolutionCache and the Hub's
 // gh:// resolution use it for GitHub not-found results. The zero value is
 // ready to use and safe for concurrent use.
 type FailureMemo struct {
@@ -47,10 +48,11 @@ type memoEntry struct {
 	expiresAt time.Time
 }
 
-// Record remembers err for key until FailureMemoTTL from now, after
-// dropping expired entries. Once FailureMemoMaxEntries unexpired failures
-// are held, a failure for a new key is not remembered; an existing key is
-// still refreshed.
+// Record remembers err for key until FailureMemoTTL from now. An existing
+// key is always refreshed. A new key at FailureMemoMaxEntries entries first
+// drops the expired ones; if the memo is still full of unexpired failures,
+// the new failure is not remembered. Below the limit, expired entries are
+// left in place: Recent never serves them and drops them when looked up.
 func (m *FailureMemo) Record(key string, err error) {
 	now := time.Now()
 	m.mu.Lock()
@@ -58,13 +60,15 @@ func (m *FailureMemo) Record(key string, err error) {
 	if m.entries == nil {
 		m.entries = make(map[string]memoEntry)
 	}
-	for k, e := range m.entries {
-		if !now.Before(e.expiresAt) {
-			delete(m.entries, k)
-		}
-	}
 	if _, ok := m.entries[key]; !ok && len(m.entries) >= FailureMemoMaxEntries {
-		return
+		for k, e := range m.entries {
+			if !now.Before(e.expiresAt) {
+				delete(m.entries, k)
+			}
+		}
+		if len(m.entries) >= FailureMemoMaxEntries {
+			return
+		}
 	}
 	m.entries[key] = memoEntry{err: err, expiresAt: now.Add(FailureMemoTTL)}
 }

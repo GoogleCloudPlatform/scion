@@ -345,7 +345,7 @@ func TestCrossNodeDataOps_RelayTypedBrokerError(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "dispatch create failed:")
 		rec := httptest.NewRecorder()
-		dispatchCreateErrorResponse(rec, err)
+		dispatchCreateErrorResponse(rec, err, f.agent.ID)
 		assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 		code, _ := errorBody(t, rec)
 		assert.Equal(t, skillResolutionErrorCode, code)

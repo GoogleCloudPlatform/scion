@@ -304,7 +304,23 @@ export class ScionChatComposer extends LitElement {
       flex-direction: column;
       gap: 0.375rem;
       padding: 0.75rem 1rem;
+      /* Clear the home indicator (the page uses viewport-fit=cover). While
+         the on-screen keyboard is open the composer sits on the keyboard,
+         not the screen edge, so the inset is dropped: --scion-kb-open is 1
+         then (set on the root by client/viewport.ts) and 0 otherwise. */
+      padding-bottom: max(
+        0.75rem,
+        calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
+      );
       border-top: 1px solid var(--scion-border, #e2e8f0);
+      /* Clear a landscape phone's notch and rounded corners (the page uses
+         viewport-fit=cover) on whichever sides this column meets the screen
+         edge. Each inset is a transparent border, so the row's background still
+         paints to the screen edge and only its content moves in. The chat page
+         sets --chat-inset-left and --chat-inset-right for the edges the
+         conversation touches; both are 0 everywhere else. */
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
       background: var(--scion-surface, #ffffff);
     }
 
@@ -499,7 +515,9 @@ export class ScionChatComposer extends LitElement {
       border-radius: 0.5rem 0.5rem 0 0;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-bottom: none;
-      margin: 0 1rem;
+      /* Keep the tab over the composer's content, which moves in by the
+         chat page's side insets (see .composer). */
+      margin: 0 calc(1rem + var(--chat-inset-right, 0px)) 0 calc(1rem + var(--chat-inset-left, 0px));
       margin-bottom: -1px;
       position: relative;
       z-index: 1;

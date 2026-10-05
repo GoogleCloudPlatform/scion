@@ -452,7 +452,7 @@ func init() {
 	createCmd.Flags().StringVarP(&agentImage, "image", "i", "", "Container image to use (overrides template)")
 	createCmd.Flags().StringVarP(&branch, "branch", "b", "", "Git branch to use for the agent workspace")
 	createCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
-	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 

@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 )
 
 var ErrTmuxBinaryNotFound = errors.New("tmux binary not found")
@@ -167,7 +168,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
@@ -1394,6 +1395,7 @@ authDone:
 	nfsGID := 0
 	nfsPVClaimName := ""
 	nfsSubPath := ""
+	nfsSubPathRoot := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1525,6 +1527,7 @@ authDone:
 			nfsPVClaimName = mount.PVClaimName
 			nfsSubPath = mount.SubPath
 			if settings.Server.WorkspaceStorage.NFS != nil {
+				nfsSubPathRoot = settings.Server.WorkspaceStorage.NFS.SubPathRoot
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
@@ -1582,6 +1585,14 @@ authDone:
 		}
 	}
 
+	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
+	// mints one per create/start dispatch; local/CLI mode and older hubs
+	// send none, so mint it here instead.
+	runID := opts.RunID
+	if runID == "" {
+		runID = uuid.NewString()
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -1600,6 +1611,7 @@ authDone:
 		NFSGID:               nfsGID,
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
+		NFSSubPathRoot:       nfsSubPathRoot,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
@@ -1771,6 +1783,7 @@ authDone:
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
+				api.LabelRunID:         runID,
 			}
 			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
@@ -1825,7 +1838,7 @@ authDone:
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
-					_ = m.Runtime.Delete(ctx, id)
+					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
 					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
 				}
 				a.Detached = detached
@@ -1845,6 +1858,7 @@ authDone:
 	warnings = append(warnings, "Container started but could not be verified as running")
 	return &api.AgentInfo{
 		ID:                    id,
+		RunID:                 runID,
 		Name:                  opts.Name,
 		Phase:                 status,
 		Detached:              detached,

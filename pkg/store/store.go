@@ -30,6 +30,9 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
+	// the agent's row (see AgentStore.SetAgentRunID).
+	ErrDeleteInProgress = errors.New("agent delete in progress")
 
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
@@ -342,6 +345,30 @@ type AgentStore interface {
 	// to find (e.g. the record was deleted).
 	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
 
+	// SetAgentRunID records runID as the agent's current run identity
+	// (ptone/scion#2550) and returns the run_id the row held immediately
+	// before the write, so a dispatch can later revert to exactly that
+	// value. It is a narrow single-column write: it does not check or bump
+	// state_version, so it neither conflicts with nor invalidates a
+	// concurrent UpdateAgent, and UpdateAgent never writes run_id back.
+	// Returns ErrNotFound if the agent doesn't exist.
+	//
+	// It refuses with ErrDeleteInProgress, writing nothing, when the row is
+	// soft-deleted or a delete holds it (finalizing, or deleting under a live
+	// lease; the start gate's rule). The check is part of the write, so a
+	// delete claim and a run-ID write are ordered by the database: a claim
+	// that lands first refuses the write, and a claim that lands after it
+	// snapshots the new run ID.
+	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
+
+	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
+	// it currently equals expectedRunID, and reports whether it did. A
+	// dispatch uses it to correct (or revert) the run ID it minted without
+	// overwriting a newer run ID a later dispatch has since recorded. Like
+	// SetAgentRunID it neither checks nor bumps state_version. A missing
+	// agent reports false with no error.
+	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error
@@ -510,12 +537,18 @@ type AgentStore interface {
 
 	// SwapRunIntent is SetRunIntent that also returns the intent the row
 	// held before the write ("" for none), read under the same row lock.
+	//
+	// SetRunIntent and SwapRunIntent return ErrDeleteInProgress, and write
+	// nothing, for RunIntentRunning on a row a delete holds
+	// (DeletionHoldsRow) or a soft-deleted row (ptone/scion#2550).
 	SwapRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
 
 	// RevertRunIntent sets run_intent to `to` only if the row still holds
 	// `from` written at exactly fromAt (the value SetRunIntent returned);
 	// run_intent_at is left unchanged. It reports whether the row changed.
-	// Used by system-initiated stops whose dispatch failed.
+	// Used by system-initiated stops whose dispatch failed. A revert to
+	// RunIntentRunning on a row a delete holds (DeletionHoldsRow) or a
+	// soft-deleted row writes nothing and reports false (ptone/scion#2550).
 	RevertRunIntent(ctx context.Context, agentID string, from RunIntent, fromAt time.Time, to RunIntent) (bool, error)
 
 	// BackfillRunIntent sets run_intent for every agent whose run_intent is
@@ -790,12 +823,20 @@ type ProjectStore interface {
 	NextAvailableSlug(ctx context.Context, baseSlug string) (string, error)
 
 	// UpdateProject updates an existing project.
+	//
+	// UpdateProject never writes OwnerID: callers read, mutate and write the
+	// whole row, so writing OwnerID would let a stale read undo a concurrent
+	// ownership transfer (ptone/scion#2597). project.OwnerID is ignored on
+	// input and, on success, refreshed from the stored row. Set OwnerID at
+	// creation through CreateProject, or change it with SetProjectOwnerID.
 	// Returns ErrNotFound if the project doesn't exist.
 	UpdateProject(ctx context.Context, project *Project) error
 
 	// SetProjectOwnerID updates only the project's OwnerID column, leaving
-	// every other field untouched. Used by ownership transfer so it cannot
-	// clobber fields written by a concurrent full-row UpdateProject.
+	// every other field untouched. It is the only store method that changes
+	// OwnerID after creation; UpdateProject does not write it. Used by
+	// ownership transfer so it cannot clobber fields written by a concurrent
+	// full-row UpdateProject, nor be clobbered by one.
 	// Returns ErrNotFound if the project doesn't exist.
 	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
 
@@ -1301,6 +1342,15 @@ type SecretStore interface {
 	// way a GetSecret-then-UpdateSecret read-modify-write would
 	// (ptone/scion#2152 round-2 review finding 11).
 	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
+
+	// UpdateSecretValueIfVersion conditionally replaces only the
+	// EncryptedValue column, applying the change and incrementing Version
+	// only if the row's current Version equals expectedVersion. Returns
+	// applied=false (no error) if the row doesn't exist or its Version has
+	// moved on, e.g. a concurrent writer updated it first. Callers use it
+	// for compare-and-swap read-modify-write on a value they own: read the
+	// row with GetSecret, compute the new value, then retry on applied=false.
+	UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (applied bool, err error)
 
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.

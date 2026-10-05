@@ -84,16 +84,42 @@ func TestFailureMemo_ExpiredFailureIsNotServed(t *testing.T) {
 	}
 }
 
-func TestFailureMemo_RecordDropsExpired(t *testing.T) {
+func TestFailureMemo_RecordBelowCapKeepsExpired(t *testing.T) {
 	var m FailureMemo
 	m.Record("old", errors.New("old"))
 	m.expire("old")
 	m.Record("new", errors.New("new"))
-	if n := m.Len(); n != 1 {
-		t.Fatalf("Len = %d, want 1 (the expired entry is dropped on Record)", n)
+	// Below the limit, Record does not sweep: the expired entry is still
+	// held but is never served.
+	if n := m.Len(); n != 2 {
+		t.Fatalf("Len = %d, want 2 (no sweep below the limit)", n)
 	}
 	if m.Recent("new") == nil {
 		t.Fatal("the new failure must be remembered")
+	}
+	if err := m.Recent("old"); err != nil {
+		t.Fatalf("Recent(old) = %v, want nil for an expired entry", err)
+	}
+	if n := m.Len(); n != 1 {
+		t.Fatalf("Len = %d, want 1 (the expired entry is dropped on lookup)", n)
+	}
+}
+
+func TestFailureMemo_RecordAtCapSweepsExpired(t *testing.T) {
+	var m FailureMemo
+	for i := 0; i < FailureMemoMaxEntries; i++ {
+		m.Record(fmt.Sprintf("k%d", i), errors.New("not found"))
+	}
+	m.expire("k1", "k2", "k3")
+	m.Record("new", errors.New("not found"))
+	if m.Recent("new") == nil {
+		t.Fatal("a new key must be remembered once expired entries make room at the limit")
+	}
+	if n := m.Len(); n != FailureMemoMaxEntries-2 {
+		t.Fatalf("Len = %d, want %d (three expired entries dropped, one added)", n, FailureMemoMaxEntries-2)
+	}
+	if m.Recent("k0") == nil {
+		t.Fatal("an unexpired entry must survive the sweep")
 	}
 }
 

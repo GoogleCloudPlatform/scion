@@ -10,7 +10,6 @@
   "max_duration": "",
   "env": {
     "TEMPLATE_KEY": "x",
-    "FOO": "bar",
-    "SCION_AUTO_EXPOSE_PORTS": "true"
+    "FOO": "bar"
   }
 }
