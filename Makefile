@@ -149,6 +149,11 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the child-group edge removal tests
+# (TestRemoveChildGroupEdge_*, ptone/scion#2723): on Postgres a second
+# transaction deleting the same edge waits on the first one's row lock and
+# must then report ErrNotFound, so only one caller writes an audit record.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -181,7 +186,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestRemoveChildGroupEdge_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

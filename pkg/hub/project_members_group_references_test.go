@@ -416,6 +416,89 @@ func TestBackfillRoleBindings_ProjectMembersGroupReferencesPaginates(t *testing.
 		"constraints past the first page are counted")
 }
 
+// listGroupsFailAfterMarkedStore fails every ListGroups call after the first
+// page that contains a project members group.
+type listGroupsFailAfterMarkedStore struct {
+	store.Store
+	firstMarkedID string // the members group on the last page returned
+	calls         int
+}
+
+func (l *listGroupsFailAfterMarkedStore) ListGroups(ctx context.Context, f store.GroupFilter, o store.ListOptions) (*store.ListResult[store.Group], error) {
+	l.calls++
+	if l.firstMarkedID != "" {
+		return nil, errors.New("injected ListGroups page failure")
+	}
+	page, err := l.Store.ListGroups(ctx, f, o)
+	if err != nil {
+		return nil, err
+	}
+	for i := range page.Items {
+		if store.IsProjectMembersGroup(&page.Items[i]) {
+			l.firstMarkedID = page.Items[i].ID
+			break
+		}
+	}
+	return page, nil
+}
+
+// TestBackfillRoleBindings_ProjectMembersGroupListingFailsPartWay pins that a
+// ListGroups error on a later page does not discard the members groups
+// already listed: their owner is cleared and their references are removed,
+// the members groups on the unread pages are left for the next startup, and
+// the listing error is still returned.
+func TestBackfillRoleBindings_ProjectMembersGroupListingFailsPartWay(t *testing.T) {
+	f := setupMembersGroupRefsFixture(t)
+	ctx := context.Background()
+	s := f.s
+	_ = captureWarnLogs(t)
+
+	orig := projectMembersGroupOwnerBackfillPageSize
+	projectMembersGroupOwnerBackfillPageSize = 1
+	t.Cleanup(func() { projectMembersGroupOwnerBackfillPageSize = orig })
+
+	for _, g := range []*store.Group{f.canonical, f.legacy} {
+		stored, err := s.GetGroup(ctx, g.ID)
+		require.NoError(t, err)
+		stored.OwnerID = f.creator.ID
+		require.NoError(t, s.UpdateGroup(ctx, stored))
+	}
+
+	ls := &listGroupsFailAfterMarkedStore{Store: s}
+	err := BackfillRoleBindings(ctx, ls)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "list project members groups")
+	assert.Contains(t, err.Error(), "injected ListGroups page failure")
+	require.NotEmpty(t, ls.firstMarkedID, "precondition: a members group was listed")
+	require.Greater(t, ls.calls, 1, "precondition: the listing failed on a later page")
+
+	listed, unread := f.canonical, f.legacy
+	if ls.firstMarkedID == f.legacy.ID {
+		listed, unread = f.legacy, f.canonical
+	}
+	require.Equal(t, listed.ID, ls.firstMarkedID)
+
+	stored, err := s.GetGroup(ctx, listed.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.OwnerID, "owner of the listed members group is cleared")
+	assert.Empty(t, f.groupBindingIDs(t, listed.ID), "role bindings naming the listed members group are removed")
+	assert.False(t, f.hasEdge(t, f.parent.ID, listed.ID), "child edge naming the listed members group is removed")
+
+	stored, err = s.GetGroup(ctx, unread.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.creator.ID, stored.OwnerID, "members group on an unread page is left for the next startup")
+	assert.ElementsMatch(t, f.bindings[unread.ID], f.groupBindingIDs(t, unread.ID))
+	assert.True(t, f.hasEdge(t, f.parent.ID, unread.ID))
+
+	// The next startup, with a working listing, handles the rest.
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+	stored, err = s.GetGroup(ctx, unread.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.OwnerID)
+	assert.Empty(t, f.groupBindingIDs(t, unread.ID))
+	assert.False(t, f.hasEdge(t, f.parent.ID, unread.ID))
+}
+
 // concurrentRemovalStore removes one row after it has been listed and before
 // its removal transaction runs, as a second replica running the same pass
 // would.

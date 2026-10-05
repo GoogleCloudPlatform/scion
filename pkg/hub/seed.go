@@ -876,20 +876,22 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	// The two project members group steps below share one listing of the
 	// members groups. They are independent of the steps above, so they run
 	// even when those fail, and a listing error is joined with theirs
-	// rather than hiding them.
-	membersGroups, err := listProjectMembersGroups(ctx, s)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("list project members groups: %w", err))
-	} else {
-		// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
-		// project members groups (ptone/scion#2599); it removes a stale
-		// group.* grant.
-		clearProjectMembersGroupOwners(ctx, s, membersGroups)
+	// rather than hiding them. If the listing fails part way through, the
+	// groups already listed are still processed and the listing error is
+	// returned afterwards.
+	membersGroups, listErr := listProjectMembersGroups(ctx, s)
 
-		// Remove role bindings and child-group edges that name a project
-		// members group. Each removal is handled independently of the owner
-		// clear above.
-		removeProjectMembersGroupReferences(ctx, s, membersGroups)
+	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
+	// project members groups (ptone/scion#2599); it removes a stale group.*
+	// grant.
+	clearProjectMembersGroupOwners(ctx, s, membersGroups)
+
+	// Remove role bindings and child-group edges that name a project members
+	// group. Each removal is handled independently of the owner clear above.
+	removeProjectMembersGroupReferences(ctx, s, membersGroups)
+
+	if listErr != nil {
+		errs = append(errs, fmt.Errorf("list project members groups: %w", listErr))
 	}
 
 	return errors.Join(errs...)
@@ -909,6 +911,9 @@ var projectMembersGroupOwnerBackfillPageSize = 200
 //
 // All groups are scanned rather than filtering by GroupType: the scan is
 // paginated and cheap, and a type filter could miss legacy group shapes.
+//
+// On a listing error it returns the members groups found on the pages
+// already read together with the error, so callers can still process them.
 func listProjectMembersGroups(ctx context.Context, s store.Store) ([]store.Group, error) {
 	var groups []store.Group
 	var cursor string
@@ -919,7 +924,7 @@ func listProjectMembersGroups(ctx context.Context, s store.Store) ([]store.Group
 			SkipTotalCount: true,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list groups: %w", err)
+			return groups, fmt.Errorf("list groups: %w", err)
 		}
 		for i := range page.Items {
 			if hasProjectMembersGroupMarker(&page.Items[i]) {
@@ -942,18 +947,32 @@ func listProjectMembersGroups(ctx context.Context, s store.Store) ([]store.Group
 // group is now created without an owner.
 //
 // The pass runs on every startup and is idempotent: a group whose OwnerID is
-// already empty is skipped, so a second run changes nothing. Per-group update
-// errors are logged and skipped.
+// already empty is skipped, so a second run changes nothing. Each group with
+// an owner in the listing is read again with GetGroup just before the update,
+// so the update writes back current values for the other fields rather than
+// the listing snapshot. Per-group read and update errors are logged and
+// skipped.
 func clearProjectMembersGroupOwners(ctx context.Context, s store.Store, groups []store.Group) {
 	var cleared int
 	for i := range groups {
-		g := groups[i]
-		if g.OwnerID == "" {
+		if groups[i].OwnerID == "" {
+			continue
+		}
+		g, err := s.GetGroup(ctx, groups[i].ID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			slog.Warn("failed to read project members group during owner backfill",
+				"group_id", groups[i].ID, "project_id", groups[i].ProjectID, "error", err)
+			continue
+		}
+		if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
 			continue
 		}
 		prevOwner := g.OwnerID
 		g.OwnerID = ""
-		if err := s.UpdateGroup(ctx, &g); err != nil {
+		if err := s.UpdateGroup(ctx, g); err != nil {
 			slog.Warn("failed to clear project members group owner during backfill",
 				"group_id", g.ID, "project_id", g.ProjectID, "error", err)
 			continue
@@ -972,11 +991,6 @@ func clearProjectMembersGroupOwners(ctx context.Context, s store.Store, groups [
 // removeProjectMembersGroupReferences for each removed role binding or
 // child-group edge.
 const membersGroupReferenceRemovedOp = "members_group_principal_removed"
-
-// errMembersGroupEdgeGone is returned from the edge removal transaction when
-// the edge no longer exists (for example, another replica removed it after it
-// was listed). It is skipped quietly.
-var errMembersGroupEdgeGone = errors.New("child group edge already removed")
 
 // removeProjectMembersGroupReferences removes existing role bindings and
 // child-group edges that name one of the given project members groups.
@@ -1108,21 +1122,15 @@ func removeProjectMembersGroupParentEdges(ctx context.Context, s store.Store, gr
 			"memberId":   groupID,
 		}
 		err := s.WithTx(ctx, func(tx store.Store) error {
-			// RemoveGroupMember does not report a missing group edge, so
-			// check inside the transaction that the edge still exists.
-			_, err := tx.GetGroupMembership(ctx, parentID, store.GroupMemberTypeGroup, groupID)
-			if errors.Is(err, store.ErrNotFound) {
-				return errMembersGroupEdgeGone
-			}
-			if err != nil {
-				return err
-			}
-			if err := tx.RemoveGroupMember(ctx, parentID, store.GroupMemberTypeGroup, groupID); err != nil {
+			// RemoveChildGroupEdge returns ErrNotFound when it deletes no
+			// row, so an edge removed by another replica after it was
+			// listed rolls back with no audit record.
+			if err := tx.RemoveChildGroupEdge(ctx, parentID, groupID); err != nil {
 				return err
 			}
 			return tx.CreateMutationAudit(ctx, membersGroupReferenceAudit("group_membership", parentID, fields))
 		})
-		if errors.Is(err, errMembersGroupEdgeGone) {
+		if errors.Is(err, store.ErrNotFound) {
 			slog.Debug("child group edge that names a project members group was already removed",
 				"group_id", groupID, "parent_group_id", parentID)
 			continue

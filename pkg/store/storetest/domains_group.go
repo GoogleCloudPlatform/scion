@@ -84,3 +84,56 @@ func GroupDirectParentsConformance(t *testing.T, factory Factory) {
 	require.NoError(t, err)
 	assert.Empty(t, got, "unknown group has no parents")
 }
+
+// GroupChildEdgeRemovalConformance exercises store.GroupStore's
+// RemoveChildGroupEdge across backends: it removes exactly the named direct
+// child-group edge (a self-edge included) and returns store.ErrNotFound when
+// no edge row was deleted.
+func GroupChildEdgeRemovalConformance(t *testing.T, factory Factory) {
+	t.Helper()
+	ctx := context.Background()
+	s := factory(t)
+
+	newGroup := func(name string) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{
+			ID: id, Name: name, Slug: name + "-" + id[:8], GroupType: store.GroupTypeExplicit,
+		}))
+		return id
+	}
+	addChild := func(parentID, childID string) {
+		t.Helper()
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: parentID, MemberType: store.GroupMemberTypeGroup, MemberID: childID,
+			Role: store.GroupMemberRoleMember,
+		}))
+	}
+
+	removeEdge := func(parentID, childID string) error {
+		return s.RemoveChildGroupEdge(ctx, parentID, childID)
+	}
+
+	parent := newGroup("edge-removal-parent")
+	other := newGroup("edge-removal-other")
+	child := newGroup("edge-removal-child")
+	self := newGroup("edge-removal-self")
+	addChild(parent, child)
+	addChild(other, child)
+	addChild(self, self)
+
+	require.NoError(t, removeEdge(parent, child))
+	got, err := s.GetDirectParentGroupIDs(ctx, child)
+	require.NoError(t, err)
+	assert.Equal(t, []string{other}, got, "only the named edge is removed")
+
+	err = removeEdge(parent, child)
+	assert.ErrorIs(t, err, store.ErrNotFound, "removing a missing edge is ErrNotFound")
+	err = removeEdge(uuid.NewString(), child)
+	assert.ErrorIs(t, err, store.ErrNotFound, "an unknown parent is ErrNotFound")
+
+	require.NoError(t, removeEdge(self, self))
+	got, err = s.GetDirectParentGroupIDs(ctx, self)
+	require.NoError(t, err)
+	assert.Empty(t, got, "a self-edge is removed")
+}

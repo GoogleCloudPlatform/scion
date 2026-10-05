@@ -86,6 +86,7 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteGroup":           "delete-resource",
 	"AddGroupMember":        "grant-authority",
 	"RemoveGroupMember":     "revoke-authority",
+	"RemoveChildGroupEdge":  "revoke-authority",
 	"UpdateGroupMemberRole": "change-authority",
 
 	// Access constraint mutations
@@ -3090,7 +3091,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/seed.go", Function: "removeHubMembershipTx", Symbol: "RemoveGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Canonical hub-members group removal when a user's role is viewer; used by syncHubRoleGrants (PATCH role inside WithTx, login paths, startup backfill); counterpart to ensureHubMembershipTx; caller authorizes", Scope: "pkg/hub/seed.go"}},
 	{File: "pkg/hub/seed.go", Function: "reconcileBuiltInRole", Symbol: "CreateRoleDefinition", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: create built-in role definition", Scope: "pkg/hub/seed.go"}},
 	{File: "pkg/hub/seed.go", Function: "reconcileBuiltInRole", Symbol: "UpdateSystemRoleDefinitionPermissions", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: reconcile built-in role permissions", Scope: "pkg/hub/seed.go"}},
-	{File: "pkg/hub/seed.go", Function: "removeProjectMembersGroupParentEdges", Symbol: "RemoveGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: remove child-group edges that name a system-managed project members group (not a valid child group); only ever removes, never grants; audited", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "removeProjectMembersGroupParentEdges", Symbol: "RemoveChildGroupEdge", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: remove child-group edges that name a system-managed project members group (not a valid child group); only ever removes, never grants; audited", Scope: "pkg/hub/seed.go"}},
 	{File: "pkg/hub/seed.go", Function: "removeProjectMembersGroupRoleBindings", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: remove role bindings whose principal is a system-managed project members group (not a valid role-binding principal); only ever removes, never grants; audited", Scope: "pkg/hub/seed.go"}},
 	{File: "pkg/hub/seed.go", Function: "seedDefaultGroupsAndBindings", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: seed default groups", Scope: "pkg/hub/seed.go"}},
 	{File: "pkg/hub/seed.go", Function: "seedDevUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: seed dev user", Scope: "pkg/hub/seed.go"}},
@@ -3201,6 +3202,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "DeleteGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain update", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "seedGCPScopeMix", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP scope seeding", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group.go", Function: "GroupChildEdgeRemovalConformance", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: child-group edge removal conformance edge setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group.go", Function: "GroupChildEdgeRemovalConformance", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: child-group edge removal conformance group setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group.go", Function: "GroupChildEdgeRemovalConformance", Symbol: "RemoveChildGroupEdge", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: child-group edge removal conformance under test", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_group.go", Function: "GroupDirectParentsConformance", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: direct-parent group conformance edge setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_group.go", Function: "GroupDirectParentsConformance", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: direct-parent group conformance group setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerJoinTokenDomain", Symbol: "CreateJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker join token domain setup", Scope: "pkg/store/storetest"}},

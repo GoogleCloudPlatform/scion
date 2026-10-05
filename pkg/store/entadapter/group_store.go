@@ -17,6 +17,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -924,6 +925,53 @@ func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+// child group of parentGroupID. Unlike RemoveGroupMember's group branch, it
+// deletes the join-table row directly and returns store.ErrNotFound when no
+// row was deleted. On PostgreSQL a concurrent delete of the same row waits
+// for the first transaction and then deletes nothing, so exactly one caller
+// sees success.
+func (s *GroupStore) RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error {
+	parentUID, err := parseUUID(parentGroupID)
+	if err != nil {
+		return err
+	}
+	childUID, err := parseUUID(childGroupID)
+	if err != nil {
+		return err
+	}
+
+	// Same guard as RemoveGroupMember.
+	g, err := s.client.Group.Get(ctx, parentUID)
+	if err != nil {
+		return mapError(err)
+	}
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
+	}
+
+	// In the child_groups join table, the first primary key column holds the
+	// parent group and the second the child group.
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s AND %s = %s",
+		group.ChildGroupsTable,
+		group.ChildGroupsPrimaryKey[0], sqlUUIDPh(d, 1),
+		group.ChildGroupsPrimaryKey[1], sqlUUIDPh(d, 2))
+	var res sql.Result
+	if err := drv.Exec(ctx, query, []any{parentUID, childUID}, &res); err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetGroupByProjectID retrieves the project_agents group associated with a project.

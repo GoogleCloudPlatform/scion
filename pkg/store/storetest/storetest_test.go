@@ -59,6 +59,13 @@ func TestCompositeStore_GroupDirectParents(t *testing.T) {
 	storetest.GroupDirectParentsConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_GroupChildEdgeRemoval runs the child-group edge removal
+// conformance check against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_GroupChildEdgeRemoval(t *testing.T) {
+	storetest.GroupChildEdgeRemovalConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance
 // case, not part of the generic CRUD-parity oracle above: the oracle's
 // pagination category (storetest's internal testPaginate) only checks a

@@ -1640,6 +1640,13 @@ type GroupStore interface {
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
+	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+	// child group of parentGroupID. It returns ErrNotFound when no edge row
+	// was deleted, including when another transaction removed it first.
+	// Like RemoveGroupMember, it refuses project_agents parent groups with
+	// ErrInvalidInput.
+	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
+
 	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
 	// given group as a direct child group (one level only, no ancestors). A
 	// group with a self-edge is included in its own result. The result is
