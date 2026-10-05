@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -1566,46 +1567,44 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	restoredAt := time.Now()
-	agent.DeletedAt = time.Time{}
-	agent.Updated = restoredAt
-
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
 	// PurgeDeletedAgents), so restoring an agent should normally find its own
 	// keys already reserved and in place. But an agent soft-deleted before
 	// this invariant existed, or before a backfill of it, may have no key
 	// rows at all, leaving a window where another agent could since have
-	// taken its slug or display-name key. Re-asserting the keys in the same
-	// transaction as the restore turns that window into a defensive
-	// revalidation: a genuine collision surfaces as the same
+	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
+	// in the same transaction as the restore, turning that window into a
+	// defensive revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// api.IdentityKeysFor is also what the backfill migration uses, so a
-	// legacy row's empty-display-name-key tolerance is handled identically
-	// by both.
-	//
-	// An agent whose owner is a user that no longer exists is not restored
-	// (ptone/scion#2769): the user delete refuses while the user owns
-	// agents, but soft-deleted agents do not count, so restoring one would
-	// bring back an agent owned by a missing user. The owner check takes a
-	// shared lock on the user's row in the restore transaction, so it also
-	// serializes with a concurrent user delete on PostgreSQL. Agents owned by
-	// other principals are not checked.
-	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
-	ownerUserID := agentOwnerUserID(agent)
-	if err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := checkRestoreOwnerTx(ctx, tx, ownerUserID); err != nil {
-			return err
+	// The same transaction checks that every delegator of the edges the soft
+	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
+	// fails), reactivates those edges (a conflicting active edge is a 409)
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose owner is a user that no longer exists (ptone/scion#2769;
+	// errAgentOwnerUserMissing, see checkRestoreOwnerTx).
+	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if errors.Is(err, errAgentNotSoftDeleted) {
+			BadRequest(w, "Agent is not in deleted state")
+			return
 		}
-		if err := tx.UpdateAgent(ctx, agent); err != nil {
-			return err
-		}
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
-	}); err != nil {
 		if errors.Is(err, errAgentOwnerUserMissing) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot restore the agent: its owner no longer exists", nil)
+			return
+		}
+		if errors.Is(err, errRestoreEdgeConflict) {
+			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorNotLive) {
+			Conflict(w, "A principal that delegated to this agent is not active, so its delegation cannot be restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorLookup) {
+			slog.Error("restore: delegator lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's delegators; retry the restore", nil)
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -1613,8 +1612,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	// Marked as a restore so web clients that tombstoned the ID on deleted
-	// bring it back (ptone/scion#2951).
-	s.events.PublishAgentRestored(ctx, agent, restoredAt)
+	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
+	// row's Updated with the restore time, so that is the marker.
+	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker

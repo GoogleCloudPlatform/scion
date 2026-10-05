@@ -917,21 +917,22 @@ func (e *deletionEngine) rowGone() bool {
 	return errors.Is(err, store.ErrNotFound)
 }
 
-// agentDeletionFinalizeSeam runs inside the finalize transaction (soft and
-// hard, including the hard delete of an incomplete create), just before
-// commit, with a transaction-scoped store. A non-nil error rolls the
-// finalize back, and the engine fails with finalize_failed. It is the
-// attachment point for lifecycle hooks and op-ID stamping
-// (ptone/scion#2121); a no-op until then. Tests may replace it.
+// agentDeletionFinalizeSeam is a test seam. It runs inside the finalize
+// transaction (soft and hard, including the hard delete of an incomplete
+// create), with a transaction-scoped store, before the Server's lifecycle
+// finalize (agentFinalizeHook). A non-nil error rolls the finalize back, and
+// the engine fails with finalize_failed. Production code leaves it a no-op.
 var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context, store.Store, *store.Agent, store.DeletionFinalizeMode) error {
 	return nil
 }
 
 // finalizeAgentDeletion is the delete engine's single terminal write: one
 // store transaction that re-checks the claim, applies the soft or hard
-// delete, and runs agentDeletionFinalizeSeam before commit.
+// delete, and runs s.agentFinalizeHook before commit (the
+// agentDeletionFinalizeSeam var first, then the Server's lifecycle finalize,
+// agent_lifecycle_tx.go).
 func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields) (int, error) {
-	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, agentDeletionFinalizeSeam)
+	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
 }
 
 // --- Request side (design §2.4) ---
