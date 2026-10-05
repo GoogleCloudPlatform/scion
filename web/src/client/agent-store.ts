@@ -42,10 +42,10 @@
  *   rather than answering from memory.
  * - A retained hub or unfiltered project list is probed every 30s (±3s)
  *   while the page is visible, for changes SSE does not carry: one compact
- *   page of the 50 most recently updated rows, applied as a seeded merge.
- *   It walks once when it cannot catch up in five pages or when the
- *   server's count differs from the rows held. A probe never sets the
- *   completeness flag.
+ *   page of the 50 most recently active rows (by last activity time, else
+ *   `updated`), applied as a seeded merge. It walks once when it cannot
+ *   catch up in five pages or when the server's count differs from the rows
+ *   held. A probe never sets the completeness flag.
  */
 
 import type { Agent, Capabilities } from '../shared/types.js';
@@ -152,7 +152,7 @@ export const AGENT_READ_TIMEOUT_MS = 30_000;
 /**
  * A retained hub or project list is probed this often for changes SSE does
  * not carry (renames, labels, capabilities, agents added or removed without
- * an event): one request for the most recently updated rows.
+ * an event): one request for the most recently active rows.
  */
 export const AGENT_PROBE_INTERVAL_MS = 30_000;
 /** Each probe is scheduled up to this much earlier or later. */
@@ -214,8 +214,8 @@ interface Entry {
   probeTimer: ReturnType<typeof setTimeout> | null;
   /** Aborts the probe in flight. */
   probe: AbortController | null;
-  /** Newest `updated` (epoch ms) seen by the last walk or probe. */
-  highWater?: number | undefined;
+  /** The newest position in the probe's order seen by the last walk or probe. */
+  highWater?: ProbeMark | undefined;
   /** The server refused the sorted view for this list: no probe before this time (epoch ms). */
   probeRetryAt?: number | undefined;
   /** A refusal for this list has been logged. */
@@ -274,18 +274,51 @@ function probePath(q: AgentQuery, cursor?: string): string {
   return `${base}?${params.toString()}`;
 }
 
-/** `updated` as epoch ms, or undefined when absent or unparsable. */
-function updatedAt(agent: Agent | undefined): number | undefined {
-  if (!agent?.updated) return undefined;
-  const ms = Date.parse(agent.updated);
+/** A time as epoch ms, or undefined when absent or unparsable. */
+function timeMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const ms = Date.parse(value);
   return Number.isNaN(ms) ? undefined : ms;
 }
 
-function newestUpdated(rows: readonly Agent[]): number | undefined {
-  let newest: number | undefined;
+/** `updated` as epoch ms, or undefined when absent or unparsable. */
+function updatedAt(agent: Agent | undefined): number | undefined {
+  return timeMs(agent?.updated);
+}
+
+/**
+ * A row's position in the server's `sort=updated` order, which lists newest
+ * first by the last activity time when set, else `updated`, with ties on
+ * `created`, then id, both descending. A heartbeat moves `updated` but not
+ * the activity time, so it does not move an active agent up the order.
+ */
+interface ProbeMark {
+  at: number;
+  created: number;
+  id: string;
+}
+
+function probeMark(agent: Agent | undefined): ProbeMark | undefined {
+  if (!agent) return undefined;
+  // A Go zero time is how the server writes an unset activity time.
+  const activity = agent.lastActivityEvent?.startsWith('0001')
+    ? undefined
+    : timeMs(agent.lastActivityEvent);
+  const at = activity ?? updatedAt(agent);
+  if (at === undefined) return undefined;
+  return { at, created: timeMs(agent.created) ?? 0, id: agent.id };
+}
+
+/** Positive when `a` lists before `b`, negative when after, zero for the same position. */
+function compareMarks(a: ProbeMark, b: ProbeMark): number {
+  return a.at - b.at || a.created - b.created || (a.id > b.id ? 1 : a.id < b.id ? -1 : 0);
+}
+
+function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
+  let newest: ProbeMark | undefined;
   for (const row of rows) {
-    const ms = updatedAt(row);
-    if (ms !== undefined && (newest === undefined || ms > newest)) newest = ms;
+    const mark = probeMark(row);
+    if (mark && (!newest || compareMarks(mark, newest) > 0)) newest = mark;
   }
   return newest;
 }
@@ -848,7 +881,7 @@ export class AgentStore {
 
       entry.walk = null;
       entry.agents = Array.from(byId.values());
-      entry.highWater = newestUpdated(rows);
+      entry.highWater = newestMark(rows);
       entry.scopeCapabilities = scopeCapabilities;
       entry.status = 'ready';
       entry.complete = !truncated;
@@ -960,13 +993,14 @@ export class AgentStore {
   }
 
   /**
-   * One delta probe: read the most recently updated rows, newest first, and
-   * merge those the feed does not hold or holds older, as a seeded merge
-   * (deltas that land meanwhile win, deleted agents stay deleted, the
-   * completeness flag is untouched). When the first page is all newer
-   * than the last probe, follow further pages; when that does not catch
-   * up, or the server's count differs from the rows held, walk once. Under
-   * sustained overflow, walks back off and probes read one page.
+   * One delta probe: read the most recently active rows in the server's
+   * order, and merge those the feed does not hold or holds older, as a
+   * seeded merge (deltas that land meanwhile win, deleted agents stay
+   * deleted, the completeness flag is untouched). When the first page all
+   * lists before the newest row the last probe saw, follow further pages;
+   * when that does not catch up, or the server's count differs from the
+   * rows held, walk once. Under sustained overflow, walks back off and
+   * probes read one page.
    */
   private async probe(
     entry: Entry,
@@ -1010,15 +1044,15 @@ export class AgentStore {
             changed.push(row);
           }
         }
-        const newest = newestUpdated(rows);
-        if (newest !== undefined && (highWater === undefined || newest > highWater)) {
-          highWater = newest;
-        }
-        const last = updatedAt(rows[rows.length - 1]);
+        const newest = newestMark(rows);
+        if (newest && (!highWater || compareMarks(newest, highWater) > 0)) highWater = newest;
+        const last = probeMark(rows[rows.length - 1]);
         // With no mark yet (no row had a time), there is nothing to catch up
         // with: the count check finds agents the list lacks.
         caughtUp =
-          !body.nextCursor || previous === undefined || (last !== undefined && last <= previous);
+          !body.nextCursor ||
+          previous === undefined ||
+          (last !== undefined && compareMarks(last, previous) <= 0);
         if (caughtUp) break;
         cursor = body.nextCursor;
       }

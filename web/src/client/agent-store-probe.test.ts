@@ -436,6 +436,64 @@ describe('AgentStore delta probe', () => {
     expect(h.server.walks()).toBe(1);
   });
 
+  describe('the order a probe reads', () => {
+    /** A row whose last activity time is `activity` seconds into the day. */
+    const active = (id: string, activity: number, extra: Partial<Agent> = {}): Agent =>
+      row(id, activity, { lastActivityEvent: t(activity), ...extra });
+
+    it('reads one page and does not walk while heartbeats move only `updated`', async () => {
+      const h = await loaded(Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1)));
+      for (let i = 1; i <= 8; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(8);
+      expect(h.server.walks()).toBe(1);
+    });
+
+    it('orders a row whose activity time is the zero time by `updated`', async () => {
+      const h = await loaded([active('a1', 1)]);
+      const burst = Array.from({ length: 2 * AGENT_PROBE_LIMIT + 20 }, (_, i) =>
+        row(`n${i}`, 100 + i, { lastActivityEvent: '0001-01-01T00:00:00Z' })
+      );
+      h.server.agents.push(...burst);
+      await tick();
+
+      expect(h.server.probes()).toBe(3);
+      expect(h.server.walks()).toBe(1);
+      expect(h.store.peek(HUB)?.agents).toHaveLength(1 + burst.length);
+    });
+
+    it('breaks a tie on the activity time by `created`, newest first', async () => {
+      // An id that sorts after every new row's, so only `created` lists them first.
+      const h = await loaded([active('z0', 5, { created: t(0) })]);
+      const tied = Array.from({ length: AGENT_PROBE_LIMIT + 10 }, (_, i) =>
+        active(`n${i}`, 5, { created: t(10 + i) })
+      );
+      h.server.agents.push(...tied);
+      await tick();
+
+      // The first page ends on a row as active as the last probe's newest but
+      // created later, so it lists before it: the probe reads on.
+      expect(h.server.probes()).toBe(2);
+      expect(h.server.walks()).toBe(1);
+      expect(h.store.peek(HUB)?.agents).toHaveLength(1 + tied.length);
+    });
+
+    it('breaks a tie on the activity time and `created` by id, highest first', async () => {
+      const h = await loaded([active('a0', 5, { created: t(0) })]);
+      const tied = Array.from({ length: AGENT_PROBE_LIMIT + 10 }, (_, i) =>
+        active(`n${String(i).padStart(2, '0')}`, 5, { created: t(0) })
+      );
+      h.server.agents.push(...tied);
+      await tick();
+
+      expect(h.server.probes()).toBe(2);
+      expect(h.server.walks()).toBe(1);
+      expect(h.store.peek(HUB)?.agents).toHaveLength(1 + tied.length);
+    });
+  });
+
   it('follows further pages when the first is all newer than the last probe', async () => {
     const initial = [row('a1', 1), row('a2', 2), row('a3', 3)];
     const h = await loaded(initial);
