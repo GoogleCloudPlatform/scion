@@ -131,8 +131,10 @@ export function stateLabel(status: string): string {
 // Provisioned, not started (ptone/scion#2929)
 // ---------------------------------------------------------------------------
 
-/** Badge text for an agent that was provisioned but never started. */
-export const PROVISIONED_ONLY_LABEL = 'provisioned, not started';
+/** Status label for a provision-only agent; the same wording as the CLI. */
+export const PROVISIONED_ONLY_LABEL = 'created (not started)';
+
+type ProvisionedAgent = Pick<Agent, 'name' | 'phase' | 'provisionedOnly'>;
 
 /**
  * Whether to show `agent` as provisioned but not started. The hub computes
@@ -143,7 +145,13 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
   return agent.provisionedOnly === true && agent.phase === 'created';
 }
 
-/** The next step for a provisioned agent, shown as the badge's hint. */
-export function provisionedStartHint(name: string): string {
-  return `Not started yet. Use Start, or run: scion start ${name}`;
+/** The status badge label: `label`, or the provision-only label. */
+export function provisionedLabel(agent: ProvisionedAgent, label: string): string {
+  return isProvisionedOnly(agent) ? PROVISIONED_ONLY_LABEL : label;
+}
+
+/** The next step for a provision-only agent, used as the badge title. */
+export function provisionedStartHint(agent: ProvisionedAgent): string | undefined {
+  if (!isProvisionedOnly(agent)) return undefined;
+  return `Not started yet. Use Start, or run: scion start ${agent.name}`;
 }

@@ -15,7 +15,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { ACTIVITY_DISPLAY, stateLabel } from './agent-state-display.js';
+import {
+  ACTIVITY_DISPLAY,
+  isProvisionedOnly,
+  provisionedLabel,
+  provisionedStartHint,
+  stateLabel,
+} from './agent-state-display.js';
 
 describe('stateLabel', () => {
   it("shows the 'blocked' activity as 'waiting on others' (ptone/scion#1571)", () => {
@@ -41,5 +47,30 @@ describe('stateLabel', () => {
     expect(stateLabel('thinking')).toBe('thinking');
     expect(stateLabel('running')).toBe('running');
     expect(stateLabel('something-new')).toBe('something-new');
+  });
+});
+
+describe('provision-only status (ptone/scion#2929)', () => {
+  const po = { name: 'po-agent', phase: 'created', provisionedOnly: true } as const;
+
+  it('needs both the hub flag and phase created', () => {
+    expect(isProvisionedOnly(po)).toBe(true);
+    expect(isProvisionedOnly({ phase: 'created' })).toBe(false);
+    expect(isProvisionedOnly({ phase: 'created', provisionedOnly: false })).toBe(false);
+    // A stale flag after an SSE delta moved the agent on.
+    expect(isProvisionedOnly({ phase: 'provisioning', provisionedOnly: true })).toBe(false);
+  });
+
+  it('labels the status badge with the CLI wording', () => {
+    expect(provisionedLabel(po, 'created')).toBe('created (not started)');
+    expect(provisionedLabel({ ...po, provisionedOnly: false }, 'created')).toBe('created');
+    expect(provisionedLabel({ ...po, phase: 'starting' }, 'starting')).toBe('starting');
+  });
+
+  it('gives a start hint only for a provision-only agent', () => {
+    const hint = provisionedStartHint(po) ?? '';
+    expect(hint).toContain('Start');
+    expect(hint).toContain('scion start po-agent');
+    expect(provisionedStartHint({ ...po, provisionedOnly: false })).toBeUndefined();
   });
 });

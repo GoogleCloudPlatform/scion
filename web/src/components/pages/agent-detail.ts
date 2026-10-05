@@ -24,6 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
 
 import type {
   PageData,
@@ -54,13 +55,16 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import {
+  provisionedLabel,
+  provisionedStartHint,
+  stateLabel,
+} from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
-import { renderProvisionedBadge } from '../shared/provisioned-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
@@ -1339,10 +1343,10 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${stateLabel(getAgentDisplayStatus(agent))}
+              label=${provisionedLabel(agent, stateLabel(getAgentDisplayStatus(agent)))}
+              title=${ifDefined(provisionedStartHint(agent))}
             ></scion-status-badge>
             <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
-            ${renderProvisionedBadge(agent)}
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1577,14 +1581,14 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-value">
               <scion-status-badge
                 status=${agent.phase as StatusType}
-                label=${agent.phase}
+                label=${provisionedLabel(agent, agent.phase)}
+                title=${ifDefined(provisionedStartHint(agent))}
                 size="small"
               ></scion-status-badge>
               <scion-deletion-badge
                 .deletion=${this.deletionLease.view(agent)}
                 size="small"
               ></scion-deletion-badge>
-              ${renderProvisionedBadge(agent, 'small')}
             </span>
           </div>
           <div class="info-item">
