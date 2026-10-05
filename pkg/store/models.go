@@ -139,6 +139,14 @@ type Agent struct {
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
 
+	// RunID is the identity of the agent's current or most recent run
+	// (ptone/scion#2550), minted by the Hub per create/start/restart
+	// dispatch and carried on the runtime entry as the scion.run_id label.
+	// "" for a row not dispatched since run IDs existed. Like the launch
+	// columns, UpdateAgent never writes it; the only writer is SetAgentRunID,
+	// so a concurrent whole-row CAS write cannot clobber it.
+	RunID string `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the

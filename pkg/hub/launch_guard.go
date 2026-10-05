@@ -157,7 +157,8 @@ func launchStartRefusal(a *store.Agent, now time.Time) *startRefusal {
 }
 
 // launchGuardError is the dispatcher backstop: it re-reads the agent and
-// returns ErrLaunchInFlight or an *AgentCreateIncompleteError. A read error
+// returns store.ErrDeleteInProgress (wrapped) when a delete holds the row,
+// otherwise ErrLaunchInFlight or an *AgentCreateIncompleteError. A read error
 // keeps today's behaviour (no refusal); the caller's own dispatch reports
 // any real problem.
 func (d *HTTPAgentDispatcher) launchGuardError(ctx context.Context, agent *store.Agent, op string) error {
@@ -171,6 +172,12 @@ func (d *HTTPAgentDispatcher) launchGuardError(ctx context.Context, agent *store
 				"op", op, "agent_id", agent.ID, "error", err)
 		}
 		return nil
+	}
+	// A delete that claimed the row after the start gate passed comes
+	// first, as in startGate: the claim writes stopping, which would
+	// otherwise read as an incomplete create (ptone/scion#2550).
+	if fresh.DeletionHoldsRow(time.Now()) {
+		return fmt.Errorf("%s: %w", op, store.ErrDeleteInProgress)
 	}
 	if fresh.IsIncompleteCreate() {
 		return &AgentCreateIncompleteError{Message: incompleteCreateMessage(fresh)}

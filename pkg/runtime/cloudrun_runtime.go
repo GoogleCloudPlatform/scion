@@ -681,7 +681,11 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the Cloud Run instance ref.ID.
+// P2/P4: enforce ref.RunID (ptone/scion#2550). The instance ID is
+// deterministic per agent name, so this is still name-scoped today.
+func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -754,6 +758,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 		agents = append(agents, api.AgentInfo{
 			ID:              inst.Labels["agent_id"],
 			ContainerID:     cloudRunShortInstanceID(inst.Name),
+			RunID:           inst.Labels[sanitizeGCPLabelKey(api.LabelRunID)], // Run stored scion.run_id under its GCP-sanitized key
 			Name:            inst.Name,
 			ContainerStatus: status,
 			Labels:          inst.Labels,
