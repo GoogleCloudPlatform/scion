@@ -264,10 +264,15 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groupID := api.NewUUID()
+
 	// A group created under a parent becomes a member of that parent and
 	// inherits the parent's role bindings, so the caller needs the same
-	// authority on the parent as adding a group member to it would require.
-	// This runs before anything is created.
+	// authority on the parent as adding a group member to it would require,
+	// and the new membership counts toward the parent's member limit. Both
+	// checks run before anything is created.
+	var parentEdge *store.GroupMember
+	var canDelegateResult, canDelegateReason string
 	if req.ParentID != "" {
 		parent, err := s.store.GetGroup(ctx, req.ParentID)
 		if err != nil {
@@ -278,7 +283,18 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if _, _, ok := s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember); !ok {
+		var ok bool
+		canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember)
+		if !ok {
+			return
+		}
+		parentEdge = &store.GroupMember{
+			GroupID:    parent.ID,
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   groupID,
+			Role:       store.GroupMemberRoleMember,
+		}
+		if !s.reserveGroupMemberSlot(w, ctx, parentEdge) {
 			return
 		}
 	}
@@ -293,7 +309,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group := &store.Group{
-		ID:          api.NewUUID(),
+		ID:          groupID,
 		Name:        req.Name,
 		Slug:        slug,
 		Description: req.Description,
@@ -306,12 +322,19 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateGroup(ctx, group); err != nil {
+		if parentEdge != nil {
+			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
+		}
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Group with this slug already exists")
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	if parentEdge != nil {
+		s.auditGroupMemberAdd(ctx, parentEdge, canDelegateResult, canDelegateReason)
 	}
 
 	s.groupsLogger().Info("group created",
@@ -751,29 +774,12 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	}
 
 	// Quota enforcement: check members-per-group limit before addition.
-	if s.quotaService != nil {
-		membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
-		if err := s.quotaService.CheckAndReserve(ctx, "max_members_per_group", groupID, "group", groupID, membershipID); err != nil {
-			if errors.Is(err, store.ErrQuotaExceeded) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota exceeded: max_members_per_group", nil)
-				return
-			}
-			if errors.Is(err, ErrQuotaLockContention) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota check temporarily unavailable, please retry", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
-			return
-		}
+	if !s.reserveGroupMemberSlot(w, ctx, member) {
+		return
 	}
 
 	if err := s.store.AddGroupMember(ctx, member); err != nil {
-		if s.quotaService != nil {
-			membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
-			s.quotaService.Release(ctx, "max_members_per_group", membershipID)
-		}
+		s.releaseGroupMemberSlot(ctx, member.GroupID, member.MemberType, member.MemberID)
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Member already exists in this group")
 			return
@@ -782,15 +788,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	auditRecord := &store.MutationAuditRecord{
-		MutationType:      "group_member_add",
-		TargetType:        "group_membership",
-		TargetID:          group.ID,
-		AfterSummary:      `{"groupId":"` + group.ID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
-		CanDelegateResult: canDelegateResult,
-		CanDelegateReason: canDelegateReason,
-	}
-	s.emitMutationAudit(r.Context(), auditRecord)
+	s.auditGroupMemberAdd(ctx, member, canDelegateResult, canDelegateReason)
 
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
@@ -804,6 +802,62 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		DisplayName: s.resolveGroupMemberDisplayName(ctx, member.MemberType, member.MemberID),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// groupMembershipQuotaID is the max_members_per_group reservation resource ID
+// for one membership of a group.
+func groupMembershipQuotaID(groupID, memberType, memberID string) string {
+	return fmt.Sprintf("%s:%s:%s", groupID, memberType, memberID)
+}
+
+// reserveGroupMemberSlot reserves a max_members_per_group slot on
+// member.GroupID for member, writing the refusal response and returning false
+// when the group is at its limit or the check fails. Callers release the slot
+// with releaseGroupMemberSlot if the membership is then not created.
+func (s *Server) reserveGroupMemberSlot(w http.ResponseWriter, ctx context.Context, member *store.GroupMember) bool {
+	if s.quotaService == nil {
+		return true
+	}
+	membershipID := groupMembershipQuotaID(member.GroupID, member.MemberType, member.MemberID)
+	err := s.quotaService.CheckAndReserve(ctx, store.LimitMaxMembersPerGroup, member.GroupID, "group", member.GroupID, membershipID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, store.ErrQuotaExceeded) {
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota exceeded: max_members_per_group", nil)
+		return false
+	}
+	if errors.Is(err, ErrQuotaLockContention) {
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota check temporarily unavailable, please retry", nil)
+		return false
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+	return false
+}
+
+// releaseGroupMemberSlot releases the max_members_per_group reservation for
+// one membership of a group (best-effort).
+func (s *Server) releaseGroupMemberSlot(ctx context.Context, groupID, memberType, memberID string) {
+	if s.quotaService == nil {
+		return
+	}
+	s.quotaService.Release(ctx, store.LimitMaxMembersPerGroup, groupMembershipQuotaID(groupID, memberType, memberID))
+}
+
+// auditGroupMemberAdd writes the group_member_add mutation audit record for a
+// membership that was just created, with the CanDelegate result and reason
+// returned by authorizeGroupMemberGrant.
+func (s *Server) auditGroupMemberAdd(ctx context.Context, member *store.GroupMember, canDelegateResult, canDelegateReason string) {
+	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType:      "group_member_add",
+		TargetType:        "group_membership",
+		TargetID:          member.GroupID,
+		AfterSummary:      `{"groupId":"` + member.GroupID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
+		CanDelegateResult: canDelegateResult,
+		CanDelegateReason: canDelegateReason,
+	})
 }
 
 // authorizeGroupMemberGrant runs the authorization for adding a member with
@@ -1003,10 +1057,7 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 	}
 
 	// Release quota reservation for the removed member (best-effort).
-	if s.quotaService != nil {
-		membershipID := fmt.Sprintf("%s:%s:%s", group.ID, memberType, memberID)
-		s.quotaService.Release(ctx, "max_members_per_group", membershipID)
-	}
+	s.releaseGroupMemberSlot(ctx, group.ID, memberType, memberID)
 
 	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
 		MutationType:  "group_member_remove",

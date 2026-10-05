@@ -19,10 +19,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -218,29 +221,6 @@ func TestCreateGroup_ParentID_AppliesCanDelegate(t *testing.T) {
 	f.assertRefusedLikeAddMember(t, actor, "cg-delegate-child", "Cannot grant authority you do not hold")
 }
 
-// TestCreateGroup_ParentID_AllowedForParentAdmin: a caller who can add
-// members to the parent (group.addMember and admin of the parent) can create
-// a group under it.
-func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
-	f := newParentGroupFixture(t, "cg-allowed")
-	actor := f.newSystemRoleUser(t, "cg-parent-admin", []string{"group.create", "group.addMember"})
-	f.addMember(t, f.parent.ID, actor.ID, store.GroupMemberRoleAdmin)
-
-	code, body := f.createChild(t, actor, "cg-allowed-child", f.parent.ID)
-	require.Equal(t, http.StatusCreated, code, body)
-
-	child, err := f.store.GetGroupBySlug(context.Background(), "cg-allowed-child")
-	require.NoError(t, err)
-	children, err := f.store.ListGroups(context.Background(), store.GroupFilter{ParentID: f.parent.ID}, store.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, children.Items, 1)
-	assert.Equal(t, child.ID, children.Items[0].ID, "the new group is a child of the parent")
-
-	// Reference: the same caller may add a group member to the parent.
-	refCode, refBody := f.addSpareAsMember(t, actor)
-	assert.Equal(t, http.StatusCreated, refCode, refBody)
-}
-
 // TestCreateGroup_NoParentID_Unchanged: without parentId, group.create alone
 // is enough, as before.
 func TestCreateGroup_NoParentID_Unchanged(t *testing.T) {
@@ -294,5 +274,276 @@ func TestCreateGroup_ParentID_UnknownParent(t *testing.T) {
 		assert.Equal(t, ErrCodeValidationError, apiErrorCode(t, body))
 		assert.ElementsMatch(t, before, listGroupIDs(), "no group may be created")
 		f.assertNothingCreated(t, actor, "cg-unknown-child-2")
+	})
+}
+
+// listAllGroupIDs returns the IDs of every group in the store.
+func (f *parentGroupFixture) listAllGroupIDs(t *testing.T) []string {
+	t.Helper()
+	res, err := f.store.ListGroups(context.Background(), store.GroupFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	ids := make([]string, 0, len(res.Items))
+	for _, g := range res.Items {
+		ids = append(ids, g.ID)
+	}
+	return ids
+}
+
+// groupMembershipAudits returns the group_membership mutation audit records
+// for groupID.
+func (f *parentGroupFixture) groupMembershipAudits(t *testing.T, groupID string) []*store.MutationAuditRecord {
+	t.Helper()
+	recs, _, err := f.store.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		TargetType: "group_membership", TargetID: groupID,
+	})
+	require.NoError(t, err)
+	return recs
+}
+
+// setMaxMembersPerGroup sets the hub-wide max_members_per_group limit.
+func (f *parentGroupFixture) setMaxMembersPerGroup(t *testing.T, limit int64) {
+	t.Helper()
+	ctx := context.Background()
+	def, err := f.store.GetLimitDefinitionByName(ctx, store.LimitMaxMembersPerGroup)
+	if errors.Is(err, store.ErrNotFound) {
+		_, err = f.store.CreateLimitDefinition(ctx, &store.LimitDefinition{
+			Name: store.LimitMaxMembersPerGroup, ResourceType: "group", Unit: "count", DefaultValue: limit,
+		})
+		require.NoError(t, err)
+		return
+	}
+	require.NoError(t, err)
+	def.DefaultValue = limit
+	_, err = f.store.UpdateLimitDefinition(ctx, def)
+	require.NoError(t, err)
+}
+
+// TestCreateGroup_ParentID_AllowedForParentAdmin: a caller who can add
+// members to the parent (group.addMember and admin of the parent) can create
+// a group under it, and the new parent membership is audited the same way
+// addGroupMember audits one.
+func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-allowed")
+	actor := f.newSystemRoleUser(t, "cg-parent-admin", []string{"group.create", "group.addMember"})
+	f.addMember(t, f.parent.ID, actor.ID, store.GroupMemberRoleAdmin)
+
+	code, body := f.createChild(t, actor, "cg-allowed-child", f.parent.ID)
+	require.Equal(t, http.StatusCreated, code, body)
+
+	child, err := f.store.GetGroupBySlug(context.Background(), "cg-allowed-child")
+	require.NoError(t, err)
+	children, err := f.store.ListGroups(context.Background(), store.GroupFilter{ParentID: f.parent.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, children.Items, 1)
+	assert.Equal(t, child.ID, children.Items[0].ID, "the new group is a child of the parent")
+
+	var recs []*store.MutationAuditRecord
+	require.Eventually(t, func() bool {
+		recs = f.groupMembershipAudits(t, f.parent.ID)
+		return len(recs) > 0
+	}, 2*time.Second, 10*time.Millisecond, "create with parentId must write a group_membership audit record")
+	time.Sleep(50 * time.Millisecond)
+	recs = f.groupMembershipAudits(t, f.parent.ID)
+	require.Len(t, recs, 1, "exactly one audit record for the parent membership")
+
+	rec := recs[0]
+	assert.Equal(t, "group_member_add", rec.MutationType)
+	assert.Equal(t, "group_membership", rec.TargetType)
+	assert.Equal(t, f.parent.ID, rec.TargetID)
+	assert.JSONEq(t,
+		`{"groupId":"`+f.parent.ID+`","memberType":"group","memberId":"`+child.ID+`","role":"member"}`,
+		rec.AfterSummary)
+	assert.Equal(t, "allow", rec.CanDelegateResult)
+	assert.NotEmpty(t, rec.CanDelegateReason)
+	assert.Equal(t, actor.ID, rec.ActorPrincipalID)
+
+	// Reference: the same caller may add a group member to the parent, and
+	// addGroupMember writes a record with the same shape.
+	refCode, refBody := f.addSpareAsMember(t, actor)
+	require.Equal(t, http.StatusCreated, refCode, refBody)
+	var ref *store.MutationAuditRecord
+	require.Eventually(t, func() bool {
+		for _, r := range f.groupMembershipAudits(t, f.parent.ID) {
+			if r.ID != rec.ID {
+				ref = r
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, ref.MutationType, rec.MutationType)
+	assert.Equal(t, ref.TargetType, rec.TargetType)
+	assert.Equal(t, ref.CanDelegateResult, rec.CanDelegateResult)
+	assert.Equal(t, ref.CanDelegateReason, rec.CanDelegateReason)
+}
+
+// TestCreateGroup_ParentID_EnforcesParentMemberLimit: a parent at its
+// max_members_per_group limit refuses a new child the same way it refuses a
+// new group member, and nothing is created.
+//
+// The test compares against addGroupMember's live response rather than a
+// fixed status: until ptone/scion#3082 is fixed, the reservation for a group
+// scope fails and both paths answer 500 runtime_error; once it is fixed, both
+// answer 429 quota_exceeded.
+func TestCreateGroup_ParentID_EnforcesParentMemberLimit(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-quota")
+	ctx := context.Background()
+	f.setMaxMembersPerGroup(t, 1)
+
+	// Take the parent's only member slot through the members endpoint.
+	fill := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
+		map[string]interface{}{"memberType": store.GroupMemberTypeGroup, "memberId": f.spare.ID})
+	t.Logf("filling the parent's member slot: %d %s", fill.Code, fill.Body.String())
+
+	// Reference: adding another group member to the parent.
+	other := &store.Group{
+		ID: api.NewUUID(), Name: "cg-quota-other", Slug: "cg-quota-other",
+		GroupType: store.GroupTypeExplicit, OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	require.NoError(t, f.store.CreateGroup(ctx, other))
+	refRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
+		map[string]interface{}{"memberType": store.GroupMemberTypeGroup, "memberId": other.ID})
+	require.GreaterOrEqual(t, refRec.Code, http.StatusBadRequest,
+		"addGroupMember must refuse a member over the parent's limit: %s", refRec.Body.String())
+	refCode := apiErrorCode(t, refRec.Body.String())
+
+	before := f.listAllGroupIDs(t)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+		map[string]interface{}{"name": "cg-quota-child", "slug": "cg-quota-child", "parentId": f.parent.ID})
+	assert.Equal(t, refRec.Code, rec.Code, "status must match addGroupMember (body: %s)", rec.Body.String())
+	assert.Equal(t, refCode, apiErrorCode(t, rec.Body.String()), "error code must match addGroupMember")
+	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
+	_, err := f.store.GetGroupBySlug(ctx, "cg-quota-child")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// failingParentLookupStore fails GetGroup for one group ID with an error
+// other than not-found.
+type failingParentLookupStore struct {
+	store.Store
+	groupID string
+}
+
+var errParentLookup = errors.New("parent lookup unavailable")
+
+func (f *failingParentLookupStore) GetGroup(ctx context.Context, id string) (*store.Group, error) {
+	if id == f.groupID {
+		return nil, errParentLookup
+	}
+	return f.Store.GetGroup(ctx, id)
+}
+
+// TestCreateGroup_ParentID_ParentLookupError: a store failure loading the
+// parent returns an error and creates nothing.
+func TestCreateGroup_ParentID_ParentLookupError(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-lookup")
+	before := f.listAllGroupIDs(t)
+	f.srv.store = &failingParentLookupStore{Store: f.store, groupID: f.parent.ID}
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+		map[string]interface{}{"name": "cg-lookup-child", "slug": "cg-lookup-child", "parentId": f.parent.ID})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), errParentLookup.Error())
+
+	f.srv.store = f.store
+	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
+	_, err := f.store.GetGroupBySlug(context.Background(), "cg-lookup-child")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestCreateGroup_ParentID_AgentCaller: an agent caller creating a group
+// under a parent is held to the same checks as an agent adding a group
+// member to that parent (agent tokens carry no group permissions, so both
+// are refused, as in the addGroupMember agent role cap tests), and a refusal
+// creates nothing.
+func TestCreateGroup_ParentID_AgentCaller(t *testing.T) {
+	type agentFixture struct {
+		srv    *Server
+		store  store.Store
+		agent  *store.Agent
+		parent *store.Group
+		spare  *store.Group
+	}
+	setup := func(t *testing.T) *agentFixture {
+		t.Helper()
+		srv, s := testServer(t)
+		ctx := context.Background()
+		owner := &store.User{
+			ID: tid("cg-agent-owner"), Email: "cg-agent-owner@test.com", DisplayName: "cg-agent-owner",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, owner))
+		proj := &store.Project{ID: tid("cg-agent-proj"), Name: "cg-agent-proj", Slug: "cg-agent-proj", OwnerID: owner.ID}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		agent := &store.Agent{
+			ID: tid("cg-agent-caller"), Slug: tid("cg-agent-caller"), Name: "cg-agent-caller",
+			ProjectID: proj.ID, Phase: string(state.PhaseRunning),
+			CreatedBy: owner.ID, OwnerID: owner.ID, Ancestry: []string{owner.ID},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		mk := func(slug string) *store.Group {
+			g := &store.Group{
+				ID: api.NewUUID(), Name: slug, Slug: slug, GroupType: store.GroupTypeExplicit,
+				ProjectID: proj.ID, OwnerID: owner.ID,
+			}
+			require.NoError(t, s.CreateGroup(ctx, g))
+			return g
+		}
+		return &agentFixture{srv: srv, store: s, agent: agent, parent: mk("cg-agent-parent"), spare: mk("cg-agent-spare")}
+	}
+
+	asAgent := func(t *testing.T, f *agentFixture, method, path string, body interface{}) *httptest.ResponseRecorder {
+		t.Helper()
+		svc := f.srv.GetAgentTokenService()
+		require.NotNil(t, svc)
+		tok, err := svc.GenerateAgentToken(f.agent.ID, f.agent.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
+		require.NoError(t, err)
+		return doRequestWithAgentToken(t, f.srv, method, path, body, tok)
+	}
+
+	listIDs := func(t *testing.T, s store.Store) []string {
+		t.Helper()
+		res, err := s.ListGroups(context.Background(), store.GroupFilter{}, store.ListOptions{Limit: 1000})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(res.Items))
+		for _, g := range res.Items {
+			ids = append(ids, g.ID)
+		}
+		return ids
+	}
+
+	assertRefused := func(t *testing.T, f *agentFixture) {
+		t.Helper()
+		before := listIDs(t, f.store)
+		rec := asAgent(t, f, http.MethodPost, "/api/v1/groups",
+			CreateGroupRequest{Name: "cg-agent-child", Slug: "cg-agent-child", ParentID: f.parent.ID})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "agent create with parentId: %s", rec.Body.String())
+		assert.ElementsMatch(t, before, listIDs(t, f.store), "no group may be created")
+		_, err := f.store.GetGroupBySlug(context.Background(), "cg-agent-child")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		refRec := asAgent(t, f, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
+			AddGroupMemberRequest{MemberType: store.GroupMemberTypeGroup, MemberID: f.spare.ID, Role: store.GroupMemberRoleMember})
+		assert.Equal(t, refRec.Code, rec.Code, "status must match addGroupMember (ref body: %s)", refRec.Body.String())
+		assert.Equal(t, apiErrorCode(t, refRec.Body.String()), apiErrorCode(t, rec.Body.String()))
+	}
+
+	t.Run("agent without role binding is refused", func(t *testing.T) {
+		assertRefused(t, setup(t))
+	})
+
+	t.Run("agent with a group role binding is refused", func(t *testing.T) {
+		f := setup(t)
+		rd := createTestRoleDefinition(t, f.store, "cg-agent-group-role", store.RoleScopeSystem,
+			[]string{"group.create", "group.addMember"})
+		_, err := f.store.CreateRoleBinding(context.Background(), &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalAgent,
+			PrincipalID:      f.agent.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+		assertRefused(t, f)
 	})
 }
