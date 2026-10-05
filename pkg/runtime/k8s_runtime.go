@@ -1972,11 +1972,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     writable by the broker user.
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if config.WorkspaceBackendName == "nfs" {
-		nfsGID := config.NFSGID
-		if nfsGID == 0 {
-			nfsGID = 1000 // design default
-		}
-		fsGroupGID = int64(nfsGID)
+		fsGroupGID = int64(provision.DefaultOwnerID(config.NFSGID))
 	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false

@@ -482,6 +482,9 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
+// must already be defaulted by the caller (cloudRunOwnerIDs); they are
+// used as given.
 func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
@@ -511,12 +514,6 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		return nil, err
 	}
 
-	if gid == 0 {
-		gid = 1000
-	}
-	if uid == 0 {
-		uid = 1000
-	}
 	resolved := ResolvedWorkspace{
 		HostPath:           hostPaths.workspaceHostPath,
 		ServerRelativePath: hostPaths.serverRelativePath,

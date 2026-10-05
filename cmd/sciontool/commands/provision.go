@@ -98,9 +98,9 @@ func init() {
 	provisionCmd.Flags().IntVar(&provisionDepth, "depth", 1,
 		"Git clone depth (0=full clone, >0=that depth; default 1=shallow)")
 	provisionCmd.Flags().IntVar(&provisionUID, "uid", 1000,
-		"UID for chown of provisioned files")
+		"UID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
-		"GID for chown of provisioned files")
+		"GID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().BoolVar(&provisionWaitSentinel, "wait-for-sentinel", false,
 		"Poll for sentinel file instead of provisioning (lock-loser mode)")
 	provisionCmd.Flags().IntVar(&provisionTimeout, "timeout", 300,
@@ -324,14 +324,14 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 	return env
 }
 
-// provisionRequireChownSuccess keeps a chown failure fatal unless the
-// Kubernetes runtime marked the workspace directory as prepared by the
-// broker, created or found with setgid and group write
-// (provision.ChownBestEffortEnv set to exactly "1").
 // prepareStateDir is provision.PrepareStateDir; a variable so tests can
 // observe the owner it is given.
 var prepareStateDir = provision.PrepareStateDir
 
+// provisionRequireChownSuccess keeps a chown failure fatal unless the
+// Kubernetes runtime marked the workspace directory as prepared by the
+// broker, created or found with setgid and group write
+// (provision.ChownBestEffortEnv set to exactly "1").
 func provisionRequireChownSuccess(getenv func(string) string) bool {
 	return !provision.ChownBestEffortRequested(getenv)
 }
