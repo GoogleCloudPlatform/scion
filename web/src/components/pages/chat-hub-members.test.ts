@@ -94,6 +94,7 @@ interface ChatPage extends HTMLElement {
   disconnectedCallback(): void;
   _hubUsersLoad: unknown;
   _hubAgentsLoad: unknown;
+  _hubAgentsLive: boolean;
   _hubMembersGeneration: number;
   _loadHubAgents(generation: number): Promise<void>;
   _handleAgentsUpdated(): void;
@@ -658,6 +659,8 @@ describe('hub members: live updates from the store', () => {
       page.v2AgentMembers = [{ id: 'sentinel', kind: 'agent', displayName: 'sentinel' }];
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
       expect(ids(page.v2AgentMembers)).toEqual(['sentinel']);
+      // Not shown, so the poll keeps asking the store.
+      expect(page._hubAgentsLive).toBe(false);
     } finally {
       unmount(page);
     }
@@ -818,6 +821,57 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
       expect(usersRequests()).toBe(usersBefore);
       expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
       expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the poll reloads the space expanded last, not the first one', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const reads = (projectId: string): number =>
+        vi
+          .mocked(apiFetch)
+          .mock.calls.filter((c) => c[0] === `/api/v1/chat/spaces/${projectId}/members`).length;
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ humans: [], agents: [] }), { status: 200 }))
+      );
+      await page.loadV2Members('pa');
+      await page.loadV2Members('pb');
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(reads('pa')).toBe(1);
+      expect(reads('pb')).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a space reached from the hub view re-seeds its rows when the scope changes', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              humans: [],
+              agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1' }],
+            }),
+            { status: 200 }
+          )
+        )
+      );
+      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      await page.loadV2Members('p1');
+      // setScope wipes the map once the rail reports its spaces.
+      globalMap.agents.clear();
+      globalMap.stateManager.dispatchEvent(new Event('scope-changed'));
+      expect(Array.from(globalMap.agents.keys())).toEqual(['sp1']);
     } finally {
       unmount(page);
     }
