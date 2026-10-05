@@ -168,9 +168,10 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// run the broker reports it labelled, so a report for an older run
 	// never clears a newer run's list. A broker that reports no run ID gets
 	// no clear; a later delete then repeats the previous runs as run-scoped
-	// 404s. Only an applied report settles: a duplicate, and a completed
-	// answer (the hub had already resolved the launch), are deliberately
-	// not settled; the conservative cost is extra 404s on a later delete.
+	// 404s. Only an applied report settles: a completed answer (a repeated
+	// terminal report, or the hub had already resolved the launch) is
+	// deliberately not settled; the conservative cost is extra 404s on a
+	// later delete.
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		s.settleLaunchedRun(ctx, agentID, req.Agent)
 	}
