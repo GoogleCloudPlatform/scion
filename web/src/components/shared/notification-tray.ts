@@ -63,6 +63,9 @@ export class ScionNotificationTray extends LitElement {
   /** Suppresses browser push for the initial fetch so existing notifications don't fire. */
   private initialFetchDone = false;
 
+  /** The user id that the list, seenIds and initialFetchDone belong to. */
+  private stateUserId: string | null = null;
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -90,6 +93,7 @@ export class ScionNotificationTray extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('user')) {
+      this.resetOnUserChange();
       if (this.user) {
         void this.fetchNotifications();
         this.startPolling();
@@ -101,6 +105,34 @@ export class ScionNotificationTray extends LitElement {
       }
     }
     this.detectTruncation();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resets per-user state when the signed-in user id changes, so the next
+   * user's first fetch behaves like a first load: it shows only that user's
+   * notifications, suppresses push for the ones that already exist, and does
+   * not treat the previous user's notifications as seen.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.notifications = [];
+    this.seenIds = new Set();
+    this.initialFetchDone = false;
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -180,10 +212,12 @@ export class ScionNotificationTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchNotifications(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
+      if (!this.isForCurrentUser(requestUserId)) return;
       const incoming = data ?? [];
 
       // Detect new notifications (IDs not previously seen) and dispatch
@@ -244,8 +278,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private async ackOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/notifications/${id}/ack`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
     } catch {
       // Ignore
@@ -253,8 +289,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private async ackAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = [];
     } catch {
       // Ignore

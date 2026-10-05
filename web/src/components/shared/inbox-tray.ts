@@ -44,6 +44,9 @@ export class ScionInboxTray extends LitElement {
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnUserMessage = this.onUserMessageEvent.bind(this);
 
+  /** The user id that the message list belongs to. */
+  private stateUserId: string | null = null;
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -66,6 +69,7 @@ export class ScionInboxTray extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('user')) {
+      this.resetOnUserChange();
       if (this.user) {
         void this.fetchMessages();
         this.startPolling();
@@ -76,6 +80,30 @@ export class ScionInboxTray extends LitElement {
         this.messages = [];
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Clears the message list when the signed-in user id changes, so the next
+   * user only ever sees their own messages.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.messages = [];
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -115,10 +143,12 @@ export class ScionInboxTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchMessages(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       const res = await apiFetch('/api/v1/messages?unread=true');
       if (!res.ok) return;
       const data = (await res.json()) as { items?: Message[] } | null;
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = data?.items ?? [];
     } catch {
       // Silently ignore network errors during polling
@@ -126,8 +156,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/messages/${id}/read`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = this.messages.filter((m) => m.id !== id);
     } catch {
       // Ignore
@@ -135,8 +167,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/messages/read-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = [];
     } catch {
       // Ignore
