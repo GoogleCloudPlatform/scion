@@ -122,7 +122,7 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Here is my progress update",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -201,7 +201,7 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Please provide more details",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -247,7 +247,7 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "I need more information",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -301,7 +301,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 			Sender:    "agent:agent-a",
 			Recipient: "user:test-user",
 			Msg:       fmt.Sprintf("progress update %d", i),
-			Type:      messages.TypeAssistantReply,
+			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
 		if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", msg); err != nil {
@@ -362,7 +362,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Working on it...",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -637,7 +637,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 			Sender:    "agent:agent-a",
 			Recipient: "user:test-user",
 			Msg:       text,
-			Type:      messages.TypeAssistantReply,
+			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
 		if err := b.HandleBrokerMessage(context.Background(), topic, msg); err != nil {
@@ -757,7 +757,7 @@ func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Response via slug fallback",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		// No a2aTaskId in metadata.
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -797,7 +797,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Just a content msg",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -855,7 +855,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Late message after completion",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, lateContent); err != nil {
@@ -920,7 +920,7 @@ func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Working on your request",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -991,7 +991,7 @@ func TestMultipleAgentTasksContentDoesNotClose(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Broadcast content",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
@@ -1199,7 +1199,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Still working...",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {

@@ -166,3 +166,24 @@ func TestTranslateScionToA2AStateChange(t *testing.T) {
 		t.Errorf("Artifacts = %d, want 0 for state-change messages", len(artifacts))
 	}
 }
+
+// An agent's explicit reply (`scion message user:...` sends type
+// instruction) is the task response and becomes an artifact. The retired
+// end-of-turn assistant-reply mirror no longer does.
+func TestTranslateScionToA2A_ExplicitReplyIsArtifact_AssistantReplyIsNot(t *testing.T) {
+	explicit := &messages.StructuredMessage{Version: 1, Msg: "answer", Type: messages.TypeInstruction}
+	mirror := &messages.StructuredMessage{Version: 1, Msg: "turn text", Type: messages.TypeAssistantReply}
+
+	if _, arts := TranslateScionToA2A(explicit); len(arts) != 1 {
+		t.Errorf("explicit reply: artifacts = %d, want 1", len(arts))
+	}
+	if _, arts := TranslateScionToA2AParts(explicit); len(arts) != 1 {
+		t.Errorf("explicit reply (SDK): artifacts = %d, want 1", len(arts))
+	}
+	if _, arts := TranslateScionToA2A(mirror); len(arts) != 0 {
+		t.Errorf("assistant-reply: artifacts = %d, want 0", len(arts))
+	}
+	if _, arts := TranslateScionToA2AParts(mirror); len(arts) != 0 {
+		t.Errorf("assistant-reply (SDK): artifacts = %d, want 0", len(arts))
+	}
+}
