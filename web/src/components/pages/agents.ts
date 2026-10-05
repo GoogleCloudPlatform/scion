@@ -1147,7 +1147,8 @@ export class ScionPageAgents extends LitElement {
       },
     });
     if (outcome.kind === 'deleted') {
-      // Through the window, so a paged page drops the row too (GoogleCloudPlatform/scion#2451).
+      // Drops the row from the held set now; on a paged page the background
+      // refresh drops it (GoogleCloudPlatform/scion#2451).
       this.applyOptimisticAgents([], [agentId]);
       this.backgroundRefresh();
     } else if (outcome.kind === 'failed') {

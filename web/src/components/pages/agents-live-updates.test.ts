@@ -854,10 +854,17 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
           urls.push(typeof input === 'string' ? input : input.toString());
           return Promise.resolve(
             jsonResponse({
-              agents: [actionable('a1', { phase: 'stopping' })],
-              totalCount: 1,
+              agents: [actionable('a1', { phase: 'stopping' }), actionable('a2')],
+              totalCount: 2,
               complete: true,
-              stats: { total: 1, running: 0, agents: [['a1', 'stopping']] },
+              stats: {
+                total: 2,
+                running: 1,
+                agents: [
+                  ['a1', 'stopping'],
+                  ['a2', 'running'],
+                ],
+              },
               _capabilities: { actions: [] },
             })
           );
@@ -874,6 +881,10 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
           'Stopping'
         )
       );
+      // A non-stopping row in the answer is still hidden by the restored filter.
+      expect(
+        (el as unknown as { agentWindow: { items: Agent[] } }).agentWindow.items.map((a) => a.id)
+      ).toEqual(['a1']);
     });
   });
 });

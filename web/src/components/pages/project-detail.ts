@@ -2079,8 +2079,8 @@ export class ScionPageProjectDetail extends LitElement {
       },
     });
     if (outcome.kind === 'deleted') {
-      // Through the window, so a paged page drops the card too
-      // (GoogleCloudPlatform/scion#2451).
+      // Drops the card from the held set now; on a paged page the
+      // background refresh drops it (GoogleCloudPlatform/scion#2451).
       this.applyOptimisticAgents([], [agentId]);
       this.backgroundRefresh();
     } else if (outcome.kind === 'failed') {
