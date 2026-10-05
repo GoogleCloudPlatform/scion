@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -280,4 +281,64 @@ func TestReincarnateMove_EmptyPerAgent(t *testing.T) {
 		assertVerdictFailedAt(t, v, moveCheckWorkspaceMode)
 		f.assertNoMoveSideEffects(t, count)
 	})
+}
+
+// A self-move never links a provider, even should its target not serve the
+// project by the time the worker runs (defense in depth behind the A8
+// check).
+func TestLinkMoveTargetProvider_SelfMoveNeverLinks(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	ctx := context.Background()
+	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true}
+	require.NoError(t, f.srv.linkMoveTargetProvider(ctx, mv))
+	_, err := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a self-move must not link the target")
+
+	mv.SelfMove = false
+	require.NoError(t, f.srv.linkMoveTargetProvider(ctx, mv))
+	p, err := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-move", p.LinkedBy)
+}
+
+// The worker re-checks eligibility before its first side effect: when the
+// facts changed after the request was accepted (here the target stopped
+// advertising AgentMove), the move fails from pending without stopping or
+// touching the agent anywhere.
+func TestReincarnationWorker_MoveRecheckFailsBeforeAnySideEffect(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	ctx := context.Background()
+
+	f.dst.Capabilities = &store.BrokerCapabilities{Reprovision: true}
+	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, f.dst))
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	a.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	rec := &store.AgentReincarnation{
+		AgentID: a.ID, FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStatePending,
+		PreviousAppliedConfig: a.AppliedConfig, SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID,
+	}
+	require.NoError(t, f.s.CreateAgentReincarnation(ctx, rec))
+	fresh := *a.AppliedConfig
+	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
+
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+
+	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.AgentReincarnationStateFailed, got.State)
+	assert.Contains(t, got.Error, "does not support agent move")
+	f.disp.mu.Lock()
+	assert.Zero(t, f.disp.stopCalls, "nothing is stopped")
+	f.disp.mu.Unlock()
+	provisions, deletes, starts := f.disp.moveSnapshot()
+	assert.Empty(t, provisions)
+	assert.Empty(t, deletes)
+	assert.Empty(t, starts)
+	after, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.src.ID, after.RuntimeBrokerID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
 }
