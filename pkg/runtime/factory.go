@@ -331,7 +331,7 @@ func (e *ErrorRuntime) Stop(ctx context.Context, id string) error {
 	return e.Err
 }
 
-func (e *ErrorRuntime) Delete(ctx context.Context, id string) error {
+func (e *ErrorRuntime) Delete(ctx context.Context, ref RunRef) error {
 	return e.Err
 }
 

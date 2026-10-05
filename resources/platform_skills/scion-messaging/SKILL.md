@@ -101,7 +101,28 @@ Good — the same content, structured:
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n sequences — those will appear as literal characters in the delivered message.
 
-Correct — real newlines in a quoted string:
+**Backticks and `$(...)` are executed by the shell.** Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` *before* `scion` starts and splices the output into the body. Markdown inline code like `` `make test` `` in a double-quoted body therefore runs `make test` and sends its output (often empty) instead of the text. `scion` cannot detect this. Whenever a body contains backticks, `$`, or code, send it through stdin or a file:
+
+- `scion message <recipient> -` reads the body from stdin.
+- `scion message <recipient> --body-file <path>` reads it from a file. `--body-file -` also reads stdin.
+- For stdin and `--body-file`, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
+
+Correct — quoted heredoc on stdin (the `'EOF'` quotes stop all expansion; preferred for anything with markdown or code):
+```bash
+scion message --non-interactive @reviewer - <<'EOF'
+PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green. Run `make test` to reproduce.
+EOF
+```
+
+Correct — body from a file:
+```bash
+scion message --non-interactive @reviewer --body-file /tmp/review-notes.md
+```
+
+Correct — plain text only (no backticks or `$`) in a double-quoted string with real newlines:
 ```bash
 scion message --non-interactive @reviewer "PR #42 is ready for review.
 
@@ -109,15 +130,10 @@ Branch: fix/auth-bug
 CI: all green"
 ```
 
-Correct — heredoc for longer messages:
+Wrong — backticks inside double quotes (the shell runs `make test`):
 ```bash
-scion message --non-interactive @reviewer "$(cat <<'EOF'
-PR #42 is ready for review.
-
-Branch: fix/auth-bug
-CI: all green
-EOF
-)"
+# BAD: `make test` executes in your shell; its output replaces it in the body
+scion message --non-interactive @reviewer "CI is green. Run `make test` to reproduce."
 ```
 
 Wrong — JSON-encoded body with literal \n:
@@ -146,6 +162,7 @@ The `scion message` command provides the following flags:
 - **`--wake`**: Resumes a suspended agent before delivering the message.
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
+- **`--body-file <path>`**: Reads the message body from a file instead of a positional argument (`--body-file -` reads stdin). A positional body of `-` also reads stdin.
 **Capabilities that exist as separate commands:**
 - **Literal keystrokes**: Use `scion keys <agent> <keys>` to send input to an agent's tmux terminal, with no envelope and no automatic Enter. One call sends exactly one tmux argument — there is no sequence syntax, so `scion keys <agent> "Up Up Enter"` types eleven literal characters, not three key presses; send each key press as a separate call. Works for container-backed agents in local and Hub mode; not supported for managed-runtime agents. As an agent, you can only target agents in your own project — cross-project targets are refused. **Authority:** in Hub mode, `scion keys` is authorized like terminal attach, not like messaging — being able to message an agent does not mean you can send it keys, and as an agent caller you also need a live attach relationship on the target, not just shared project membership. Each call reports `dispatched`, `rejected`, or `unknown`; on `unknown`, check with `scion look` before resending.
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
@@ -175,10 +192,9 @@ characters** (counted as Unicode runes, not bytes — CJK and emoji each
 count as one character). Agent-to-agent messages have **no enforced cap
 in code** and are not subject to this limit, but remember to keep message content focused. Longer findings can be written to a shared file and sent as a reference.
 
-When the limit is exceeded, the command returns a non-zero exit code but
-also dumps the full CLI `--help` text to `stderr` — the actual error line
-(`validation_error: message exceeds 2000 character limit`) scrolls off if
-you pipe to `tail`. Redirect `stderr` and pipe to `head` (e.g., `2>&1 | head`) to surface it.
+When the limit is exceeded, the command returns a non-zero exit code and
+prints the error (`validation_error: message exceeds 2000 character limit`)
+to `stderr`. Redirect `stderr` (e.g., `2>&1`) to see it.
 
 If your user-directed message is long:
 - Split it into two or more messages, each under ~1800 characters.

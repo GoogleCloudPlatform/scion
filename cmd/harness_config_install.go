@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -38,7 +39,13 @@ Source can be:
   - An rclone URI (:gcs:bucket/path)
   - An archive URL (.tgz, .zip)
 
-The installed name defaults to the source directory name, override with --name.
+The installed name is, in order of precedence: --name; the "name" field in
+the source's config.yaml; its "harness" field; the source directory name.
+
+Without --global the config is installed into the current project (locally,
+or in the project's scope on the Hub when Hub mode is enabled); with
+--global it is installed globally. If a harness-config with the same name
+already exists in the target scope, install fails unless --force is given.
 
 Examples:
   scion harness-config install https://github.com/org/repo/tree/main/harness-configs/my-config
@@ -98,7 +105,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if hubCtx != nil {
-		return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness)
+		return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness, force)
 	}
 
 	return installLocally(name, localSourcePath, gp, force, hcDir.Config.Harness)
@@ -164,18 +171,27 @@ func normalizeHarnessConfigSourceURL(raw string) string {
 	return s
 }
 
-func installToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
+func installToHub(hubCtx *HubContext, name, localPath, harnessType string, force bool) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	scope := templateScopeFromGlobalFlag()
-	scopeID := ""
+	scope, scopeID, err := harnessConfigHubScope(hubCtx)
+	if err != nil {
+		return err
+	}
 
-	if !globalMode {
-		projectID, err := GetProjectID(hubCtx)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project for Hub install: %w", err)
-		}
-		scopeID = projectID
+	// Match local-mode --force semantics: refuse to replace an existing
+	// config of the same name in the target scope unless --force is given.
+	// syncHarnessConfigToHub itself always updates in place (that is what
+	// 'sync' is for), so the check lives here in the install caller.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	existing, err := findHubHarnessConfig(ctx, hubCtx, name, scope, scopeID)
+	cancel()
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to check for existing harness-config: %w", err))
+	}
+	if existing != nil && !force {
+		return fmt.Errorf("harness-config %q already exists on the Hub in scope %s (ID: %s); use --force to overwrite it",
+			name, harnessConfigScopeLabel(scope, scopeID), existing.ID)
 	}
 
 	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType)
@@ -243,5 +259,5 @@ func deriveHarnessConfigName(source string) string {
 
 func init() {
 	harnessConfigInstallCmd.Flags().String("name", "", "Override the installed harness-config name")
-	harnessConfigInstallCmd.Flags().Bool("force", false, "Overwrite an existing local harness-config")
+	harnessConfigInstallCmd.Flags().Bool("force", false, "Overwrite an existing harness-config with the same name in the target scope (local or Hub)")
 }

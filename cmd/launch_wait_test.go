@@ -425,7 +425,7 @@ func TestStartAgentViaHub_SendsOptInAndOldHubSyncAnswerUnchanged(t *testing.T) {
 
 	var err error
 	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "do it", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "do it", false, nil) })
 	})
 	require.NoError(t, err)
 	require.Len(t, hub.createReqs, 1)
@@ -446,7 +446,7 @@ func TestStartAgentViaHub_EndedLaunchIsSynchronous(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
 	_ = captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 0, hub.getsAfterCR)
@@ -468,7 +468,7 @@ func TestStartAgentViaHub_AsyncWaitsUntilRunning(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
 	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hub.getsAfterCR)
@@ -487,7 +487,7 @@ func TestStartAgentViaHub_AsyncFailure(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
 	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	var failed *launchFailedError
 	require.ErrorAs(t, err, &failed)
@@ -508,7 +508,7 @@ func TestStartAgentViaHub_InFlight200WithWarningsWaits(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
 	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "new task", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "new task", false, nil) })
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, hub.getsAfterCR)
@@ -522,7 +522,7 @@ func TestStartAgentViaHub_NoWaitReturnsAfterAdmission(t *testing.T) {
 	startNoWait = true
 	var err error
 	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 0, hub.getsAfterCR)
@@ -539,7 +539,7 @@ func TestStartAgentViaHub_WaitTimeout(t *testing.T) {
 	startWaitTimeout = 50 * time.Millisecond
 	var err error
 	_ = captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	var timeout *launchWaitTimeoutError
 	require.ErrorAs(t, err, &timeout)
@@ -557,7 +557,7 @@ func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
 	_ = captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	var failed *launchFailedError
 	require.ErrorAs(t, err, &failed)
@@ -581,7 +581,7 @@ func TestStartAgentViaHub_JSONOutputStaysClean(t *testing.T) {
 	var err error
 	var stdout string
 	stderr := captureStderr(t, func() {
-		stdout = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		stdout = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	var result ActionResult
@@ -691,7 +691,7 @@ func TestFinishHubStart_FinalizeWaitsOnOldHub(t *testing.T) {
 	var err error
 	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -712,7 +712,7 @@ func TestFinishHubStart_FinalizeBudgetFromFirstGet(t *testing.T) {
 	start := time.Now()
 	_ = captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(activeLaunch("", 3, nil)), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(activeLaunch("", 3, nil)), nil, true)
 		})
 	})
 	var timeout *launchWaitTimeoutError
@@ -729,7 +729,7 @@ func TestFinishHubStart_FinalizeNoWaitReportsCurrentPhase(t *testing.T) {
 	var err error
 	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -749,7 +749,7 @@ func TestFinishHubStart_FinalizeNoWaitFetchFailsOmitsPhase(t *testing.T) {
 	var stdout string
 	_ = captureStderr(t, func() {
 		stdout = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -776,7 +776,7 @@ func TestStartAgentViaHub_AttachOverridesNoWait(t *testing.T) {
 	attach, startNoWait = true, true
 	var err error
 	_ = captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	// The attach step itself stops at the token gate in this test.
 	require.Error(t, err)
@@ -795,7 +795,7 @@ func TestStartAgentViaHub_AttachWithJSONDoesNotWait(t *testing.T) {
 	var err error
 	var stdout string
 	_ = captureStderr(t, func() {
-		stdout = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		stdout = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 0, hub.getsAfterCR, "JSON output returns after the JSON document, without waiting")
@@ -814,7 +814,7 @@ func TestStartAgentViaHub_NoWaitJSONIncludesLaunch(t *testing.T) {
 	var err error
 	var stdout string
 	_ = captureStderr(t, func() {
-		stdout = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+		stdout = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
 	var result ActionResult
@@ -862,7 +862,7 @@ func TestStartAgentViaHub_WaitReleasesSignalHandler(t *testing.T) {
 			hubCtx := setupLaunchStartTest(t, hub)
 			var err error
 			_ = captureStderr(t, func() {
-				_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+				_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 			})
 			if tc.wantErr {
 				require.Error(t, err)
@@ -893,7 +893,7 @@ func TestFinishHubStart_JSONAttachAfterFinalizeAttaches(t *testing.T) {
 	var stdout string
 	_ = captureStderr(t, func() {
 		stdout = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	// The attach step stops at the token gate in this test.

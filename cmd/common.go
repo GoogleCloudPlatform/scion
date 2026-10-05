@@ -379,23 +379,92 @@ func PrintUsingHub(endpoint string) {
 	fmt.Fprintf(os.Stderr, "Using hub: %s\n", endpoint)
 }
 
-// wrapHubError wraps a Hub error with guidance to disable Hub integration.
-// When running inside a hub-managed agent, the local-only mode hint is
-// suppressed because disabling the Hub would break orchestration connectivity.
+// localOnlyHint is appended to hub errors where switching to local-only mode
+// is a plausible remedy (the hub is unreachable or failing).
+const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
+
+// hubError marks an error that has been through wrapHubError. Error() is the
+// fully rendered message (including any hint); Unwrap exposes the original
+// cause so callers can still use errors.Is / errors.As on it. Execute uses the
+// marker to suppress the Usage block for hub failures, which are runtime
+// errors rather than usage errors.
+type hubError struct {
+	msg string
+	err error
+}
+
+func (e *hubError) Error() string { return e.msg }
+func (e *hubError) Unwrap() error { return e.err }
+
+// isHubFailure reports whether err came from talking to the Hub: it went
+// through wrapHubError, it is a Hub launch outcome (launchFailedError,
+// launchWaitTimeoutError, launchWaitInterruptedError), or it wraps a
+// structured *apiclient.APIError.
+func isHubFailure(err error) bool {
+	var he *hubError
+	if errors.As(err, &he) {
+		return true
+	}
+	// Launch outcomes reported by the Hub (an incomplete or failed create,
+	// a wait that timed out or was interrupted) are runtime results, not
+	// usage errors, even though they do not wrap an APIError.
+	var lf *launchFailedError
+	var lt *launchWaitTimeoutError
+	var li *launchWaitInterruptedError
+	if errors.As(err, &lf) || errors.As(err, &lt) || errors.As(err, &li) {
+		return true
+	}
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr)
+}
+
+// wrapHubError annotates an error from a Hub operation with user guidance.
+//
+//   - 401: replaced with a "login with scion hub auth login" hint (or, inside a
+//     hub-managed agent, a credentials-rejected message that keeps the cause).
+//   - Connectivity failures (anything that is not an *apiclient.APIError, e.g.
+//     a transport error or timeout) and 5xx responses: the "scion hub disable"
+//     local-only hint is appended, since the hub being down is the case where
+//     falling back to local mode can help.
+//   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
+//     hub answered and the message is about the request, so suggesting that
+//     the user disable the hub would be misleading noise.
+//
+// Inside a hub-managed agent the local-only hint is never added, because
+// disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *hubError
+	if errors.As(err, &already) {
+		// Already annotated further down the call chain; don't add a
+		// second hint.
+		return err
+	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
 		// hub-managed agent cannot run `scion hub auth login` and must not be
 		// told to. Keep the underlying error instead of discarding it.
 		if config.IsHubManagedAgent() {
-			return fmt.Errorf("hub rejected this agent's credentials: %w", err)
+			return &hubError{msg: "hub rejected this agent's credentials: " + err.Error(), err: err}
 		}
-		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
+		return &hubError{msg: "authentication failed, login to hub with 'scion hub auth login'", err: err}
 	}
-	if config.IsHubManagedAgent() {
-		return err
+	if config.IsHubManagedAgent() || !shouldSuggestLocalOnly(err) {
+		return &hubError{msg: err.Error(), err: err}
 	}
-	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
+	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+}
+
+// shouldSuggestLocalOnly reports whether the local-only hint is relevant for
+// err: true for connectivity failures (no structured API response) and 5xx.
+func shouldSuggestLocalOnly(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	return apiErr.IsServerError()
 }
 
 // GetProjectID looks up the project ID from HubContext or settings.
@@ -584,7 +653,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	if hubCtx != nil {
-		return startAgentViaHub(hubCtx, agentName, task, resume, inlineCfg)
+		return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
 	}
 
 	// Local mode
@@ -864,7 +933,137 @@ func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
 	return lines
 }
 
-func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
+// printHubWorkspaceSource prints where the hub gets the agent workspace from
+// for a git-based project. It mirrors the hub's provisioning decision
+// (pkg/hub/handlers_agent_create_helpers.go): shared-workspace projects mount
+// the shared workspace and are not cloned; every other git project is cloned
+// from the URL the hub resolves (same normalization, ptone/scion#1915).
+func printHubWorkspaceSource(project *hubclient.Project) {
+	if project.GitRemote == "" {
+		return
+	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeShared {
+		fmt.Fprintf(os.Stderr, "Using hub, shared workspace for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
+		return
+	}
+	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
+	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
+}
+
+// hubCloneTransportNote describes how the hub clones cloneURL (as resolved by
+// util.ResolveCloneURL), for the "Using hub, cloning repo" log line. The
+// broker's git credential helper supplies GITHUB_TOKEN for HTTP(S) clones
+// only.
+func hubCloneTransportNote(cloneURL string) string {
+	lower := strings.ToLower(cloneURL)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		return "Hub mode uses HTTPS clone with GITHUB_TOKEN"
+	case strings.HasPrefix(lower, "http://"):
+		return "Hub mode uses plain HTTP clone with GITHUB_TOKEN"
+	case strings.HasPrefix(lower, "ssh://"), strings.HasPrefix(cloneURL, "git@"):
+		return "Hub mode uses SSH clone; GITHUB_TOKEN is not used"
+	case strings.HasPrefix(lower, "git://"):
+		return "Hub mode uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
+	default:
+		return "Hub mode clones this path on the runtime broker"
+	}
+}
+
+// hubStartImpliesResume reports whether `scion start` on an existing hub agent
+// in the given phase should be sent as a resume request. Suspended agents
+// resume their session; stopped agents restart in place with a fresh session
+// (the hub's resume-in-place path). Error-phase agents are deliberately not
+// included: the hub only restarts them in place with --force
+// (resumeInPlaceDecision), so `start` on them still reports a conflict.
+func hubStartImpliesResume(phase string) bool {
+	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped)
+}
+
+// hubCreateReusesExistingAgent mirrors the hub's handleExistingAgent decision
+// tree (pkg/hub/handlers_agent_create_helpers.go) and reports whether a create
+// request for an agent already in the given phase will start, resume or
+// restart that agent in place rather than create a new one. On those paths the
+// hub applies only the task and attach mode; all other create configuration
+// is ignored.
+func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
+	switch phase {
+	case string(state.PhaseSuspended), string(state.PhaseCreated):
+		return true
+	case string(state.PhaseStopped):
+		return resume
+	case string(state.PhaseError):
+		return resume && force
+	default:
+		// Not found, running (conflict), provisioning (deleted and
+		// re-created by env-gather, so flags do apply), or unknown.
+		return false
+	}
+}
+
+// hubStartActionWord returns the verb printed before a hub start request so it
+// reflects what the hub will actually do with an agent in the given phase.
+func hubStartActionWord(phase string, resume, force bool) string {
+	switch {
+	case phase == string(state.PhaseStopped) && resume:
+		// The hub restarts a stopped agent with a fresh harness session.
+		return "Restarting"
+	case resume && force:
+		return "Force-resuming"
+	case resume:
+		return "Resuming"
+	default:
+		return "Starting"
+	}
+}
+
+// configFlagsNotAppliedToExistingAgent lists the start/resume flags that carry
+// agent configuration. When the hub reuses an existing agent in place it
+// applies only the task and --attach, so explicitly setting any of these has
+// no effect.
+var configFlagsNotAppliedToExistingAgent = []string{
+	"type", "harness-config", "harness", "harness-auth", "image", "model",
+	"thinking-level", "config", "broker", "label", "role", "message-mode",
+	"branch", "workspace", "service-account", "enable-telemetry",
+	"disable-telemetry", "no-auth", "profile",
+}
+
+// warnFlagsIgnoredForExistingAgent prints one stderr warning naming the
+// configuration flags the user explicitly set that the hub will not apply
+// because the agent already exists and is being reused in place.
+func warnFlagsIgnoredForExistingAgent(cmd *cobra.Command, agentName, phase string) {
+	if cmd == nil {
+		return
+	}
+	var ignored []string
+	noAuthIgnored := false
+	for _, name := range configFlagsNotAppliedToExistingAgent {
+		// cmd.Flag also finds inherited persistent flags (--profile).
+		f := cmd.Flag(name)
+		if f == nil || !f.Changed {
+			continue
+		}
+		ignored = append(ignored, "--"+name)
+		if name == "no-auth" {
+			noAuthIgnored = true
+		}
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: agent '%s' already exists (phase: %s) and is reused in place; these flags are not applied to an existing agent: %s\n",
+		agentName, phase, strings.Join(ignored, ", "))
+	if noAuthIgnored {
+		fmt.Fprintf(os.Stderr, "  --no-auth is not applied when resuming or restarting an existing agent (see ptone/scion#1855); delete and re-create the agent to apply it.\n")
+	}
+}
+
+// startAgentViaHub creates/starts (or resumes/restarts in place) an agent via
+// the Hub. cmd is used only to detect which flags the user explicitly set (for
+// the "not applied to an existing agent" warning); it may be nil.
+func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -880,13 +1079,8 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
-		if projectErr == nil && project != nil && project.GitRemote != "" {
-			cloneURL := project.Labels[store.LabelCloneURL]
-			if cloneURL == "" {
-				cloneURL = "https://" + project.GitRemote + ".git"
-			}
-			fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
-			fmt.Fprintf(os.Stderr, "  (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)\n")
+		if projectErr == nil && project != nil {
+			printHubWorkspaceSource(project)
 		}
 	}
 
@@ -944,6 +1138,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
 		MessageMode:     messageModeFlag,
+		NoAuth:          noAuth,
 		// Opt in to a non-blocking launch; the CLI waits for it below. A
 		// Hub without async launch ignores this and answers synchronously.
 		AcceptAsyncLaunch: true,
@@ -1040,31 +1235,32 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Check if the agent is suspended on the hub; if so, start implicitly
-	// resumes the session. This check is best-effort — if it fails (agent
-	// doesn't exist yet), we fall through to "Starting".
-	if !resume {
-		suspendCheckStart := time.Now()
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
-		checkCancel()
-		if debugMode {
-			util.Debugf("[startup] suspend check completed in %s (err=%v)", time.Since(suspendCheckStart), getErr)
-		}
-		if getErr == nil && existing != nil && existing.Phase == string(state.PhaseSuspended) {
-			resume = true
-			req.Resume = true
-		}
+	// Check whether the agent already exists on the hub. A suspended or
+	// stopped agent is resumed/restarted in place (parity with local mode and
+	// `scion resume`, ptone/scion#1911). This check is best-effort — if it
+	// fails (agent doesn't exist yet), we fall through to "Starting".
+	existingCheckStart := time.Now()
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
+	checkCancel()
+	if debugMode {
+		util.Debugf("[startup] existing-agent check completed in %s (err=%v)", time.Since(existingCheckStart), getErr)
 	}
+	existingPhase := ""
+	if getErr == nil && existing != nil {
+		existingPhase = existing.Phase
+	}
+	if !resume && hubStartImpliesResume(existingPhase) {
+		resume = true
+		req.Resume = true
+	}
+	// Warn about flags the hub will not apply, but only once the hub has
+	// accepted the request: a refused start must not claim the agent was
+	// reused.
+	reusesExisting := hubCreateReusesExistingAgent(existingPhase, req.Resume, req.ForceResume)
 
 	if !isJSONOutput() {
-		action := "Starting"
-		if resume {
-			action = "Resuming"
-		}
-		if resume && forceResume {
-			action = "Force-resuming"
-		}
+		action := hubStartActionWord(existingPhase, resume, req.ForceResume)
 		fmt.Printf("%s agent '%s'...\n", action, agentName)
 	}
 
@@ -1077,6 +1273,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			return incompleteCreateError(agentName, apiErr)
 		}
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
+	}
+	if reusesExisting {
+		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhase)
 	}
 
 	// Debug: log the response from Hub
@@ -1210,15 +1409,20 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		workspaceFinalized = true
 	}
 
-	return finishHubStart(hubCtx, projectID, agentName, resume, resp, remainingWarnings, workspaceFinalized)
+	// A stopped agent is restarted in place with a fresh session; report it
+	// with the same word as the "Restarting agent" line above.
+	restarted := hubStartActionWord(existingPhase, resume, req.ForceResume) == "Restarting"
+	return finishHubStart(hubCtx, projectID, agentName, resume, restarted, resp, remainingWarnings, workspaceFinalized)
 }
 
 // finishHubStart completes a Hub start after the create (and any workspace
 // finalize): it waits for the launch when needed, reports the result, and
-// attaches with --attach. textWarnings are the create warnings still to
-// print in text output (those not already shown as workspace notices); JSON
-// output carries all of resp.Warnings.
-func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
+// attaches with --attach. restarted reports a stopped agent restarted in
+// place, so the success line matches the "Restarting" action word.
+// textWarnings are the create warnings still to print in text output (those
+// not already shown as workspace notices); JSON output carries all of
+// resp.Warnings.
+func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, restarted bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
 	// Decide whether to wait for the agent to reach running:
 	//   - after a workspace finalize, which dispatches the start;
 	//   - when the Hub accepted the create for an asynchronous launch;
@@ -1278,7 +1482,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 	}
 
 	displayStatus := "started"
-	if resume {
+	switch {
+	case restarted:
+		displayStatus = "restarted"
+	case resume:
 		displayStatus = "resumed"
 	}
 	launching := !needWait && launchActive(finalAgent)
