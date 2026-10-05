@@ -18,6 +18,8 @@ type recordedHubRequest struct {
 	Path       string
 	RawQuery   string
 	LinkedUser string
+	// SignedHeaders is the X-Scion-Signed-Headers value.
+	SignedHeaders string
 }
 
 // fakeHub is a minimal hub API used by Slack tests. Each route returns the
@@ -40,10 +42,11 @@ func newFakeHub(t *testing.T) *fakeHub {
 	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.requests = append(h.requests, recordedHubRequest{
-			Method:     r.Method,
-			Path:       r.URL.Path,
-			RawQuery:   r.URL.RawQuery,
-			LinkedUser: r.Header.Get("X-Scion-On-Behalf-Of"),
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			RawQuery:      r.URL.RawQuery,
+			LinkedUser:    r.Header.Get("X-Scion-On-Behalf-Of"),
+			SignedHeaders: r.Header.Get("X-Scion-Signed-Headers"),
 		})
 		resp, ok := h.routes[r.Method+" "+r.URL.Path]
 		h.mu.Unlock()
@@ -89,6 +92,7 @@ func TestHubClient_ListAgents_RequestWithLinkedUser(t *testing.T) {
 	reqs := hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 }
 
 func TestHubClient_ListAgents_RequestWithoutLinkedUser(t *testing.T) {
@@ -101,6 +105,7 @@ func TestHubClient_ListAgents_RequestWithoutLinkedUser(t *testing.T) {
 	reqs := hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Empty(t, reqs[0].LinkedUser)
+	assert.Empty(t, reqs[0].SignedHeaders)
 }
 
 func TestHubClient_ListUserProjects_RequestWithLinkedUser(t *testing.T) {
@@ -115,11 +120,6 @@ func TestHubClient_ListUserProjects_RequestWithLinkedUser(t *testing.T) {
 	reqs := hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 	assert.Empty(t, reqs[0].RawQuery, "the user's projects come from the linked user, not a query filter")
-}
-
-func TestLinkedUserPrincipal(t *testing.T) {
-	assert.Equal(t, "", linkedUserPrincipal(nil))
-	assert.Equal(t, "", linkedUserPrincipal(&SlackUserMapping{SlackUserID: "U1"}))
-	assert.Equal(t, "user:a@example.com", linkedUserPrincipal(&SlackUserMapping{ScionEmail: "a@example.com"}))
 }

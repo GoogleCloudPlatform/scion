@@ -111,6 +111,7 @@ func TestHandleAgents_RequestWithLinkedUser(t *testing.T) {
 	reqs := f.hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 	assert.Contains(t, f.slack.lastText(t), "alpha")
 }
 
@@ -237,4 +238,36 @@ func TestHandleSetup_StaleAccountLinkShowsReRegisterText(t *testing.T) {
 	f.run(t, "setup")
 
 	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleAgents_LinkWithoutEmailAsksToReRegister(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "")
+
+	f.run(t, "agents")
+
+	assert.Empty(t, f.hub.recorded(), "no hub request without a linked Scion email")
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleStatus_LinkWithoutEmailAsksToReRegister(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "")
+
+	f.run(t, "status alpha")
+
+	assert.Empty(t, f.hub.recorded(), "no hub request without a linked Scion email")
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleStatus_WithoutLinkedAccountAsksToRegister(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+
+	f.run(t, "status alpha")
+
+	assert.Empty(t, f.hub.recorded(), "no hub request without a linked account")
+	assert.Contains(t, f.slack.lastText(t), "/scion register")
 }

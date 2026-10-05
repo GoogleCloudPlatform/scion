@@ -55,15 +55,6 @@ type HubClient interface {
 // headerOnBehalfOf names the linked Scion user a request is made for.
 const headerOnBehalfOf = "X-Scion-On-Behalf-Of"
 
-// linkedUserPrincipal returns the "user:<email>" value for a Slack user's
-// linked Scion account, or "" when the mapping has no email.
-func linkedUserPrincipal(m *SlackUserMapping) string {
-	if m == nil || m.ScionEmail == "" {
-		return ""
-	}
-	return "user:" + m.ScionEmail
-}
-
 // setLinkedUser adds the linked user to a hub request. It must be called
 // before the request is signed.
 func setLinkedUser(req *http.Request, linkedUser string) {
