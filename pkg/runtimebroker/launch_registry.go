@@ -43,6 +43,10 @@ type launchRecord struct {
 	AgentID  string
 	Kind     string
 	Deadline time.Time
+	// RunID is the Hub-minted run this launch starts (ptone/scion#2550),
+	// or "" when the request carried none. Set before Begin and never
+	// changed, so it needs no lock.
+	RunID string
 
 	// Seq is the last report sequence number sent for this launch.
 	Seq int64
@@ -174,6 +178,27 @@ func (r *launchRegistry) CancelLocal(key launchKey) {
 	if rec != nil {
 		rec.CancelLocal()
 	}
+}
+
+// CancelLocalForRun is CancelLocal for a delete that names run runID
+// (ptone/scion#2550): it leaves alone a launch of a different run, so a
+// stale delete for an earlier run cannot cancel the start of the agent
+// recreated under the same name. A launch or a delete without a run ID
+// matches as before.
+func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	rec := r.records[key]
+	r.mu.Unlock()
+	if rec == nil {
+		return
+	}
+	if runID != "" && rec.RunID != "" && rec.RunID != runID {
+		return
+	}
+	rec.CancelLocal()
 }
 
 // Finish closes rec's done channel and removes it from the registry if it is

@@ -106,6 +106,8 @@ const (
 	FieldLaunchAsyncOptIn = "launch_async_opt_in"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldRunID holds the string denoting the run_id field in the database.
+	FieldRunID = "run_id"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -225,6 +227,7 @@ var Columns = []string{
 	FieldReincarnationUpdatedAt,
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
+	FieldRunID,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -288,6 +291,8 @@ var (
 	DefaultLaunchAsyncOptIn bool
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultRunID holds the default value on creation for the "run_id" field.
+	DefaultRunID string
 	// DefaultLaunchState holds the default value on creation for the "launch_state" field.
 	DefaultLaunchState string
 	// DefaultLaunchEndReason holds the default value on creation for the "launch_end_reason" field.
@@ -591,6 +596,11 @@ func ByLaunchAsyncOptIn(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchID orders the results by the launch_id field.
 func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
+}
+
+// ByRunID orders the results by the run_id field.
+func ByRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunID, opts...).ToFunc()
 }
 
 // ByLaunchState orders the results by the launch_state field.

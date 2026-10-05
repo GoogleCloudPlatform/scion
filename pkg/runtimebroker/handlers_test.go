@@ -70,6 +70,7 @@ type mockManager struct {
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
 	lastDeleteContainerID string
+	lastDeleteRunID       string
 	lastDeleteFiles       bool
 	lastStopAgentID       string
 	// lastStartCtx captures the context passed to Start, so tests can assert
@@ -134,6 +135,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 		ID:    "test-container-id",
 		Name:  opts.Name,
 		Phase: "running",
+		RunID: opts.RunID, // as pkg/agent.Start labels the new entry
 	}
 	m.mu.Lock()
 	m.agents = append(m.agents, *agent)
@@ -158,12 +160,13 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 	return true, nil
 }
 
-func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
 	m.lastDeleteAgentID = agentName
-	m.lastDeleteContainerID = containerID
+	m.lastDeleteContainerID = ref.ID
+	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
