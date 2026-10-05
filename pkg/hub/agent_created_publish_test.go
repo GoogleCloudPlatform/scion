@@ -90,7 +90,7 @@ type raceAsyncClient struct {
 	deleteFn func(ctx context.Context) error
 }
 
-func (c *raceAsyncClient) DeleteAgent(ctx context.Context, _, _, _, _ string, _, _, _ bool, _ time.Time) error {
+func (c *raceAsyncClient) DeleteAgent(ctx context.Context, _, _, _, _ string, _ DeleteAgentOptions) error {
 	c.mu.Lock()
 	fn := c.deleteFn
 	c.mu.Unlock()
