@@ -14,7 +14,11 @@
 
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+import (
+	"slices"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+)
 
 // remoteHubAgentDefaults converts the hub's operational agent_defaults section
 // into the wire form sent to a runtime broker, or nil when the hub has no
@@ -40,9 +44,13 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 // limit/resource fields it is sent in file mode too: no broker reads it from
 // its own settings.yaml, so the hub is its only source, and it lands at the
 // broker's lowest env tier (buildAgentEnv's defaultEnv) in every mode.
-func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool) *RemoteHubAgentDefaults {
+//
+// experiments lists the enabled dispatch experiments (see
+// HTTPAgentDispatcher.dispatchExperiments); like the auto-expose default it is
+// sent in every mode, since the hub is the only place it is decided.
+func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
-		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil {
+		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil && len(experiments) == 0 {
 		return nil
 	}
 	out := &RemoteHubAgentDefaults{
@@ -50,6 +58,7 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 		MaxModelCalls:   d.DefaultMaxModelCalls,
 		MaxDuration:     d.DefaultMaxDuration,
 		AutoExposePorts: copyBoolPtr(autoExposePorts),
+		Experiments:     slices.Clone(experiments),
 	}
 	if d.DefaultResources != nil {
 		// Copy the pointee: hubAgentDefaults() already returns a deep copy, but
@@ -62,14 +71,14 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 }
 
 // startHubAgentDefaults is the hub-defaults wire value for a start or restart
-// dispatch: the auto-expose default only, or nil when the hub has none. The
-// limit/resource fields stay create/provision-only, so a start never changes
-// which tier supplies them.
-func startHubAgentDefaults(autoExposePorts *bool) *RemoteHubAgentDefaults {
-	if autoExposePorts == nil {
+// dispatch: the auto-expose default and the enabled dispatch experiments
+// only, or nil when there are neither. The limit/resource fields stay
+// create/provision-only, so a start never changes which tier supplies them.
+func startHubAgentDefaults(autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
+	if autoExposePorts == nil && len(experiments) == 0 {
 		return nil
 	}
-	return &RemoteHubAgentDefaults{AutoExposePorts: copyBoolPtr(autoExposePorts)}
+	return &RemoteHubAgentDefaults{AutoExposePorts: copyBoolPtr(autoExposePorts), Experiments: slices.Clone(experiments)}
 }
 
 func copyBoolPtr(b *bool) *bool {
