@@ -236,6 +236,8 @@ The WebSocket close frame that ends a terminal attach carries a code that tells 
 ### State Reporting
 Agents use the `sciontool` utility to report their state back to the Hub via the `POST /api/v1/agents/:id/status` endpoint. State updates include the agent's current phase, activity, and contextual detail (e.g., which tool is executing). This happens at high frequency during task execution.
 
+The endpoint answers `200 OK` with `{"applied": true}` when the update was written. It answers `{"applied": false, "reason": "..."}` when the Hub accepted the report but wrote nothing because the agent's status is owned by another operation. `reason` is either `delete_in_progress` (the agent is being deleted or is soft-deleted) or `reincarnation_in_flight` (a `scion reincarnate` migration owns the agent). In a report that mixes those owned fields (`phase`, `activity`, `message`, `exitCode`, `exitReason`) with other fields such as `taskSummary`, the owned fields are dropped, the rest are written, and the answer is `applied: true`.
+
 ### Log Streaming
 Logs are collected by the Runtime Broker and can be streamed in two ways:
 1. **Real-time**: Streamed via WebSocket from the Broker to the Hub, then to the Dashboard/CLI.
