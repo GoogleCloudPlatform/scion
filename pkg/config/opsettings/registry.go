@@ -459,6 +459,7 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"public_url":     getSchemaProperty(root, "server", "hub", "public_url"),
+				"hub_name":       getSchemaProperty(root, "server", "hub", "hub_name"),
 				"image_registry": getSchemaProperty(root, "image_registry"),
 			},
 			"additionalProperties": false,
