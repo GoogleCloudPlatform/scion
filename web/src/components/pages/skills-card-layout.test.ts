@@ -16,28 +16,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { render, type TemplateResult } from 'lit';
-
-/** Leaf style rules from Lit cssText. */
-function styleRules(cssText: string): Map<string, string> {
-  const rules = new Map<string, string>();
-  const stack: string[] = [];
-  let buf = '';
-  for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
-    if (ch === '{') {
-      stack.push(buf.trim());
-      buf = '';
-    } else if (ch === '}') {
-      const selector = stack.pop() ?? '';
-      if (!selector.startsWith('@')) {
-        for (const part of selector.split(',')) rules.set(part.trim(), buf);
-      }
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  return rules;
-}
+import { elementStyleRules } from './__fixtures__/card-layout.js';
 
 type SkillPage = HTMLElement & {
   renderSkillCard(item: Record<string, unknown>): TemplateResult;
@@ -49,11 +28,8 @@ describe('skill card layout', () => {
 
   beforeAll(async () => {
     await import('./skills.js');
-    const ctor = customElements.get('scion-page-skills') as unknown as {
-      styles: Array<{ cssText: string }>;
-    };
-    rules = styleRules(ctor.styles.map((s) => s.cssText).join('\n'));
-    page = document.createElement('scion-page-skills') as SkillPage;
+    rules = elementStyleRules('scion-page-skills');
+    page = document.createElement('scion-page-skills') as unknown as SkillPage;
   });
 
   it('renders the skill name in the span the shared wrapping rules apply to', () => {
