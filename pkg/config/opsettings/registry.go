@@ -665,9 +665,15 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 // modified.
 func withStringOnlyIntervals(node map[string]interface{}) map[string]interface{} {
 	out := withoutProperties(node)
-	props, _ := out["properties"].(map[string]interface{})
+	props, ok := out["properties"].(map[string]interface{})
+	if !ok || props == nil {
+		return out // unexpected shape: leave the schema as it is
+	}
 	for _, key := range []string{"refresh_interval", "debounce_interval"} {
-		prop, _ := props[key].(map[string]interface{})
+		prop, ok := props[key].(map[string]interface{})
+		if !ok || prop == nil {
+			continue
+		}
 		branches, _ := prop["anyOf"].([]interface{})
 		for _, b := range branches {
 			bm, ok := b.(map[string]interface{})
