@@ -2388,6 +2388,17 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 				return
 			}
 		}
+		// The global-directory check needs the project; a lookup failure
+		// fails the request rather than skipping the check.
+		target, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
+			return
+		}
 		info, err := os.Stat(cleanPath)
 		if err != nil || !info.IsDir() {
 			ValidationError(w, "localPath must be an existing directory", nil)
@@ -2414,7 +2425,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	// so agents and templates directories exist before the first agent starts.
 	if cleanPath != "" {
 		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",
 				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
 		}

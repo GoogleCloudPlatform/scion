@@ -1247,3 +1247,54 @@ func TestHandlePutServerConfig_SharedDirStorage_MergedResultAccepted(t *testing.
 		})
 	}
 }
+
+// File-mode PUT persists home_storage_backend and home_storage_leaf on
+// runtime and profile entries and server.home_storage, and rejects unknown
+// values naming the key.
+func TestHandlePutServerConfig_HomeStorage(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv, `{
+		"server": {"home_storage": {"leaf": "pod", "stop_grace_seconds": 40}},
+		"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "broker"}},
+		"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "nfs", "home_storage_leaf": "pod"}}
+	}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"home_storage_backend: nfs", "home_storage_leaf: broker", "home_storage_leaf: pod", "stop_grace_seconds: 40"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("settings.yaml should contain %q: %s", want, data)
+		}
+	}
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gs.ResolveHomeStorage("gke"); got.Backend != "nfs" || got.Leaf != "pod" {
+		t.Errorf("gke resolves to %+v, want nfs/pod", got)
+	}
+
+	for body, key := range map[string]string{
+		`{"profiles":{"gke":{"runtime":"k8s","home_storage_backend":"ceph"}}}`:  "profiles.gke.home_storage_backend",
+		`{"runtimes":{"k8s":{"type":"kubernetes","home_storage_leaf":"node"}}}`: "runtimes.k8s.home_storage_leaf",
+		`{"server":{"home_storage":{"backend":"NFS"}}}`:                         "server.home_storage.backend",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				t.Errorf("nothing should be persisted for an invalid value")
+			}
+		})
+	}
+}
