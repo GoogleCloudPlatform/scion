@@ -29,9 +29,9 @@ import (
 // Creates a new broker registration with join token.
 // Requires an authenticated user holding broker.create, presenting an
 // interactive session or a dev credential (see authorizeBrokerCreate);
-// broker on-behalf-of credentials are not admitted. This route is classified RouteBrokerHMAC in
-// route_metadata.go, so the permission check happens in-handler rather than
-// at the route guard.
+// broker on-behalf-of credentials are not admitted. This route is
+// classified RouteBrokerHMAC in route_metadata.go, so the permission check
+// happens in-handler rather than at the route guard.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -257,13 +257,12 @@ func (s *Server) requireUserCredentialKind(w http.ResponseWriter, r *http.Reques
 //
 // where the last two arms are evaluated only when the request credential
 // is an interactive session or a dev credential
-// (brokerUserCredentialKindAdmitted with allowUAT=false). A broker request
-// acting on behalf of a user and a user access token never use the
-// creator or super-admin arms. No user access token selector authorizes
-// rotation; scoped credentials never use the creator or super-admin arms.
-// The broker self arm depends only on the HMAC-verified broker identity,
-// so it admits a broker rotating its own secret whatever on-behalf-of
-// user the request names, and never admits another broker's ID.
+// (brokerUserCredentialKindAdmitted with allowUAT=false), so a broker
+// request acting on behalf of a user and a user access token never use
+// them. The broker self arm depends only on the HMAC-verified broker
+// identity, so it admits a broker rotating its own secret whatever
+// on-behalf-of user the request names, and never admits another broker's
+// ID.
 //
 // fetchBroker is only invoked when the earlier checks do not already grant
 // access, so callers that already have the broker record on hand can

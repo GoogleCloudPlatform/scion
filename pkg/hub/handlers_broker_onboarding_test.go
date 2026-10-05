@@ -220,3 +220,59 @@ func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "secretKey", "a denied response must not carry a secret")
 	assertBrokerSecretKey(t, s, target.ID, targetKey, "the target broker's secret must not change on a denied rotation")
 }
+
+// TestBrokerUserCredentialKindAdmitted pins the credential kinds admitted
+// for broker registration, re-registration and secret rotation. The kind
+// is read from the credential context and derived from the identity only
+// when the context carries no kind; the identity must agree with the kind
+// (a scoped user identity only with a user access token kind, and a user
+// access token kind only with a scoped user identity). Federated user
+// identities are not admitted.
+func TestBrokerUserCredentialKindAdmitted(t *testing.T) {
+	user := NewAuthenticatedUser("ck-user", "ck-user@example.com", "CK User", "member", "web")
+	dev := NewDevUser(DevUserConfig{Username: "ck-dev", DisplayName: "CK Dev", Email: "ck-dev@example.com"})
+	scoped := NewScopedUserIdentity(user, "ck-project", []string{"project:read"})
+	federated := NewFederatedUserIdentity("https://issuer.example.com", "ck-sub", "ck-fed@example.com", "CK Fed", "member", nil)
+	var typedNilUser *AuthenticatedUser
+
+	tests := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+		allowUAT bool
+		want     bool
+	}{
+		{name: "nil identity", identity: nil, kind: CredentialKindInteractive, allowUAT: true, want: false},
+		{name: "typed-nil identity", identity: typedNilUser, kind: CredentialKindInteractive, allowUAT: true, want: false},
+
+		{name: "user with empty kind derives interactive", identity: user, want: true},
+		{name: "dev user with empty kind derives dev", identity: dev, want: true},
+		{name: "scoped user with empty kind derives UAT, UAT not allowed", identity: scoped, allowUAT: false, want: false},
+		{name: "scoped user with empty kind derives UAT, UAT allowed", identity: scoped, allowUAT: true, want: true},
+		{name: "federated user with empty kind derives federation", identity: federated, want: false},
+
+		{name: "user with interactive kind", identity: user, kind: CredentialKindInteractive, want: true},
+		{name: "dev user with dev kind", identity: dev, kind: CredentialKindDev, want: true},
+		{name: "user with broker kind", identity: user, kind: CredentialKindBroker, allowUAT: true, want: false},
+		{name: "user with agent JWT kind", identity: user, kind: CredentialKindAgentJWT, allowUAT: true, want: false},
+		{name: "user with hub delivery kind", identity: user, kind: CredentialKindHubDelivery, allowUAT: true, want: false},
+		{name: "user with federation kind", identity: user, kind: CredentialKindFederation, allowUAT: true, want: false},
+		{name: "user with unknown kind", identity: user, kind: CredentialKind("ck-unknown"), allowUAT: true, want: false},
+		{name: "federated user with federation kind", identity: federated, kind: CredentialKindFederation, allowUAT: true, want: false},
+
+		{name: "scoped user with UAT kind, UAT not allowed", identity: scoped, kind: CredentialKindUAT, allowUAT: false, want: false},
+		{name: "scoped user with UAT kind, UAT allowed", identity: scoped, kind: CredentialKindUAT, allowUAT: true, want: true},
+		{name: "scoped user with interactive kind does not agree", identity: scoped, kind: CredentialKindInteractive, allowUAT: true, want: false},
+		{name: "user with UAT kind does not agree", identity: user, kind: CredentialKindUAT, allowUAT: true, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.kind != "" {
+				ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: tc.kind})
+			}
+			assert.Equal(t, tc.want, brokerUserCredentialKindAdmitted(ctx, tc.identity, tc.allowUAT))
+		})
+	}
+}
