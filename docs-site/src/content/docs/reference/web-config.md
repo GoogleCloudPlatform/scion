@@ -37,7 +37,9 @@ These variables are required for standard user login in production.
 | `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` | Comma-separated list of email domains allowed to sign in. |
 
 #### External OIDC Login Provider
-User login via an external OIDC provider (e.g. Okta, Keycloak) is configured in the `server.oidc_login` section of `settings.yaml` (`enabled`, `display_name`, `issuer_url`, `client_id`, `client_secret`, `scopes`). There are no working `SCION_SERVER_*` environment variables for these keys: names such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. See [Authentication](/scion/hosted/single-node/auth/) for an example.
+Configure user login via an external OIDC provider (e.g. Okta, Keycloak) in the `server.oidc_login` section of `settings.yaml` (`enabled`, `display_name`, `issuer_url`, `client_id`, `client_secret`, `scopes`). See [Authentication](/scion/hosted/single-node/auth/) for an example.
+
+Underscored names such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, and so on) take effect only when `settings.yaml` has a `server:` section. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 #### Development Authentication
 Used for local testing without setting up full OAuth.

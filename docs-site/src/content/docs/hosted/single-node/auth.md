@@ -126,7 +126,7 @@ server:
     scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
 ```
 
-These keys cannot be set through `SCION_SERVER_*` environment variables. Names such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one.
+Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
 If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.

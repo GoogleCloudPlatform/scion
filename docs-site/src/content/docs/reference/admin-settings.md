@@ -95,7 +95,7 @@ Seeds re-sync on restart for sections that haven't been admin-edited (seeded sec
 | `server.auth.default_user_role` | `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` |
 | `server.hub.auto_suspend_stalled` | `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED` |
 | `server.hub.soft_delete_retain_files` | `SCION_SEED_SERVER_HUB_SOFTDELETERETAINFILES` |
-| `server.hub.image_registry` | `SCION_SEED_SERVER_HUB_IMAGEREGISTRY` |
+| `image_registry` | `SCION_SEED_IMAGEREGISTRY` |
 | `telemetry.enabled` | `SCION_SEED_TELEMETRY_ENABLED` |
 | `server.github_app.webhooks_enabled` | `SCION_SEED_SERVER_GITHUBAPP_WEBHOOKSENABLED` |
 
