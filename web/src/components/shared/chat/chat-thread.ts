@@ -112,6 +112,13 @@ const SCROLL_BOTTOM_THRESHOLD = 80;
 /** How long a restored scroll position is held against late layout shifts. */
 const RESTORE_SETTLE_MS = 500;
 
+/**
+ * How far `scrollTop` may move from the value last written before the
+ * restore watch treats it as a user scroll. Fractional device pixel ratios
+ * can shift it by a sub-pixel amount with no scroll at all.
+ */
+const RESTORE_SCROLL_TOLERANCE_PX = 1;
+
 /** Small margin kept above the unread divider when it is anchored to the top. */
 const UNREAD_ANCHOR_MARGIN_PX = 16;
 
@@ -3087,7 +3094,8 @@ export class ScionChatThread extends LitElement {
    * markdown, fonts, an agent DM's inter-agent exchanges loading), which
    * would drift the view off the anchor. Re-apply it on every resize of the
    * list for `RESTORE_SETTLE_MS`, stopping early the moment the user scrolls
-   * (seen as `scrollTop` no longer being the value last written).
+   * (seen as `scrollTop` moving more than `RESTORE_SCROLL_TOLERANCE_PX`
+   * from the value last written).
    */
   private watchRestoreSettle(apply: () => number | null, written: number): void {
     this.cancelRestoreSettleWatch();
@@ -3096,7 +3104,7 @@ export class ScionChatThread extends LitElement {
     let last = written;
     const observer = new ResizeObserver(() => {
       const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
-      if (!scrollEl || scrollEl.scrollTop !== last) {
+      if (!scrollEl || Math.abs(scrollEl.scrollTop - last) > RESTORE_SCROLL_TOLERANCE_PX) {
         this.cancelRestoreSettleWatch();
         return;
       }

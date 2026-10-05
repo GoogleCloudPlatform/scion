@@ -6867,6 +6867,24 @@ describe('scion-chat-thread scroll position hand-over', () => {
       expect(watch().disconnected).toBe(true);
     });
 
+    it('rides out sub-pixel scrollTop drift (fractional DPR)', async () => {
+      const { scroller, watch } = await restored();
+      scroller().scrollTop = 430.5; // rounding, not a user scroll
+      shift = 200;
+      watch().fire();
+      expect(watch().disconnected).toBe(false);
+      expect(scroller().scrollTop).toBe(630);
+    });
+
+    it('still stops at a real scroll of a few dozen pixels', async () => {
+      const { scroller, watch } = await restored();
+      scroller().scrollTop = 470; // the user scrolls 40px
+      shift = 200;
+      watch().fire();
+      expect(scroller().scrollTop).toBe(470);
+      expect(watch().disconnected).toBe(true);
+    });
+
     it('stops after a short settle window', async () => {
       const { watch } = await restored();
       expect(watch().disconnected).toBe(false);
