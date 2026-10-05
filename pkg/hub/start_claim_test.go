@@ -330,7 +330,7 @@ type startBeforeStopClaimStore struct {
 }
 
 func (s startBeforeStopClaimStore) ClaimAgentStop(ctx context.Context, agentID, owner string, intentAt time.Time, ttl time.Duration) (store.StartClaim, error) {
-	if _, err := s.Store.ClaimAgentStart(ctx, agentID, "newer-hub", store.StartClaimUser, "", time.Minute); err != nil {
+	if _, err := s.ClaimAgentStart(ctx, agentID, "newer-hub", store.StartClaimUser, "", time.Minute); err != nil {
 		return store.StartClaim{}, err
 	}
 	return s.Store.ClaimAgentStop(ctx, agentID, owner, intentAt, ttl)

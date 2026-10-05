@@ -292,9 +292,9 @@ type swapClaimAfterListStore struct {
 func (s swapClaimAfterListStore) ListAgentsWithStartClaim(ctx context.Context) ([]*store.Agent, error) {
 	list, err := s.Store.ListAgentsWithStartClaim(ctx)
 	for _, a := range list {
-		_, rerr := s.Store.ReleaseUnconfirmedStart(ctx, a.ID, a.StartClaimID)
+		_, rerr := s.ReleaseUnconfirmedStart(ctx, a.ID, a.StartClaimID)
 		require.NoError(s.t, rerr)
-		_, cerr := s.Store.ClaimAgentStart(ctx, a.ID, "newer-hub", store.StartClaimUser, "", time.Minute)
+		_, cerr := s.ClaimAgentStart(ctx, a.ID, "newer-hub", store.StartClaimUser, "", time.Minute)
 		require.NoError(s.t, cerr)
 	}
 	return list, err
@@ -319,4 +319,25 @@ func TestStartClaimReaper_StopSkippedWhenClaimChanged(t *testing.T) {
 	f.srv.reapStartClaims(context.Background())
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(t, int32(0), d.stops.Load(), "a newer start's container is never stopped")
+}
+
+// A running status while the broker still lists the start in flight is not
+// a success: the start has not finished.
+func TestStartClaimReaper_RunningStatusWithStartInFlightIsNotSuccess(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	noObservationLag(t)
+	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+	ctx := context.Background()
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Heartbeat: true}))
+	f.send(brokerHeartbeatRequest{
+		Status:         store.BrokerStatusOnline,
+		Inventory:      completeInventory(),
+		Capabilities:   &store.BrokerCapabilities{StartsInFlight: true},
+		StartsInFlight: []brokerStartInFlight{{ProjectID: f.projectID, Slug: a.Slug}},
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "starting", ContainerStatus: "Pending", RuntimeTarget: "docker"},
+		}}},
+	})
+	f.srv.reapStartClaims(ctx)
+	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
 }
