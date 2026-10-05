@@ -571,6 +571,37 @@ func isBrokerRuntimeUnavailable(err error) bool {
 		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
 }
 
+// isRestartStopTolerable reports whether a restart's stop-leg error means the
+// agent has no running instance on its broker, so the start leg may proceed:
+// the broker's 404 agent_not_found or 409 agent_not_running answer. Any other
+// error, including a runtime_unavailable 503, leaves the old instance's state
+// unknown.
+func isRestartStopTolerable(err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.StatusCode {
+	case http.StatusNotFound:
+		return se.brokerErrorCode() == ErrCodeAgentNotFound
+	case http.StatusConflict:
+		return se.brokerErrorCode() == ErrCodeAgentNotRunning
+	}
+	return false
+}
+
+// restartStopFailedRetryAfter is the Retry-After sent when a restart is
+// aborted because its stop leg failed.
+const restartStopFailedRetryAfter = "30"
+
+// writeRestartStopFailed writes the retryable 503 for a restart aborted
+// because its stop leg failed and the start leg was not dispatched.
+func writeRestartStopFailed(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", restartStopFailedRetryAfter)
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+		"Restart not performed: the agent's current instance could not be stopped; retry later", nil)
+}
+
 // writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
 // an existing-agent operation as a retryable 503 (with Retry-After) instead of
 // the generic 502, and reports whether it did; for any other error it writes

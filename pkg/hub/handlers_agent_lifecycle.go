@@ -573,10 +573,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
-			// Stop errors are tolerated: the container may already be
-			// exited and some runtimes (podman) return non-standard
-			// errors for stopping non-running containers. The subsequent
-			// Start will handle cleanup of the exited container.
+			// The broker already answers a stop of an exited or absent
+			// container with success (runtimebroker stopAgent), so the
+			// start leg only runs once the old instance is known to be
+			// down (ptone/scion#2710).
 			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
 			// The broker has no runtime of the agent's recorded type
 			// registered (ptone/scion#2748): the agent may still be
@@ -587,8 +587,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			if stopErr != nil {
-				slog.Warn("Restart: stop dispatch failed, proceeding with start",
+				if !isRestartStopTolerable(stopErr) {
+					// The old instance may still be running (for example,
+					// the broker could not reach or resolve it), and a
+					// start now could leave two instances. Abort before
+					// the start leg; the agent row keeps its pre-restart
+					// phase and reservation.
+					slog.Warn("Restart: stop dispatch failed, not starting",
+						"agent_id", id, "error", stopErr)
+					writeRestartStopFailed(w)
+					return
+				}
+				// The broker reports no running instance: the stop's goal
+				// is met, so continue as after a clean stop.
+				slog.Info("Restart: agent not running on broker, proceeding with start",
 					"agent_id", id, "error", stopErr)
+				stopErr = nil
 			}
 			// The broker reservation is held across the restart
 			// (ptone/scion#1978). Releasing it after the stop leg and
