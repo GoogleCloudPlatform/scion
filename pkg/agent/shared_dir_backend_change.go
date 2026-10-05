@@ -246,15 +246,6 @@ type pendingSharedDirBackendChange struct {
 	createdProfile string
 }
 
-// savedAgentProfile returns the profile recorded for the agent before this
-// reprovision, or "" when none is recorded.
-func savedAgentProfile(opts api.StartOptions) string {
-	if info := getSavedAgentInfo(opts.Name, opts.ProjectPath); info != nil {
-		return info.Profile
-	}
-	return ""
-}
-
 // prepareSharedDirBackendChange loads what an explicit backend change needs
 // and validates it. A request that cannot be honoured is refused with
 // ErrReprovisionRefused, before anything is provisioned.
@@ -275,7 +266,7 @@ func prepareSharedDirBackendChange(projectDir, agentDir string, opts api.StartOp
 	if err != nil {
 		return nil, err
 	}
-	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec, createdProfile: savedAgentProfile(opts)}, nil
+	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec, createdProfile: GetSavedProfile(opts.Name, opts.ProjectPath)}, nil
 }
 
 // record writes the changed record. An agent without a record first gets

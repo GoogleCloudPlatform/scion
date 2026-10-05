@@ -184,10 +184,6 @@ broker checks.`,
 		if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
 			return err
 		}
-		if _, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD); err != nil {
-			return err
-		}
-
 		agentName, isSelf, err := resolveReincarnateTarget(args, os.Getenv("SCION_AGENT_NAME"), reincarnateHandoffFile != "", reincarnateDryRun)
 		if err != nil {
 			return err
@@ -244,7 +240,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
 		return err
 	}
-	// Checked before any hub request.
+	// The shared dir flags are checked before any agent request.
 	sharedDirBackends, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD)
 	if err != nil {
 		return err
