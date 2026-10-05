@@ -651,7 +651,10 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 
 // withStringOnlyIntervals returns a copy of the federation schema whose
 // refresh_interval and debounce_interval keep only their string anyOf
-// branch.
+// branch, with the parent's description carried over. The copy is shallow:
+// only the top-level map, the properties map and the two new interval maps
+// are new; everything else is shared with the root schema and must not be
+// modified.
 func withStringOnlyIntervals(node map[string]interface{}) map[string]interface{} {
 	out := withoutProperties(node)
 	props, _ := out["properties"].(map[string]interface{})
@@ -659,9 +662,18 @@ func withStringOnlyIntervals(node map[string]interface{}) map[string]interface{}
 		prop, _ := props[key].(map[string]interface{})
 		branches, _ := prop["anyOf"].([]interface{})
 		for _, b := range branches {
-			if bm, ok := b.(map[string]interface{}); ok && bm["type"] == "string" {
-				props[key] = bm
+			bm, ok := b.(map[string]interface{})
+			if !ok || bm["type"] != "string" {
+				continue
 			}
+			repl := make(map[string]interface{}, len(bm)+1)
+			for k, v := range bm {
+				repl[k] = v
+			}
+			if desc, ok := prop["description"]; ok {
+				repl["description"] = desc
+			}
+			props[key] = repl
 		}
 	}
 	return out

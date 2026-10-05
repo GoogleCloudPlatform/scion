@@ -1054,7 +1054,12 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
-	config             ServerConfig
+	config ServerConfig
+	// startupHubName is the hub name resolved at startup (ServerConfig.HubName
+	// from LoadGlobalConfig(serverConfigPath), so it honours --config, else
+	// the hostname). ApplySnapshot returns to it when the configured
+	// hub_name is unset. See startupHubNameOrDefault.
+	startupHubName     string
 	store              store.Store
 	httpServer         *http.Server
 	mux                *http.ServeMux
@@ -1515,6 +1520,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	// The startup-resolved hub name, which ApplySnapshot returns to when
+	// the configured hub_name is unset.
+	srv.startupHubName = cfg.HubName
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale

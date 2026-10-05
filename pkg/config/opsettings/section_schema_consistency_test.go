@@ -315,3 +315,18 @@ func TestFederationSection_IntervalsStringOnly(t *testing.T) {
 		t.Error("a duration without a unit should fail")
 	}
 }
+
+// The federation section's string-only intervals keep the root property's
+// description (it lives on the anyOf parent, not on the string branch).
+func TestFederationSection_IntervalDescriptionCarried(t *testing.T) {
+	fed, _ := rawSchemas["federation"]["properties"].(map[string]interface{})
+	for _, key := range []string{"refresh_interval", "debounce_interval"} {
+		prop, _ := fed[key].(map[string]interface{})
+		if desc, _ := prop["description"].(string); !strings.Contains(desc, "Go duration") {
+			t.Errorf("%s description not carried: %v", key, prop)
+		}
+		if prop["type"] != "string" || prop["anyOf"] != nil {
+			t.Errorf("%s should be the string branch only: %v", key, prop)
+		}
+	}
+}

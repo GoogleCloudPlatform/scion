@@ -188,8 +188,8 @@ func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	assert.Equal(t, "boot-hub", getServerConfigDB(t, srv, ops).Server.Hub.HubName)
 	// The running hub switches back too (round-2 finding 1): Snapshot
 	// resolves the bootstrap name, so ApplySnapshot does not keep the stale
-	// managed name. The GCP secret backend label follows the same
-	// snap.HubName in ApplySnapshot.
+	// managed name. The GCP secret backend label follows the name
+	// ApplySnapshot resolves (snap.HubName, else the startup name).
 	assert.Equal(t, "boot-hub", ops.Snapshot().HubName)
 	ApplySnapshot(running, ops.Snapshot())
 	assert.Equal(t, "boot-hub", running.HubName())

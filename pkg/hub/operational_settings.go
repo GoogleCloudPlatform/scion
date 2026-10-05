@@ -79,7 +79,8 @@ type sectionState struct {
 //   - No OperationalSettings (BuildLayer1SnapshotFromFile): only the fields that the old
 //     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
 //     DefaultTimezone, which are read from the top-level
-//     default_harness_config and default_timezone keys in settings.yaml.
+//     default_harness_config and default_timezone keys in settings.yaml,
+//     and HubName (see the HubName field: every constructor must set it).
 //     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
 //     values because the old reloadSettings never applied them on reload — they
 //     are consumed only at startup. This maintains file-mode parity (the
@@ -142,7 +143,10 @@ type Layer1Snapshot struct {
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
-	PublicURL     string
+	PublicURL string
+	// HubName is the configured hub_name. "" does NOT mean "leave alone":
+	// ApplySnapshot resets the running name (and the GCP secret label) to
+	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
 
@@ -977,6 +981,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
 // hubAgentDefaults() reflects them in file mode, including immediately after a
 // file-mode admin PUT (reloadSettings).
+//
+// HubName is populated too: "" in a snapshot makes ApplySnapshot reset the
+// running name to the startup name, so leaving it out would rename a
+// configured hub on every file-mode reload.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -1038,6 +1046,13 @@ func boolPtrEqual(a, b *bool) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// startupHubNameOrDefault returns the hub name resolved at startup, or the
+// startup default (config.ResolveHubNameOrDefault) for a Server not built
+// by New.
+func (s *Server) startupHubNameOrDefault() string {
+	return config.ResolveHubNameOrDefault(s.startupHubName)
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -1184,10 +1199,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
-	// Hub name: the configured value, or when unset this replica's startup
-	// default (os.Hostname), so a cleared hub_name does not leave a stale
-	// managed name in use. Reported as applied only when it changes.
-	hubName := config.ResolveHubNameOrDefault(snap.HubName)
+	// Hub name: the configured value, or when unset the name this replica
+	// resolved at startup, so a cleared hub_name does not leave a stale
+	// managed name in use and a name set only through --config survives.
+	// Reported as applied only when it changes. (Other Layer-1 keys set
+	// only in a --config file are still overridden; tracked in ptone/scion#3070.)
+	hubName := snap.HubName
+	if hubName == "" {
+		hubName = s.startupHubNameOrDefault()
+	}
 	if s.config.HubName != hubName {
 		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
