@@ -517,6 +517,13 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 
 	// Fall back to git remote lookup
 	gitRemote := util.GetGitRemote()
+	if gitRemote == "" && hubCtx.IsGlobal {
+		// Falling back to the local global directory with no project ID
+		// (ptone/scion#3124): say how to reach a hub project instead of
+		// pointing at a git remote the global directory never has.
+		return "", errors.New("the local global project is not linked to a hub project.\n\n" +
+			"Pass --global (-g global) to target the hub's Global project, or --project <slug|id> to target another hub project")
+	}
 	if gitRemote == "" {
 		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"
 		if !config.IsHubManagedAgent() {

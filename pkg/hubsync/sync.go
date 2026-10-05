@@ -241,7 +241,19 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		cleanupProjectBrokerCredentials(resolvedPath)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	// An explicit --project / -g / --global target names the project to use,
+	// so its ID must come from that project's own settings rather than from
+	// SCION_PROJECT_ID in the environment of the agent container the CLI may
+	// be running in (ptone/scion#3123). Precedence: flag, then the
+	// environment (hub-connected containers only), then the project .scion,
+	// then the global directory.
+	explicitTarget := projectPath != ""
+	loadSettings := config.LoadSettings
+	if explicitTarget {
+		loadSettings = config.LoadSettingsIgnoringEnvProjectID
+	}
+
+	settings, err := loadSettings(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
@@ -292,9 +304,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// settings.ProjectID because the dispatcher sets it to the authoritative
 	// project for this agent. The workspace may contain a cloned repo whose
 	// .scion/settings has a different project_id (e.g. template-sync from an
-	// external repo).
+	// external repo). An explicit target skips this (see explicitTarget).
 	var projectID string
-	if hubContext {
+	if hubContext && !explicitTarget {
 		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
@@ -313,7 +325,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
-			settings, err = config.LoadSettings(resolvedPath)
+			settings, err = loadSettings(resolvedPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload settings: %w", err)
 			}
@@ -332,6 +344,18 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 	if _, err := client.Health(ctx); err != nil {
 		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+	}
+
+	// An explicit global target (-g global, -g home, --global) inside a
+	// hub-connected context has no local project ID to use: the global
+	// directory there is not linked to a hub project. Resolve the hub's
+	// Global project instead (ptone/scion#3124).
+	if explicitTarget && isGlobal && hubContext && projectID == "" && settings.GetHubProjectID() == "" {
+		globalID, err := resolveHubGlobalProjectID(ctx, client, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		projectID = globalID
 	}
 
 	// Get broker ID
@@ -1601,4 +1625,24 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		debugf("Warning: failed to write cleaned settings: %v", err)
 	}
+}
+
+// hubGlobalProjectSlug is the reserved slug of the hub's Global project
+// (see pkg/hub/provider_localpath.go globalProjectSlug).
+const hubGlobalProjectSlug = "global"
+
+// resolveHubGlobalProjectID returns the ID of the hub project with the
+// reserved slug "global". Only the slug identifies the Global project;
+// project names are client-settable, so there is no name fallback.
+func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
+	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
+	if err != nil {
+		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+	}
+	if resp == nil || len(resp.Projects) == 0 {
+		return "", fmt.Errorf("no project with slug %q found on hub %s.\n\n"+
+			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
+			"Create or link it on the hub, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+	}
+	return resp.Projects[0].ID, nil
 }
