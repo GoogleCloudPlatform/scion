@@ -218,9 +218,10 @@ describe('hub members: one load per view', () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
-      // A mount's route parses can each walk the users once the previous
-      // walk has finished (single-flight, not a cache).
+      // A mount's route parses join the one users walk, or follow it
+      // finished and walk nothing.
       const usersBefore = usersRequests();
+      expect(usersBefore).toBe(1);
       await vi.advanceTimersByTimeAsync(1_000);
       await settle();
       expect(usersRequests()).toBe(usersBefore);
