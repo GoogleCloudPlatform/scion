@@ -913,11 +913,12 @@ type AgentStatusUpdate struct {
 	// running write gets whatever the stored phase is: the message (unless
 	// Message is set on this update), the stalled marker, and the exit code
 	// and reason. A lifecycle start, restart or wake brings up a new
-	// generation of the agent, and its final write uses this because the row
-	// no longer reads stopped/error by then (beginStartDispatch writes
-	// starting first, and a heartbeat guarded during the dispatch may have
-	// stored the old container's exit message). Internal to the hub —
-	// json:"-".
+	// generation of the agent, and its write after a successful dispatch
+	// uses this (the HTTP start/restart final write; the wake's
+	// post-dispatch starting write) because the row no longer reads
+	// stopped/error by then: beginStartDispatch writes starting first, and a
+	// heartbeat guarded during the dispatch may have stored the old
+	// container's exit message. Internal to the hub — json:"-".
 	ClearTerminalRemnants bool `json:"-"`
 	// IfPhase, when non-empty, makes the update conditional: it applies only
 	// if the stored phase equals IfPhase, checked on the row read inside the

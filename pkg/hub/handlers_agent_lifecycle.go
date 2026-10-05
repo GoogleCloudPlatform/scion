@@ -819,9 +819,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		statusUpdate.ClearExit = true
 		// A new generation: clear the prior one's message and stalled
 		// marker too, whatever the row reads now (beginStartDispatch wrote
-		// starting, and a heartbeat guarded mid-dispatch may have stored
-		// the old container's exit message).
-		statusUpdate.ClearTerminalRemnants = true
+		// starting, or a restart's stop leg ran, and a heartbeat guarded
+		// mid-dispatch may have stored the old container's exit message).
+		// A start on an agent that was already running is not a new
+		// generation and keeps its live status.
+		statusUpdate.ClearTerminalRemnants = action == api.AgentActionRestart || sd.wroteStarting()
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")

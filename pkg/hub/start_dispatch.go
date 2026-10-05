@@ -75,7 +75,11 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     errStartingWrite is returned. If the mismatch is because a delete now
 //     holds the row (or soft-deleted it), the error also wraps
 //     store.ErrDeleteInProgress, so callers answer delete_in_progress
-//     (deleteClaimedDuringDispatch) as for a refused running intent.
+//     (deleteClaimedDuringDispatch) as for a refused running intent. A claim
+//     on the unchanged row is not a mismatch: the store's delete guard drops
+//     the phase, and the caller's running-intent write is then refused
+//     (delete_in_progress). marked (wroteStarting) therefore records an
+//     attempted write, not an applied one.
 //  3. It does NOT change agent.Phase in memory. DispatchAgentStart reads its
 //     revoke-on-failure decision (isConfirmedNonRunningPhase) from the
 //     in-memory phase, so that decision stays the one the pre-dispatch phase
@@ -87,18 +91,20 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 // once the dispatch has succeeded or the caller has recorded its own failure
 // state. Further:
 //
-//   - The caller's final write must move the row off PhaseStarting and should
-//     use AgentStatusUpdate.ClearTerminalRemnants (or, for a full-row write,
+//   - The caller's final write must move the row off PhaseStarting. When
+//     wroteStarting reports true it should use
+//     AgentStatusUpdate.ClearTerminalRemnants (or, for a full-row write,
 //     clear the message, stalled marker and exit fields in memory): the
 //     store's stopped/error -> running clear no longer fires once the row
-//     reads starting. Clear while the lifecycle op is still held and before
-//     the new generation can post its own status: the wake clears on its
+//     reads starting.
+//   - Clear while the lifecycle op is still held and before the new
+//     generation can post its own status: the wake clears on its
 //     post-dispatch starting write, before the readiness wait. HTTP start
 //     and restart clear on their final write; a status the new container
 //     posts between the broker's reply and that write is cleared too (a
-//     narrow residual window, accepted). settle only marks the handle. If the final write
-//     fails, the row stays starting with the reservation held, and only a
-//     heartbeat corrects it.
+//     narrow residual window, accepted).
+//   - settle only marks the handle. If the final write fails, the row stays
+//     starting with the reservation held, and only a heartbeat corrects it.
 //   - rollback restores priorPhase with one conditional write (IfPhase
 //     starting), so a phase written meanwhile (a heartbeat from another
 //     replica, a launch reaper) is kept. Under a live delete claim the
@@ -134,9 +140,11 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 		}); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
 			if errors.Is(err, store.ErrPhaseMismatch) && s.deleteHoldsRow(ctx, agent.ID) {
-				// A delete claimed the row after the caller's start gate
-				// (the claim moved it to stopping): answer as #2415's
-				// running-intent refusal does (delete_in_progress).
+				// A delete claimed the row after it moved on from the
+				// caller's copy (a claim on an active row moves it to
+				// stopping): answer as #2415's running-intent refusal does
+				// (delete_in_progress). A claim on the unchanged row never
+				// gets here; see the contract, item 2.
 				return nil, fmt.Errorf("%w: %w: %w", errStartingWrite, store.ErrDeleteInProgress, err)
 			}
 			return nil, fmt.Errorf("%w: %w", errStartingWrite, err)
@@ -202,6 +210,13 @@ func (d *startDispatch) rollback(ctx context.Context) {
 	d.s.rollbackBrokerQuota(ctx, d.agent, d.reserved)
 }
 
+// wroteStarting reports whether beginStartDispatch attempted the
+// PhaseStarting write (the agent's phase was uncounted). The write may have
+// been dropped by the store's delete guard; see the contract, item 2.
+func (d *startDispatch) wroteStarting() bool {
+	return d != nil && d.marked
+}
+
 // settle marks d as finished without undoing anything: the dispatch
 // succeeded, or the caller recorded its own failure state.
 func (d *startDispatch) settle() {
@@ -217,9 +232,8 @@ func (d *startDispatch) settle() {
 // heartbeat's own snapshot of the row may predate beginStartDispatch's
 // starting write (or read "running" between a restart's legs), and
 // deferring a stopped report over a stopped or suspended row is harmless.
-// Such a report usually
-// describes the old container a start is replacing; applying it would also
-// release the broker slot mid-dispatch through
+// Such a report usually describes the old container a start is replacing;
+// applying it would also release the broker slot mid-dispatch through
 // reconcileBrokerQuotaOnPhaseChange. The caller drops only the phase (and
 // with it that heartbeat's quota reconcile); exit code, exit reason, message
 // and container status still apply, so a guarded report can leave e.g.

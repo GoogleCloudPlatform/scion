@@ -969,3 +969,113 @@ func TestStartDispatch_RestartFailedUnderClaimThenFailedDeleteEndsStopped(t *tes
 	assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
 }
+
+// Review round 3 F1: a start on an agent that is already running is not a
+// new generation (no starting write, no stop leg): the final write keeps the
+// live harness's message, activity and stalled marker.
+func TestStartDispatch_StartOnRunningAgentKeepsLiveStatus(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-r3-running")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-r3-running", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	row, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	row.Activity = string(state.ActivityStalled)
+	row.StalledFromActivity = string(state.ActivityWorking)
+	row.Message = "Processing: hello"
+	require.NoError(t, s.UpdateAgent(ctx, row))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.Equal(t, "Processing: hello", got.Message)
+	assert.Equal(t, string(state.ActivityStalled), got.Activity)
+	assert.Equal(t, string(state.ActivityWorking), got.StalledFromActivity)
+}
+
+// recordingStatusStore records the heartbeat status updates it is given.
+type recordingStatusStore struct {
+	store.Store
+	mu         sync.Mutex
+	heartbeats []store.AgentStatusUpdate
+}
+
+func (r *recordingStatusStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	if su.Heartbeat {
+		r.mu.Lock()
+		r.heartbeats = append(r.heartbeats, su)
+		r.mu.Unlock()
+	}
+	return r.Store.UpdateAgentStatus(ctx, id, su)
+}
+
+func (r *recordingStatusStore) lastHeartbeat(t *testing.T) store.AgentStatusUpdate {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	require.NotEmpty(t, r.heartbeats)
+	return r.heartbeats[len(r.heartbeats)-1]
+}
+
+// Review round 3 F5: the heartbeat wiring for round 2's F3. While an op is
+// held on an agent whose stored phase is uncounted (the heartbeat's snapshot
+// predating a starting write), a stopped report's phase is dropped before
+// the store write and the quota reconcile, while its exit code and reason
+// are still recorded. Without an op the same report keeps its phase.
+func TestHeartbeatPhaseGuard_UncountedStoredPhaseEndToEnd(t *testing.T) {
+	for _, op := range []bool{true, false} {
+		t.Run(fmt.Sprintf("op=%v", op), func(t *testing.T) {
+			srv, s := testServer(t)
+			grantDevUserRuntimeBrokerAccess(t, s)
+			rec := &recordingStatusStore{Store: srv.store}
+			srv.store = rec
+			setBrokerAgentCeiling(t, s, 2)
+			ctx := context.Background()
+			sfx := fmt.Sprintf("hbg-e2e-%v", op)
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			a := newQuotaTestAgent(t, s, broker, project, sfx, state.PhaseStopped)
+			reserveBrokerSlot(t, s, broker, a.ID)
+			if op {
+				defer srv.beginLifecycleOp(a.ID)()
+			}
+
+			code := 137
+			hb := brokerHeartbeatRequest{
+				Status: "online",
+				Projects: []brokerProjectHeartbeat{{
+					ProjectID:  a.ProjectID,
+					AgentCount: 1,
+					Agents: []brokerAgentHeartbeat{{
+						Slug:            a.Slug,
+						Phase:           string(state.PhaseStopped),
+						ContainerStatus: "Exited (137)",
+						ExitCode:        &code,
+						ExitReason:      string(state.ExitReasonPreempted),
+					}},
+				}},
+			}
+			resp := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+			require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+			su := rec.lastHeartbeat(t)
+			if op {
+				assert.Empty(t, su.Phase, "the guard drops the phase before the store write")
+			} else {
+				assert.Equal(t, string(state.PhaseStopped), su.Phase, "no op: the report's phase applies as before")
+			}
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+			assert.Equal(t, string(state.ExitReasonPreempted), got.ExitReason, "the exit reason is recorded")
+			require.NotNil(t, got.ExitCode, "the exit code is recorded")
+			assert.Equal(t, 137, *got.ExitCode)
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "no reconcile release")
+		})
+	}
+}
