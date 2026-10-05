@@ -152,7 +152,7 @@ export class ScionCodeEditor extends LitElement {
     .editor-container .cm-editor {
       height: 100%;
       min-height: 200px;
-      max-height: calc(100vh - 16rem);
+      max-height: calc(var(--scion-app-height, 100dvh) - 16rem);
       font-size: 0.875rem;
       font-family: var(
         --scion-font-mono,
