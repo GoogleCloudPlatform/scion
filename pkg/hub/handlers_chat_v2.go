@@ -129,7 +129,7 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible)
+	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible, s.chatSpacesBatch)
 
 	spaces := make([]chatSpaceEntry, 0, len(visible))
 	for _, p := range visible {
@@ -165,17 +165,32 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// chatSpacesTopicBatch and chatSpacesReadStateBatch bound the number of
-// bind parameters in one rollup query, keeping each well under SQLite's
-// limit while still covering a typical hub in a single query each. They
-// are variables only so tests can exercise batch boundaries: tests
-// overwrite them (TestChatSpaces_RollupBatchBoundaries), so a test that
-// does must not use t.Parallel, and neither may any test that reads them
-// through GET /chat/spaces while one is overwritten.
-var (
-	chatSpacesTopicBatch     = 200
-	chatSpacesReadStateBatch = 500
+// Default batch sizes for the spaces-list rollup queries. They bound the
+// number of bind parameters in one rollup query, keeping each well under
+// SQLite's limit while still covering a typical hub in a single query each.
+const (
+	defaultChatSpacesTopicBatch     = 200
+	defaultChatSpacesReadStateBatch = 500
 )
+
+// chatSpacesBatchSizes holds the rollup batch sizes a Server uses. A zero
+// field means the matching default; tests set small values on their own
+// Server to exercise batch boundaries without touching shared state.
+type chatSpacesBatchSizes struct {
+	topics     int
+	readStates int
+}
+
+// withDefaults returns b with every zero field replaced by its default.
+func (b chatSpacesBatchSizes) withDefaults() chatSpacesBatchSizes {
+	if b.topics <= 0 {
+		b.topics = defaultChatSpacesTopicBatch
+	}
+	if b.readStates <= 0 {
+		b.readStates = defaultChatSpacesReadStateBatch
+	}
+	return b
+}
 
 // chatSpaceRollup is one space's thread rollup for the spaces list.
 type chatSpaceRollup struct {
@@ -191,35 +206,36 @@ type chatSpaceRollup struct {
 // A failed batch read is logged and otherwise degrades as the per-project
 // lookups this replaces did: a failed topic read leaves its projects with
 // no threads, and a failed read-state read leaves its threads with no
-// read state.
-func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project) map[string]chatSpaceRollup {
+// read state. batch sets the batch sizes; zero fields take the defaults.
+func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) map[string]chatSpaceRollup {
+	batch = batch.withDefaults()
 	out := make(map[string]chatSpaceRollup, len(projects))
 	if len(projects) == 0 {
 		return out
 	}
 
 	var topics []WebChatTopic
-	for start := 0; start < len(projects); start += chatSpacesTopicBatch {
-		end := min(start+chatSpacesTopicBatch, len(projects))
+	for start := 0; start < len(projects); start += batch.topics {
+		end := min(start+batch.topics, len(projects))
 		ids := make([]string, 0, end-start)
 		for _, p := range projects[start:end] {
 			ids = append(ids, p.ID)
 		}
-		batch, err := wcs.ListTopicsByProjects(ctx, ids)
+		page, err := wcs.ListTopicsByProjects(ctx, ids)
 		if err != nil {
 			slog.Warn("chat spaces: batched topic read failed",
 				"projects", len(ids), "error", err)
 			continue
 		}
-		topics = append(topics, batch...)
+		topics = append(topics, page...)
 	}
 	if len(topics) == 0 {
 		return out
 	}
 
 	readMap := make(map[string]WebChatReadState, len(topics))
-	for start := 0; start < len(topics); start += chatSpacesReadStateBatch {
-		end := min(start+chatSpacesReadStateBatch, len(topics))
+	for start := 0; start < len(topics); start += batch.readStates {
+		end := min(start+batch.readStates, len(topics))
 		keys := make([]string, 0, end-start)
 		for _, t := range topics[start:end] {
 			keys = append(keys, t.ID)

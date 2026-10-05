@@ -463,10 +463,8 @@ func TestChatSpaces_RollupBatchBoundaries(t *testing.T) {
 	f := newSpacesPerfFixture(t)
 	want := getSpaces(t, f.srv, f.admin)
 
-	// Overwrites package-level batch sizes: must not run with t.Parallel.
-	oldTopic, oldRead := chatSpacesTopicBatch, chatSpacesReadStateBatch
-	chatSpacesTopicBatch, chatSpacesReadStateBatch = 2, 2
-	t.Cleanup(func() { chatSpacesTopicBatch, chatSpacesReadStateBatch = oldTopic, oldRead })
+	// Batch sizes live on this test's own server, not in shared state.
+	f.srv.chatSpacesBatch = chatSpacesBatchSizes{topics: 2, readStates: 2}
 
 	f.wcs.reset()
 	got := getSpaces(t, f.srv, f.admin)
