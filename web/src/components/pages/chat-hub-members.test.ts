@@ -218,7 +218,7 @@ describe('hub members: one load per view', () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
-      // A mount's route parses join the one users walk, or follow it
+      // A mount's route parses join the one users walk, or arrive after it
       // finished and walk nothing.
       const usersBefore = usersRequests();
       expect(usersBefore).toBe(1);
@@ -1149,7 +1149,7 @@ describe('hub members: guards', () => {
       await settle();
 
       expect(usersRequests()).toBe(usersBefore);
-      expect(storeWalks()).toBeGreaterThan(walksBefore);
+      expect(storeWalks()).toBe(walksBefore + 1);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
     } finally {
       unmount(page);
@@ -1157,15 +1157,13 @@ describe('hub members: guards', () => {
   });
 
   it('a users walk dropped for a space claim does not mark the users loaded: the returning hub view walks them', async () => {
+    // The mount's users walk is held; it lands after the space's claim.
     const held = deferred<Response>();
-    let call = 0;
-    serveUsers(() => (++call === 1 ? held.promise : usersPage(['hub-user'])));
+    serveUsers(() => held.promise);
     const page = await mountPage();
     try {
       vi.mocked(apiFetch).mockImplementation((url) => {
-        if (url.startsWith('/api/v1/users')) {
-          return ++call === 1 ? held.promise : Promise.resolve(usersPage(['hub-user']));
-        }
+        if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['hub-user']));
         return Promise.resolve(
           new Response(
             JSON.stringify({ humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }], agents: [] }),
@@ -1174,7 +1172,7 @@ describe('hub members: guards', () => {
         );
       });
       await page.loadV2Members('p1');
-      held.resolve(usersPage(['hub-user']));
+      held.resolve(usersPage(['stale-user']));
       await settle();
       expect(ids(page.v2HumanMembers)).toEqual(['h1']);
       const usersBefore = usersRequests();
@@ -1189,7 +1187,7 @@ describe('hub members: guards', () => {
     }
   });
 
-  it('a DM opened without the hub view live scopes agents-updated to nothing, not to a space visited earlier', async () => {
+  it('agents-updated in a DM without a live hub view is not scoped to a space visited earlier: it adopts agents from any space', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     vi.mocked(apiFetch).mockImplementation(() =>
@@ -1199,6 +1197,8 @@ describe('hub members: guards', () => {
     serveUsers(() => usersPage(['u1']));
     page.loadHubMembers();
     await settle();
+    // The real precondition is a hub list that never published (a failed
+    // first store read); a disconnect clears the live flag the same way.
     document.body.removeChild(page);
 
     page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
