@@ -34,6 +34,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { html, render } from 'lit';
 import { apiFetch } from '../../../client/api.js';
+import { chatSpacesLoad } from '../../../client/chat-list-cache.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -144,6 +145,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   serveDefaults();
+  // The rail's first load reuses a recent shared spaces load; one test's
+  // spaces must not answer the next test's first load.
+  chatSpacesLoad.invalidate();
 });
 
 afterEach(() => {
@@ -583,6 +587,9 @@ describe('space rail — toggling the auto-expanded group (R5 regression)', () =
     // (spaces collapse by default on first load — a separate mechanism).
     el.collapsedSpaces = new Set();
     await el.updateComplete;
+    // Expanding the space loads its thread list; the group renders once
+    // its threads are known.
+    await vi.waitFor(() => expect(el.shadowRoot.querySelector('.thread-group')).not.toBeNull());
 
     expect(el.autoExpandedGroupId).toBe('g-sel');
     let chevron = el.shadowRoot.querySelector('.thread-group-header .chevron');
