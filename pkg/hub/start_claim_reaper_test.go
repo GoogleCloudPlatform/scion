@@ -341,3 +341,16 @@ func TestStartClaimReaper_RunningStatusWithStartInFlightIsNotSuccess(t *testing.
 	f.srv.reapStartClaims(ctx)
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
 }
+
+// Success also needs the inventory to be taken at least one heartbeat
+// interval after the claim became unconfirmed: a running status with an
+// inventory inside that window keeps the claim.
+func TestStartClaimReaper_SuccessInventoryInsideLagKeeps(t *testing.T) {
+	f, _, a := newClaimFixture(t) // default lag: one heartbeat interval
+	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+	ctx := context.Background()
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Heartbeat: true}))
+	f.heartbeat(completeInventory(), a.Slug)
+	f.srv.reapStartClaims(ctx)
+	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
+}

@@ -161,6 +161,9 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 	// The start succeeded after all: the agent reported running since the
 	// claim became unconfirmed, and a fresh inventory taken after that
 	// lists its container running.
+	// (A present_running observation is what success means. The state check
+	// also keeps this rule from overlapping the "nothing running" rule
+	// below, which releases absent or terminal observations by itself.)
 	if startReportedRunning(a) && obs.State == store.ObservedPresentRunning && !obs.InFlight &&
 		!obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
 		release("agent reported running")
