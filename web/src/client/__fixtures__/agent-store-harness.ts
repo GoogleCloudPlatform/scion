@@ -198,11 +198,37 @@ const COMPACT_KEYS = [
   '_messageability',
 ] as const;
 
-/** A row as the compact view lists it: its compact keys, and the creator's name. */
+/** The compact keys the hub always emits; it omits the others when empty. */
+const ALWAYS_EMITTED: ReadonlySet<string> = new Set([
+  'id',
+  'slug',
+  'name',
+  'projectId',
+  'messageMode',
+  'created',
+  'updated',
+  'lastActivityEvent',
+]);
+
+/** Whether Go's `omitempty` drops `value`: null, an empty string, list or map. */
+function isEmpty(value: unknown): boolean {
+  if (value === null || value === '') return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/**
+ * A row as the compact view lists it: its compact keys, and the creator's
+ * name, with the empty values the hub omits left out.
+ */
 function compactRow(a: Agent): Agent {
   const row: Record<string, unknown> = {};
   const full = a as unknown as Record<string, unknown>;
-  for (const key of COMPACT_KEYS) if (full[key] !== undefined) row[key] = full[key];
+  for (const key of COMPACT_KEYS) {
+    const value = full[key];
+    if (value === undefined || (!ALWAYS_EMITTED.has(key) && isEmpty(value))) continue;
+    row[key] = value;
+  }
   const creatorName = a.appliedConfig?.creatorName;
   if (creatorName) row.creatorName = creatorName;
   return row as unknown as Agent;
