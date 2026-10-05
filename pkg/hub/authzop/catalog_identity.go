@@ -355,6 +355,7 @@ var identityOperations = []OperationSpec{
 			Scope:  "self-token management only",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
+		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
 	{
 		ID:          "credential.token.revoke",
@@ -394,6 +395,7 @@ var identityOperations = []OperationSpec{
 			Scope:  "self-token management only",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
+		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
 
 	// =====================================================================
@@ -482,6 +484,7 @@ var identityOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 
 	{
@@ -509,6 +512,7 @@ var identityOperations = []OperationSpec{
 		// bindings changed concurrently during the delete.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 
 	// =====================================================================
@@ -670,5 +674,28 @@ var identityOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "user.provision",
+		Domain:      "user",
+		Description: "Create a user directly through the API; refused for every caller, because sign-in flows create users",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "none",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "Direct user creation is refused for every caller; user records come from sign-in flows",
+			Scope:  "direct user creation",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerOutOfScope, Owner: BearerOwnerUserProvisioning},
 	},
 }

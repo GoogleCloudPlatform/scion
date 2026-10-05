@@ -41,6 +41,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_RequiresLiveDelegator"},
 		},
+		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.delete",
@@ -64,6 +65,7 @@ var agentOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 
 	// Agent actions on the by-id and project alias forms. Every entry point
@@ -92,6 +94,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.restore",
@@ -110,6 +113,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.exec",
@@ -128,6 +132,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.env",
@@ -146,6 +151,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.resetauth",
@@ -164,6 +170,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.reincarnate",
@@ -182,6 +189,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -203,6 +211,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	// RS2: agent.list — split from agent.read because the list operation
 	// has distinct authorization semantics: scope-based resolution with
@@ -288,6 +297,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.portaccess",
@@ -364,5 +374,76 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "agent.token.refresh",
+		Domain:      "agent",
+		Description: "Refresh the calling agent's own hub token",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/token/refresh", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/refresh-token", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialAgentJWT},
+		ResourceResolver: "agent-self",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The agent authenticates with its own agent JWT for its own record; no user permission applies",
+			Scope:  "agent self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
+		ID:          "agent.outbound.message",
+		Domain:      "agent",
+		Description: "Deliver an outbound message from the calling agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/outbound-message", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/outbound-message", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialAgentJWT},
+		ResourceResolver: "agent-self",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The agent authenticates with its own agent JWT for its own record; no user permission applies",
+			Scope:  "agent self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
+		ID:          "agent.metrics.report",
+		Domain:      "agent",
+		Description: "Report runtime metrics for the calling agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/metrics", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialAgentJWT},
+		ResourceResolver: "agent-self",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The agent authenticates with its own agent JWT for its own record; no user permission applies",
+			Scope:  "agent self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
 	},
 }

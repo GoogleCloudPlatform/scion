@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 103
+**Operations:** 110
 
 ## Table of Contents
 
@@ -21,6 +21,9 @@
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
 - [agent.stopall](#agentstopall) — Stop all running agents in a project
 - [agent.setmessagemode](#agentsetmessagemode) — Change an agent's message mode
+- [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
+- [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
+- [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
@@ -63,6 +66,7 @@
 - [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
+- [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
@@ -100,6 +104,9 @@
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
+- [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
+- [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
@@ -127,6 +134,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.create`
 
@@ -164,6 +173,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.delete`
 
@@ -209,6 +220,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `agent.lifecycle`
 
 **Resource Resolver:** agent-from-url
@@ -239,6 +252,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.lifecycle`
 
@@ -271,6 +286,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `agent.attach`
 
 **Resource Resolver:** agent-from-url
@@ -301,6 +318,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.attach`
 
@@ -333,6 +352,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `agent.attach`
 
 **Resource Resolver:** agent-from-url
@@ -364,6 +385,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `agent.lifecycle`
 
 **Resource Resolver:** agent-from-url
@@ -393,6 +416,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.read`
 
@@ -507,6 +532,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `agent.attach`
 
 **Resource Resolver:** agent-from-url
@@ -617,6 +644,110 @@
 
 ---
 
+## agent.token.refresh
+
+**Domain:** agent
+
+**Description:** Refresh the calling agent's own hub token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/token/refresh` |
+| http_route | POST | `/api/v1/agents/{id}/refresh-token` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.outbound.message
+
+**Domain:** agent
+
+**Description:** Deliver an outbound message from the calling agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/outbound-message` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/outbound-message` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.metrics.report
+
+**Domain:** agent
+
+**Description:** Report runtime metrics for the calling agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/metrics` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
 ## project.membership.add
 
 **Domain:** project.membership
@@ -631,7 +762,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.manage`
 
@@ -685,7 +818,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.manage`
 
@@ -742,7 +877,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.manage`
 
@@ -794,6 +931,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
 **Base Permission:** `project.read`
 
 **Resource Resolver:** project-from-url
@@ -822,7 +961,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.manage`
 
@@ -912,6 +1053,8 @@
 
 **Credentials:** `session_jwt`
 
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
 **Base Permission:** `project.delete`
 
 **Resource Resolver:** project-from-url
@@ -970,6 +1113,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `project.read`
 
@@ -1056,6 +1201,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `project.update`
 
@@ -1786,6 +1933,8 @@
 
 **Credentials:** `session_jwt`
 
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
 **Base Permission:** `user.read`
 
 **Resource Resolver:** self-principal
@@ -1835,6 +1984,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
 
 **Base Permission:** `user.read`
 
@@ -1968,6 +2119,8 @@
 
 **Credentials:** `session_jwt`
 
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
 **Base Permission:** `user.promote`
 
 **Resource Resolver:** user-from-url
@@ -2012,6 +2165,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `user.delete`
 
@@ -2279,6 +2434,40 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.provision
+
+**Domain:** user
+
+**Description:** Create a user directly through the API; refused for every caller, because sign-in flows create users
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `out_of_scope` (owner `user-provisioning`)
+
+**Resource Resolver:** none
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** Direct user creation is refused for every caller; user records come from sign-in flows (scope: direct user creation) — waives: `base_permission`
 
 ---
 
@@ -3104,6 +3293,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `skill.update`
 
 **Resource Resolver:** skill-from-url
@@ -3133,6 +3324,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `skill.delete`
 
@@ -3275,6 +3468,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `template.update`
 
 **Resource Resolver:** template-from-url
@@ -3343,6 +3538,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
 **Base Permission:** `harness_config.read`
 
 **Resource Resolver:** project-from-url
@@ -3402,6 +3599,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `harness_config.update`
 
@@ -3483,6 +3682,116 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## broker.agent.launchreport
+
+**Domain:** broker
+
+**Description:** Record a broker's launch report for an agent it runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/launch` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for its own record; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.messagefailures.report
+
+**Domain:** broker
+
+**Description:** Record buffered message delivery failures reported by a broker
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/message-failures` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for its own record; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.controlchannel.call
+
+**Domain:** broker
+
+**Description:** Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| broker_call | — | `controlchannel:TunnelRequest` |
+| broker_call | — | `controlchannel:OpenStream` |
+| broker_call | — | `controlchannel:SendStreamData` |
+| broker_call | — | `controlchannel:ResizeStream` |
+| broker_call | — | `controlchannel:CloseStream` |
+| broker_call | — | `controlchannel:handleResponse` |
+| broker_call | — | `controlchannel:handleStreamData` |
+| broker_call | — | `controlchannel:handleStreamClose` |
+| broker_call | — | `controlchannel:handleEvent` |
+
+**Principals:** `broker`, `system`
+
+**Credentials:** `broker_token`, `system_internal`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** initiating-operation
+
+**Effects:** `read-one`, `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** Transport between the hub and an authenticated broker; authorization belongs to the initiating operation (scope: control channel transport) — waives: `base_permission`
 
 ---
 

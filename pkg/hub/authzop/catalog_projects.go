@@ -28,7 +28,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
@@ -51,6 +51,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialPrincipalIneligible},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 	{
 		ID:          "project.membership.update",
@@ -60,7 +61,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/{memberId}", Method: "PATCH"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectChangeAuthority},
@@ -84,6 +85,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 	{
 		ID:          "project.membership.remove",
@@ -93,7 +95,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.manage",
 		Effects:          []SecurityEffect{EffectRevokeAuthority},
@@ -114,6 +116,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 	{
 		ID:          "project.membership.list",
@@ -131,6 +134,7 @@ var projectOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "project.membership.transfer",
@@ -140,7 +144,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/transfer-ownership", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectChangeAuthority},
@@ -165,6 +169,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialPrincipalIneligible, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	},
 
 	// =====================================================================
@@ -228,6 +233,7 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteGovernanceMatrix"},
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteAtomicAudit"},
 		},
+		Bearer: SessionOnly(ReasonIrreversibleCascade),
 	},
 
 	// =====================================================================
@@ -249,6 +255,7 @@ var projectOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	// RS2: project.list — split from project.read because the list operation
 	// has distinct authorization semantics: scope-based resolution with
@@ -314,6 +321,7 @@ var projectOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "project.register",

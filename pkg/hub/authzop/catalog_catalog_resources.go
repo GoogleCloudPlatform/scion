@@ -76,6 +76,7 @@ var catalogResourceOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "skill.delete",
@@ -99,6 +100,7 @@ var catalogResourceOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "skill.register",
@@ -186,6 +188,7 @@ var catalogResourceOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "template.delete",
@@ -231,6 +234,7 @@ var catalogResourceOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "harnessconfig.create",
@@ -265,6 +269,7 @@ var catalogResourceOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "harnessconfig.delete",
