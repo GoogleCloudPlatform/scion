@@ -211,6 +211,12 @@ const (
 	// — rows left with released_at IS NULL for agents that are no longer in a
 	// counted phase (stopped/suspended/error) or no longer exist.
 	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
+
+	// LockConduitRegistryReap guards the conduit registry maintenance
+	// singleton (design v2.4 §3.4): ReapStaleRelays, ReapStaleSessions and
+	// PruneRelayInstances run together under this one lock, as the registry
+	// requires.
+	LockConduitRegistryReap AdvisoryLockKey = 0x5C100023
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
