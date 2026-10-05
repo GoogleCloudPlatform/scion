@@ -64,8 +64,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scion_harness  # type: ignore[import-not-found]
 
-assert scion_harness.INTERFACE_VERSION >= 2, (
-    "codex provision.py requires scion_harness INTERFACE_VERSION >= 2; "
+assert scion_harness.INTERFACE_VERSION >= 3, (
+    "codex provision.py requires scion_harness INTERFACE_VERSION >= 3; "
     f"got {scion_harness.INTERFACE_VERSION}"
 )
 
@@ -233,52 +233,23 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
     return "\n".join(lines) + "\n"
 
 
-def _resolve_reasoning_effort(level: int) -> str:
-    """Map a thinking level (0-100) to OpenAI reasoning_effort (low/medium/high/xhigh)."""
-    level = max(0, min(100, level))
-    if level >= 76:
-        return "xhigh"
-    if level >= 51:
-        return "high"
-    if level >= 26:
-        return "medium"
-    return "low"
+def _resolve_reasoning_effort(ctx: scion_harness.ProvisionContext) -> str | None:
+    """Resolve the thinking level into codex's model_reasoning_effort.
 
-
-# Codex-only fallback effort when SCION_THINKING_LEVEL gives no explicit
-# level (ptone/scion#2479) -- see _resolve_reasoning_effort_env below.
-_DEFAULT_REASONING_EFFORT = "medium"
-
-
-def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_raw: str) -> str:
-    """Resolve the (already-stripped) SCION_THINKING_LEVEL value into a
-    reasoning_effort, logging the decision.
-
-    An explicit integer value always wins and uses _resolve_reasoning_effort's
-    mapping. An unset/blank value, or one that isn't a valid integer, falls
-    back to _DEFAULT_REASONING_EFFORT: both cases mean this script has no
-    explicit signal from CLI/web/template/hub, so they're treated the same
-    way rather than letting an invalid value silently reproduce the
-    "low" bug this fallback exists to fix.
+    The bucket table and the "medium" default (ptone/scion#2479: unset must
+    not fall back to codex's own per-model default) live in config.yaml's
+    `thinking:` block, and scion_harness.resolve_thinking owns the parse,
+    clamp and logging. If the harness-config has no thinking block (a stale
+    or customized config.yaml paired with this provision.py), nothing is
+    written and codex's own default applies -- warn loudly about it.
     """
-    if thinking_raw:
-        try:
-            thinking_level = int(thinking_raw)
-        except ValueError:
-            # Every Go path produces this value with strconv.Itoa, so a
-            # non-integer here means something upstream (a hand-set env, a
-            # template, or a harness-config env) is misconfigured -- warn
-            # rather than log at the same level as the normal paths below.
-            ctx.warn(
-                f"thinking_level={thinking_raw!r} is not a valid integer; "
-                f"reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)"
-            )
-            return _DEFAULT_REASONING_EFFORT
-        reasoning_effort = _resolve_reasoning_effort(thinking_level)
-        ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
-        return reasoning_effort
-    ctx.info(f"thinking_level=<unset>, reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)")
-    return _DEFAULT_REASONING_EFFORT
+    harness_cfg = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    if not harness_cfg.get("thinking"):
+        ctx.warn(
+            "config.yaml has no thinking block; model_reasoning_effort not "
+            "written (update the harness-config)"
+        )
+    return scion_harness.resolve_thinking(ctx)
 
 
 # The line-oriented TOML string/comment masking, bracket-depth tracking,
@@ -581,8 +552,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
     scion_harness.project_instructions(ctx, instructions_file)
 
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    reasoning_effort = _resolve_reasoning_effort_env(ctx, thinking_raw)
+    reasoning_effort = _resolve_reasoning_effort(ctx)
 
     telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
