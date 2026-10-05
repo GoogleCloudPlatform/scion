@@ -573,19 +573,19 @@ type serverStatusInfo struct {
 	// "unhealthy"); empty when healthy or not detected.
 	HubStatus string `json:"hubStatus,omitempty"`
 	WebStatus string `json:"webStatus,omitempty"`
-	// HubDegradedReason names the non-healthy checks (see
+	// HubHealthReason names the non-healthy checks (see
 	// healthProblemReason, e.g. "colocated_broker: unhealthy: registration
 	// failed") when either probe (the combined web+hub probe on 8080, or the
 	// standalone Hub probe on 9810) answered with a non-healthy status —
 	// degraded or unhealthy. Empty when the Hub is healthy or unreachable.
-	HubDegradedReason string `json:"hubDegradedReason,omitempty"`
-	// WebDegradedReason is set only when the 8080 (combined web+hub) probe
+	HubHealthReason string `json:"hubHealthReason,omitempty"`
+	// WebHealthReason is set only when the 8080 (combined web+hub) probe
 	// itself reported a non-healthy status — i.e. the process actually
 	// serving the Web Frontend is the degraded one. Kept separate from
-	// HubDegradedReason so a standalone Hub-only deployment (port 9810, no
+	// HubHealthReason so a standalone Hub-only deployment (port 9810, no
 	// web server running at all) does not get an incorrect "Web Frontend:
 	// degraded" line just because the Hub is degraded.
-	WebDegradedReason string `json:"webDegradedReason,omitempty"`
+	WebHealthReason string `json:"webHealthReason,omitempty"`
 }
 
 // probeServerStatus probes the web, hub, and broker health endpoints at the
@@ -628,26 +628,29 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 				case health.Status == probeStatusHealthy:
 					status.WebRunning = true
 					status.HubRunning = true
-				case health.Status == probeStatusDegraded || webPortHasHub:
-					// Degraded is up; unhealthy is not, but a scion composite
-					// body (webPortHasHub) is still worth naming instead of a
-					// bare "not detected". The webPortHasHub guard keeps an
-					// unrelated service on 8080 from being reported.
+				case webPortHasHub:
+					// A scion composite body (it carries a nested "hub"):
+					// degraded is up, unhealthy is not, and either way the
+					// non-healthy checks are named instead of a bare "not
+					// detected". Requiring webPortHasHub keeps an unrelated
+					// service on 8080 answering {"status":"degraded"} from
+					// being reported as the scion web server; a scion web
+					// server without a hub provider never reports degraded.
 					up := probeStatusIsUp(health.Status)
 					status.WebRunning = up
 					status.HubRunning = up
 					status.WebStatus = health.Status
 					status.HubStatus = health.Status
 					reason := healthProblemReason(health)
-					status.HubDegradedReason = reason
-					status.WebDegradedReason = reason
+					status.HubHealthReason = reason
+					status.WebHealthReason = reason
 				}
 			}
 		}
 	}
 
 	// Check standalone hub port if not already found on the web port. This
-	// probe intentionally leaves WebDegradedReason/WebStatus unset: a
+	// probe intentionally leaves WebHealthReason/WebStatus unset: a
 	// standalone Hub (no web server) must not print "Web Frontend: degraded"
 	// just because the Hub itself is degraded.
 	if !status.HubRunning && !webPortHasHub {
@@ -656,13 +659,21 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && readErr == nil {
 				var health healthProbeResponse
-				if json.Unmarshal(body, &health) == nil && health.Status != "" {
-					status.HubRunning = probeStatusIsUp(health.Status)
-					if health.Status != probeStatusHealthy {
+				if json.Unmarshal(body, &health) == nil {
+					switch health.Status {
+					case probeStatusHealthy:
+						status.HubRunning = true
+					case probeStatusDegraded, probeStatusUnhealthy:
+						status.HubRunning = health.Status == probeStatusDegraded
 						status.HubStatus = health.Status
-						if status.HubDegradedReason == "" {
-							status.HubDegradedReason = healthProblemReason(health)
+						if status.HubHealthReason == "" {
+							status.HubHealthReason = healthProblemReason(health)
 						}
+					default:
+						// Not a scion hub status (e.g. {"status":"ok"} from
+						// some other service on this port, or no status at
+						// all): report the Hub as not detected rather than
+						// echoing an unrecognised status.
 					}
 				}
 			}
@@ -710,8 +721,8 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	status.WebRunning = probed.WebRunning
 	status.HubStatus = probed.HubStatus
 	status.WebStatus = probed.WebStatus
-	status.HubDegradedReason = probed.HubDegradedReason
-	status.WebDegradedReason = probed.WebDegradedReason
+	status.HubHealthReason = probed.HubHealthReason
+	status.WebHealthReason = probed.WebHealthReason
 
 	if serverStatusJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -745,7 +756,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 func formatServerStatusComponents(status serverStatusInfo) []string {
 	var lines []string
 
-	lines = append(lines, "  Hub API:         "+formatComponentState(status.HubRunning, status.HubStatus, status.HubDegradedReason))
+	lines = append(lines, "  Hub API:         "+formatComponentState(status.HubRunning, status.HubStatus, status.HubHealthReason))
 
 	if status.BrokerRunning {
 		lines = append(lines, "  Runtime Broker:  running")
@@ -753,10 +764,10 @@ func formatServerStatusComponents(status serverStatusInfo) []string {
 		lines = append(lines, "  Runtime Broker:  not detected")
 	}
 
-	// WebStatus/WebDegradedReason (not the Hub fields): a standalone Hub-only
+	// WebStatus/WebHealthReason (not the Hub fields): a standalone Hub-only
 	// deployment with no web server at all must not print "Web Frontend:
 	// degraded" just because the Hub is degraded.
-	lines = append(lines, "  Web Frontend:    "+formatComponentState(status.WebRunning, status.WebStatus, status.WebDegradedReason))
+	lines = append(lines, "  Web Frontend:    "+formatComponentState(status.WebRunning, status.WebStatus, status.WebHealthReason))
 
 	return lines
 }
@@ -817,7 +828,13 @@ func waitForServerReady(host string, port int, timeout time.Duration) (ready boo
 	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
 	deadline := time.Now().Add(timeout)
 
+	// lastAnswered tracks whether the most recent poll got a parsed answer,
+	// so a server that answered degraded and then died before the deadline
+	// is not reported ready on a stale response. lastHealth is still
+	// returned for naming the checks.
+	lastAnswered := false
 	for time.Now().Before(deadline) {
+		lastAnswered = false
 		if resp, err := client.Get(url); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -825,6 +842,7 @@ func waitForServerReady(host string, port int, timeout time.Duration) (ready boo
 				var health healthProbeResponse
 				if json.Unmarshal(body, &health) == nil {
 					lastHealth = health
+					lastAnswered = true
 					if health.Status == probeStatusHealthy {
 						return true, lastHealth
 					}
@@ -833,7 +851,29 @@ func waitForServerReady(host string, port int, timeout time.Duration) (ready boo
 		}
 		time.Sleep(serverReadyPollInterval)
 	}
-	return lastHealth.Status == probeStatusDegraded, lastHealth
+	return lastAnswered && lastHealth.Status == probeStatusDegraded, lastHealth
+}
+
+// quickstartReadyMessage chooses what printWorkstationQuickstart prints after
+// waitForServerReady, and whether to open the browser:
+//   - ready, healthy:            no message, open.
+//   - ready, degraded:           a warning naming the checks, open (it is up).
+//   - not ready, with a reason:  the status and checks (e.g. unhealthy), no open.
+//   - not ready, no answer:      "not yet ready", no open.
+func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg string, openBrowser bool) {
+	reason := healthProblemReason(lastHealth)
+	switch {
+	case ready && reason != "":
+		// Degraded: e.g. a co-located broker that failed to register
+		// (ptone/scion#2154), which does not retry: fix config and restart.
+		return fmt.Sprintf("  Warning: server is up but degraded: %s — %s", reason, healthProblemHint(reason)), true
+	case ready:
+		return "", true
+	case reason != "":
+		return fmt.Sprintf("  (server is up but %s: %s — open the URL manually; %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
+	default:
+		return "  (server not yet ready — open the URL manually once it starts)", false
+	}
 }
 
 // printWorkstationQuickstart prints the first-run quickstart information
@@ -871,23 +911,12 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 
 		// Auto-open the browser in interactive terminals once the server is ready.
 		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			ready, lastHealth := waitForServerReady(displayHost, wPort, 20*time.Second)
-			reason := healthProblemReason(lastHealth)
-			switch {
-			case ready && reason != "":
-				// Degraded: the process is up and serving, so open the
-				// browser, but name what is wrong (e.g. a co-located broker
-				// that failed to register, ptone/scion#2154, which does not
-				// retry: fix the config and restart).
-				fmt.Printf("  Warning: server is up but degraded: %s — %s\n", reason, healthProblemHint(reason))
+			msg, openBrowser := quickstartReadyMessage(waitForServerReady(displayHost, wPort, 20*time.Second))
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			if openBrowser {
 				_ = util.OpenBrowser(url)
-			case ready:
-				_ = util.OpenBrowser(url)
-			case reason != "":
-				// Answering /healthz but unhealthy (a critical check failed).
-				fmt.Printf("  (server is up but %s: %s — open the URL manually; %s)\n", lastHealth.Status, reason, healthProblemHint(reason))
-			default:
-				fmt.Println("  (server not yet ready — open the URL manually once it starts)")
 			}
 		}
 	}

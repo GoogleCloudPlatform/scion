@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,8 +354,8 @@ func TestFormatServerStatusComponents(t *testing.T) {
 			status: serverStatusInfo{
 				HubRunning: true, WebRunning: true,
 				HubStatus: "degraded", WebStatus: "degraded",
-				HubDegradedReason: brokerReason,
-				WebDegradedReason: brokerReason,
+				HubHealthReason: brokerReason,
+				WebHealthReason: brokerReason,
 			},
 			want: []string{
 				"  Hub API:         running, degraded (" + brokerReason + ")" + brokerHint,
@@ -366,8 +367,8 @@ func TestFormatServerStatusComponents(t *testing.T) {
 			name: "combined mode, unhealthy database",
 			status: serverStatusInfo{
 				HubStatus: "unhealthy", WebStatus: "unhealthy",
-				HubDegradedReason: "database: unhealthy",
-				WebDegradedReason: "database: unhealthy",
+				HubHealthReason: "database: unhealthy",
+				WebHealthReason: "database: unhealthy",
 			},
 			want: []string{
 				"  Hub API:         unhealthy (database: unhealthy) — see server log",
@@ -387,9 +388,9 @@ func TestFormatServerStatusComponents(t *testing.T) {
 		{
 			name: "standalone hub, degraded on colocated_broker, no web server: Web Frontend must stay not detected",
 			status: serverStatusInfo{
-				HubRunning:        true,
-				HubStatus:         "degraded",
-				HubDegradedReason: "colocated_broker: unhealthy: registration pending",
+				HubRunning:      true,
+				HubStatus:       "degraded",
+				HubHealthReason: "colocated_broker: unhealthy: registration pending",
 				// Web fields intentionally unset: no web server ran at all.
 			},
 			want: []string{
@@ -430,8 +431,8 @@ func TestProbeServerStatus_StandaloneHubDegraded(t *testing.T) {
 	assert.True(t, status.HubRunning)
 	assert.False(t, status.WebRunning)
 	assert.Equal(t, "degraded", status.HubStatus)
-	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.HubDegradedReason)
-	assert.Empty(t, status.WebDegradedReason, "no web server ran, so Web Frontend must not be labeled degraded")
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.HubHealthReason)
+	assert.Empty(t, status.WebHealthReason, "no web server ran, so Web Frontend must not be labeled degraded")
 	assert.Empty(t, status.WebStatus)
 }
 
@@ -445,7 +446,7 @@ func TestProbeServerStatus_StandaloneHubUnhealthy(t *testing.T) {
 
 	assert.False(t, status.HubRunning)
 	assert.Equal(t, "unhealthy", status.HubStatus)
-	assert.Equal(t, "database: unhealthy", status.HubDegradedReason)
+	assert.Equal(t, "database: unhealthy", status.HubHealthReason)
 	assert.Empty(t, status.WebStatus)
 }
 
@@ -481,8 +482,8 @@ func TestProbeServerStatus_CombinedModeDegraded(t *testing.T) {
 	assert.True(t, status.WebRunning, "degraded means up")
 	assert.Equal(t, "degraded", status.HubStatus)
 	assert.Equal(t, "degraded", status.WebStatus)
-	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.HubDegradedReason)
-	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.WebDegradedReason)
+	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.HubHealthReason)
+	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.WebHealthReason)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&hubHits),
 		"the 8080 probe already answered (degraded), so the standalone hub port must not be probed at all")
 }
@@ -507,7 +508,7 @@ func TestProbeServerStatus_CombinedModeUnhealthy(t *testing.T) {
 	assert.False(t, status.WebRunning)
 	assert.Equal(t, "unhealthy", status.HubStatus)
 	assert.Equal(t, "unhealthy", status.WebStatus)
-	assert.Equal(t, "database: unhealthy", status.HubDegradedReason)
+	assert.Equal(t, "database: unhealthy", status.HubHealthReason)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&hubHits))
 }
 
@@ -582,8 +583,139 @@ func TestProbeServerStatus_CombinedModeHealthy(t *testing.T) {
 	assert.True(t, status.HubRunning)
 	assert.True(t, status.WebRunning)
 	assert.True(t, status.BrokerRunning)
-	assert.Empty(t, status.HubDegradedReason)
-	assert.Empty(t, status.WebDegradedReason)
+	assert.Empty(t, status.HubHealthReason)
+	assert.Empty(t, status.WebHealthReason)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&hubHits),
 		"the 8080 probe already reported healthy, so the standalone hub port must not be probed at all")
+}
+
+// TestWaitForServerReady_StaleDegradedIsNotReady (review a1 N2): a server
+// that answered degraded once and then stopped answering before the deadline
+// must not be reported ready on that stale answer; lastHealth still names
+// the checks it last reported.
+func TestWaitForServerReady_StaleDegradedIsNotReady(t *testing.T) {
+	fastReadyPoll(t)
+	answered := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`))
+		w.(http.Flusher).Flush()
+		once.Do(func() { close(answered) })
+	}))
+	host, port := splitTestServerHostPort(t, srv.URL)
+	// Shut the server down once it has answered once (degraded), so every
+	// later poll before the deadline gets connection refused.
+	go func() {
+		<-answered
+		srv.Close()
+	}()
+	t.Cleanup(srv.Close)
+
+	ready, lastHealth := waitForServerReady(host, port, 400*time.Millisecond)
+	assert.False(t, ready, "the last poll got no answer, so a stale degraded response must not count as up")
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", healthProblemReason(lastHealth))
+}
+
+// TestProbeServerStatus_StandaloneNonScionStatus (review a1 N3): a 9810
+// answer whose status is not a scion hub status, or that has no status at
+// all, is reported as not detected rather than echoing the status.
+func TestProbeServerStatus_StandaloneNonScionStatus(t *testing.T) {
+	for _, body := range []string{`{"status":"ok"}`, `{}`, `{"status":""}`} {
+		t.Run(body, func(t *testing.T) {
+			hubSrv := serveHealth(t, body)
+			client := &http.Client{Timeout: 2 * time.Second}
+			status := probeServerStatus(client, unreachableHTTPURL(t), hubSrv.URL, unreachableHTTPURL(t))
+
+			assert.False(t, status.HubRunning)
+			assert.Empty(t, status.HubStatus)
+			assert.Empty(t, status.HubHealthReason)
+			assert.Equal(t, "  Hub API:         not detected", formatServerStatusComponents(status)[0])
+		})
+	}
+}
+
+// TestProbeServerStatus_UnrelatedDegradedOnWebPort (review a1 N4): an
+// unrelated service on 8080 answering {"status":"degraded"} (no nested
+// "hub") must not be reported as the scion web server/hub, and the
+// standalone hub port is still probed.
+func TestProbeServerStatus_UnrelatedDegradedOnWebPort(t *testing.T) {
+	webSrv := serveHealth(t, `{"status":"degraded"}`)
+	hubSrv := serveHealth(t, `{"status":"healthy","checks":{"database":"healthy"}}`)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status := probeServerStatus(client, webSrv.URL, hubSrv.URL, unreachableHTTPURL(t))
+
+	assert.False(t, status.WebRunning)
+	assert.Empty(t, status.WebStatus)
+	assert.Empty(t, status.WebHealthReason)
+	assert.True(t, status.HubRunning, "the real standalone hub must still be found")
+	assert.Empty(t, status.HubHealthReason)
+}
+
+// TestQuickstartReadyMessage (review a1 N6) covers the message and browser
+// decision printWorkstationQuickstart makes after waitForServerReady.
+func TestQuickstartReadyMessage(t *testing.T) {
+	parse := func(body string) healthProbeResponse {
+		var h healthProbeResponse
+		require.NoError(t, json.Unmarshal([]byte(body), &h))
+		return h
+	}
+	tests := []struct {
+		name     string
+		ready    bool
+		health   healthProbeResponse
+		wantMsg  string
+		wantOpen bool
+	}{
+		{"healthy", true, parse(`{"status":"healthy","hub":{"status":"healthy"}}`), "", true},
+		{"degraded at deadline", true, parse(`{"status":"degraded","hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`),
+			"  Warning: server is up but degraded: colocated_broker: unhealthy: registration failed — see server log; restart after fixing the broker config", true},
+		{"unhealthy", false, parse(`{"status":"unhealthy","hub":{"status":"unhealthy","checks":{"database":"unhealthy"}}}`),
+			"  (server is up but unhealthy: database: unhealthy — open the URL manually; see server log)", false},
+		{"never answered", false, healthProbeResponse{}, "  (server not yet ready — open the URL manually once it starts)", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, open := quickstartReadyMessage(tt.ready, tt.health)
+			assert.Equal(t, tt.wantMsg, msg)
+			assert.Equal(t, tt.wantOpen, open)
+		})
+	}
+}
+
+// TestServerStatusInfoJSON (review a1 N5/N6) pins the `scion server status
+// --json` keys: hubRunning/webRunning mean up (healthy or degraded),
+// hubStatus/webStatus carry a non-healthy status, hubHealthReason/
+// webHealthReason name the checks, and all are omitted when empty.
+func TestServerStatusInfoJSON(t *testing.T) {
+	data, err := json.Marshal(serverStatusInfo{
+		DaemonRunning:   true,
+		HubRunning:      true,
+		WebRunning:      true,
+		HubStatus:       "degraded",
+		WebStatus:       "degraded",
+		HubHealthReason: "colocated_broker: unhealthy: registration failed",
+		WebHealthReason: "colocated_broker: unhealthy: registration failed",
+	})
+	require.NoError(t, err)
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, true, got["hubRunning"])
+	assert.Equal(t, true, got["webRunning"])
+	assert.Equal(t, "degraded", got["hubStatus"])
+	assert.Equal(t, "degraded", got["webStatus"])
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", got["hubHealthReason"])
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", got["webHealthReason"])
+	assert.NotContains(t, got, "hubDegradedReason")
+
+	data, err = json.Marshal(serverStatusInfo{DaemonRunning: true, HubRunning: true, WebRunning: true})
+	require.NoError(t, err)
+	got = nil
+	require.NoError(t, json.Unmarshal(data, &got))
+	for _, k := range []string{"hubStatus", "webStatus", "hubHealthReason", "webHealthReason"} {
+		assert.NotContains(t, got, k, "a healthy server omits %s", k)
+	}
 }
