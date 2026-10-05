@@ -2032,6 +2032,9 @@ func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
 			t.Fatalf("tickCount went backwards: %d after %d", st.TickCount, last)
 		}
 		last = st.TickCount
+		// Yield so the loop cannot spin-starve the ticker goroutine on a
+		// loaded CI runner.
+		time.Sleep(time.Millisecond)
 	}
 	s.Stop()
 
