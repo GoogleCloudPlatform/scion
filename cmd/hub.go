@@ -2575,16 +2575,16 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Offer to sync project templates to Hub
-	offerTemplateSyncOnLink(resolvedPath, endpoint, projectID)
+	offerTemplateSyncOnLinkFn(resolvedPath, endpoint, effectiveHubProjectID)
 
 	// Display available brokers for this project
-	listBrokersForProject(ctx, client, projectID)
+	listBrokersForProject(ctx, client, effectiveHubProjectID)
 
 	return nil
 }
 
 // templateSyncHubContext builds the hub context that template sync uses
-// after hub link. It targets the just-linked projectID, whatever the
+// after hub link. It targets the just-linked hub projectID, whatever the
 // environment or flags say.
 func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContext, error) {
 	settings, err := loadSettingsForTarget(projectPath)
@@ -2603,6 +2603,10 @@ func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContex
 		Settings:    settings,
 	}, nil
 }
+
+// offerTemplateSyncOnLinkFn lets tests see the project ID that hub link
+// passes to template sync.
+var offerTemplateSyncOnLinkFn = offerTemplateSyncOnLink
 
 // offerTemplateSyncOnLink detects local project templates and prompts
 // the user to sync them to the Hub during project linking.
