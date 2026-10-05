@@ -157,6 +157,40 @@ describe('SharedJsonLoad', () => {
     expect(f.calls).toBe(2);
   });
 
+  it('startedAfter shares only a request that started after the event', async () => {
+    const f = deferredFetcher();
+    const load = new SharedJsonLoad(f.fetchOnce, clock);
+
+    void load.load(); // sent before the event
+    const eventAt = now;
+    // Same tick as the event: it may have been sent before it.
+    expect(f.calls).toBe(1);
+    void load.load({ startedAfter: eventAt });
+    expect(f.calls).toBe(2);
+
+    // A request another owner sent after the event is shared.
+    now += 1;
+    const ownerRefresh = load.load();
+    const shared = load.load({ startedAfter: eventAt });
+    expect(f.calls).toBe(3);
+    f.resolve(2, { n: 3 });
+    expect(await shared).toBe(await ownerRefresh);
+  });
+
+  it('startedAfter shares a completed request too, however old the event', async () => {
+    const f = deferredFetcher();
+    const load = new SharedJsonLoad(f.fetchOnce, clock);
+    const eventAt = now;
+    now += 1;
+    const first = load.load();
+    f.resolve(0, { n: 1 });
+    await first;
+
+    now += 60_000;
+    expect(await load.load({ startedAfter: eventAt })).toEqual({ n: 1 });
+    expect(f.calls).toBe(1);
+  });
+
   it('invalidate makes the next initial load fetch', async () => {
     const f = deferredFetcher();
     const load = new SharedJsonLoad(f.fetchOnce, clock);

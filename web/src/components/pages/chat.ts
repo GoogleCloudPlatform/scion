@@ -50,7 +50,7 @@ import type { AgentListSnapshot } from '../../client/agent-store.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
-import { CHAT_STARTUP_REUSE_MS, chatDMsLoad } from '../../client/chat-list-cache.js';
+import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
@@ -432,6 +432,15 @@ export class ScionPageChat extends LitElement {
   private _hubMembersLoadedGeneration: number | null = null;
   /** The in-flight project members request, aborted once another view claims the sidebar. */
   private _projectMembersAbort: AbortController | null = null;
+  /** Newest chat message (event time) the pending debounced rail reload must reflect. */
+  private _railReloadAfter = -Infinity;
+  /**
+   * The {@link _hubMembersGeneration} hub presence was last fetched for (or
+   * is being fetched for). Presence then stays current over SSE, so a rail
+   * reload — one per chat message — must not fetch a space's members again
+   * just to re-merge it; the fallback poll resyncs it slowly instead.
+   */
+  private _hubPresenceGeneration: number | null = null;
   /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
@@ -1535,6 +1544,9 @@ export class ScionPageChat extends LitElement {
         // route/view re-parses elsewhere, which just want whatever walk is
         // already in flight.
         void this.loadHubMembers({ refresh: true });
+        // Presence rides on SSE between these polls; resync it here, at the
+        // poll's pace, rather than on every rail reload.
+        void this.refreshHubMemberPresence(this._presenceProjectIds[0] ?? '');
       }
     }, FALLBACK_POLL_INTERVAL_MS);
   }
@@ -1583,10 +1595,9 @@ export class ScionPageChat extends LitElement {
       // When in the global /chat view (no conversation selected), the hub
       // members were loaded from /api/v1/users which doesn't include presence
       // state. Now that we have space IDs, fetch presence data from the first
-      // space's members endpoint and merge it into the existing list.
-      if (!this.v2Conversation) {
-        void this.refreshHubMemberPresence(detail.spaceIds[0]);
-      }
+      // space's members endpoint and merge it into the existing list — once
+      // per hub view, not on every rail reload.
+      this.maybeRefreshHubPresence();
     }
   }
 
@@ -2248,14 +2259,21 @@ export class ScionPageChat extends LitElement {
     // A new message may create an unread DM or clear one — refresh the dots.
     void this.loadUnreadDMPeers();
 
-    // Debounce: reload the rail + backfill conversation
+    // Debounce: reload the rail + backfill conversation. The reload only
+    // needs a spaces list requested after the newest message of the burst,
+    // so it shares the tab-title counter's refresh for the same messages
+    // (which runs sooner) rather than asking the server a second time.
+    const eventAt = Number.isFinite(e.timeStamp) ? e.timeStamp : chatLoadClock();
+    this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
     this._refreshTimer = setTimeout(() => {
       this._refreshTimer = null;
+      const startedAfter = this._railReloadAfter;
+      this._railReloadAfter = -Infinity;
       const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
         | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
         | null;
-      if (rail) void rail.reload();
+      if (rail) void rail.reload({ startedAfter });
     }, 2000);
   }
 
@@ -2925,6 +2943,8 @@ export class ScionPageChat extends LitElement {
       ];
       if (usersResult.status === 'fulfilled' && agentsResult.status === 'fulfilled') {
         this._hubMembersLoadedGeneration = generation;
+        // The rail may have loaded first; presence waited for this list.
+        this.maybeRefreshHubPresence();
       }
     } catch {
       // Non-critical — sidebar keeps whatever it already had.
@@ -2937,8 +2957,26 @@ export class ScionPageChat extends LitElement {
    * hub-level human members list.  Called from handleRailLoaded when the user
    * is in the global /chat view so that presence indicators render on first load.
    */
+  /**
+   * Fetch hub presence once per hub view: when both the hub member list
+   * (which presence merges into) and the space IDs (which name the members
+   * endpoint to ask) are known, whichever arrives second triggers it.
+   */
+  private maybeRefreshHubPresence(): void {
+    const projectId = this._presenceProjectIds[0];
+    if (this.v2Conversation || !projectId) return;
+    if (this._hubMembersLoadedGeneration !== this._hubMembersGeneration) return;
+    if (this._hubPresenceGeneration === this._hubMembersGeneration) return;
+    void this.refreshHubMemberPresence(projectId);
+  }
+
   private async refreshHubMemberPresence(projectId: string): Promise<void> {
     if (!projectId) return;
+    // Claimed up front so a second trigger during the request does not ask
+    // again; released below if the merge does not happen.
+    const generation = this._hubMembersGeneration;
+    this._hubPresenceGeneration = generation;
+    let merged = false;
     // Captured, not bumped: this only merges presence fields into whatever
     // loadHubMembers/loadV2Members last populated, it doesn't replace that
     // view's arrays. If the view has since moved on, bail instead of
@@ -2954,6 +2992,7 @@ export class ScionPageChat extends LitElement {
       // a newer load could otherwise land in the window between the body
       // resolving and this check.
       if (seq !== this._membersViewSeq) return;
+      merged = true;
       if (!data.humans?.length) return;
 
       // Build a lookup of userId → presenceState. Members present in the
@@ -2976,6 +3015,11 @@ export class ScionPageChat extends LitElement {
       }
     } catch {
       // Non-critical — presence will still update via SSE events
+    } finally {
+      // Not applied (failed, or the view moved on): let the next trigger retry.
+      if (!merged && this._hubPresenceGeneration === generation) {
+        this._hubPresenceGeneration = null;
+      }
     }
   }
 

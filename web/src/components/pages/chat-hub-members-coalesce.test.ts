@@ -42,7 +42,7 @@ import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.j
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
-  stateManager: Object.assign(new EventTarget(), { seedAgents: vi.fn() }),
+  stateManager: Object.assign(new EventTarget(), { seedAgents: vi.fn(), setScope: vi.fn() }),
 }));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
@@ -821,6 +821,126 @@ describe('loadHubMembers after a finished walk', () => {
 
     expect(countRequests('/api/v1/agents')).toBe(2);
     expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+  });
+});
+
+describe('hub presence fetch', () => {
+  function membersRequests(): number {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => /\/chat\/spaces\/[^/]+\/members$/.test(String(c[0]))).length;
+  }
+
+  function railLoaded(page: any): void {
+    page.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: ['p1'],
+          spaces: [{ projectId: 'p1', projectSlug: 'p1', projectName: 'P1' }],
+        },
+      })
+    );
+  }
+
+  function presencePage(): any {
+    const page = createPage();
+    page.pageData = { user: { id: 'user-me' } };
+    // The route re-parse rail-loaded triggers is not under test here.
+    page.parseV2Route = vi.fn();
+    return page;
+  }
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+  });
+
+  it('is fetched once per hub view, not again on every rail reload', async () => {
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+
+    railLoaded(page);
+    await flush();
+    railLoaded(page);
+    railLoaded(page);
+    await flush();
+
+    expect(membersRequests()).toBe(1);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('waits for the hub member list when the rail loads first', async () => {
+    const page = presencePage();
+    railLoaded(page);
+    await flush();
+    expect(membersRequests()).toBe(0);
+
+    page.loadHubMembers();
+    await flush();
+
+    expect(membersRequests()).toBe(1);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('a failed presence fetch is retried by the next rail load', async () => {
+    let members = 0;
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (/\/members$/.test(url)) {
+        return ++members === 1 ? new Response('', { status: 500 }) : new Response('{}');
+      }
+      return routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )(url);
+    });
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+    railLoaded(page);
+    await flush();
+
+    railLoaded(page);
+    await flush();
+
+    expect(membersRequests()).toBe(2);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('the fallback poll resyncs it', async () => {
+    vi.useFakeTimers();
+    const page = mountPage();
+    await vi.advanceTimersByTimeAsync(0);
+    page._presenceProjectIds = ['p1'];
+    const before = membersRequests();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(membersRequests()).toBe(before + 1);
+    page.remove();
+  });
+
+  it('a new hub view (after a conversation) fetches it again', async () => {
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+    railLoaded(page);
+    await flush();
+
+    page._hubMembersGeneration++;
+    page.loadHubMembers();
+    await flush();
+
+    expect(membersRequests()).toBe(2);
+    page.stopPresenceHeartbeat();
   });
 });
 

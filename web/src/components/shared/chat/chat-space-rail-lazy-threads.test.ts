@@ -51,7 +51,9 @@ function space(i: number, withActivity = true): ChatSpace {
   };
 }
 
-function threadsFor(projectId: string): ChatSpaceThread[] {
+/** One #general per space; with `withActivity`, newer for lower space numbers. */
+function threadsFor(projectId: string, withActivity = false): ChatSpaceThread[] {
+  const hour = 12 - Number(projectId.slice(1));
   return [
     {
       id: `${projectId}-general`,
@@ -60,6 +62,9 @@ function threadsFor(projectId: string): ChatSpaceThread[] {
       pinned: false,
       hasUnread: false,
       hasUnreadMention: false,
+      ...(withActivity
+        ? { lastActivityAt: new Date(Date.UTC(2026, 9, 5, hour)).toISOString() }
+        : {}),
     },
   ];
 }
@@ -70,6 +75,8 @@ interface Server {
   /** Thread requests held until released, in arrival order. */
   held: Array<{ projectId: string; signal: AbortSignal | undefined; release: () => void }>;
   holdThreads: boolean;
+  /** Thread lists carry `lastActivityAt` (for activity order from threads). */
+  threadActivity: boolean;
 }
 
 let server: Server;
@@ -99,7 +106,9 @@ function serve(): void {
     if (m) {
       const projectId = decodeURIComponent(m[1]);
       const respond = (): Response =>
-        new Response(JSON.stringify({ threads: threadsFor(projectId) }), { status: 200 });
+        new Response(JSON.stringify({ threads: threadsFor(projectId, server.threadActivity) }), {
+          status: 200,
+        });
       if (!server.holdThreads) return Promise.resolve(respond());
       return new Promise<Response>((resolve, reject) => {
         const signal = init?.signal ?? undefined;
@@ -147,6 +156,7 @@ beforeEach(() => {
     prefs: {},
     held: [],
     holdThreads: false,
+    threadActivity: false,
   };
   chatSpacesLoad.invalidate();
   serve();
@@ -319,5 +329,175 @@ describe('space rail — progressive thread loading', () => {
     await early;
 
     expect(spacesRequests()).toBe(1);
+  });
+});
+
+describe('space rail — writes to a space whose list never loaded', () => {
+  it('marking a never-loaded space read keeps it unloaded, so its header still opens #general', async () => {
+    server.spaces = [
+      { ...space(0), unreadCount: 2 },
+      { ...space(1), unreadCount: 3 },
+    ];
+    const el = await mount();
+
+    await el.handleMarkSpaceRead('p1');
+    expect(el.threadsBySpace.has('p1')).toBe(false);
+    expect(el.spaces.find((s: ChatSpace) => s.projectId === 'p1').unreadCount).toBe(0);
+
+    const selected = new Promise<string>((resolve) => {
+      el.addEventListener(
+        'thread-select',
+        (e: Event) => resolve((e as CustomEvent).detail.conversationKey),
+        { once: true }
+      );
+    });
+    el.handleCollapsedSpaceClick(el.spaces[1]);
+    expect(await selected).toBe('p1-general');
+  });
+
+  it('a thread update for a never-loaded space writes nothing', async () => {
+    const el = await mount();
+
+    el.updateThread('p2', 'p2-general', { muted: true });
+
+    expect(el.threadsBySpace.has('p2')).toBe(false);
+  });
+
+  it('while a never-loaded space loads after a mark-read, it shows the loading state', async () => {
+    server.holdThreads = true;
+    const el = await mount();
+    await el.handleMarkSpaceRead('p3');
+
+    el.expandSpace('p3');
+    await el.updateComplete;
+
+    expect(el.shadowRoot.querySelectorAll('.threads-loading')).toHaveLength(1);
+  });
+});
+
+describe('space rail — first-load epoch', () => {
+  it('a thread list requested before the first spaces load is not fetched again', async () => {
+    // A cold space deep link asks the rail for a space's threads while the
+    // spaces response is still on its way.
+    let releaseSpaces: () => void = () => {};
+    const spacesHeld = new Promise<void>((resolve) => {
+      releaseSpaces = resolve;
+    });
+    const base = apiFetchMock.getMockImplementation()!;
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/chat/spaces') await spacesHeld;
+      return base(path, init);
+    });
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.selectedProjectId = 'p1';
+    el.selectedKey = 'p1-general';
+    const loaded = waitForRailLoaded(el);
+    document.body.appendChild(el);
+
+    const threads = await el.threadsFor('p1');
+    expect(threads.map((t: ChatSpaceThread) => t.id)).toEqual(['p1-general']);
+    releaseSpaces();
+    await loaded;
+    await flush();
+
+    expect(threadRequests()).toEqual(['p1']);
+  });
+});
+
+describe('space rail — read state for a thread in an unloaded space', () => {
+  for (const action of ['markThreadRead', 'markThreadUnread'] as const) {
+    it(`${action} refreshes the spaces rollup instead of leaving the badge stale`, async () => {
+      const el = await mount();
+      apiFetchMock.mockClear();
+
+      el[action]('p2-general');
+      el[action]('p2-general');
+      await flush();
+
+      // Two calls, one coalesced reload pass (plus at most one trailing).
+      expect(spacesRequests()).toBeGreaterThanOrEqual(1);
+      expect(spacesRequests()).toBeLessThanOrEqual(2);
+    });
+  }
+
+  it('does nothing once every list is loaded and none holds the thread', async () => {
+    server.spaces = [space(0)];
+    const el = await mount();
+    el.expandSpace('p0');
+    await flush();
+    apiFetchMock.mockClear();
+
+    el.markThreadRead('elsewhere');
+    await flush();
+
+    expect(spacesRequests()).toBe(0);
+  });
+});
+
+describe('space rail — loading state accessibility', () => {
+  it('names the space being loaded and marks its list busy', async () => {
+    server.holdThreads = true;
+    const el = await mount();
+
+    el.expandSpace('p2');
+    await el.updateComplete;
+
+    const status = el.shadowRoot.querySelector('.threads-loading');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.textContent).toContain('Loading threads for Project 2');
+    expect(el.shadowRoot.querySelector('.thread-list').getAttribute('aria-busy')).toBe('true');
+
+    server.held[0].release();
+    await flush();
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.thread-list').getAttribute('aria-busy')).toBe('false');
+  });
+});
+
+describe('space rail — background order without server activity', () => {
+  it('keeps the server order until every background load lands, then sorts once and stays sorted', async () => {
+    // Server order 3, 2, 1, 0; activity order is 0, 1, 2, 3.
+    server.spaces = [space(3, false), space(2, false), space(1, false), space(0, false)];
+    server.threadActivity = true;
+    server.holdThreads = true;
+    const el = await mount();
+    await flush();
+    const releaseNext = async (): Promise<void> => {
+      server.held.shift()!.release();
+      await flush();
+      await el.updateComplete;
+    };
+
+    await releaseNext();
+    expect(spaceNames(el)).toEqual(['Project 3', 'Project 2', 'Project 1', 'Project 0']);
+    await releaseNext();
+    await releaseNext();
+    expect(spaceNames(el)).toEqual(['Project 3', 'Project 2', 'Project 1', 'Project 0']);
+    await releaseNext();
+    expect(spaceNames(el)).toEqual(['Project 0', 'Project 1', 'Project 2', 'Project 3']);
+
+    // A reload refetches in the background; the order does not fall back.
+    await el.reload();
+    await el.updateComplete;
+    expect(el.loadingThreads.size).toBeGreaterThan(0);
+    expect(spaceNames(el)).toEqual(['Project 0', 'Project 1', 'Project 2', 'Project 3']);
+  });
+});
+
+describe('space rail — reload sharing', () => {
+  it('a reload for an event shares a spaces request started after it, and only that', async () => {
+    const el = await mount();
+    apiFetchMock.mockClear();
+
+    const eventAt = performance.now();
+    await new Promise((r) => setTimeout(r, 2));
+    // Another owner (the tab-title counter) refreshes for the same event.
+    await chatSpacesLoad.load();
+    await el.reload({ startedAfter: eventAt });
+    expect(spacesRequests()).toBe(1);
+
+    // A plain reload needs a request newer than itself.
+    await el.reload();
+    expect(spacesRequests()).toBe(2);
   });
 });

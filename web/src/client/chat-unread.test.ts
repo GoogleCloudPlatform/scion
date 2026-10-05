@@ -196,6 +196,32 @@ describe('ChatUnreadCounter', () => {
     counter.stop();
   });
 
+  it('a message refresh shares the DM fetch the chat page made for the same message', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    apiFetch.mockClear();
+
+    try {
+      const event = new CustomEvent('chat-message-received', { detail: {} });
+      vi.advanceTimersByTime(1);
+      // The page reloads its DM dots the moment the message arrives.
+      stateManager.dispatchEvent(event);
+      void chatDMsLoad.load();
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      const dmCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/dms'));
+      const spaceCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/spaces'));
+      expect(dmCalls).toHaveLength(1);
+      expect(spaceCalls).toHaveLength(1);
+      expect(getUnreadBadge()).toBe(2);
+    } finally {
+      counter.stop();
+    }
+  });
+
   it('coalesces a burst of events into one refresh', async () => {
     vi.useFakeTimers();
     mockChatApi([{ unreadCount: 1 }], []);

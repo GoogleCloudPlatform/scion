@@ -26,7 +26,12 @@
  * "stop telling me about this", and a number in the tab title is telling them.
  */
 
-import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatSpacesLoad } from './chat-list-cache.js';
+import {
+  CHAT_STARTUP_REUSE_MS,
+  chatDMsLoad,
+  chatLoadClock,
+  chatSpacesLoad,
+} from './chat-list-cache.js';
 import type { SharedLoadOptions } from './chat-list-cache.js';
 import { isChatNotificationStatus } from './chat-notifications.js';
 import { setUnreadBadge } from './page-title.js';
@@ -76,7 +81,14 @@ export class ChatUnreadCounter {
   private stopped = false;
   /** Incrementing counter to detect stale refresh results. */
   private refreshId = 0;
-  private readonly boundSchedule = (): void => this.scheduleRefresh();
+  /**
+   * When the newest event of the pending burst was delivered. The debounced
+   * refresh only needs data requested after it, so it shares a fetch the
+   * chat page made for the same event — the page reloads its DM dots the
+   * moment a message arrives — instead of asking the server again.
+   */
+  private burstEventAt: number | null = null;
+  private readonly boundSchedule = (e: Event): void => this.scheduleRefresh(eventTime(e));
   private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
   /** Begins tracking, with one immediate refresh. */
@@ -139,22 +151,30 @@ export class ChatUnreadCounter {
   private onNotification(e: Event): void {
     const { detail } = e as CustomEvent<{ data?: { status?: string } } | undefined>;
     if (!isChatNotificationStatus(detail?.data?.status)) return;
-    this.scheduleRefresh();
+    this.scheduleRefresh(eventTime(e));
   }
 
-  /** Coalesces a burst of events into a single refresh. */
-  scheduleRefresh(): void {
+  /**
+   * Coalesces a burst of events into a single refresh. `eventAt` is when
+   * the triggering event was delivered (default: now); the refresh accepts
+   * any request started after the newest one.
+   */
+  scheduleRefresh(eventAt: number = chatLoadClock()): void {
+    this.burstEventAt = Math.max(this.burstEventAt ?? eventAt, eventAt);
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.refresh();
+      const startedAfter = this.burstEventAt ?? chatLoadClock();
+      this.burstEventAt = null;
+      void this.refresh({ startedAfter });
     }, UNREAD_REFRESH_DEBOUNCE_MS);
   }
 
   /**
    * Recomputes both halves from the server. Without options this always
-   * fetches — it follows an event that may have changed the counts; `start`
-   * passes `maxAgeMs` to share the startup loads.
+   * fetches; `start` passes `maxAgeMs` to share the startup loads, and the
+   * debounced refresh passes `startedAfter` to share a fetch made after its
+   * events.
    */
   async refresh(options: SharedLoadOptions = {}): Promise<void> {
     const localId = ++this.refreshId;
@@ -171,6 +191,7 @@ export class ChatUnreadCounter {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    this.burstEventAt = null;
   }
 
   private publish(): void {
@@ -188,6 +209,11 @@ export class ChatUnreadCounter {
     const data = await chatDMsLoad.load(options);
     return data ? ((data.dms ?? []) as UnreadDM[]) : null;
   }
+}
+
+/** When an event was delivered, on the shared loads' clock. */
+function eventTime(e: Event): number {
+  return Number.isFinite(e.timeStamp) ? e.timeStamp : chatLoadClock();
 }
 
 /** The page-wide unread counter. */

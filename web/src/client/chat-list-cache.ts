@@ -23,10 +23,13 @@
  * `/chat/spaces` and `/chat/dms` twice each — and those are among the
  * heaviest chat endpoints. Going through this module they share one request.
  *
- * Two ways to ask:
+ * Three ways to ask:
  *
  * - `{ maxAgeMs }` (an initial load): join a request already in flight, or
  *   reuse a result whose request started at most `maxAgeMs` ago.
+ * - `{ startedAfter }` (a refresh for a known event): join or reuse a
+ *   request that started after the event was delivered — another owner's
+ *   refresh for the same event — and otherwise fetch.
  * - no options (a refresh after something may have changed — an SSE event,
  *   a reconnect, a mutation): always start a new request. A request already
  *   in flight may have been answered before the change, so joining it would
@@ -51,6 +54,17 @@ export const CHAT_STARTUP_REUSE_MS = 5_000;
 export interface SharedLoadOptions {
   /** Accept an in-flight request, or a result whose request started at most this long ago. */
   maxAgeMs?: number;
+  /**
+   * Accept a request (in flight or done) that started after this instant, on the `performance.now()` clock — e.g. a DOM event's
+   * `timeStamp`. A request started after an event was delivered reflects
+   * it, so a refresh for that event can share it instead of fetching again.
+   */
+  startedAfter?: number;
+}
+
+/** The clock `startedAfter` is measured on, matching `Event.timeStamp`. */
+export function chatLoadClock(): number {
+  return performance.now();
 }
 
 interface Entry<T> {
@@ -66,14 +80,22 @@ export class SharedJsonLoad<T> {
 
   constructor(
     private readonly fetchOnce: () => Promise<T | null>,
-    private readonly now: () => number = () => Date.now()
+    private readonly now: () => number = chatLoadClock
   ) {}
 
+  /**
+   * Every caller sharing a load receives the same parsed object: treat it
+   * as read-only, and copy before changing anything in it.
+   */
   load(options: SharedLoadOptions = {}): Promise<T | null> {
-    const { maxAgeMs } = options;
+    const { maxAgeMs, startedAfter } = options;
     const current = this.entry;
-    if (current && maxAgeMs !== undefined && this.now() - current.startedAt <= maxAgeMs) {
-      return current.promise;
+    if (current && (maxAgeMs !== undefined || startedAfter !== undefined)) {
+      // Both options must hold. `startedAfter` is strict: a request started
+      // in the same clock tick as the event may have been sent before it.
+      const youngEnough = maxAgeMs === undefined || this.now() - current.startedAt <= maxAgeMs;
+      const afterEvent = startedAfter === undefined || current.startedAt > startedAfter;
+      if (youngEnough && afterEvent) return current.promise;
     }
     return this.start();
   }
