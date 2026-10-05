@@ -28,9 +28,72 @@ import (
 // runtime default). They name the tier in log lines and in the user-facing
 // error text, so an operator can tell which setting to fix.
 const (
+	defaultTierProfile = "project profile"
 	defaultTierProject = "project"
 	defaultTierHub     = "hub"
 )
+
+// projectProfileDefaultSA returns the per-profile default GCP service
+// account ID (ProjectSettings.DefaultGCPIdentityServiceAccountIDByProfile)
+// for the profile the agent runs under, and that profile's name. Both are
+// empty when the project sets no per-profile default or has no entry for
+// that profile, and the caller then applies the rest of the ladder
+// unchanged.
+//
+// The profile is resolved with the same helpers the hub-default passthrough
+// rung uses, so both rungs agree on which profile an agent dispatches under:
+// effectiveRuntimeProfileName (request profile, then the project's active
+// profile), then resolveAgentRuntimeProfileType against the broker record
+// (falling back to the broker's default profile, or its single profile).
+// When the broker record is unavailable or does not list a named profile,
+// the named profile itself is used: the agent is dispatched under that name
+// either way. The caller pins the returned profile onto the agent (see
+// pinResolvedProfile) so the broker cannot dispatch it under another one.
+func (s *Server) projectProfileDefaultSA(ctx context.Context, runtimeBrokerID string, project *store.Project, requestProfile string) (profile, saID string) {
+	if project == nil {
+		return "", ""
+	}
+	byProfile := projectSettingsFromAnnotations(project).DefaultGCPIdentityServiceAccountIDByProfile
+	if len(byProfile) == 0 {
+		return "", ""
+	}
+	profile = effectiveRuntimeProfileName(requestProfile, project)
+	if runtimeBrokerID != "" {
+		broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+		if err == nil && broker != nil {
+			if resolved, _, ok := resolveAgentRuntimeProfileType(broker, profile); ok {
+				profile = resolved
+			}
+		} else {
+			slog.Debug("per-profile default GCP service account: runtime broker unavailable, using the named profile only",
+				"project_id", project.ID, "broker", runtimeBrokerID, "profile", profile, "error", err)
+		}
+	}
+	if profile == "" {
+		return "", ""
+	}
+	saID = byProfile[profile]
+	if saID == "" {
+		return "", ""
+	}
+	return profile, saID
+}
+
+// pinResolvedProfile pins profile onto the agent's applied config and its
+// CreateInputs (what reincarnate replays) when they name none yet, so the
+// agent dispatches under the profile a profile-scoped default was chosen
+// for. An explicit profile already set is never overwritten.
+func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
+	if ac == nil || profile == "" {
+		return
+	}
+	if ac.Profile == "" {
+		ac.Profile = profile
+	}
+	if ac.CreateInputs != nil && ac.CreateInputs.Profile == "" {
+		ac.CreateInputs.Profile = profile
+	}
+}
 
 // resolveDefaultSAAssignmentCore is the transport-independent body shared by
 // every default-tier assign rung of the GCP identity ladder: the HTTP

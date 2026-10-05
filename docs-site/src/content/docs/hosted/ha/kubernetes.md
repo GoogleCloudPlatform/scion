@@ -339,7 +339,7 @@ Windows and exclusions don't stop Compute Engine maintenance, and most control p
 
 ### GCP Identity Modes on Kubernetes
 
-An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
+An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
 
 | Mode | On the Kubernetes runtime |
 | :--- | :--- |
@@ -408,6 +408,8 @@ The mapping is read only from the broker's global settings: `~/.scion/settings.y
 | On start or restart, the agent now resolves to another runtime, profile, or runtime entry than its identity was resolved for | 409 | `GCP identity mode "assign" was resolved for ...` |
 
 There is no fallback: a failed mapping never runs the pod with the emulator or with the pod's default identity.
+
+**Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
 #### passthrough
 

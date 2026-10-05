@@ -704,6 +704,27 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		clonedIDs = append(clonedIDs, newSA.ID)
 	}
 
+	// Remap the per-profile default SA map's entries that reference a
+	// source SA. Entries naming other (hub-scoped) accounts are kept.
+	if byProfile := profileDefaultSAIDsFromAnnotations(clone.Annotations); len(byProfile) > 0 {
+		changed := false
+		for profile, saID := range byProfile {
+			for i, srcSA := range accounts {
+				if srcSA.ID == saID {
+					byProfile[profile] = clonedIDs[i]
+					changed = true
+					break
+				}
+			}
+		}
+		if changed {
+			setProfileDefaultSAIDsAnnotation(clone.Annotations, byProfile)
+			if err := s.store.UpdateProject(ctx, clone); err != nil {
+				return fmt.Errorf("remap per-profile default SA annotation: %w", err)
+			}
+		}
+	}
+
 	// Remap default SA annotation if it references a source SA.
 	defaultSAID, ok := clone.Annotations[projectSettingDefaultGCPIdentitySAID]
 	if ok && defaultSAID != "" {

@@ -4222,6 +4222,20 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
+	// A per-profile default for the profile this agent runs under wins over
+	// the project-wide default, as on the create path.
+	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			profileSAID, SurfaceProjectDefault, defaultTierProfile)
+		if err != nil {
+			return err
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		pinResolvedProfile(agent.AppliedConfig, profileName)
+		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
+			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
+		return nil
+	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
 	case store.GCPMetadataModePassthrough:

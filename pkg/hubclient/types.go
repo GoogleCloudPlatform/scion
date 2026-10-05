@@ -215,6 +215,13 @@ type ProjectSettings struct {
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
+	// DefaultGCPIdentityServiceAccountIDByProfile maps a broker profile name
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity, the entry for the profile the agent runs
+	// under assigns that service account, ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
+	// keeps the stored map and an empty object clears it.
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
