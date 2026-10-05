@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -747,6 +748,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -774,6 +776,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
 		SetDefaultProfile(b.DefaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -875,6 +878,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
 			SetDefaultProfile(b.DefaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -979,6 +983,10 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
 	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	// broker_target_inventory has no FK to runtime_brokers either.
+	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)

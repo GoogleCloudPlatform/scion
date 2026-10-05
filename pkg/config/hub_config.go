@@ -126,6 +126,21 @@ type HubServerConfig struct {
 	// Default: 3 minutes (minimum 1 minute).
 	MissingAgentGrace time.Duration `json:"missingAgentGrace" yaml:"missingAgentGrace" koanf:"missingAgentGrace"`
 
+	// --- Start claim (every agent start runs under an owned, leased claim) ---
+
+	// StartClaimLeaseTTL is the claim lease; renewed every third of it.
+	// Default 90s (30s to 5m).
+	StartClaimLeaseTTL time.Duration `json:"startClaimLeaseTtl" yaml:"startClaimLeaseTtl" koanf:"startClaimLeaseTtl"`
+	// StartMaxDuration is the hard deadline on any start. Default 12m
+	// (minimum 11m).
+	StartMaxDuration time.Duration `json:"startMaxDuration" yaml:"startMaxDuration" koanf:"startMaxDuration"`
+	// StartUnconfirmedHold bounds how long a start with an unknown outcome
+	// blocks other starts. Default 13m (minimum 12m40s).
+	StartUnconfirmedHold time.Duration `json:"startUnconfirmedHold" yaml:"startUnconfirmedHold" koanf:"startUnconfirmedHold"`
+	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
+	// create-and-start. Default 5m (3m up to StartUnconfirmedHold).
+	StartCreateUnconfirmedHold time.Duration `json:"startCreateUnconfirmedHold" yaml:"startCreateUnconfirmedHold" koanf:"startCreateUnconfirmedHold"`
+
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback introduced during GCS namespace migration. When true,
 	// only hub-scoped paths are checked; legacy paths are never consulted.
@@ -143,16 +158,14 @@ type HubServerConfig struct {
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
-	// API already advertises the remaining budget (`launch.remainingSeconds`,
-	// design §3.2) so a client can size its own wait around it, but no
-	// client does that yet (planned CLI behavior, design §3.11).
+	// API advertises the remaining budget (`launch.remainingSeconds`, design
+	// §3.2), and the CLI sizes its default launch wait from it.
 	LaunchTimeout time.Duration `json:"launchTimeout" yaml:"launchTimeout" koanf:"launchTimeout"`
 
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
-	// (design §3.7). Today it only sets the reaper's staleness window (8x
-	// this value); it will also be sent to the broker as
-	// launchKeepaliveSeconds in the create request once the async dispatch
-	// path lands. Default 15.
+	// (design §3.7). It is sent to the broker as launchKeepaliveSeconds in
+	// each asynchronous create request, and sets the reaper's staleness
+	// window (8x this value). Default 15.
 	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
 }
 
@@ -1324,38 +1337,42 @@ func parseCommaSeparatedList(s string) []string {
 // match the opsettings keyspace (admin_emails).
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
-	"adminemails":           "admin_emails",
-	"agentendpoint":         "agent_endpoint",
-	"apibaseurl":            "api_base_url",
-	"appid":                 "app_id",
-	"authorizeddomains":     "authorized_domains",
-	"autosuspendstalled":    "auto_suspend_stalled",
-	"cafile":                "ca_file",
-	"defaultharnessconfig":  "default_harness_config",
-	"defaultmaxduration":    "default_max_duration",
-	"defaultuserrole":       "default_user_role",
-	"defaultmaxmodelcalls":  "default_max_model_calls",
-	"defaultmaxturns":       "default_max_turns",
-	"defaultresources":      "default_resources",
-	"defaulttemplate":       "default_template",
-	"githubapp":             "github_app",
-	"hubname":               "hub_name",
-	"imageregistry":         "image_registry",
-	"insecureskipverify":    "insecure_skip_verify",
-	"installationurl":       "installation_url",
-	"maxsize":               "max_size",
-	"missingagentgrace":     "missing_agent_grace",
-	"notificationchannels":  "notification_channels",
-	"privatekeypath":        "private_key_path",
-	"publicurl":             "public_url",
-	"reportinterval":        "report_interval",
-	"respectdebugmode":      "respect_debug_mode",
-	"slowrequestthreshold":  "slow_request_threshold",
-	"softdeleteretainfiles": "soft_delete_retain_files",
-	"softdeleteretention":   "soft_delete_retention",
-	"stalledthreshold":      "stalled_threshold",
-	"useraccessmode":        "user_access_mode",
-	"webhooksenabled":       "webhooks_enabled",
+	"adminemails":                "admin_emails",
+	"agentendpoint":              "agent_endpoint",
+	"apibaseurl":                 "api_base_url",
+	"appid":                      "app_id",
+	"authorizeddomains":          "authorized_domains",
+	"autosuspendstalled":         "auto_suspend_stalled",
+	"cafile":                     "ca_file",
+	"defaultharnessconfig":       "default_harness_config",
+	"defaultmaxduration":         "default_max_duration",
+	"defaultuserrole":            "default_user_role",
+	"defaultmaxmodelcalls":       "default_max_model_calls",
+	"defaultmaxturns":            "default_max_turns",
+	"defaultresources":           "default_resources",
+	"defaulttemplate":            "default_template",
+	"githubapp":                  "github_app",
+	"hubname":                    "hub_name",
+	"imageregistry":              "image_registry",
+	"insecureskipverify":         "insecure_skip_verify",
+	"installationurl":            "installation_url",
+	"maxsize":                    "max_size",
+	"missingagentgrace":          "missing_agent_grace",
+	"notificationchannels":       "notification_channels",
+	"privatekeypath":             "private_key_path",
+	"publicurl":                  "public_url",
+	"reportinterval":             "report_interval",
+	"respectdebugmode":           "respect_debug_mode",
+	"slowrequestthreshold":       "slow_request_threshold",
+	"softdeleteretainfiles":      "soft_delete_retain_files",
+	"softdeleteretention":        "soft_delete_retention",
+	"stalledthreshold":           "stalled_threshold",
+	"startclaimleasettl":         "start_claim_lease_ttl",
+	"startmaxduration":           "start_max_duration",
+	"startunconfirmedhold":       "start_unconfirmed_hold",
+	"startcreateunconfirmedhold": "start_create_unconfirmed_hold",
+	"useraccessmode":             "user_access_mode",
+	"webhooksenabled":            "webhooks_enabled",
 	// Layer-0 compound segments (from layer0Prefixes)
 	"adminmode":               "admin_mode",
 	"devmode":                 "dev_mode",
@@ -1423,6 +1440,10 @@ var camelCaseFields = map[string]string{
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
+	"startclaimleasettl":            "startClaimLeaseTtl",
+	"startmaxduration":              "startMaxDuration",
+	"startunconfirmedhold":          "startUnconfirmedHold",
+	"startcreateunconfirmedhold":    "startCreateUnconfirmedHold",
 	"oidcaudience":                  "oidcAudience",
 	"platformauthsa":                "platformAuthSA",
 	"privatekey":                    "privateKey",

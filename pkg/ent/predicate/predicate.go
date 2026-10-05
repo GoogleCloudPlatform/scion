@@ -24,6 +24,9 @@ type AgentCredential func(*sql.Selector)
 // AgentIdentityKey is the predicate function for agentidentitykey builders.
 type AgentIdentityKey func(*sql.Selector)
 
+// AgentRecovery is the predicate function for agentrecovery builders.
+type AgentRecovery func(*sql.Selector)
+
 // AgentReincarnation is the predicate function for agentreincarnation builders.
 type AgentReincarnation func(*sql.Selector)
 
@@ -47,6 +50,9 @@ type BrokerSecret func(*sql.Selector)
 
 // BrokerSetting is the predicate function for brokersetting builders.
 type BrokerSetting func(*sql.Selector)
+
+// BrokerTargetInventory is the predicate function for brokertargetinventory builders.
+type BrokerTargetInventory func(*sql.Selector)
 
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
