@@ -337,7 +337,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	}
 
 	// Update the original message to show the selection and disable buttons.
-	h.respondUpdate(s, i, fmt.Sprintf("✅ Responded: **%s**", choice), nil)
+	h.respondUpdate(s, i, formatAskResponded(choice), nil)
 
 	h.log.Info("Ask-user option selected",
 		"request_id", requestID,

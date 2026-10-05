@@ -345,7 +345,9 @@ func TestAskUser_FailedDeliveryKeepsQuestion(t *testing.T) {
 
 	edits, followups := rt.interactionCalls()
 	assert.Empty(t, edits, "the question and its buttons should not be edited")
-	assert.Len(t, followups, 1, "the error should be shown as an ephemeral follow-up")
+	require.Len(t, followups, 1, "the error should be shown as an ephemeral follow-up")
+	assertEphemeralFollowup(t, followups[0],
+		"Failed to deliver message. Please try again or contact an administrator.")
 }
 
 // TestAskUser_LookupErrorKeepsQuestion checks that a store error while
@@ -367,7 +369,22 @@ func TestAskUser_LookupErrorKeepsQuestion(t *testing.T) {
 	assert.Empty(t, *delivered)
 	edits, followups := rt.interactionCalls()
 	assert.Empty(t, edits, "the question and its buttons should not be edited")
-	assert.Len(t, followups, 1, "the error should be shown as an ephemeral follow-up")
+	require.Len(t, followups, 1, "the error should be shown as an ephemeral follow-up")
+	assertEphemeralFollowup(t, followups[0], "Error looking up request. Please try again.")
+}
+
+// assertEphemeralFollowup checks that a follow-up is ephemeral and shows
+// the given text.
+func assertEphemeralFollowup(t *testing.T, p askUserPost, want string) {
+	t.Helper()
+	var sent struct {
+		Content string `json:"content"`
+		Flags   int    `json:"flags"`
+	}
+	require.NoError(t, json.Unmarshal(p.body, &sent))
+	assert.Equal(t, int(discordgo.MessageFlagsEphemeral), sent.Flags)
+	assert.Equal(t, 64, sent.Flags)
+	assert.Equal(t, want, sent.Content)
 }
 
 // TestAskUser_ChoiceButtonLimits checks how choices that do not fit
@@ -437,8 +454,70 @@ func TestAskUser_ChoiceButtonLimits(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, pending)
 			assert.Equal(t, tt.wantChoices, pending.Choices)
+
+			// Clicking a truncated button delivers the full choice.
+			for idx, want := range tt.wantChoices {
+				if want == tt.wantLabels[idx] {
+					continue
+				}
+				var got []*messages.StructuredMessage
+				deliver := func(_ string, msg *messages.StructuredMessage) *hubError {
+					got = append(got, msg)
+					return nil
+				}
+				h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+				id := buttons[idx].customID
+				h.Dispatch(b.session, askUserClick(channelID, id), id, nil)
+				require.Len(t, got, 1)
+				assert.Equal(t, want, got[0].Msg)
+				assert.Equal(t, 100, utf8.RuneCountInString(got[0].Msg))
+			}
 		})
 	}
+}
+
+// TestAskUser_LongChoiceEditFits checks that answering a very long choice
+// keeps the edit within Discord's message limit while the delivered
+// answer carries the full choice.
+func TestAskUser_LongChoiceEditFits(t *testing.T) {
+	ctx := context.Background()
+	const channelID = "chan-ask"
+	b, rt, delivered, deliver := newAskUserFixture(t, channelID)
+
+	long := strings.Repeat("é", 3000)
+	require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"),
+		askUserQuestion("Pick one", `["short","`+long+`"]`)))
+	ids := rt.postedCustomIDs(t, channelID)
+	require.Len(t, ids, 2)
+
+	h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+	h.Dispatch(b.session, askUserClick(channelID, ids[1]), ids[1], nil)
+
+	require.Len(t, *delivered, 1)
+	assert.Equal(t, long, (*delivered)[0].msg.Msg, "the full choice should be delivered")
+
+	edits, _ := rt.interactionCalls()
+	require.Len(t, edits, 1)
+	var sent struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(edits[0].body, &sent))
+	assert.LessOrEqual(t, utf8.RuneCountInString(sent.Content), maxDiscordMessageLength)
+	assert.True(t, strings.HasSuffix(sent.Content, "é…**"))
+}
+
+// TestFormatAskResponded checks that the edit shown after a choice is
+// answered fits Discord's message limit.
+func TestFormatAskResponded(t *testing.T) {
+	assert.Equal(t, "✅ Responded: **yes**", formatAskResponded("yes"))
+
+	got := formatAskResponded(strings.Repeat("é", 3000))
+	assert.Equal(t, maxDiscordMessageLength, utf8.RuneCountInString(got))
+	assert.True(t, strings.HasPrefix(got, "✅ Responded: **é"))
+	assert.True(t, strings.HasSuffix(got, "é…**"))
+
+	fits := strings.Repeat("a", maxDiscordMessageLength-utf8.RuneCountInString("✅ Responded: ****"))
+	assert.Equal(t, "✅ Responded: **"+fits+"**", formatAskResponded(fits))
 }
 
 // TestAskUser_FallbackPostsPlainText checks that a question with no store

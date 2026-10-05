@@ -303,6 +303,17 @@ func truncateButtonLabel(label string) string {
 	return string(r[:maxButtonLabelRunes-1]) + "…"
 }
 
+// formatAskResponded builds the edit shown after a choice is answered,
+// shortening the choice so the content fits Discord's message limit.
+func formatAskResponded(choice string) string {
+	const prefix, suffix = "✅ Responded: **", "**"
+	limit := maxDiscordMessageLength - utf8.RuneCountInString(prefix+suffix)
+	if r := []rune(choice); len(r) > limit {
+		choice = string(r[:limit-1]) + "…"
+	}
+	return prefix + choice + suffix
+}
+
 // RenderInputNeeded builds an embed and interactive components for a TypeInputNeeded message.
 // If msg.Metadata["choices"] contains a JSON array of strings, each choice is rendered as a
 // button. Otherwise, a generic "Reply" and "Dismiss" button pair is returned.
