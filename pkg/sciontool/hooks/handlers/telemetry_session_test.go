@@ -158,3 +158,70 @@ func TestTelemetryHandler_LifecycleEventsDoNotOpenSession(t *testing.T) {
 		t.Errorf("StartedAt %v precedes session-start (%v)", got[0].StartedAt, before)
 	}
 }
+
+// Only session-end carries the session ID: observing session-end must
+// put that ID on the summary.
+func TestTelemetryHandler_SessionIDOnlyOnSessionEnd(t *testing.T) {
+	h := NewTelemetryHandler(nil, nil, nil)
+
+	var got []telemetry.SessionSummary
+	h.OnSessionEnd = func(s telemetry.SessionSummary) { got = append(got, s) }
+
+	model := sessionEvent(hooks.EventModelEnd, "")
+	model.Data.InputTokens = 9
+	for _, ev := range []*hooks.Event{
+		model,
+		sessionEvent(hooks.EventToolEnd, ""),
+		sessionEvent(hooks.EventAgentEnd, ""),
+		sessionEvent(hooks.EventSessionEnd, "sess-5"),
+	} {
+		if err := h.Handle(ev); err != nil {
+			t.Fatalf("Handle(%s): %v", ev.Name, err)
+		}
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("OnSessionEnd called %d times, want 1", len(got))
+	}
+	if got[0].SessionID != "sess-5" || got[0].TokensInput != 9 || got[0].APICallCount != 1 {
+		t.Errorf("got id=%q in=%d api=%d, want sess-5/9/1", got[0].SessionID, got[0].TokensInput, got[0].APICallCount)
+	}
+}
+
+// Claude repeats session-start with the same ID on /compact and on
+// resume. Counts from before the repeat must reach the summary.
+func TestTelemetryHandler_RepeatedSessionStartSameIDKeepsCounts(t *testing.T) {
+	h := NewTelemetryHandler(nil, nil, nil)
+
+	var got []telemetry.SessionSummary
+	h.OnSessionEnd = func(s telemetry.SessionSummary) { got = append(got, s) }
+
+	m1 := sessionEvent(hooks.EventModelEnd, "sess-6")
+	m1.Data.InputTokens = 20
+	m2 := sessionEvent(hooks.EventModelEnd, "sess-6")
+	m2.Data.InputTokens = 3
+	before := time.Now()
+	for _, ev := range []*hooks.Event{
+		sessionEvent(hooks.EventSessionStart, "sess-6"),
+		m1,
+		sessionEvent(hooks.EventAgentEnd, "sess-6"),
+		sessionEvent(hooks.EventSessionStart, "sess-6"),
+		m2,
+		sessionEvent(hooks.EventSessionEnd, "sess-6"),
+	} {
+		if err := h.Handle(ev); err != nil {
+			t.Fatalf("Handle(%s): %v", ev.Name, err)
+		}
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("OnSessionEnd called %d times, want 1", len(got))
+	}
+	s := got[0]
+	if s.SessionID != "sess-6" || s.TokensInput != 23 || s.APICallCount != 2 || s.TurnCount != 1 {
+		t.Errorf("got id=%q in=%d api=%d turns=%d, want sess-6/23/2/1", s.SessionID, s.TokensInput, s.APICallCount, s.TurnCount)
+	}
+	if s.StartedAt.Before(before) || s.StartedAt.After(before.Add(time.Second)) {
+		t.Errorf("StartedAt %v, want the first session-start (~%v)", s.StartedAt, before)
+	}
+}

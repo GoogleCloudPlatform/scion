@@ -95,11 +95,16 @@ func NewAggregator() *Aggregator {
 // session-start event arrived late) and the IDs do not conflict, that
 // session is adopted as-is so the events recorded so far are kept and not
 // counted twice.
+//
+// A session-start with the same ID as the open session (Claude sends one
+// on /compact and on resume) also keeps the counts and start time. A
+// different ID, or any start after Finalize, resets.
 func (a *Aggregator) StartSession(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.open && a.implicit && (a.sessionID == "" || sessionID == "" || a.sessionID == sessionID) {
+	sameID := sessionID != "" && a.sessionID == sessionID
+	if a.open && (sameID || (a.implicit && (a.sessionID == "" || sessionID == ""))) {
 		if a.sessionID == "" {
 			a.sessionID = sessionID
 		}
@@ -208,6 +213,9 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 
 	endedAt := time.Now()
 	startedAt := a.startedAt
+	// Defensive: through the handler, ObserveSession always opens the
+	// session before Finalize, so startedAt is only zero when Finalize is
+	// called directly. The Hub requires started_at, so never send zero.
 	if startedAt.IsZero() {
 		startedAt = endedAt
 	}

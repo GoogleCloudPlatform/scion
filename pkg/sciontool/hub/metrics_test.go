@@ -90,6 +90,6 @@ func TestClient_ReportMetricsWithoutSessionIDIsNotSent(t *testing.T) {
 
 	err := client.ReportMetrics(context.Background(), MetricsPayload{AgentID: "agent-123"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no session ID")
+	assert.EqualError(t, err, "session metrics not sent: summary has no session ID")
 	assert.Equal(t, 0, attempts)
 }
