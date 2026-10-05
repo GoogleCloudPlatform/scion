@@ -1079,19 +1079,10 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Try to resolve local project path when using --hub flag with --project
-		if localProjectPath == "" {
-			if rp, _, err := config.ResolveProjectPath(projectPath); err == nil {
-				localProjectPath = rp
-			}
-		}
 	} else {
 		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
 			return fmt.Errorf("failed to resolve project path: %w", err)
-		}
-		if localProjectPath == "" {
-			localProjectPath = resolvedPath
 		}
 
 		settings, err := config.LoadSettings(resolvedPath)
@@ -1116,6 +1107,15 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		}
 		projectID = project.ID
 		projectName = project.Name
+		// The project named by --project need not be the one in the
+		// current directory: register a local path only when it is
+		// (ptone/scion#2839). Otherwise the provider gets no path and the
+		// hub has the broker resolve the project by its slug; registering the
+		// CWD's project (often the global ~/.scion) would make the broker
+		// provision this project's agents there.
+		if !isRemoteBroker {
+			localProjectPath = localPathForProvidedProject(projectPath, projectID)
+		}
 	}
 
 	// If we used --broker flag, resolve broker by name or ID
@@ -2062,4 +2062,27 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 	}
 
 	return &result
+}
+
+// localPathForProvidedProject returns the local .scion path to register for
+// projectID on `scion broker provide --project`: the project resolved from
+// projectPath (the CWD when empty) if it is linked to projectID, otherwise
+// "", so the hub has the broker resolve the project by its slug.
+func localPathForProvidedProject(projectPath, projectID string) string {
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil || resolved == "" {
+		return ""
+	}
+	settings, err := config.LoadSettings(resolved)
+	if err != nil {
+		return ""
+	}
+	linked := settings.GetHubProjectID()
+	if linked == "" {
+		linked = settings.ProjectID
+	}
+	if linked == "" || linked != projectID {
+		return ""
+	}
+	return resolved
 }
