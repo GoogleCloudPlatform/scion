@@ -28,10 +28,7 @@ import (
 // res defines already win the SDK merge, so dropping every other key leaves
 // exactly the authoritative resource.
 func loopbackResourceDialOption(res *resource.Resource) grpc.DialOption {
-	allowed := make(map[string]bool, res.Len())
-	for _, kv := range res.Attributes() {
-		allowed[string(kv.Key)] = true
-	}
+	allowed := loopbackResourceAllowlist(res)
 	return grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		pinLoopbackRequestResource(req, allowed)
 		return invoker(ctx, method, req, reply, cc, opts...)
@@ -67,4 +64,20 @@ func pinResourceAttributes(res *resourcepb.Resource, allowed map[string]bool) {
 	}
 	clear(res.Attributes[len(kept):])
 	res.Attributes = kept
+}
+
+// loopbackResourceAllowlist returns the resource keys res defines. A nil res
+// yields an empty allowlist, so every resource attribute is dropped: an empty
+// resource always passes GCP admission, whereas passing requests through
+// unfiltered would let OTEL_RESOURCE_ATTRIBUTES leak back in. (The SDK's
+// Len and Attributes are nil-safe; the explicit check documents the choice.)
+func loopbackResourceAllowlist(res *resource.Resource) map[string]bool {
+	if res == nil {
+		return map[string]bool{}
+	}
+	allowed := make(map[string]bool, res.Len())
+	for _, kv := range res.Attributes() {
+		allowed[string(kv.Key)] = true
+	}
+	return allowed
 }
