@@ -900,6 +900,20 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       expect(targets).toHaveLength(1);
     });
 
+    it('commits nothing once a query is cleared, even after the user picked a row for it', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      await typeQuery(el, 'a');
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await el.updateComplete;
+      await typeQuery(el, '');
+
+      enter(el);
+
+      expect(targets).toEqual([]);
+    });
+
     it('commits nothing once a typed query is cleared, or is only spaces', async () => {
       const el = await mountPalette(twoAgents());
       const targets = committedTargets(el);
