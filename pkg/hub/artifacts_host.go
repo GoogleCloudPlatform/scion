@@ -79,7 +79,7 @@ func (h *artifactHost) Principal(ctx context.Context) (kind, ref, homeScope stri
 //     its ceiling must allow the permission;
 //   - a token-backed agent: its token must carry one of the permission's
 //     dedicated agent scopes. There is no project boundary: grants to other
-//     projects are how agents collaborate across projects (design D5);
+//     projects are how agents collaborate across projects (ptone/scion#3202);
 //   - anything else: no.
 //
 // It fails closed on an empty scope or a permission that is not an artifact
@@ -114,28 +114,21 @@ func (h *artifactHost) Permits(ctx context.Context, scopeRef, permission string)
 // unauthenticated caller, a permission that is not an artifact registry row,
 // or a missing authz service.
 //
-// Agents are checked twice. First here: the agent's token must carry one of
-// the permission's AgentScopes, so a permission with none (artifact.delete,
-// artifact.manage) is never agent-callable whatever bindings exist, and an
-// agent without project:artifact:read is refused even artifact.read. Then,
-// like every caller, through AuthzService.CheckAccess against the project.
+// It starts with Permits, so Authorize true implies Permits true: the
+// credential's own limits always apply (for agents, a token-backed identity
+// holding one of the permission's dedicated agent scopes, so a permission
+// with none, artifact.delete or artifact.manage, is never agent-callable).
+// Then, like every caller, it goes through AuthzService.CheckAccess against
+// the project.
 func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission string) bool {
-	if scopeRef == "" || h.server == nil || h.server.authzService == nil {
+	if h.server == nil || h.server.authzService == nil {
+		return false
+	}
+	if !h.Permits(ctx, scopeRef, permission) {
 		return false
 	}
 	identity := GetIdentityFromContext(ctx)
-	if isNilIdentity(identity) {
-		return false
-	}
-	perm, ok := artifactPermission(permission)
-	if !ok {
-		return false
-	}
-	if agent, isAgent := identity.(AgentIdentity); isAgent {
-		if !agentHasAnyScope(agent, perm.AgentScopes) {
-			return false
-		}
-	}
+	perm, _ := artifactPermission(permission)
 	decision := h.server.authzService.CheckAccess(ctx, identity, Resource{
 		Type:       permissions.ResourceArtifact,
 		ParentType: permissions.ResourceProject,

@@ -91,8 +91,9 @@ func TestServiceAnswers404ForEverything(t *testing.T) {
 	}
 }
 
-// TestHostIsStringOnly pins D13: every Host method takes a context plus
-// strings and returns strings and bools only, so it can be served remotely.
+// TestHostIsStringOnly pins the string-only contract: every Host method
+// takes a context plus strings and returns strings and bools only, so it can
+// be served remotely.
 func TestHostIsStringOnly(t *testing.T) {
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 	host := reflect.TypeOf((*Host)(nil)).Elem()
@@ -118,7 +119,8 @@ func TestHostIsStringOnly(t *testing.T) {
 }
 
 // TestNoHubImports keeps the package extractable: it must not import any
-// hub package (D2, D13). The hub adapter lives in pkg/hub instead.
+// hub package, so it can run outside the hub. The hub adapter lives in
+// pkg/hub instead.
 func TestNoHubImports(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

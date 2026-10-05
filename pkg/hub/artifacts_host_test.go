@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -116,11 +117,18 @@ func TestArtifactHostAuthorizeAgentScopes(t *testing.T) {
 	host := newArtifactHost(srv)
 	// The authz kernel resolves agent principals from the store, so the
 	// agents and their projects must exist. createTestAgent makes a fresh
-	// project for each agent.
+	// project for each agent. Each agent gets a recorded delegation from a
+	// user who holds every artifact permission, and the edge backfill is
+	// complete, as on any current hub.
 	agent := createTestAgent(t, s)
 	project := agent.ProjectID
-	otherProject := createTestAgent(t, s).ProjectID
+	other := createTestAgent(t, s)
+	otherProject := other.ProjectID
 	require.NotEqual(t, project, otherProject)
+	delegator := createScopeSuperAdmin(t, s, "artifact-delegator")
+	addRecordedArtifactEdge(t, s, delegator.ID, agent.ID, project)
+	addRecordedArtifactEdge(t, s, delegator.ID, other.ID, otherProject)
+	markEdgeBackfillComplete(t, s)
 
 	allScopes := []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeAgentLifecycle, ScopeAgentCreate, ScopeProjectTemplateWrite}
 	full := contextWithIdentity(context.Background(), artifactTestAgent(agent.ID, project, allScopes...))
@@ -271,4 +279,56 @@ func TestArtifactsGuardViaRegisterRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	artifacts.NewService(newArtifactHost(srv)).RegisterRoutes(mux, srv.artifactsGuard)
 	serveArtifactRequests(t, mux, NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"))
+}
+
+// addRecordedArtifactEdge records an active, principal-bounded delegation
+// edge with recorded provenance from user delegatorID to agentID in project.
+func addRecordedArtifactEdge(t *testing.T, s store.Store, delegatorID, agentID, project string) {
+	t.Helper()
+	edge := &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   delegatorID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    agentID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       project,
+		Role:          string(AgentRoleFull),
+		Active:        true,
+	}
+	edge.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
+	edge.AuthorityProvenance = store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourceCredentialKind: store.SourceCredentialSession}
+	require.NoError(t, s.CreateDelegationEdge(context.Background(), edge))
+}
+
+// TestArtifactHostNoEdgeAgentDeniedArtifacts: an agent with no delegation
+// edge is denied artifact permissions at use, before and after the edge
+// backfill, even with the artifact scopes on its token, while it keeps the
+// reads it had.
+func TestArtifactHostNoEdgeAgentDeniedArtifacts(t *testing.T) {
+	srv, s := testServer(t)
+	host := newArtifactHost(srv)
+	agent := createTestAgent(t, s)
+	id := artifactTestAgent(agent.ID, agent.ProjectID, ScopeProjectRead, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	ctx := contextWithIdentity(context.Background(), id)
+	projectRead := func() bool {
+		return srv.authzService.CheckAccess(ctx, id, Resource{Type: "project", ID: agent.ProjectID}, ActionRead).Allowed
+	}
+
+	for _, phase := range []string{"before backfill", "after backfill"} {
+		if phase == "after backfill" {
+			markEdgeBackfillComplete(t, s)
+		}
+		for _, p := range []string{artifacts.PermissionRead, artifacts.PermissionCreate, artifacts.PermissionUpdate} {
+			assert.False(t, host.Authorize(ctx, agent.ProjectID, p), "%s: %s", phase, p)
+		}
+		assert.True(t, projectRead(), "%s: project reads are kept", phase)
+
+		var cause DenyCause
+		allowed, _, err := srv.authzService.walkDelegationChainWithCause(context.Background(),
+			Resource{Type: "artifact", ParentType: "project", ParentID: agent.ProjectID}, ActionRead, artifacts.PermissionRead,
+			agent.ID, true, store.RoleScopeProject, agent.ProjectID, nil, &cause)
+		assert.NoError(t, err)
+		assert.False(t, allowed, phase)
+		assert.Equal(t, DenyCauseCeilingUnrecorded, cause, phase)
+	}
 }

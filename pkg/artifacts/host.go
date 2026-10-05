@@ -58,7 +58,7 @@ type Host interface {
 	// Authorize reports whether the caller may exercise permission (one of
 	// the Permission constants) on artifacts in the scope scopeRef. It fails
 	// closed: an unknown permission, an empty scope or an unauthenticated
-	// caller yields false.
+	// caller yields false. Authorize true implies Permits true.
 	Authorize(ctx context.Context, scopeRef, permission string) bool
 
 	// Permits reports whether the caller's credential itself allows

@@ -290,6 +290,15 @@ func (a *AuthzService) walkDelegationChainWithCause(
 		}
 
 		if len(active) == 0 {
+			// A chain with no edge has no recorded bound, so it is denied the
+			// permissions such chains never held (legacyChainExcludedPermissions)
+			// before either no-edge allowance below.
+			if legacyChainExcludedPermissions[permissionID] {
+				addStep("delegation_ceiling_no_edge_excluded",
+					fmt.Sprintf("no delegation edge for agent:%s; %s requires a recorded delegation", delegateID, permissionID))
+				setCause(DenyCauseCeilingUnrecorded)
+				return false, fmt.Sprintf("no delegation edge for agent:%s: %s requires a recorded delegation", delegateID, permissionID), nil
+			}
 			if depth == 0 && attested {
 				// Before the edge backfill runs, hub-attested agents may
 				// have no edge yet. Once the backfill marker exists every

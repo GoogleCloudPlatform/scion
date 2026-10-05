@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestArtifactHostPermits checks the credential question per identity type.
@@ -195,4 +196,57 @@ func TestMigrationSentinelWithholdsOnlyArtifactRead(t *testing.T) {
 	allowed, _, err = a.migrationSentinelCeiling(Resource{Type: "artifact", ParentType: "project", ParentID: "p"}, ActionRead, "a1", edge, "artifact.read", nil)
 	assert.NoError(t, err)
 	assert.False(t, allowed, "artifact.read is withheld")
+}
+
+// TestArtifactHostAuthorizeImpliesPermits: Authorize applies the
+// credential's own limits first, so an identity the hub builds in process
+// (no token id) is refused even when it carries the read scope.
+func TestArtifactHostAuthorizeImpliesPermits(t *testing.T) {
+	srv, s := testServer(t)
+	host := newArtifactHost(srv)
+	agent := createTestAgent(t, s)
+	tokenless := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: agent.ID}, ProjectID: agent.ProjectID,
+		Scopes: []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead}, ScopeSchema: CurrentAgentScopeSchema,
+	}}
+	ctx := contextWithIdentity(context.Background(), tokenless)
+	assert.False(t, host.Permits(ctx, agent.ProjectID, artifacts.PermissionRead))
+	assert.False(t, host.Authorize(ctx, agent.ProjectID, artifacts.PermissionRead))
+}
+
+// TestArtifactHostServesGenuinelyMintedAgentToken uses the real create
+// handler and the real mint and validation: a token minted for an agent
+// whose source allows artifact.read carries a token id and the read scope,
+// and is served; one whose source does not allow it is not.
+func TestArtifactHostServesGenuinelyMintedAgentToken(t *testing.T) {
+	ctx := context.Background()
+	f := newUATCreateFixture(t, "artifact-real-token")
+	f.srv.authzService.mintDevAuthOverride = false
+	host := newArtifactHost(f.srv)
+
+	mintedIdentity := func(name string, selectors ...string) (*store.Agent, context.Context) {
+		t.Helper()
+		rec := f.create(t, f.uat(t, selectors...), CreateAgentRequest{Name: name})
+		agent, _ := f.createdAgent(t, rec, name)
+		tok, err := f.srv.GenerateAgentTokenForAgent(ctx, agent)
+		require.NoError(t, err)
+		claims, err := f.srv.agentTokenService.ValidateAgentToken(tok)
+		require.NoError(t, err)
+		require.NotEmpty(t, claims.ID, "a minted token carries a token id")
+		return agent, contextWithIdentity(ctx, &agentIdentityWrapper{claims})
+	}
+
+	agent, withRead := mintedIdentity("artifact-real-token", append(minimalSelectors(t), "artifact:read")...)
+	kind, ref, home, ok := host.Principal(withRead)
+	assert.True(t, ok)
+	assert.Equal(t, artifacts.PrincipalKindAgent, kind)
+	assert.Equal(t, agent.ID, ref)
+	assert.Equal(t, agent.ProjectID, home)
+	assert.True(t, host.Permits(withRead, agent.ProjectID, artifacts.PermissionRead))
+	assert.False(t, host.Permits(withRead, agent.ProjectID, artifacts.PermissionCreate))
+
+	other, withoutRead := mintedIdentity("artifact-real-token-noread", minimalSelectors(t)...)
+	_, _, _, ok = host.Principal(withoutRead)
+	assert.False(t, ok, "a token whose source did not allow artifact.read is not served")
+	assert.False(t, host.Permits(withoutRead, other.ProjectID, artifacts.PermissionRead))
 }
