@@ -304,6 +304,13 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		return err
 	}
 	if err := checkHubAppliedPatch(wantPatched, resp); err != nil {
+		if !reincarnateDryRun {
+			// The dry-run probe passed, but the real request reached a hub
+			// that did not apply the patch (e.g. a rolling upgrade): the
+			// reincarnation is already running, without the patch.
+			return fmt.Errorf("the reincarnation of '%s' started without the requested changes (%s): the hub that accepted it does not support reincarnate patch flags; upgrade the hub, then reincarnate again with the flags",
+				agentName, strings.Join(wantPatched, ", "))
+		}
 		return err
 	}
 

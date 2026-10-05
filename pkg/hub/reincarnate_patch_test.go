@@ -48,6 +48,22 @@ func patchTestSA(t *testing.T, s store.Store, projectID string, verified bool, c
 	return sa
 }
 
+// saAssigningAgent makes a fixture agent able to assign a project service
+// account itself: the SA assign gate admits an agent caller only with a
+// full stored role (its permissions come from the agent role binding), the
+// sa_assign scope on its token, and a GCP identity of its own (actAs).
+func saAssigningAgent(t *testing.T, s store.Store, projectID string) func(a *store.Agent) {
+	own := patchTestSA(t, s, projectID, true, "someone")
+	return func(a *store.Agent) {
+		a.AppliedConfig.AgentRole = string(AgentRoleFull)
+		a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode:        store.GCPMetadataModeAssign,
+			ServiceAccountID:    own.ID,
+			ServiceAccountEmail: own.Email,
+		}
+	}
+}
+
 // reincarnateAsDev runs a reincarnate request as the dev user through the
 // full HTTP stack.
 func reincarnateAsDev(t *testing.T, srv *Server, agentID string, body ReincarnateAgentRequest) *httptest.ResponseRecorder {
@@ -152,6 +168,16 @@ func TestReincarnatePatch_EachFlagAppliesAndPersists(t *testing.T) {
 			body: func(string) ReincarnateAgentRequest { return ReincarnateAgentRequest{Role: "readonly"} },
 			check: func(t *testing.T, cfg *store.AgentAppliedConfig, _ string) {
 				assert.Equal(t, "readonly", cfg.AgentRole)
+			},
+		},
+		{
+			// --role none must also drop injected credentials (A3.1), in
+			// this generation and the next.
+			name: "role none sets NoAuth",
+			body: func(string) ReincarnateAgentRequest { return ReincarnateAgentRequest{Role: "none"} },
+			check: func(t *testing.T, cfg *store.AgentAppliedConfig, _ string) {
+				assert.Equal(t, "none", cfg.AgentRole)
+				assert.True(t, cfg.NoAuth, "role none must imply NoAuth")
 			},
 		},
 		{
@@ -452,9 +478,7 @@ func TestReincarnatePatch_RoleRefusals(t *testing.T) {
 func TestReincarnatePatch_SelfWithPatchNeedsLifecycle(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.AppliedConfig.AgentRole = "readonly"
-	})
+	agent := newReincarnateTestAgent(t, s, project, broker, saAssigningAgent(t, s, project.ID))
 	self := agentIdentityFor(agent.ID, project.ID) // no scopes
 
 	// No patch: allowed (D2).
@@ -463,26 +487,43 @@ func TestReincarnatePatch_SelfWithPatchNeedsLifecycle(t *testing.T) {
 	srv.handleReincarnateAgent(rec, req, agent.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
+	// An SA this agent could otherwise assign (in-project, verified; the
+	// token below carries sa_assign, which the assign gate needs).
+	sa := patchTestSA(t, s, project.ID, true, "someone")
+	// Every scope a role or SA patch needs except lifecycle, so each 403
+	// below is D1's and not CanDelegate's or the SA gate's.
+	selfNoLifecycle := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentSAAssign)...)
+
 	before := snapshotAgent(t, s, agent.ID)
 	for _, body := range []ReincarnateAgentRequest{
 		{Model: "other-model"},
 		{Image: "other:v1"},
 		{ThinkingLevel: intPtr(5)},
 		{HarnessAuth: "vertex-ai"},
+		{ServiceAccount: sa.ID},
+		{Role: "readonly"},
+		{Role: "none"},
 	} {
-		req := reincarnateRequest(t, agent.ID, self, body)
+		req := reincarnateRequest(t, agent.ID, selfNoLifecycle, body)
 		rec := httptest.NewRecorder()
 		srv.handleReincarnateAgent(rec, req, agent.ID)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%+v: %s", body, rec.Body.String())
 	}
 	assertAgentUntouched(t, s, disp, agent.ID, before)
 
-	// With the lifecycle scope, the same self patch is allowed.
-	selfWithLifecycle := agentIdentityFor(agent.ID, project.ID, ScopeAgentLifecycle)
-	req = reincarnateRequest(t, agent.ID, selfWithLifecycle, ReincarnateAgentRequest{DryRun: true, Model: "other-model"})
-	rec = httptest.NewRecorder()
-	srv.handleReincarnateAgent(rec, req, agent.ID)
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// With the lifecycle scope added, the same self patches are allowed:
+	// the refusals above are D1's alone.
+	selfWithLifecycle := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentSAAssign, ScopeAgentLifecycle)...)
+	for _, body := range []ReincarnateAgentRequest{
+		{DryRun: true, Model: "other-model"},
+		{DryRun: true, ServiceAccount: sa.ID},
+		{DryRun: true, Role: "readonly"},
+	} {
+		req = reincarnateRequest(t, agent.ID, selfWithLifecycle, body)
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusOK, rec.Code, "%+v: %s", body, rec.Body.String())
+	}
 }
 
 // TestReincarnatePatch_CombinesWithBroker: a dry-run move carries the
@@ -506,4 +547,188 @@ func TestReincarnatePatch_CombinesWithBroker(t *testing.T) {
 	require.NotNil(t, resp.Plan.ThinkingLevel)
 	assert.Equal(t, "33", resp.Plan.ThinkingLevel.New)
 	f.assertNoMoveSideEffects(t, count)
+}
+
+// TestReincarnatePatch_ServiceAccountGateForAgentCallers: create's SA
+// assign gate also applies to agent callers, self and not self. An agent
+// needs the project:agent:sa_assign scope to assign a project service account.
+func TestReincarnatePatch_ServiceAccountGateForAgentCallers(t *testing.T) {
+	t.Run("another agent", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		canAssignSA := saAssigningAgent(t, s, project.ID)
+		coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.ID = tid("sa-coordinator")
+			a.Slug = "sa-coordinator-" + tidSlugSafe(t.Name())
+			a.Name = "Coordinator"
+			canAssignSA(a)
+		})
+		sa := patchTestSA(t, s, project.ID, true, "someone")
+		noAssign := delegatingRequesterFor(coordinator.ID, project.ID) // lifecycle + baseline, no sa_assign
+
+		// Precondition: this requester may reincarnate without the flag.
+		req := reincarnateRequest(t, agent.ID, noAssign, ReincarnateAgentRequest{DryRun: true})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		require.Equal(t, http.StatusOK, rec.Code, "precondition: %s", rec.Body.String())
+
+		before := snapshotAgent(t, s, agent.ID)
+		req = reincarnateRequest(t, agent.ID, noAssign, ReincarnateAgentRequest{ServiceAccount: sa.ID})
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+
+		// Admitted arm: with sa_assign the same requester may assign it.
+		canAssign := agentIdentityFor(coordinator.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle, ScopeAgentSAAssign)...)
+		req = reincarnateRequest(t, agent.ID, canAssign, ReincarnateAgentRequest{DryRun: true, ServiceAccount: sa.ID})
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("self", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, saAssigningAgent(t, s, project.ID))
+		sa := patchTestSA(t, s, project.ID, true, "someone")
+		// Lifecycle passes D1; no sa_assign, so the SA gate refuses.
+		self := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
+		before := snapshotAgent(t, s, agent.ID)
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{ServiceAccount: sa.ID})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+
+		selfCanAssign := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle, ScopeAgentSAAssign)...)
+		req = reincarnateRequest(t, agent.ID, selfCanAssign, ReincarnateAgentRequest{DryRun: true, ServiceAccount: sa.ID})
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+}
+
+// TestReincarnatePatch_RoleRaisedFromNoAuthWarns: raising the role of an
+// agent created with no credentials keeps NoAuth, and the plan says so.
+func TestReincarnatePatch_RoleRaisedFromNoAuthWarns(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.AgentRole = string(AgentRoleNone)
+		a.AppliedConfig.NoAuth = true
+		a.AppliedConfig.CreateInputs.NoAuth = true
+	})
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: true, Role: "baseline"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Plan.Warnings, reincarnateNoAuthKeptWarning)
+
+	// No warning for an agent without the create-time no-credentials request.
+	plain := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("noauth-plain")
+		a.Slug = "noauth-plain-" + tidSlugSafe(t.Name())
+	})
+	rec = reincarnateAsDev(t, srv, plain.ID, ReincarnateAgentRequest{DryRun: true, Role: "readonly"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp = ReincarnateAgentResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotContains(t, resp.Plan.Warnings, reincarnateNoAuthKeptWarning)
+}
+
+// TestReincarnatePatch_PatchedFieldPinnedOthersFollowTemplate: a patched
+// image survives a later template change, while the unpatched model keeps
+// following the template.
+func TestReincarnatePatch_PatchedFieldPinnedOthersFollowTemplate(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+	template := &store.Template{
+		ID:          tid("tmpl-" + t.Name()),
+		Name:        "t",
+		Slug:        "patch-template-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.TemplateScopeGlobal,
+		Status:      store.TemplateStatusActive,
+		ContentHash: "hash-v1",
+		Config:      &store.TemplateConfig{Image: "template-image:v1", Model: "template-model-v1"},
+	}
+	require.NoError(t, s.CreateTemplate(ctx, template))
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Template = template.Slug
+	})
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{Image: "patched-image:v1"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	template.Config = &store.TemplateConfig{Image: "template-image:v2", Model: "template-model-v2"}
+	template.ContentHash = "hash-v2"
+	require.NoError(t, s.UpdateTemplate(ctx, template))
+
+	rec = reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "patched-image:v1", resp.Plan.Image.New, "the patched image is pinned")
+	assert.Equal(t, "template-model-v2", resp.Plan.Model.New, "the unpatched model follows the template")
+}
+
+// TestReincarnatePatch_FailureRestoresPreviousConfig: when the worker fails
+// before reprovision succeeds, the agent is restored to the previous
+// config, patch included (role, SA, CreateInputs).
+func TestReincarnatePatch_FailureRestoresPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("broker refused: reprovision refused: container is still running")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	sa := patchTestSA(t, s, project.ID, true, "someone")
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{
+		Role: "readonly", ServiceAccount: sa.ID, Model: "patched-model", ThinkingLevel: intPtr(9),
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	cfg := final.AppliedConfig
+	assert.Equal(t, "baseline", cfg.AgentRole)
+	assert.Nil(t, cfg.GCPIdentity)
+	assert.Empty(t, cfg.Model)
+	assert.Nil(t, cfg.ThinkingLevel)
+	require.NotNil(t, cfg.CreateInputs)
+	assert.Nil(t, cfg.CreateInputs.InlineConfig)
+	assert.Nil(t, cfg.CreateInputs.ThinkingLevel)
+}
+
+// TestReincarnatePatch_LegacyAgent: an agent without CreateInputs gets the
+// reconstructed inputs plus the patch, and keeps the patch afterwards.
+func TestReincarnatePatch_LegacyAgent(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.CreateInputs = nil
+	})
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{Model: "legacy-patched-model"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+	gen2, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, gen2.Generation)
+	assert.Equal(t, "legacy-patched-model", gen2.AppliedConfig.Model)
+	require.NotNil(t, gen2.AppliedConfig.CreateInputs)
+	require.NotNil(t, gen2.AppliedConfig.CreateInputs.InlineConfig)
+	assert.Equal(t, "legacy-patched-model", gen2.AppliedConfig.CreateInputs.InlineConfig.Model)
+
+	rec = reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "legacy-patched-model", resp.Plan.Model.New)
 }

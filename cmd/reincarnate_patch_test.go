@@ -97,6 +97,10 @@ type patchHub struct {
 	mu       sync.Mutex
 	requests []hubclient.ReincarnateAgentRequest
 	patched  []string
+	// realPatched, when set, is the answer to a non-dry-run request
+	// (a skewed hub: the probe and the real request reach different
+	// versions).
+	realPatched *[]string
 }
 
 func (h *patchHub) serve(t *testing.T) *HubContext {
@@ -115,8 +119,12 @@ func (h *patchHub) serve(t *testing.T) *HubContext {
 		if !req.DryRun {
 			state, code = "pending", http.StatusAccepted
 		}
+		patched := h.patched
+		if !req.DryRun && h.realPatched != nil {
+			patched = *h.realPatched
+		}
 		resp := hubclient.ReincarnateAgentResponse{AgentID: "agent-1", Generation: 2, State: state,
-			Plan: hubclient.ReincarnationPlan{Patched: h.patched}}
+			Plan: hubclient.ReincarnationPlan{Patched: patched}}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(resp)
@@ -204,4 +212,35 @@ func TestReincarnatePatch_CombinesWithBroker(t *testing.T) {
 	require.Len(t, hub.requests, 1)
 	assert.Equal(t, "b2", hub.requests[0].TargetBroker)
 	assert.Equal(t, "m2", hub.requests[0].Model)
+}
+
+// TestReincarnatePatch_PartialPatchedAnswer_NoRealRequest: a hub that
+// applies only some of the requested fields is refused per field.
+func TestReincarnatePatch_PartialPatchedAnswer_NoRealRequest(t *testing.T) {
+	hub := &patchHub{patched: []string{"role"}}
+	hubCtx := hub.serve(t)
+	setReincarnatePatchFlags(t, "", "readonly", "", 30, "", "")
+	reincarnateBroker, reincarnateDryRun = "", false
+
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support reincarnate patch flags")
+	require.Len(t, hub.requests, 1)
+	assert.True(t, hub.requests[0].DryRun, "only the dry-run probe may reach the hub")
+}
+
+// TestReincarnatePatch_SkewedHubAfter202_SaysStartedWithoutPatch: when the
+// probe passes but the real request reaches a hub that ignores the patch,
+// the error says the reincarnation started without it.
+func TestReincarnatePatch_SkewedHubAfter202_SaysStartedWithoutPatch(t *testing.T) {
+	none := []string{}
+	hub := &patchHub{patched: []string{"role"}, realPatched: &none}
+	hubCtx := hub.serve(t)
+	setReincarnatePatchFlags(t, "", "readonly", "", -1, "", "")
+	reincarnateBroker, reincarnateDryRun = "", false
+
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "started without the requested changes (role)")
+	require.Len(t, hub.requests, 2)
 }

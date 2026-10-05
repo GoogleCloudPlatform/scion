@@ -228,6 +228,10 @@ func cloneCreateInputs(ci *store.AgentCreateInputs) *store.AgentCreateInputs {
 	return &out
 }
 
+// reincarnateNoAuthKeptWarning is the plan warning for a role patch on an
+// agent whose create-time no-credentials request is kept.
+const reincarnateNoAuthKeptWarning = "the agent keeps running with no injected credentials: it was created with --no-auth or role none, and reincarnate keeps that setting; the new role does not restore credentials"
+
 // addPatchToPlan adds the old and new value of each patched field to plan.
 // Image and Model are always on the plan; the other patch fields appear
 // only when patched, so a request without patch flags gets the same plan as
@@ -236,6 +240,14 @@ func addPatchToPlan(plan *ReincarnationPlan, old, fresh *store.AgentAppliedConfi
 	plan.Patched = req.patchedFields()
 	if req.Role != "" {
 		plan.Role = &FieldChange{Old: old.AgentRole, New: fresh.AgentRole}
+		// A no-credentials request recorded at create (--no-auth, or
+		// role=none mapped to NoAuth) is kept: it cannot be told apart
+		// from an explicit --no-auth, so a role raised from none still
+		// runs with no injected credentials. Say so on the plan.
+		if fresh.AgentRole != string(AgentRoleNone) && fresh.NoAuth &&
+			fresh.CreateInputs != nil && fresh.CreateInputs.NoAuth {
+			plan.Warnings = append(plan.Warnings, reincarnateNoAuthKeptWarning)
+		}
 	}
 	if req.ServiceAccount != "" {
 		plan.ServiceAccount = &FieldChange{Old: gcpIdentityLabel(old.GCPIdentity), New: gcpIdentityLabel(fresh.GCPIdentity)}
