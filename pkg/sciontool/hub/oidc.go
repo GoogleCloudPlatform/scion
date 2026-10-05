@@ -43,7 +43,12 @@ const (
 //     short-lived clients see the value the long-lived client in sciontool
 //     init last refreshed. The file alone does not select this mode.
 //  2. Else if running on GCP → metadata server mode (ambient SA identity).
-//  3. Else → no OIDC transport (agent uses plain HTTP).
+//  3. Else if SCION_TRANSPORT_MODE names a proxy mode ("iap",
+//     "cloudrun_invoker") → file-backed mode with no bootstrap value. The
+//     agent started without a hub-provided transport token; a token
+//     delivered later by a refresh or reset-auth is persisted to the file
+//     and used from then on. Until then no transport header is sent.
+//  4. Else → no OIDC transport (agent uses plain HTTP).
 //
 // The header carrying the token follows SCION_TRANSPORT_MODE (see
 // transportauth.ModeFromEnv), the same as hubclient: "iap" uses
@@ -64,12 +69,31 @@ func (c *Client) configureOIDCTransport() {
 		return
 	}
 
-	if !transportauth.IsOnGCEFunc() {
+	if c.configureMetadataTransport(mode) {
 		return
+	}
+
+	if transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
+		src := NewTransportTokenFileSource()
+		src.WarnLog = log.Debug
+		c.oidcSource = src
+		c.oidcMode = mode
+		c.oidcLate = true
+		c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
+		log.Debug("Configured OIDC transport: file-backed mode without a bootstrap token (proxy mode)")
+	}
+}
+
+// configureMetadataTransport installs a metadata-server transport source
+// when running on GCP with the real metadata server reachable. It reports
+// whether it did.
+func (c *Client) configureMetadataTransport(mode transportauth.HeaderMode) bool {
+	if !transportauth.IsOnGCEFunc() {
+		return false
 	}
 	if mdMode := os.Getenv(transportauth.EnvMetadataMode); transportauth.IsMetadataRedirected(mdMode) {
 		log.Debug("Skipping OIDC metadata mode: scion metadata server active (mode=%s), GCE metadata IP is redirected", mdMode)
-		return
+		return false
 	}
 
 	audience := os.Getenv(transportauth.EnvHubOIDCAudience)
@@ -82,6 +106,7 @@ func (c *Client) configureOIDCTransport() {
 	c.oidcMode = mode
 	c.client.Transport = transportauth.Wrap(c.client.Transport, source, mode)
 	log.Debug("Configured OIDC transport: metadata mode (audience=%s)", audience)
+	return true
 }
 
 // newTransportFileSource returns a file-backed transport source when this
@@ -91,7 +116,10 @@ func (c *Client) configureOIDCTransport() {
 // SCION_TRANSPORT_TOKEN value. The file path is SCION_TRANSPORT_TOKEN_FILE
 // when set, else the default under the agent home. Returns nil otherwise,
 // so a transport token file left over from an earlier configuration is
-// not used once the hub stops providing one.
+// not used once the hub stops providing one. (In proxy mode,
+// configureOIDCTransport separately falls back to a file-backed source
+// without a bootstrap value; sciontool init removes a leftover file at
+// start in that case.)
 func newTransportFileSource() *transportauth.FileSource {
 	envTok := os.Getenv(transportauth.EnvTransportToken)
 	path := os.Getenv(transportauth.EnvTransportTokenFile)
@@ -101,7 +129,7 @@ func newTransportFileSource() *transportauth.FileSource {
 	if path == "" {
 		path = TransportTokenFilePath()
 	}
-	src := transportauth.NewFileSource(path, readTransportTokenFile)
+	src := transportauth.NewFileSource(path, ReadTransportTokenFileGuarded)
 	src.SetBootstrap(envTok)
 	return src
 }

@@ -556,12 +556,13 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 2: Complete broker join with join token
 		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:     createResp.BrokerID,
-			JoinToken:    createResp.JoinToken,
-			Hostname:     brokerName,
-			Version:      version.Version,
-			Capabilities: brokerRegistrationCapabilities(),
-			Profiles:     profiles,
+			BrokerID:         createResp.BrokerID,
+			JoinToken:        createResp.JoinToken,
+			Hostname:         brokerName,
+			Version:          version.Version,
+			Capabilities:     brokerRegistrationCapabilities(),
+			Profiles:         profiles,
+			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)

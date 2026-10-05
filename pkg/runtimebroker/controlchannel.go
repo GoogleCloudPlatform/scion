@@ -162,6 +162,10 @@ type ControlChannelClient struct {
 	cancels  map[string]context.CancelFunc
 	cancelMu sync.Mutex
 
+	// writePing sends one keepalive ping on conn. It is nil in production
+	// (conn.WritePing is used); tests set it to simulate a failed write.
+	writePing func(conn *wsprotocol.Connection) error
+
 	// Connection state
 	connected   bool
 	sessionID   string
@@ -438,20 +442,39 @@ func (c *ControlChannelClient) waitForConnected() error {
 	return c.conn.SetReadDeadline(time.Time{})
 }
 
-// runMessageLoop processes incoming messages.
+// runMessageLoop processes incoming messages on the current connection
+// until it fails. On return the connection is closed and its ping loop has
+// exited, so a reconnect never leaves the previous connection or its ping
+// loop behind.
 func (c *ControlChannelClient) runMessageLoop() {
-	// Start ping ticker
+	conn := c.conn
+
+	// Start the ping loop for this connection only. loopDone tells it to
+	// exit once this read loop is over; pingDone reports that it has.
+	loopDone := make(chan struct{})
+	pingDone := make(chan struct{})
 	c.wg.Add(1)
-	go c.pingLoop()
+	go func() {
+		defer close(pingDone)
+		c.pingLoop(conn, loopDone)
+	}()
+	defer func() {
+		close(loopDone)
+		// Close is idempotent, so this is safe when the ping loop already
+		// closed the connection after a failed write.
+		_ = conn.Close()
+		<-pingDone
+	}()
 
 	// Set pong handler
-	c.conn.SetPongHandler(func(appData string) error {
-		return c.conn.SetReadDeadline(time.Now().Add(c.config.PongWait))
+	conn.SetPongHandler(func(appData string) error {
+		return conn.SetReadDeadline(time.Now().Add(c.config.PongWait))
 	})
 
 	// Set initial read deadline
-	if err := c.conn.SetReadDeadline(time.Now().Add(c.config.PongWait)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(c.config.PongWait)); err != nil {
 		c.log.Error("Failed to set read deadline", "error", err)
+		c.markDisconnected()
 		return
 	}
 
@@ -462,7 +485,7 @@ func (c *ControlChannelClient) runMessageLoop() {
 		default:
 		}
 
-		_, data, err := c.conn.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
 			if wsprotocol.IsUnexpectedCloseError(err, wsprotocol.CloseGoingAway, wsprotocol.CloseNormalClosure) {
 				c.log.Error("Control channel read error", "error", err)
@@ -477,28 +500,32 @@ func (c *ControlChannelClient) runMessageLoop() {
 	}
 }
 
-// pingLoop sends periodic pings to keep the connection alive.
-func (c *ControlChannelClient) pingLoop() {
+// pingLoop sends periodic pings on conn to keep it alive, until done is
+// closed or the client is closed. When a ping write fails, the connection is
+// treated as lost: pingLoop closes it, which makes the read loop return at
+// once and starts the reconnect, instead of leaving the channel half open
+// until a read deadline expires.
+func (c *ControlChannelClient) pingLoop(conn *wsprotocol.Connection, done <-chan struct{}) {
 	defer c.wg.Done()
 
 	ticker := time.NewTicker(c.config.PingInterval)
 	defer ticker.Stop()
 
+	writePing := c.writePing
+	if writePing == nil {
+		writePing = (*wsprotocol.Connection).WritePing
+	}
+
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-done:
+			return
 		case <-ticker.C:
-			c.mu.RLock()
-			connected := c.connected
-			c.mu.RUnlock()
-
-			if !connected {
-				return
-			}
-
-			if err := c.conn.WritePing(); err != nil {
-				c.log.Error("Failed to ping Hub", "error", err)
+			if err := writePing(conn); err != nil {
+				c.log.Error("Failed to ping Hub; closing control channel to reconnect", "error", err)
+				_ = conn.Close()
 				return
 			}
 		}
