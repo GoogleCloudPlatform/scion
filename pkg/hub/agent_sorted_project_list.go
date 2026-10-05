@@ -281,6 +281,13 @@ func filterMembersByPhase(members []store.AgentMember, phase string) []store.Age
 
 // listProjectAgentsSorted implements the project endpoint's sorted mode user
 // path (per-item read filter, kept exactly as the legacy user path has it).
+//
+// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+// in an agent list, its pages and its totalCount only if the caller can
+// read that agent. listAgents and listProjectAgents both apply it, so the
+// two endpoints return the same set for the same project. Here the read
+// pass below covers every candidate, so totalCount and stats are the
+// readable counts.
 // The agent-JWT path is listProjectAgentsSortedAgentJWT. The agent.list gate has
 // already run in the caller.
 func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request, projectID string, filter store.AgentFilter, p agentListParams) {

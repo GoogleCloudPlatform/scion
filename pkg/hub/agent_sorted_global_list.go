@@ -48,10 +48,11 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	statsFilter.Phase = ""
 
 	var (
-		items      []store.Agent
-		totalCount int
-		nextCursor string
-		complete   bool
+		items       []store.Agent
+		totalCount  int
+		totalApprox bool
+		nextCursor  string
+		complete    bool
 	)
 
 	if p.hasFit {
@@ -67,16 +68,12 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		if result.NextCursor == "" {
 			// Complete: the candidate set fit. Keep the readable rows;
 			// caps and messageability for each of them.
-			readable, err := s.authzService.AuthorizeReadBatch(ctx, identity, agentResources(result.Items))
+			readable, err := s.readableAgentRows(ctx, identity, result.Items)
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			for i := range result.Items {
-				if readable[i] {
-					items = append(items, result.Items[i])
-				}
-			}
+			items = readable
 			complete = true
 			totalCount = len(items)
 		}
@@ -89,13 +86,14 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		// Paged: the readable rows of filter (phase applied) in sorted
 		// order, keyset after the request cursor. totalCount is the
 		// readable count of filter, phase applied.
-		result, err := s.listReadableAgentsSorted(ctx, identity, filter, p, binding)
+		result, err := s.listAgentsSortedPage(ctx, identity, filter, p, binding)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		items = result.Items
 		totalCount = result.TotalCount
+		totalApprox = result.TotalCountApproximate
 		nextCursor = result.NextCursor
 	}
 
@@ -114,14 +112,15 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
 	resp := ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   nextCursor,
-		TotalCount:   totalCount,
-		Sort:         p.sort,
-		Dir:          p.dir,
-		Stats:        statsResp,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            nextCursor,
+		TotalCount:            totalCount,
+		TotalCountApproximate: totalApprox,
+		Sort:                  p.sort,
+		Dir:                   p.dir,
+		Stats:                 statsResp,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	}
 	if p.hasFit {
 		c := complete
@@ -173,6 +172,9 @@ const globalAgentStatsCap = 2000
 // lower bound and the [id,phase] list is omitted. The list is also
 // omitted above globalAgentStatsCap readable agents.
 func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, statsFilter store.AgentFilter, p agentListParams) (*ListAgentsStats, error) {
+	if !agentListAppliesReadRule(ctx) {
+		return buildUnfilteredGlobalAgentStats(ctx, s, statsFilter)
+	}
 	members, err := s.store.ListAgentMembers(ctx, statsFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
 	if err != nil {
 		return nil, err
@@ -185,7 +187,7 @@ func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, s
 	if err != nil {
 		return nil, err
 	}
-	stats := &ListAgentsStats{Total: len(readable)}
+	stats := &ListAgentsStats{Total: len(readable), TotalApproximate: truncated}
 	for _, m := range readable {
 		if m.Phase == "running" {
 			stats.Running++
@@ -201,13 +203,28 @@ func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, s
 	return stats, nil
 }
 
-// agentResources returns the authorization Resource of each agent.
-func agentResources(items []store.Agent) []Resource {
-	resources := make([]Resource, len(items))
-	for i := range items {
-		resources[i] = agentResource(&items[i])
+// buildUnfilteredGlobalAgentStats is the stats block for a caller the
+// agent-list rule does not apply to (an agent): every candidate of
+// statsFilter, read via CountAgentsByPhaseIDs with no decision made.
+func buildUnfilteredGlobalAgentStats(ctx context.Context, s *Server, statsFilter store.AgentFilter) (*ListAgentsStats, error) {
+	idPhases, err := s.store.CountAgentsByPhaseIDs(ctx, statsFilter)
+	if err != nil {
+		return nil, err
 	}
-	return resources
+	stats := &ListAgentsStats{Total: len(idPhases)}
+	for _, ip := range idPhases {
+		if ip.Phase == "running" {
+			stats.Running++
+		}
+	}
+	if stats.Total <= globalAgentStatsCap {
+		agentsOut := make([][2]string, len(idPhases))
+		for i, ip := range idPhases {
+			agentsOut[i] = [2]string{ip.ID, ip.Phase}
+		}
+		stats.Agents = &agentsOut
+	}
+	return stats, nil
 }
 
 // sortedShortCircuitResponse builds the empty-list short-circuit response

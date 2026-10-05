@@ -21,6 +21,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
+// agentListAppliesReadRule reports whether the agent-list rule applies to
+// the caller of ctx. It applies to every caller except an agent: an agent's
+// own agent listings keep their documented sibling-listing behaviour.
+func agentListAppliesReadRule(ctx context.Context) bool {
+	return GetAgentIdentityFromContext(ctx) == nil
+}
+
 // listReadableAgents pages the agents matching a list request through
 // authorizedList, keeping only the agents identity can read.
 //
@@ -33,8 +40,9 @@ import (
 // the page is filled from readable rows only, so paging and totalCount
 // agree with the items. A row whose read decision fails is denied by
 // AuthorizeReadBatch and is dropped. Past authorizedListMaxCandidates
-// candidates the total is a lower bound and the page may be short with a
-// resume cursor (see authorizedListResult).
+// (2000) candidates, counted before any read decision, the total is a
+// lower bound and TotalCountApproximate is set; the page may then be short
+// with a resume cursor (see authorizedListResult).
 //
 // fetch reads one batch of candidates after cursor; cursorFor mints the
 // resume cursor for a returned row in the same format fetch accepts.
@@ -57,34 +65,56 @@ func (s *Server) listReadableAgents(
 		agentResource, cursorFor, s.authzService.AuthorizeReadBatch)
 }
 
-// listReadableAgentsLegacy is listReadableAgents over the legacy
-// (created DESC, id DESC) store order and its created,id cursor.
-func (s *Server) listReadableAgentsLegacy(ctx context.Context, identity Identity, filter store.AgentFilter, cursor, binding string, limit int) (authorizedListResult[store.Agent], error) {
+// listAgentsLegacyPage returns one legacy-order (created DESC, id DESC)
+// page of filter, applying the agent-list rule when it applies to the
+// caller; otherwise it is the store page unchanged.
+func (s *Server) listAgentsLegacyPage(ctx context.Context, identity Identity, filter store.AgentFilter, cursor, binding string, limit int) (authorizedListResult[store.Agent], error) {
+	fetch := func(ctx context.Context, cursor string, limit int, skipTotal bool) (*store.ListResult[store.Agent], error) {
+		return s.store.ListAgents(ctx, filter, store.ListOptions{
+			Limit: limit, Cursor: cursor, CursorBinding: binding, SkipTotalCount: skipTotal,
+		})
+	}
+	if !agentListAppliesReadRule(ctx) {
+		page, err := fetch(ctx, cursor, limit, false)
+		if err != nil {
+			return authorizedListResult[store.Agent]{}, err
+		}
+		return authorizedListResult[store.Agent]{Items: page.Items, NextCursor: page.NextCursor, TotalCount: page.TotalCount}, nil
+	}
 	return s.listReadableAgents(ctx, identity, cursor, limit,
 		func(ctx context.Context, cursor string, limit int) (*store.ListResult[store.Agent], error) {
-			return s.store.ListAgents(ctx, filter, store.ListOptions{
-				Limit: limit, Cursor: cursor, CursorBinding: binding, SkipTotalCount: true,
-			})
+			return fetch(ctx, cursor, limit, true)
 		},
 		func(a *store.Agent) string { return authorizedListCursor(a.Created, a.ID, binding) })
 }
 
-// listReadableAgentsSorted is listReadableAgents over the sorted-mode store
-// order for (sort, dir) and its v2 cursor.
-func (s *Server) listReadableAgentsSorted(ctx context.Context, identity Identity, filter store.AgentFilter, p agentListParams, binding string) (authorizedListResult[store.Agent], error) {
+// listAgentsSortedPage returns one sorted-mode page of filter for
+// (p.sort, p.dir) with its v2 cursor, applying the agent-list rule when it
+// applies to the caller; otherwise it is the store page unchanged.
+func (s *Server) listAgentsSortedPage(ctx context.Context, identity Identity, filter store.AgentFilter, p agentListParams, binding string) (authorizedListResult[store.Agent], error) {
+	fetch := func(ctx context.Context, cursor string, limit int, skipTotal bool) (*store.ListResult[store.Agent], error) {
+		opts := store.ListOptions{
+			Limit: limit, SortBy: p.sort, SortDir: p.dir, CursorBinding: binding, SkipTotalCount: skipTotal,
+		}
+		if cursor != "" {
+			cur, err := store.DecodeAgentCursor(cursor, p.sort, p.dir, binding)
+			if err != nil {
+				return nil, err
+			}
+			opts.SortCursor = &cur
+		}
+		return s.store.ListAgents(ctx, filter, opts)
+	}
+	if !agentListAppliesReadRule(ctx) {
+		page, err := fetch(ctx, p.cursor, p.limit, false)
+		if err != nil {
+			return authorizedListResult[store.Agent]{}, err
+		}
+		return authorizedListResult[store.Agent]{Items: page.Items, NextCursor: page.NextCursor, TotalCount: page.TotalCount}, nil
+	}
 	return s.listReadableAgents(ctx, identity, p.cursor, p.limit,
 		func(ctx context.Context, cursor string, limit int) (*store.ListResult[store.Agent], error) {
-			opts := store.ListOptions{
-				Limit: limit, SortBy: p.sort, SortDir: p.dir, CursorBinding: binding, SkipTotalCount: true,
-			}
-			if cursor != "" {
-				cur, err := store.DecodeAgentCursor(cursor, p.sort, p.dir, binding)
-				if err != nil {
-					return nil, err
-				}
-				opts.SortCursor = &cur
-			}
-			return s.store.ListAgents(ctx, filter, opts)
+			return fetch(ctx, cursor, limit, true)
 		},
 		func(a *store.Agent) string {
 			row := agentsort.KeyFor(p.sort, a.ID, a.Created, a.Updated, a.LastActivityEvent)
@@ -92,9 +122,30 @@ func (s *Server) listReadableAgentsSorted(ctx context.Context, identity Identity
 		})
 }
 
-// readableAgentMembers returns the members identity can read, in order.
-// A member whose read decision fails is dropped.
+// readableAgentRows returns the rows of items the agent-list rule keeps
+// for the caller, in order. A row whose read decision fails is dropped.
+func (s *Server) readableAgentRows(ctx context.Context, identity Identity, items []store.Agent) ([]store.Agent, error) {
+	if !agentListAppliesReadRule(ctx) {
+		return items, nil
+	}
+	allowed, err := s.authzService.AuthorizeReadBatch(ctx, identity, agentResources(items))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.Agent, 0, len(items))
+	for i := range items {
+		if allowed[i] {
+			out = append(out, items[i])
+		}
+	}
+	return out, nil
+}
+
+// readableAgentMembers is readableAgentRows for narrow member rows.
 func (s *Server) readableAgentMembers(ctx context.Context, identity Identity, members []store.AgentMember) ([]store.AgentMember, error) {
+	if !agentListAppliesReadRule(ctx) {
+		return members, nil
+	}
 	resources := make([]Resource, len(members))
 	for i, m := range members {
 		resources[i] = memberResource(m)
@@ -110,4 +161,13 @@ func (s *Server) readableAgentMembers(ctx context.Context, identity Identity, me
 		}
 	}
 	return out, nil
+}
+
+// agentResources returns the authorization Resource of each agent.
+func agentResources(items []store.Agent) []Resource {
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = agentResource(&items[i])
+	}
+	return resources
 }

@@ -2265,27 +2265,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	// read that agent. listAgents and listProjectAgents both apply it, so the
 	// two endpoints return the same set for the same project. Passing the
 	// project-level agent.list gate above does not by itself make every
-	// agent in the project readable. Agent callers keep the sibling listing
-	// below; they are outside this rule.
-	var result *store.ListResult[store.Agent]
-	if agentIdent != nil {
-		var err error
-		result, err = s.store.ListAgents(ctx, filter, store.ListOptions{
-			Limit:         limit,
-			Cursor:        cursor,
-			CursorBinding: cursorBinding,
-		})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-	} else {
-		readable, err := s.listReadableAgentsLegacy(ctx, identity, filter, cursor, cursorBinding, limit)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		result = &store.ListResult[store.Agent]{Items: readable.Items, NextCursor: readable.NextCursor, TotalCount: readable.TotalCount}
+	// agent in the project readable. Agent callers are outside this rule and
+	// keep the unfiltered sibling listing (listAgentsLegacyPage).
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	// Enrich agents with project and broker names
@@ -2313,11 +2298,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 
