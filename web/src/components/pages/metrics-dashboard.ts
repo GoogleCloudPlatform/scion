@@ -20,6 +20,12 @@ import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatNumber } from '../../utils/format-number.js';
+import {
+  DISPLAY_TIMEZONE_CHANGED_EVENT,
+  dayBucketAxisTitle,
+  dayBucketZoneLabel,
+  effectiveTimeZone,
+} from '../../utils/time.js';
 
 Chart.register(...registerables);
 
@@ -35,6 +41,8 @@ interface LabeledTimeSeries {
 
 interface SummaryData {
   periodDays: number;
+  /** The IANA zone the hub bucketed by (absent from older hubs: UTC). */
+  timeZone?: string;
   totalSessions: number;
   totalApiCalls: number;
   totalTokens: number;
@@ -43,18 +51,24 @@ interface SummaryData {
 
 interface SessionsData {
   periodDays: number;
+  /** The IANA zone the hub bucketed by (absent from older hubs: UTC). */
+  timeZone?: string;
   dailyCounts: TimeSeriesPoint[];
   activeAgents: TimeSeriesPoint[];
 }
 
 interface ModelCallsData {
   periodDays: number;
+  /** The IANA zone the hub bucketed by (absent from older hubs: UTC). */
+  timeZone?: string;
   byModel: LabeledTimeSeries[];
   byHarness: LabeledTimeSeries[];
 }
 
 interface TokensData {
   periodDays: number;
+  /** The IANA zone the hub bucketed by (absent from older hubs: UTC). */
+  timeZone?: string;
   input: LabeledTimeSeries[];
   output: LabeledTimeSeries[];
 }
@@ -73,12 +87,14 @@ const CHART_COLORS = [
 ];
 
 /**
- * The hub buckets every dashboard time series by UTC calendar day
- * (pkg/hub/metrics_dashboard.go), so each x-axis tick is a UTC date. The axis
- * title and the chart headings say so, because a viewer in another zone would
- * otherwise read the dates as local days.
+ * The page asks the hub to bucket every daily series by calendar day in the
+ * viewer's effective display zone (`effectiveTimeZone()`: the user's zone
+ * preference, else the browser's zone), sent as the `tz` query parameter
+ * (ptone/scion#3370). The hub
+ * falls back to UTC for a zone it cannot resolve and reports the zone it
+ * used as `timeZone`, so the headings and the x-axis title name that
+ * reported zone, never the requested one.
  */
-export const DAY_BUCKET_AXIS_TITLE = 'Day (UTC)';
 
 @customElement('scion-page-metrics')
 export class ScionPageMetrics extends LitElement {
@@ -89,6 +105,8 @@ export class ScionPageMetrics extends LitElement {
   @state() private error: string | null = null;
   @state() private activeTab = 'summary';
   @state() private periodDays = 7;
+  /** The zone the hub reported for the last loaded view's day buckets. */
+  @state() private bucketZone = 'UTC';
 
   @state() private summary: SummaryData | null = null;
   @state() private sessions: SessionsData | null = null;
@@ -251,13 +269,25 @@ export class ScionPageMetrics extends LitElement {
       const match = window.location.pathname.match(/\/projects\/([^/]+)\/metrics/);
       if (match) this.projectId = match[1];
     }
+    window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.handleDisplayZoneChanged);
     void this.loadView('summary');
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.handleDisplayZoneChanged);
     this.destroyAllCharts();
   }
+
+  /**
+   * The day buckets are computed by the hub for the zone the page sends, so a
+   * change of the display-zone preference needs a refetch, not just a
+   * re-render.
+   */
+  private readonly handleDisplayZoneChanged = (): void => {
+    this.destroyAllCharts();
+    void this.loadView(this.activeTab);
+  };
 
   private destroyAllCharts(): void {
     for (const chart of this.charts.values()) {
@@ -278,15 +308,20 @@ export class ScionPageMetrics extends LitElement {
       // rendered by the page. Each view is a separate request and the dashboard
       // reloads on a timer, so leaving the toast on produces a stream of
       // duplicates rather than one actionable message.
-      const response = await apiFetch(`${basePath}?view=${view}&period=${this.periodDays}`, {
-        suppressAccessDeniedToast: true,
-      });
+      const tz = encodeURIComponent(effectiveTimeZone());
+      const response = await apiFetch(
+        `${basePath}?view=${view}&period=${this.periodDays}&tz=${tz}`,
+        {
+          suppressAccessDeniedToast: true,
+        }
+      );
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
       const data = await response.json();
+      this.bucketZone = dayBucketZoneLabel((data as { timeZone?: string }).timeZone);
 
       switch (view) {
         case 'summary':
@@ -342,6 +377,7 @@ export class ScionPageMetrics extends LitElement {
     'tokens',
     'activeTab',
     'loading',
+    'bucketZone',
   ]);
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -491,7 +527,11 @@ export class ScionPageMetrics extends LitElement {
             x: {
               grid: { display: false },
               ticks: { font: { size: 11 } },
-              title: { display: true, text: DAY_BUCKET_AXIS_TITLE, font: { size: 11 } },
+              title: {
+                display: true,
+                text: dayBucketAxisTitle(this.bucketZone),
+                font: { size: 11 },
+              },
             },
             y: {
               beginAtZero: true,
@@ -593,13 +633,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily Sessions (UTC)</h3>
+          <h3 class="chart-section-title">Daily Sessions (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-sessions"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Active Agents per Day (UTC)</h3>
+          <h3 class="chart-section-title">Active Agents per Day (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-agents"></canvas>
           </div>
@@ -615,13 +655,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily API Calls by Model (UTC)</h3>
+          <h3 class="chart-section-title">Daily API Calls by Model (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-model-calls"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Daily API Calls by Harness (UTC)</h3>
+          <h3 class="chart-section-title">Daily API Calls by Harness (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-harness-calls"></canvas>
           </div>
@@ -637,13 +677,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily Input Tokens by Model (UTC)</h3>
+          <h3 class="chart-section-title">Daily Input Tokens by Model (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-input"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Daily Output Tokens by Model (UTC)</h3>
+          <h3 class="chart-section-title">Daily Output Tokens by Model (${this.bucketZone})</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-output"></canvas>
           </div>
