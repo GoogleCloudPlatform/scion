@@ -47,19 +47,6 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 			golden: "just raw text",
 		},
 		{
-			name: "raw",
-			msg: &StructuredMessage{
-				Version:   Version,
-				Timestamp: "2026-08-01T10:00:00Z",
-				Sender:    "user:alice",
-				Recipient: "agent:dev",
-				Msg:       "Escape",
-				Type:      TypeInstruction,
-				Raw:       true,
-			},
-			golden: "Escape",
-		},
-		{
 			name: "urgent",
 			msg: &StructuredMessage{
 				Version:   Version,

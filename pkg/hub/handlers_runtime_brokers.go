@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -645,6 +646,11 @@ type brokerHeartbeatRequest struct {
 	// an older broker, in which case the missing-container reconcile never
 	// runs for it.
 	Inventory *brokerInventory `json:"inventory,omitempty"`
+	// WorkspaceStorage refreshes the broker's stored workspace storage
+	// descriptor (see hubclient.BrokerHeartbeat.WorkspaceStorage). Omitted
+	// by an older broker, in which case the stored descriptor is left
+	// unchanged.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
 	// only when Capabilities.StartsInFlight is set.
@@ -762,15 +768,35 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// --force re-registration. An old broker sends no Capabilities field at
 	// all, and the store keeps whatever it already had (nil-safe: a missing
 	// field, not an empty struct, is the "don't touch" signal).
-	if heartbeat.Capabilities != nil {
+	// WorkspaceStorage follows the same rule, so the hub sees share health
+	// changes within one heartbeat. Both are persisted in a single update,
+	// and only when something changed.
+	//
+	// Keeping an omitted descriptor means a broker downgraded to a version
+	// that does not report one keeps its last descriptor, Healthy included,
+	// indefinitely. That is safe because move eligibility never relies on
+	// the descriptor alone: the capability check reads AgentMove from the
+	// Capabilities every heartbeat refreshes (an old broker reports none),
+	// and the target health check also probes live reachability.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
 				"broker_id", id, "error", err)
-		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
-			broker.Capabilities = heartbeat.Capabilities
-			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
-					"broker_id", id, "error", err)
+		} else {
+			changed := false
+			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
+				broker.Capabilities = heartbeat.Capabilities
+				changed = true
+			}
+			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
+				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
+				changed = true
+			}
+			if changed {
+				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+						"broker_id", id, "error", err)
+				}
 			}
 		}
 	}
