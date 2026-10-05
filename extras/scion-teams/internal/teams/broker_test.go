@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -478,6 +479,9 @@ func TestBroker_ParsePublishTopic(t *testing.T) {
 		agentSlug string
 	}{
 		{"myproject.agent1.event", "myproject", "agent1"},
+		{"scion.project.proj-1.agent.dev-1.messages", "proj-1", "dev-1"},
+		{"scion.project.proj-1.user.u-1.messages", "proj-1", ""},
+		{"scion.project.proj-1.broadcast", "proj-1", ""},
 		{"project.agent", "project", "agent"},
 		{"project", "project", ""},
 		{"", "", ""},
@@ -1022,4 +1026,159 @@ func TestCommands_LinkLookupErrorRepliesGenerically(t *testing.T) {
 	assert.False(t, hubCalled)
 	require.Len(t, ms.sent, 1)
 	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
+}
+
+// publishAskUserCard publishes an ask-user message for agent dev-1 in
+// proj-1 to a linked conversation and returns the broker and the card sent.
+func publishAskUserCard(t *testing.T, metadata map[string]string) (*TeamsBroker, map[string]interface{}) {
+	t.Helper()
+	var mu sync.Mutex
+	var sent []Activity
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var a Activity
+		if err := json.NewDecoder(r.Body).Decode(&a); err == nil {
+			mu.Lock()
+			sent = append(sent, a)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ActivityResponse{ID: "sent-1"})
+	}))
+	t.Cleanup(apiServer.Close)
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithAPI(t, broker, apiServer.URL)
+	ctx := context.Background()
+	require.NoError(t, broker.AddChannelLink(&ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		Active:         true,
+		LinkedAt:       time.Now(),
+	}))
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "conv-1",
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+
+	msg := &messages.StructuredMessage{
+		Version:  messages.Version,
+		Sender:   "agent:dev-1",
+		Msg:      "Deploy to production?",
+		Type:     messages.TypeInputNeeded,
+		Metadata: metadata,
+	}
+	require.NoError(t, broker.Publish(ctx, projectkeys.AgentTopic("proj-1", "dev-1"), msg))
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(sent) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, sent[0].Attachments, 1)
+	raw, err := json.Marshal(sent[0].Attachments[0].Content)
+	require.NoError(t, err)
+	var card map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &card))
+	return broker, card
+}
+
+func TestBroker_Publish_AskUserStoresPendingRequest(t *testing.T) {
+	broker, card := publishAskUserCard(t, map[string]string{
+		"request_id": "req-42",
+		"choices":    `["Yes","No"]`,
+	})
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Equal(t, "proj-1", pending.ProjectID)
+	assert.Equal(t, "dev-1", pending.AgentSlug)
+	assert.Equal(t, "conv-1", pending.ConversationID)
+	assert.Equal(t, []string{"Yes", "No"}, pending.Choices)
+	assert.False(t, pending.Responded)
+	assert.WithinDuration(t, time.Now().Add(askUserTTL), pending.ExpiresAt, time.Minute)
+
+	actions := card["actions"].([]interface{})
+	require.Len(t, actions, 3)
+	for _, a := range actions {
+		action := a.(map[string]interface{})
+		assert.Equal(t, "Action.Execute", action["type"])
+		assert.NotEmpty(t, action["verb"])
+		assert.Equal(t, "req-42", action["data"].(map[string]interface{})["request_id"])
+	}
+}
+
+func TestBroker_Publish_AskUserWithoutRequestIDGetsOne(t *testing.T) {
+	broker, card := publishAskUserCard(t, nil)
+
+	actions := card["actions"].([]interface{})
+	requestID, _ := actions[0].(map[string]interface{})["data"].(map[string]interface{})["request_id"].(string)
+	require.NotEmpty(t, requestID)
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), requestID)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Equal(t, []string{"approve", "reject"}, pending.Choices)
+}
+
+func TestBroker_AskUserCardButtonDeliversAnswer(t *testing.T) {
+	broker, card := publishAskUserCard(t, map[string]string{"request_id": "req-42"})
+
+	var payload inboundPayload
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hubServer.Close)
+	broker.hubClient = NewHubClient(hubServer.URL, "", "", slog.Default())
+	require.NoError(t, broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID: "aad-user-1",
+		ScionUserID: "scion-1",
+		ScionEmail:  "user@example.com",
+		LinkedAt:    time.Now(),
+	}))
+
+	// Build the invoke Teams sends for the first button, from the card JSON.
+	approve := card["actions"].([]interface{})[0].(map[string]interface{})
+	value, err := json.Marshal(map[string]interface{}{
+		"action": map[string]interface{}{
+			"type": approve["type"],
+			"verb": approve["verb"],
+			"data": approve["data"],
+		},
+		"trigger": "manual",
+	})
+	require.NoError(t, err)
+	invoke := &Activity{
+		Type:         "invoke",
+		Name:         "adaptiveCard/action",
+		ID:           "invoke-1",
+		From:         ChannelAccount{ID: "user-1", Name: "Test User", AadObjectID: "aad-user-1"},
+		Conversation: ConversationAccount{ID: "conv-1"},
+		ServiceURL:   "https://smba.trafficmanager.net/test/",
+		Value:        value,
+	}
+
+	resp, err := broker.HandleActivity(context.Background(), invoke)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	body, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "application/vnd.microsoft.card.adaptive", body["type"])
+
+	require.NotNil(t, payload.Message, "expected the answer to be delivered to the hub")
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "approve", payload.Message.Msg)
+	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
+	assert.Equal(t, "req-42", payload.Message.Metadata["ask_request_id"])
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.True(t, pending.Responded)
 }

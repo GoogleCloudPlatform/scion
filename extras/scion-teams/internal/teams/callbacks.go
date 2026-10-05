@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
-// CallbackHandler processes Adaptive Card Action.Submit invoke activities.
+// CallbackHandler processes Adaptive Card Action.Execute invoke activities.
 type CallbackHandler struct {
 	broker *TeamsBroker
 	log    *slog.Logger
@@ -59,7 +59,7 @@ func (h *CallbackHandler) HandleInvoke(ctx context.Context, activity *Activity) 
 	// Parse the Value to extract action data.
 	var data map[string]interface{}
 	if activity.Value != nil {
-		// The Teams SDK wraps the Action.Submit data inside {"action": {"data": ...}}
+		// Teams wraps Action.Execute data inside {"action": {"data": ...}}
 		// but in practice the data is the Value itself or under a "data" wrapper.
 		var raw json.RawMessage
 		if err := json.Unmarshal(activity.Value, &raw); err != nil {

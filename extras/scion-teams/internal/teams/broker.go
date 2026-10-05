@@ -16,6 +16,8 @@ package teams
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -343,6 +345,12 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		msg.Metadata["project_id"] = projectID
 	}
 
+	// Ask-user cards need a request ID so button clicks can be matched to
+	// the stored request.
+	if msg.Type == messages.TypeInputNeeded && msg.Metadata["request_id"] == "" {
+		msg.Metadata["request_id"] = newAskRequestID()
+	}
+
 	// Format the message into a Teams Activity.
 	activity, err := formatStructuredMessage(msg)
 	if err != nil {
@@ -457,6 +465,12 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		return nil
 	}
 
+	// Store ask-user requests before the card is sent so button clicks can
+	// be answered.
+	if msg.Type == messages.TypeInputNeeded && store != nil {
+		b.storePendingAskUser(ctx, store, msg, projectID, agentSlug, targets[0].conversationID)
+	}
+
 	// TODO(Phase 3): Add dedup guard before sending. Discord has dedup
 	// protection via message nonces; Teams should get equivalent protection
 	// when the Store layer is integrated in Phase 3.
@@ -488,9 +502,54 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	return nil
 }
 
+// askUserTTL is how long an ask-user card can be answered.
+const askUserTTL = 24 * time.Hour
+
+// newAskRequestID returns a random ask-user request ID.
+func newAskRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("ask-%d", time.Now().UnixNano())
+	}
+	return "ask-" + hex.EncodeToString(b)
+}
+
+// storePendingAskUser records an ask-user request posted to conversationID.
+func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg *messages.StructuredMessage, projectID, topicAgentSlug, conversationID string) {
+	agentSlug := topicAgentSlug
+	if strings.HasPrefix(msg.Sender, "agent:") {
+		agentSlug = strings.TrimPrefix(msg.Sender, "agent:")
+	}
+	if projectID == "" {
+		projectID = msg.Metadata["project_id"]
+	}
+	pending := &PendingAskUser{
+		RequestID:      msg.Metadata["request_id"],
+		ConversationID: stripThreadSuffix(conversationID),
+		AgentSlug:      agentSlug,
+		ProjectID:      projectID,
+		Choices:        askUserChoices(msg),
+		ExpiresAt:      time.Now().Add(askUserTTL),
+	}
+	if pending.ProjectID == "" || pending.AgentSlug == "" {
+		b.log.Warn("Ask-user message without project or agent, buttons cannot be answered",
+			"request_id", pending.RequestID, "project_id", pending.ProjectID, "agent_slug", pending.AgentSlug)
+	}
+	if err := store.CreatePendingAskUser(ctx, pending); err != nil {
+		b.log.Error("Failed to store pending ask-user request", "request_id", pending.RequestID, "error", err)
+	}
+}
+
 // parsePublishTopic extracts projectID and agentSlug from a topic string.
-// Topics follow the pattern "project.agent.event" or similar dot-delimited formats.
+// Canonical topics (scion.project.<id>.agent.<slug>.messages) are parsed
+// with projectkeys; other topics use the "project.agent.event" form.
 func parsePublishTopic(topic string) (projectID, agentSlug string) {
+	if parsed, err := projectkeys.ParseTopic(topic); err == nil {
+		if parsed.Kind == projectkeys.TopicKindAgent {
+			agentSlug = parsed.Actor
+		}
+		return parsed.ProjectID, agentSlug
+	}
 	parts := strings.SplitN(topic, ".", 3)
 	if len(parts) >= 1 {
 		projectID = parts[0]
