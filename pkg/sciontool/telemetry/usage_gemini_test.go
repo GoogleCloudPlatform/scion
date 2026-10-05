@@ -5,7 +5,10 @@ Copyright 2026 The Scion Authors.
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -13,7 +16,9 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 const geminiCLIUsageFixturePath = "testdata/usage/gemini-cli-0.62.0.pb.json"
@@ -176,6 +181,7 @@ func TestGeminiCLIUsageRuleMalformedCases(t *testing.T) {
 		{"negative output", []*commonpb.KeyValue{geminiIntAttr("output_token_count", -1)}},
 		{"non-numeric thoughts", []*commonpb.KeyValue{{Key: "thoughts_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "many"}}}}},
 		{"output overflow", []*commonpb.KeyValue{geminiIntAttr("output_token_count", 1<<62), geminiIntAttr("thoughts_token_count", 1<<62)}},
+		{"input overflow", []*commonpb.KeyValue{geminiIntAttr("input_token_count", 1<<62), geminiIntAttr("tool_token_count", 1<<62)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,5 +263,97 @@ func TestPipelineDerivesGeminiCLIUsageEndToEnd(t *testing.T) {
 		if labels["harness"] != "gemini-cli" || labels["model"] != "gemini-2.5-pro" {
 			t.Errorf("unexpected tokens series labels: %+v", labels)
 		}
+	}
+}
+
+// TestReceiverGeminiCLIInstalledLogShapePrivacy pins that gemini-cli's
+// prompt-bearing native log shape cannot carry its system prompt to log
+// egress. gemini-cli emits gen_ai.system_instructions (its full system
+// prompt) on every gen_ai.client.inference.operation.details record even
+// with logPrompts=false, and today only the mandatory-redact entry for that
+// key keeps it out of the exported logs -- so this asserts it with both the
+// default and an empty redaction list, using the captured fixture's real
+// record shape with a marker substituted for the (already scrubbed) value.
+func TestReceiverGeminiCLIInstalledLogShapePrivacy(t *testing.T) {
+	const marker = "PRIVATE_GEMINI_SYSTEM_INSTRUCTIONS"
+	for _, tc := range []struct {
+		name      string
+		redaction RedactionConfig
+	}{
+		{name: "default", redaction: RedactionConfig{Redact: DefaultRedactFields, Hash: DefaultHashFields}},
+		{name: "empty", redaction: RedactionConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resourceLogs := loadGeminiCLIUsageFixture(t)
+			substituted := 0
+			for _, rl := range resourceLogs {
+				for _, sl := range rl.ScopeLogs {
+					for _, record := range sl.LogRecords {
+						for _, kv := range record.Attributes {
+							if kv.Key == "gen_ai.system_instructions" {
+								kv.Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: marker}}
+								substituted++
+							}
+						}
+					}
+				}
+			}
+			if substituted == 0 {
+				t.Fatal("fixture has no gen_ai.system_instructions attribute to substitute")
+			}
+
+			p := NewWithConfig(&Config{
+				Enabled: true,
+				Filter: FilterConfig{Include: []string{
+					"gen_ai.client.inference.operation.details",
+					geminiCLIAPIResponseEvent, geminiCLIAPIErrorEvent, "gemini_cli.api_request",
+				}},
+				Redaction: tc.redaction,
+			})
+			p.retryConfig = fastRetryConfig()
+			var captured []*logspb.ResourceLogs
+			p.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, req *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+				captured = append(captured, req.ResourceLogs...)
+				return &collogspb.ExportLogsServiceResponse{}, nil
+			}}}
+
+			body, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: resourceLogs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			receiver := &Receiver{logHandler: p.handleLogs}
+			response := httptest.NewRecorder()
+			receiver.handleHTTPLogs(response, otlpHTTPRequest("/v1/logs", bytes.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("receiver status %d: %s", response.Code, response.Body.String())
+			}
+
+			// The operation.details records must actually reach egress, so
+			// the marker assertion below is not vacuous.
+			exported := 0
+			for _, rl := range captured {
+				for _, sl := range rl.ScopeLogs {
+					for _, record := range sl.LogRecords {
+						if logAttrString(record.Attributes, "event.name") != "gen_ai.client.inference.operation.details" {
+							continue
+						}
+						if logAttrPresent(record.Attributes, "gen_ai.system_instructions") {
+							assertRedacted(t, record.Attributes, "gen_ai.system_instructions")
+						}
+						exported++
+					}
+				}
+			}
+			if exported != substituted {
+				t.Fatalf("exported operation.details records = %d, want %d", exported, substituted)
+			}
+			egressBytes, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: captured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(egressBytes, []byte(marker)) {
+				t.Fatal("gemini-cli system instructions survived log egress")
+			}
+		})
 	}
 }
