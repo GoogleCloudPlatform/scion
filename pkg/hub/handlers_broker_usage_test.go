@@ -135,15 +135,18 @@ func TestBrokerUsage_MemberCannotUseBrokerThatIsNotAProvider(t *testing.T) {
 
 func TestBrokerUsage_AutoProvideBrokerOpenToMembers(t *testing.T) {
 	f := brokerLinkAuthzSetup(t)
-	require.NoError(t, f.store.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: f.proj.ID, BrokerID: f.broker.ID, BrokerName: f.broker.Name, Status: store.BrokerStatusOnline,
-	}))
+	// An owned broker whose provider row carries no consent evidence, so
+	// only its auto-provide setting opens it to members.
+	b := newUsageBroker(t, f.store, f.owner.ID, f.proj.ID, strPtr("agent-create"))
+	require.False(t, f.srv.brokerProviderHasOwnerConsent(context.Background(), b, f.proj.ID))
+	b.AutoProvide = true
+	require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), b))
 
 	rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
-		CreateAgentRequest{Name: "usage-auto-provide", RuntimeBrokerID: f.broker.ID})
+		CreateAgentRequest{Name: "usage-auto-provide", RuntimeBrokerID: b.ID})
 
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Equal(t, f.broker.ID, decodeCreatedAgentBroker(t, rec))
+	assert.Equal(t, b.ID, decodeCreatedAgentBroker(t, rec))
 }
 
 func TestBrokerUsage_ProjectTokenUsesOwnerLinkedBroker(t *testing.T) {
