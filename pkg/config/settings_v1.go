@@ -2488,9 +2488,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // Both the versioned and legacy env key mappers drop them via this list so
 // that koanf's Unmarshal never fails just because one of them is present in
 // the process environment.
+//
+// SCION_HUB is the exception to "consumed by another subsystem": nothing in
+// scion reads a bare SCION_HUB, but left mapped it lands on the top-level
+// key "hub" as a string and collides with the struct-typed hub settings.
+// Hub settings come from the SCION_HUB_* variables (e.g.
+// SCION_HUB_ENDPOINT), which are unaffected.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
+	"SCION_HUB",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -2510,6 +2517,8 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isSettingsExcludedEnv(s) {
+		// See settingsExcludedEnvVars for the full list (a bare SCION_HUB
+		// is dropped for the same collision reason, on key "hub").
 		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
 		// consumed directly by sciontool's auto-expose scanner
 		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
