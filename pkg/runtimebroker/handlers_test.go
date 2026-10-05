@@ -2525,6 +2525,11 @@ func TestStartAgentEndpoint_SkillResolutionError(t *testing.T) {
 			if resp.Error.Details["cause"] != tt.code {
 				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
 			}
+			// The failure came from inside Manager.Start, so the hub must
+			// also see the start marker it uses to settle the run ID.
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
 		})
 	}
 }
