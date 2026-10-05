@@ -47,6 +47,7 @@ import {
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -3206,7 +3207,7 @@ export class ScionPageProjectDetail extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge
@@ -3387,7 +3388,7 @@ export class ScionPageProjectDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge

@@ -43,7 +43,11 @@ import {
   canMessageAgent,
   isTerminalAvailable,
 } from '../../shared/types.js';
-import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
+import {
+  getStateDisplay,
+  stateLabel,
+  type StatusVariant,
+} from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   computeStableLayout,
@@ -120,6 +124,17 @@ const HIGHLIGHT_MS = 2000;
 const PENDING_REVEAL_MS = 1000;
 
 /**
+ * Whether `sel` holds a non-empty range selection. Uses `type`, not
+ * `isCollapsed`: for a selection inside a shadow root, Chromium retargets
+ * `window.getSelection()` to the host and reports `isCollapsed === true`
+ * even though `type === 'Range'` and the text is non-empty, so
+ * `isCollapsed` cannot detect a selection of the graph's own text.
+ */
+function hasRangeSelection(sel: Selection | null): boolean {
+  return !!sel && sel.type === 'Range';
+}
+
+/**
  * Inline agent lineage graph component. Accepts an `agents` property (the
  * already-filtered list from the parent page) and renders it as an
  * interactive pan/zoom forest. All rendering state (hover, collapse,
@@ -191,6 +206,9 @@ export class ScionAgentTreeView extends LitElement {
 
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+  private boundOnSelectStart = (e: Event): void => this.onSelectStart(e);
+  /** Whether a range selection (see hasRangeSelection) already existed when the current pan began. */
+  private hadSelectionAtPanStart = false;
   /** Canvas-content size of the last computed layout (for keyboard "fit"). */
   private contentW = 0;
   private contentH = 0;
@@ -375,6 +393,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .canvas.dragging {
+      -webkit-user-select: none;
       user-select: none;
       cursor: grabbing;
     }
@@ -678,6 +697,7 @@ export class ScionAgentTreeView extends LitElement {
     super.disconnectedCallback();
     this.removeEventListener('wheel', this.boundOnWheel);
     window.removeEventListener('keydown', this.boundOnKeyDown);
+    this.endPan();
     cancelAnimationFrame(this.pendingRevealFrame);
     this.dropPendingReveal();
     clearTimeout(this.highlightTimer);
@@ -871,6 +891,19 @@ export class ScionAgentTreeView extends LitElement {
     this.dragStartY = e.clientY;
     this.dragPanX = this.panX;
     this.dragPanY = this.panY;
+    // preventDefault on pointerdown does not reliably stop text selection in
+    // Chromium, and a selection can begin before the .dragging class
+    // (user-select: none) applies (ptone/scion#765). Suppress selectstart
+    // for the duration of the gesture instead. selectstart is not composed,
+    // so one fired on text in this component's shadow root (node and user
+    // labels) never reaches document: the render root needs its own capture
+    // listener. Text inside a nested component's shadow root is not covered,
+    // but no such text is pannable today (badges sit inside node links,
+    // which never pan). The document listener still catches a selection
+    // starting outside the component.
+    this.hadSelectionAtPanStart = hasRangeSelection(window.getSelection());
+    this.renderRoot.addEventListener('selectstart', this.boundOnSelectStart, true);
+    document.addEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.setPointerCapture(e.pointerId);
     this.canvasEl?.classList.add('dragging');
   }
@@ -882,9 +915,37 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   private onPointerUp(e: PointerEvent): void {
-    this.dragging = false;
+    if (this.dragging) {
+      // Drop any selection that slipped through during the pan; leave one
+      // that already existed before it.
+      const sel = window.getSelection();
+      if (sel && hasRangeSelection(sel) && !this.hadSelectionAtPanStart) sel.removeAllRanges();
+    }
+    this.endPan();
     this.canvasEl?.releasePointerCapture(e.pointerId);
+  }
+
+  /**
+   * Ends the pan if pointer capture is lost without a pointerup/pointercancel
+   * (e.g. the browser drops capture), so the selectstart
+   * suppression cannot outlive the gesture. Idempotent after onPointerUp.
+   */
+  private onLostPointerCapture(): void {
+    this.endPan();
+  }
+
+  /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
+  private endPan(): void {
+    this.dragging = false;
+    this.hadSelectionAtPanStart = false;
+    this.renderRoot.removeEventListener('selectstart', this.boundOnSelectStart, true);
+    document.removeEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.classList.remove('dragging');
+  }
+
+  /** Prevents text selection from starting while a pan is in progress. */
+  private onSelectStart(e: Event): void {
+    if (this.dragging) e.preventDefault();
   }
 
   private onShowUsersChange(e: Event): void {
@@ -1165,6 +1226,7 @@ export class ScionAgentTreeView extends LitElement {
         @pointermove=${this.onPointerMove}
         @pointerup=${this.onPointerUp}
         @pointercancel=${this.onPointerUp}
+        @lostpointercapture=${this.onLostPointerCapture}
         @pointerleave=${() => (this.hoverId = null)}
       >
         <div
@@ -1362,7 +1424,7 @@ export class ScionAgentTreeView extends LitElement {
           <span class="badges">
             <scion-status-badge
               status=${status as StatusType}
-              label=${status}
+              label=${stateLabel(status)}
               size="small"
             ></scion-status-badge>
             <scion-deletion-badge

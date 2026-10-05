@@ -591,7 +591,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 		ProjectID: project.ID,
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
@@ -690,22 +690,6 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 	return nil
 }
 
-const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
-
-// legacyProjectMembersGroupAnnotation is the project-members-group marker
-// written by the entadapter marker backfill
-// (BackfillProjectMembersGroupMarkers). It differs from
-// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
-// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
-// owner-clearing backfill matches either key.
-//
-// This literal duplicates the entadapter constant
-// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
-// fold the two together under ptone/scion#2556.
-const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
-
-const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
-
 func projectMembersGroupSlug(projectSlug string) string {
 	return "project:" + projectSlug + ":members"
 }
@@ -714,7 +698,7 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectMembersGroup] == "true"
 }
 
 // hasProjectMembersGroupMarker reports whether g carries either
@@ -722,26 +706,27 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 // the owner-clearing backfill and the group PATCH guards.
 //
 // Its semantics differ from isSystemProjectMembersGroup on purpose:
-// isSystemProjectMembersGroup matches only the hub key
-// (systemProjectMembersGroupAnnotation) for one specific project, and
+// isSystemProjectMembersGroup matches only the canonical key
+// (store.AnnotationProjectMembersGroup) for one specific project, and
 // decides whether createProjectMembersGroup may adopt a group. This
-// predicate matches either key (see legacyProjectMembersGroupAnnotation)
-// for any project, so groups marked only by the entadapter backfill are
-// still protected. Fold the two together once the key mismatch is resolved
+// predicate also accepts the legacy key
+// (store.LegacyAnnotationProjectMembersGroup) for any project. The startup
+// migration rewrites the legacy key, but an older binary may still write it
+// during a rolling upgrade, so the guards keep protecting such a group
 // (ptone/scion#2556).
 func hasProjectMembersGroupMarker(g *store.Group) bool {
 	if g == nil || g.ProjectID == "" || g.Annotations == nil {
 		return false
 	}
-	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
-		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+	return g.Annotations[store.AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[store.LegacyAnnotationProjectMembersGroup] == "true"
 }
 
 // changesProjectMembersGroupMarker reports whether replacing the stored
 // annotations with patched would remove, add or change the value of either
 // project-members-group marker key.
 func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		sv, sok := stored[key]
 		pv, pok := patched[key]
 		if sok != pok || sv != pv {
@@ -757,7 +742,7 @@ func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
 // removal of a key, so a PATCH may still drop a stray non-marking value from
 // an unmarked group.
 func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		pv, pok := patched[key]
 		if !pok {
 			continue
@@ -773,7 +758,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectAgentsGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectAgentsGroup] == "true"
 }
 
 // createProjectMembersGroup creates the project's collaboration
@@ -807,7 +792,7 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectMembersGroupAnnotation: "true",
+			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
@@ -899,53 +884,9 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 		return nfsPath, nil
 	}
 
-	// --- Cloud Run volume backend ---
-	// Unlike the GKE branch below, this one does not require a non-empty
-	// volume name: guarding it would change where existing Cloud Run
-	// deployments look for content, which needs its own migration (#1073).
-	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
-		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
-		if subPathRoot == "" {
-			subPathRoot = "projects"
-		}
-		crPath := filepath.Join(volumeMountBase, wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
-		if hasWorkspaceContent(crPath) {
-			return crPath, nil
-		}
-		// Fallback: check legacy local path
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		return crPath, nil
-	}
-
-	// --- GKE shared volume backend ---
-	// The mount root comes from workspaceMountRoot, the same resolver
-	// checkWorkspaceStorageHealth probes for readiness, so the two cannot
-	// drift. An empty root means no volume name was configured: there is no
-	// mount point to build a path from, so the config is treated as unset and
-	// this falls through to the local path. A deployment in that state fails
-	// its readiness check and never serves.
-	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil {
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
-			if subPathRoot == "" {
-				subPathRoot = "projects"
-			}
-			gkePath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-			if hasWorkspaceContent(gkePath) {
-				return gkePath, nil
-			}
-			// Fallback: check legacy local path
-			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-				// Worth saying out loud: on GKE the local path is always pod
-				// ephemeral storage, so this content disappears on the next
-				// reschedule and the project silently moves to the volume.
-				s.warnEphemeralProjectPath(slug, localPath, gkePath)
-				return localPath, nil
-			}
-			return gkePath, nil
-		}
+	// --- Cloud Run volume and GKE shared volume backends ---
+	if volPath, ok := s.volumeBackedProjectPath(wsCfg, slug); ok {
+		return volPath, nil
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---

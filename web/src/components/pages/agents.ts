@@ -45,6 +45,7 @@ import {
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -1405,7 +1406,7 @@ export class ScionPageAgents extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           >
           </scion-status-badge>
@@ -1503,7 +1504,7 @@ export class ScionPageAgents extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge
