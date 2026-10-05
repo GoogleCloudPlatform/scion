@@ -3105,6 +3105,9 @@ describe('project-detail — agent list window', () => {
           const list = await banners(el, view === 'grid' ? '.agent-card' : 'tbody tr');
           expect(list.map(title)).toEqual([expected]);
           expect(list[0].hasAttribute('compact')).toBe(view === 'list');
+          expect(list[0].shadowRoot?.querySelector('.force')?.getAttribute('aria-label')).toBe(
+            'Force delete agent-0'
+          );
           expect(list[0].shadowRoot?.querySelector('.retry')).not.toBeNull();
           expect(list[0].shadowRoot?.querySelector('.force')).not.toBeNull();
           el.remove();

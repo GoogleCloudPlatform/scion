@@ -971,6 +971,9 @@ describe('scion-page-agent-detail phase 2: shared delete helper and failure bann
       expect(b).not.toBeNull();
       expect(text(b!, '.title')).toBe(title);
       expect(b!.shadowRoot?.querySelector('[role="alert"]')).not.toBeNull(); // live on detail
+      expect(b!.shadowRoot?.querySelector('.retry')?.getAttribute('aria-label')).toBe(
+        'Retry delete of Test Agent'
+      );
       expect(b!.shadowRoot?.querySelector('.retry')).not.toBeNull();
       expect(b!.shadowRoot?.querySelector('.force')).not.toBeNull();
       if (blocked) {

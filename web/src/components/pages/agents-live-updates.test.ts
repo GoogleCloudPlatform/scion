@@ -662,6 +662,9 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
         const cards = await banners(el, '.agent-card');
         expect(cards.map(title)).toEqual([expected]);
         expect(cards[0].hasAttribute('compact')).toBe(false);
+        expect(cards[0].shadowRoot?.querySelector('.retry')?.getAttribute('aria-label')).toBe(
+          'Retry delete of a1'
+        );
         expect(cards[0].shadowRoot?.querySelector('.retry')).not.toBeNull();
         expect(cards[0].shadowRoot?.querySelector('.force')).not.toBeNull();
 
