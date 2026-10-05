@@ -435,8 +435,18 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		// Wire command bus for cross-node dispatch (B2-4).
-		cmdBus := newCommandBus(ctx, cfg, hubSrv)
+		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
+		if err != nil {
+			return err
+		}
 		hubSrv.SetCommandBus(cmdBus)
+
+		// Conduit relay (hub.conduit): after operational settings are
+		// loaded (initHubServer) and before the background services start,
+		// which register the registry singleton only when a relay runs.
+		if err := startConduit(ctx, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
+			return err
+		}
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
@@ -1041,6 +1051,7 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("storage-dir") {
 		cfg.Storage.LocalPath = storageDir
 	}
+	applyConduitFlagOverrides(cmd, cfg)
 
 	// Standalone broker in hosted mode: default to loopback when host
 	// is not explicitly set. The broker needs to start on loopback so that
@@ -1214,6 +1225,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 		return err
 	}
 	cfg.Hub.AgentEndpoint = normalized
+	if err := cfg.Hub.Conduit.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1859,6 +1873,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
+		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
+		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
@@ -2588,9 +2604,14 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbme
 // newCommandBus selects the command bus backend. With Postgres it returns a
 // PostgresCommandBus (LISTEN/NOTIFY on scion_broker_cmd); otherwise it returns
 // a no-op bus (single-process SQLite always owns all brokers locally).
-func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) hub.CommandBus {
+//
+// If the Postgres bus cannot start, the hub normally falls back to the
+// no-op bus. In hosted HA with hub.conduit on that is a startup error
+// instead (C8): cross-replica conduit routing and dispatch depend on the
+// listener, so a replica without it must not serve.
+func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) (hub.CommandBus, error) {
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
-		return hub.NoopCommandBus{}
+		return hub.NoopCommandBus{}, nil
 	}
 	ownsLocally := func(brokerID string) bool {
 		mgr := hubSrv.GetControlChannelManager()
@@ -2599,13 +2620,21 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		}
 		return mgr.IsConnected(brokerID)
 	}
-	bus, err := hub.NewPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
+	bus, err := startPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
 	if err != nil {
+		if hubSrv.ConduitEnabled() && hostedHAGuardsRequired(cfg) {
+			return nil, fmt.Errorf("postgres command bus startup failed (hosted HA with hub.conduit on): %w", err)
+		}
 		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
-		return hub.NoopCommandBus{}
+		return hub.NoopCommandBus{}, nil
 	}
 	log.Printf("Using Postgres command bus on channel scion_broker_cmd")
-	return bus
+	return bus, nil
+}
+
+// startPostgresCommandBus starts the Postgres command bus (a test seam).
+var startPostgresCommandBus = func(ctx context.Context, dsn string, ownsLocally func(string) bool, reconcile func(context.Context, string), logger *slog.Logger) (hub.CommandBus, error) {
+	return hub.NewPostgresCommandBus(ctx, dsn, ownsLocally, reconcile, logger)
 }
 
 // initWebServer creates and configures the Web server. The provided context is

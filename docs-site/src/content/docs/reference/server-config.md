@@ -71,6 +71,7 @@ Controls the central Hub API server.
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `cors` | object | | CORS configuration (see below). |
+| `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -78,6 +79,33 @@ Controls the central Hub API server.
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable CORS. |
 | `allowed_origins` | list | `["*"]` | Allowed origins. |
+
+#### Conduit (`server.hub.conduit`)
+
+Settings for the in-process conduit relay and its stream grants. They take effect only when the `hub.conduit` [experiment](/scion/reference/experiments/) is on. All of them are read at startup, so a change needs a restart. An invalid value is a startup error, not silently ignored.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `grant_key_activation` | duration | `"15m"` | Delay between publishing a new grant signing key and signing with it. Minimum `"1m"`. Targets must refresh their keys at least this often. Flag: `--conduit-grant-key-activation`. Env: `SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION`. |
+| `tcp_allowed_ports` | list of int | `[]` | Additional agent-local ports a TCP stream grant may target, on every agent, besides that agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty means exposed ports only; this setting never narrows access to exposed ports. Flag: `--conduit-tcp-allowed-ports`. Env: `SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS` (comma-separated). |
+| `internal_listen` | string | | `host:port` of the internal relay API listener, used by multi-node deployments. It serves only the internal relay API and must be reachable only inside the cluster or VPC, never publicly. Flag: `--internal-listen`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN`. |
+| `internal_advertise` | string | | Base URL (`http(s)://host:port`) other hub nodes use to reach this node's internal listener. Default: `POD_IP` with the listen port, else the listen host if it is not a wildcard. Flag: `--internal-advertise`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE`. |
+| `peer_auth` | string | `"auto"` | Relay-peer authentication: `auto`, `oidc` or `hmac`. Requests between relays are always signed with a key derived from the hub's signing secret, which is required in every mode. `oidc` also requires a Google OIDC ID token, `auto` adds the ID token on GCP, and `hmac` uses the signature alone. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUTH`. |
+| `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
+| `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
+| `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
+| `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
+
+**TLS on the internal hop.** Use TLS for the internal relay endpoint (for example a service mesh or a TLS-terminating proxy) and advertise it as `https://`. Plain `http://` is accepted.
+
+**Hosted HA.** In an HA deployment each hub node runs a relay that other nodes must reach directly, so the hub refuses to start when:
+
+- the grant key ring is not stored with the shared at-rest key;
+- it runs on Cloud Run (`K_SERVICE` is set), whose instances are not individually addressable;
+- `internal_advertise` uses the public hub host or a `*.run.app` host;
+- the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
+
+Outside HA, a relay that cannot start is logged and the hub serves without it.
 
 #### Asynchronous agent create
 
@@ -830,6 +858,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
+| Conduit relay | `hub.conduit.*` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 

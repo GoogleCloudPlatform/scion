@@ -121,10 +121,6 @@ type ServerConfig struct {
 	// loopback ports a Conduit tcp stream grant may target in addition to
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
-	//
-	// Not yet reachable from configuration: settings/flag wiring comes in
-	// the Phase 1 hub-wiring change (1d-ii, ptone/scion#2780). Until then
-	// it is empty, so only exposed ports are targets.
 	ConduitTCPAllowedPorts []int
 	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
 	// is published before it signs (default 15m). It must be at least the
@@ -133,11 +129,6 @@ type ServerConfig struct {
 	// learned the new key refuses its grants. It must also be at least the
 	// hub's ring refresh interval (1m). Only used behind the hub.conduit
 	// experiment.
-	//
-	// Not yet reachable from configuration: settings/flag wiring, with
-	// load-time validation (activation >= 1m), comes in the Phase 1
-	// hub-wiring change (1d-ii, ptone/scion#2780). Until then the default
-	// applies, and rotate rejects a delay below the refresh interval.
 	ConduitGrantKeyActivation time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
@@ -1094,8 +1085,11 @@ type Server struct {
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
-	conduitGrantsOnce      sync.Once
-	conduitGrants          *conduitGrantKeys
+	conduitGrantsOnce sync.Once
+	conduitGrants     *conduitGrantKeys
+	// conduit is the in-process conduit relay (conduit_relay.go); nil
+	// unless hub.conduit was on at startup.
+	conduit                atomic.Pointer[conduitRuntime]
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -4850,6 +4844,14 @@ func (s *Server) registerSchedulerHandlers() {
 		)
 	}
 
+	// Conduit registry maintenance (design v2.4 §3.4): only when this
+	// process runs a relay (hub.conduit on at startup). One replica per tick
+	// under Postgres; the registry requires the three reaps to run together
+	// under one lock.
+	if s.conduit.Load() != nil {
+		s.scheduler.RegisterRecurringSingleton("conduit-registry-reap", conduitRegistryReapInterval, store.LockConduitRegistryReap, s.conduitRegistryReapHandler())
+	}
+
 	// Register GitHub resolution cache TTL eviction (every 10 minutes)
 	if s.ghResolutionStore != nil {
 		s.scheduler.RegisterRecurringSingleton("github-resolution-cache-eviction", 10, store.LockGitHubResolutionCacheEviction, s.githubResolutionCacheEvictionHandler())
@@ -5059,6 +5061,11 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Drain the conduit relay first, while the database, scheduler and
+		// server context are still up: the relay row goes draining, every
+		// session gets GoAway and the relay deletes its rows (bounded by ctx).
+		s.shutdownConduitRelay(ctx)
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from
@@ -5329,6 +5336,7 @@ func (s *Server) registerRoutes() {
 
 	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
 	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
+	s.mux.HandleFunc("/api/v1/conduit", s.guarded("/api/v1/conduit", s.handleConduit))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))

@@ -167,6 +167,10 @@ type HubServerConfig struct {
 	// each asynchronous create request, and sets the reaper's staleness
 	// window (8x this value). Default 15.
 	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
+
+	// Conduit holds the conduit relay and grant settings (validated by
+	// HubConduitConfig.Validate at startup).
+	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1294,6 +1298,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		key = envKeyToConfigKey(key)
 		return key
 	}), nil)
+	splitKoanfListKeys(k, envListConfigKeys)
 
 	// Unmarshal into GlobalConfig struct
 	config := &GlobalConfig{
@@ -1404,6 +1409,15 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"grantkeyactivation":         "grant_key_activation",
+	"tcpallowedports":            "tcp_allowed_ports",
+	"internallisten":             "internal_listen",
+	"internaladvertise":          "internal_advertise",
+	"peerauth":                   "peer_auth",
+	"peerserviceaccounts":        "peer_service_accounts",
+	"peeraudience":               "peer_audience",
+	"reconnectwindow":            "reconnect_window",
+	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
 	"publicurl":                  "public_url",
@@ -1413,12 +1427,12 @@ var snakeCaseFields = map[string]string{
 	"softdeleteretainfiles":      "soft_delete_retain_files",
 	"softdeleteretention":        "soft_delete_retention",
 	"stalledthreshold":           "stalled_threshold",
+	"useraccessmode":             "user_access_mode",
+	"webhooksenabled":            "webhooks_enabled",
 	"startclaimleasettl":         "start_claim_lease_ttl",
 	"startmaxduration":           "start_max_duration",
 	"startunconfirmedhold":       "start_unconfirmed_hold",
 	"startcreateunconfirmedhold": "start_create_unconfirmed_hold",
-	"useraccessmode":             "user_access_mode",
-	"webhooksenabled":            "webhooks_enabled",
 	// Layer-0 compound segments (from layer0Prefixes)
 	"adminmode":               "admin_mode",
 	"devmode":                 "dev_mode",
@@ -1486,6 +1500,15 @@ var camelCaseFields = map[string]string{
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
+	"grantkeyactivation":            "grantKeyActivation",
+	"tcpallowedports":               "tcpAllowedPorts",
+	"internallisten":                "internalListen",
+	"internaladvertise":             "internalAdvertise",
+	"peerauth":                      "peerAuth",
+	"peerserviceaccounts":           "peerServiceAccounts",
+	"peeraudience":                  "peerAudience",
+	"reconnectwindow":               "reconnectWindow",
+	"instanceid":                    "instanceId",
 	"startclaimleasettl":            "startClaimLeaseTtl",
 	"startmaxduration":              "startMaxDuration",
 	"startunconfirmedhold":          "startUnconfirmedHold",
@@ -1743,13 +1766,29 @@ func embeddedAgentDefaultsKoanfMap() map[string]interface{} {
 var commaSplitKoanfKeys = []string{
 	"server.hub.admin_emails",
 	"server.auth.authorized_domains",
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
+}
+
+// envListConfigKeys are the GlobalConfig koanf keys (as mapped by
+// envKeyToConfigKey) of list settings whose SCION_SERVER_* env var holds a
+// comma-separated list.
+var envListConfigKeys = []string{
+	"hub.conduit.peerServiceAccounts",
+	"hub.conduit.tcpAllowedPorts",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices
 // for known list keys. Koanf's env provider loads all values as strings, but
 // list fields must be slices for correct JSON serialization by ExtractSectionFromKoanf.
 func splitCommaSeparatedKoanfKeys(k *koanf.Koanf) {
-	for _, key := range commaSplitKoanfKeys {
+	splitKoanfListKeys(k, commaSplitKoanfKeys)
+}
+
+// splitKoanfListKeys replaces a string value of each listed key with the
+// comma-separated list it holds (entries trimmed, empty entries dropped).
+func splitKoanfListKeys(k *koanf.Koanf, keys []string) {
+	for _, key := range keys {
 		if !k.Exists(key) {
 			continue
 		}
@@ -1781,6 +1820,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 		key := strings.TrimPrefix(s, "SCION_SERVER_")
 		return envKeyToConfigKey(key)
 	}), nil)
+	splitKoanfListKeys(k, envListConfigKeys)
 
 	if err := k.Unmarshal("", gc); err != nil {
 		return err
