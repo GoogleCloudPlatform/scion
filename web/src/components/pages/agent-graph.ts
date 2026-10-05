@@ -61,6 +61,11 @@ interface GraphIncomplete {
   unscoped: boolean;
   /** A re-drain of the same scope failed and the graph shown before it is still shown. */
   keptPrevious: boolean;
+  /**
+   * The graph still shown is the complete set of its scope (only its
+   * re-drain failed), so no ancestor is missing from it.
+   */
+  shownComplete: boolean;
 }
 
 /** A capped unscoped drain, kept live for the page lifetime. */
@@ -425,12 +430,14 @@ export class AgentGraphPage extends LitElement {
   private adoptDrain(result: SeededDrainResult, scope: string): boolean {
     if (result.error && this.memberScope === scope) {
       // A capped or partial graph keeps its own reason and count; a complete
-      // one reports what it shows, never fewer rows than are on screen.
+      // one reports what it shows, never fewer rows than are on screen, and
+      // stays marked complete.
       this.incomplete = {
         ...(this.incomplete ?? {
           reason: 'failed',
           loaded: this.agents.length,
           unscoped: scope === '',
+          shownComplete: true,
         }),
         keptPrevious: true,
       };
@@ -445,7 +452,13 @@ export class AgentGraphPage extends LitElement {
       result.agents,
       scope,
       reason
-        ? { reason, loaded: result.agents.length, unscoped: scope === '', keptPrevious: false }
+        ? {
+            reason,
+            loaded: result.agents.length,
+            unscoped: scope === '',
+            keptPrevious: false,
+            shownComplete: false,
+          }
         : null,
       result.stale
     );
@@ -495,7 +508,13 @@ export class AgentGraphPage extends LitElement {
       this.adopt(
         Array.from(kept.members.values()),
         '',
-        { reason: 'capped', loaded: kept.loaded, unscoped: true, keptPrevious: false },
+        {
+          reason: 'capped',
+          loaded: kept.loaded,
+          unscoped: true,
+          keptPrevious: false,
+          shownComplete: false,
+        },
         kept.stale
       );
       this.loading = false;
@@ -675,7 +694,8 @@ export class AgentGraphPage extends LitElement {
                   focusId=${this.focusId}
                   orientation=${this.orientation}
                   filterKey=${this.projectFilter}
-                  .markMissingAncestors=${this.incomplete !== null}
+                  .markMissingAncestors=${this.incomplete !== null &&
+                  !this.incomplete.shownComplete}
                   @orientation-change=${this.onOrientationChange}
                 ></scion-agent-tree-view>
               `}

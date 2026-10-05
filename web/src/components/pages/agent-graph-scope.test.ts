@@ -1388,6 +1388,90 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(banner(el2, 'incomplete')).toBeNull();
       expect(treeView(el2)?.markMissingAncestors).toBe(false);
     });
+
+    it('stays off on a complete project graph whose Refresh failed, for a parent the project filter hides', async () => {
+      const fake = newFake(25);
+      const child = fake.agents.find((a) => a.projectId === 'p-1')!;
+      const parent = fake.agents.find((a) => a.projectId === 'p-2')!;
+      child.ancestry = ['user-1', parent.id];
+      let fail = false;
+      vi.stubGlobal('fetch', vi.fn(failingFetch(fake, () => fail)));
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      await vi.waitFor(() => expect(treeNode(el, child.id)).not.toBeNull());
+      expect(treeNode(el, child.id)?.querySelector('.ancestor-missing')).toBeNull();
+      reconnect();
+      await el.updateComplete;
+      fail = true;
+      await clickBanner(el, 'stale');
+      expect(bannerText(el, 'incomplete')).toBe(
+        'Incomplete: loaded 25 · showing the previous graph'
+      );
+      expect(g(el).agents.some((a) => a.id === parent.id)).toBe(true);
+      expect(treeView(el)?.markMissingAncestors).toBe(false);
+      await vi.waitFor(() => expect(treeNode(el, child.id)).not.toBeNull());
+      expect(treeNode(el, child.id)?.querySelector('.ancestor-missing')).toBeNull();
+    });
+
+    it('stays off on a complete unscoped graph whose Refresh failed, for an agent whose parent is gone', async () => {
+      const fake = newFake(25);
+      fake.agents[3] = { ...fake.agents[3], ancestry: ['user-1', 'deleted-parent'] } as Agent;
+      let fail = false;
+      vi.stubGlobal('fetch', vi.fn(failingFetch(fake, () => fail)));
+      const el = await mountGraph();
+      reconnect();
+      await el.updateComplete;
+      fail = true;
+      await clickBanner(el, 'stale');
+      expect(bannerText(el, 'incomplete')).toBe(
+        'Incomplete: loaded 25 · showing the previous graph'
+      );
+      // A second failure keeps it marked complete too.
+      reconnect();
+      await el.updateComplete;
+      await clickBanner(el, 'stale');
+      expect(bannerText(el, 'incomplete')).toBe(
+        'Incomplete: loaded 25 · showing the previous graph'
+      );
+      expect(treeView(el)?.markMissingAncestors).toBe(false);
+      await vi.waitFor(() => expect(treeNode(el, fake.agents[3].id)).not.toBeNull());
+      expect(treeNode(el, fake.agents[3].id)?.querySelector('.ancestor-missing')).toBeNull();
+    });
+
+    it('stays on for a partial or capped graph whose Retry failed', async () => {
+      const fake = newFake(1201);
+      fake.agents[3] = { ...fake.agents[3], ancestry: ['user-1', 'deleted-parent'] } as Agent;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(failingFetch(fake, (u) => u.searchParams.get('cursor') === '500'))
+      );
+      const el = await mountGraph();
+      expect(bannerText(el, 'incomplete')).toBe('Incomplete: loaded 500');
+      await clickBanner(el, 'incomplete');
+      expect(bannerText(el, 'incomplete')).toBe(
+        'Incomplete: loaded 500 · showing the previous graph'
+      );
+      expect(treeView(el)?.markMissingAncestors).toBe(true);
+      await vi.waitFor(() => expect(treeNode(el, fake.agents[3].id)).not.toBeNull());
+      expect(treeNode(el, fake.agents[3].id)?.querySelector('.ancestor-missing')).not.toBeNull();
+      el.remove();
+
+      const capped = newFake(2001);
+      let fail = false;
+      vi.stubGlobal('fetch', vi.fn(failingFetch(capped, () => fail)));
+      const el2 = await mountGraph();
+      fail = true;
+      await clickBanner(el2, 'incomplete');
+      expect(bannerText(el2, 'incomplete')).toBe(`${CAPPED_ALL} · showing the previous graph`);
+      expect(treeView(el2)?.markMissingAncestors).toBe(true);
+      // The kept capped set, reused for all projects, still marks.
+      fail = false;
+      await pick(el2, 'p-1');
+      expect(treeView(el2)?.markMissingAncestors).toBe(false);
+      await pick(el2, '');
+      expect(bannerText(el2, 'incomplete')).toBe(CAPPED_ALL);
+      expect(treeView(el2)?.markMissingAncestors).toBe(true);
+    });
   });
 
   describe('detach and re-attach', () => {
