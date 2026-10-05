@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"time"
 	"unicode"
@@ -158,6 +159,18 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
 	}
 
+	// An applied succeeded report settles the run the launch started
+	// (ptone/scion#3176), as a synchronous dispatch that lands does
+	// (adoptBrokerRunID): the broker's Start removed every earlier entry of
+	// the name, so the previous runs are cleared. The same-value swap is
+	// keyed on the run the broker reports it labelled, so a report for an
+	// older run never clears a newer run's list. A broker that reports no
+	// run ID gets no clear; a later delete then repeats the previous runs
+	// as run-scoped 404s.
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
+		s.settleLaunchedRun(ctx, agentID, req.Agent)
+	}
+
 	if answer.HTTPStatus != 0 {
 		if answer.HTTPStatus == http.StatusForbidden {
 			Forbidden(w)
@@ -173,5 +186,19 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// not published.
 	if answer.Changed {
 		s.events.PublishAgentStatus(ctx, &updated)
+	}
+}
+
+// settleLaunchedRun clears the agent's previous runs when info names the run
+// the launch started and the row still records that run (see the caller).
+// Best-effort: a failed write is logged and leaves the list, which costs a
+// later delete only extra 404s.
+func (s *Server) settleLaunchedRun(ctx context.Context, agentID string, info *RemoteAgentInfo) {
+	if info == nil || info.RunID == "" {
+		return
+	}
+	if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, info.RunID, info.RunID); err != nil {
+		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
+			"agent_id", agentID, "run_id", info.RunID, "error", err)
 	}
 }

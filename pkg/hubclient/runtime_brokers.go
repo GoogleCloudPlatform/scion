@@ -120,6 +120,9 @@ type AgentLaunchReportInfo struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
+	// RunID is the run the launched entry is labelled with
+	// (ptone/scion#3176), so the hub can settle exactly that run.
+	RunID string `json:"runId,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
