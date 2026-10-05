@@ -45,11 +45,14 @@ import { stateManager } from './state.js';
 export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
 
 /**
- * Upper bound on how long a deferred first refresh waits after start(). It
- * runs at the page's first idle period so it does not compete with the page's
- * own requests, and no later than this. It is shorter than
- * CHAT_STARTUP_REUSE_MS, so when the chat page has loaded the lists since
- * start() the first refresh reuses that load instead of fetching again.
+ * How long a deferred first refresh waits for the page's first idle period
+ * before it asks to run anyway. It runs at idle so it does not compete with
+ * the page's own requests. This is the timeout passed to requestIdleCallback
+ * (or the fallback timer's delay), so it is a minimum wait for the forced
+ * run, not a guaranteed maximum: a hidden tab, a busy main thread or a frozen
+ * page can delay the callback further. The first refresh therefore reuses
+ * any list load made since start(), however late it runs; events after
+ * start() cancel it and fetch fresh data themselves.
  */
 export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
 
@@ -111,6 +114,8 @@ export class ChatUnreadCounter {
   private refreshId = 0;
   /** The pending first refresh, until it runs or is superseded. */
   private initial: InitialHandle | null = null;
+  /** When start() ran, on the shared loads' clock. */
+  private startedAt = 0;
   /**
    * When the newest event of the pending burst was delivered. The debounced
    * refresh only needs data requested after it, so it shares a fetch the
@@ -136,6 +141,7 @@ export class ChatUnreadCounter {
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
     this.stopped = false;
+    this.startedAt = chatLoadClock();
     if (options.immediate) this.runInitialRefresh();
     else this.scheduleInitialRefresh();
   }
@@ -243,8 +249,12 @@ export class ChatUnreadCounter {
   private runInitialRefresh(): void {
     this.initial = null;
     // The chat page and rail ask for the same lists as they mount; share
-    // whatever request is already in flight or has just completed.
-    void this.refresh({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+    // whatever request is already in flight or has just completed. Any load
+    // made since start() is fresh enough: an event after start() cancels this
+    // refresh and fetches for itself, so a late idle callback must not send a
+    // second pair just because the page's load is older than the reuse window.
+    const sinceStart = chatLoadClock() - this.startedAt;
+    void this.refresh({ maxAgeMs: Math.max(CHAT_STARTUP_REUSE_MS, sinceStart) });
   }
 
   private cancelInitialRefresh(): void {
