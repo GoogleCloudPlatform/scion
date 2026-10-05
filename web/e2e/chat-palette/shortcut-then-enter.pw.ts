@@ -20,7 +20,7 @@
  * conversation with the newest activity is never opened by accident.
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { setupApiMocks, AGENT_WITH_DM, AGENT_WITHOUT_DM, SELF_USER_ID } from './mock-api.js';
 
 // A conversation other than the one the empty-query ranking puts first.
@@ -49,7 +49,7 @@ async function gotoCurrentConversation(page: Page): Promise<void> {
   });
 }
 
-function composerTextarea(page: Page) {
+function composerTextarea(page: Page): Locator {
   return page
     .locator('scion-page-chat')
     .locator('scion-chat-thread')
@@ -58,15 +58,15 @@ function composerTextarea(page: Page) {
     .locator('textarea');
 }
 
-function paletteDialog(page: Page) {
+function paletteDialog(page: Page): Locator {
   return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
-function paletteInput(page: Page) {
+function paletteInput(page: Page): Locator {
   return page.locator('scion-quick-palette #palette-query-input');
 }
 
-function paletteOptions(page: Page) {
+function paletteOptions(page: Page): Locator {
   return page.locator('scion-quick-palette .palette-option');
 }
 
