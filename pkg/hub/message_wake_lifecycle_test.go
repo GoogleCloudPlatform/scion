@@ -152,6 +152,21 @@ type wakeLifecycleAgentIdentity struct {
 	scopes []AgentTokenScope
 }
 
+// wakeDMSenderIdentity returns an agent identity for sender carrying exactly
+// scopes.
+func wakeDMSenderIdentity(sender *store.Agent, scopes ...AgentTokenScope) *wakeLifecycleAgentIdentity {
+	return &wakeLifecycleAgentIdentity{
+		wakeDMTestIdentity: wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+		scopes:             scopes,
+	}
+}
+
+// authzClassification opts this fake into agent JWT classification, so
+// authorization decisions treat it as an agent caller with its scopes.
+func (i *wakeLifecycleAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
+
 func (i *wakeLifecycleAgentIdentity) Scopes() []AgentTokenScope { return i.scopes }
 func (i *wakeLifecycleAgentIdentity) HasScope(scope AgentTokenScope) bool {
 	for _, s := range i.scopes {
@@ -170,11 +185,7 @@ func TestMessageWake_AgentWithoutLifecycleCannotResumeSuspendedAgent(t *testing.
 	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
 	disp := &wakeTrackingDispatcher{}
 	srv.SetDispatcher(disp)
-
-	ident := &wakeLifecycleAgentIdentity{
-		wakeDMTestIdentity: wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
-		scopes:             []AgentTokenScope{ScopeProjectRead},
-	}
+	ident := wakeDMSenderIdentity(sender, ScopeProjectRead)
 
 	result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 		SenderAgent:    sender,
