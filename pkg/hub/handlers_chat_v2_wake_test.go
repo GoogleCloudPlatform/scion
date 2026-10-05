@@ -475,29 +475,79 @@ func TestChatV2Wake_IdempotencyReplay_ReportsFailedDispatch(t *testing.T) {
 	assert.Len(t, f.disp.getMessageCalls(), 1, "the replay must not dispatch again")
 }
 
-// keyProbeDispatcher reads the idempotency cache from inside dispatch.
-type keyProbeDispatcher struct {
+// replayProbeDispatcher replays the send from inside dispatch, i.e. while
+// the row is persisted but its dispatch has not ended, then fails.
+type replayProbeDispatcher struct {
 	*wakeTrackingDispatcher
-	srv      *Server
-	key      string
-	duringID string
-	during   IdempotencyBeginResult
+	t          *testing.T
+	f          *chatWakeFixture
+	payload    map[string]any
+	replayCode int
+	replayBody string
 }
 
-func (d *keyProbeDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
-	d.duringID, d.during = d.srv.chatIdempotency.Begin(DevUserID, d.key)
-	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+func (d *replayProbeDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	if d.replayCode == 0 {
+		rec := doRequest(d.t, d.f.srv, http.MethodPost, d.f.path(), d.payload)
+		d.replayCode, d.replayBody = rec.Code, rec.Body.String()
+	}
+	_ = d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+	return assert.AnError
 }
 
-// The key is recorded as soon as the row is stored, before dispatch, so a
-// panic or dropped request during dispatch cannot release it.
-func TestChatV2Wake_IdempotencyRecordedBeforeDispatch(t *testing.T) {
+// A replay while the original's dispatch is still running is told the
+// send is in progress (not a premature "dispatched"); once the dispatch
+// has failed, a replay reports that failure with the same reason.
+func TestChatV2Wake_IdempotencyReplayDuringFailingDispatch(t *testing.T) {
 	f := chatWakeSetup(t, string(state.PhaseRunning))
-	disp := &keyProbeDispatcher{wakeTrackingDispatcher: f.disp, srv: f.srv, key: "key-early"}
+	payload := map[string]any{"content": "hello", "idempotency_key": "key-race"}
+	disp := &replayProbeDispatcher{wakeTrackingDispatcher: f.disp, t: t, f: f, payload: payload}
+	f.srv.SetDispatcher(disp)
+
+	first := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusCreated, first.Code, "body=%s", first.Body.String())
+	firstResp := decodeWakeResp(t, first)
+	require.Equal(t, "failed", firstResp["dispatchState"])
+
+	assert.Equal(t, http.StatusConflict, disp.replayCode, "replay during dispatch: %s", disp.replayBody)
+	assert.Contains(t, disp.replayBody, ErrCodeSendInProgress)
+
+	after := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusOK, after.Code, "body=%s", after.Body.String())
+	resp := decodeWakeResp(t, after)
+	assert.Equal(t, firstResp["id"], resp["id"])
+	assert.Equal(t, "failed", resp["dispatchState"])
+	assert.Equal(t, firstResp["dispatchFailureReason"], resp["dispatchFailureReason"])
+	assert.Len(t, f.disp.getMessageCalls(), 1, "neither replay may dispatch")
+}
+
+// The message is noted against the key as soon as the row is stored, so
+// ending the send without Record (as a panic mid-dispatch would, via the
+// deferred Finish) makes the key done rather than releasing it.
+func TestChatV2Wake_IdempotencyPersistedBeforeDispatch(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	var persistedID string
+	disp := &persistProbeDispatcher{wakeTrackingDispatcher: f.disp, probe: func() {
+		f.srv.chatIdempotency.mu.Lock()
+		defer f.srv.chatIdempotency.mu.Unlock()
+		entry := f.srv.chatIdempotency.entries[idempotencyCacheKey{senderID: DevUserID, idempotencyKey: "key-early"}]
+		persistedID = entry.messageID
+		assert.False(t, entry.done, "the key must stay in flight during dispatch")
+	}}
 	f.srv.SetDispatcher(disp)
 	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
 		map[string]any{"content": "hello", "idempotency_key": "key-early"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
-	assert.Equal(t, IdempotencyDone, disp.during, "key must be recorded before dispatch")
-	assert.Equal(t, decodeWakeResp(t, rec)["id"], disp.duringID)
+	assert.Equal(t, decodeWakeResp(t, rec)["id"], persistedID, "message noted before dispatch")
+}
+
+// persistProbeDispatcher runs probe from inside dispatch.
+type persistProbeDispatcher struct {
+	*wakeTrackingDispatcher
+	probe func()
+}
+
+func (d *persistProbeDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.probe()
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
 }

@@ -34,10 +34,14 @@ type idempotencyCacheKey struct {
 	idempotencyKey string
 }
 
-// chatIdempotencyEntry stores a cached idempotency result. An empty
-// messageID marks a send that Begin admitted and that has not finished.
+// chatIdempotencyEntry stores a cached idempotency result. A send moves
+// through three states: admitted (in flight, no message yet), persisted
+// (in flight, messageID known, dispatch still running) and done. Only a
+// done entry is replayed: a persisted row's dispatch state is not final
+// until its dispatch ends.
 type chatIdempotencyEntry struct {
 	messageID string
+	done      bool
 	expiresAt time.Time
 }
 
@@ -46,7 +50,8 @@ type IdempotencyBeginResult int
 
 const (
 	// IdempotencyNew: the key is unseen; the caller owns the send and must
-	// end it with Record (a message was created) or Abandon (none was).
+	// end it with Record (its outcome is final) or Finish (deferred, so it
+	// also runs on panic).
 	IdempotencyNew IdempotencyBeginResult = iota
 	// IdempotencyDone: a send with this key already created a message.
 	IdempotencyDone
@@ -100,7 +105,7 @@ func (c *ChatIdempotencyCache) Begin(senderID, idempotencyKey string) (string, I
 
 	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
 	if entry, ok := c.entries[key]; ok && !now.After(entry.expiresAt) {
-		if entry.messageID == "" {
+		if !entry.done {
 			return "", IdempotencyInFlight
 		}
 		return entry.messageID, IdempotencyDone
@@ -109,19 +114,48 @@ func (c *ChatIdempotencyCache) Begin(senderID, idempotencyKey string) (string, I
 	return "", IdempotencyNew
 }
 
-// Abandon releases a key Begin marked in flight when the send ended
-// without creating a message, so a retry may send. A finished key is
-// left alone.
-func (c *ChatIdempotencyCache) Abandon(senderID, idempotencyKey string) {
+// MarkPersisted notes the message a send stored, keeping the key in
+// flight: Begin keeps answering IdempotencyInFlight until Record or Finish,
+// because the row's dispatch state is not final yet. It is what makes a
+// panic or dropped request during dispatch safe: Finish then marks the key
+// done instead of releasing it.
+func (c *ChatIdempotencyCache) MarkPersisted(senderID, idempotencyKey, messageID string) {
+	if idempotencyKey == "" || messageID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
+	if entry, ok := c.entries[key]; ok && !entry.done {
+		entry.messageID = messageID
+		entry.expiresAt = time.Now().Add(chatIdempotencyTTL)
+		c.entries[key] = entry
+	}
+}
+
+// Finish ends a send that did not Record its outcome; deferred by the
+// owner of an IdempotencyNew key, so it also runs on panic. A key with a
+// persisted message becomes done (a retry is told about that message and
+// does not send it again); a key without one is released, so a retry may
+// send. A done key is left alone.
+func (c *ChatIdempotencyCache) Finish(senderID, idempotencyKey string) {
 	if idempotencyKey == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
-	if entry, ok := c.entries[key]; ok && entry.messageID == "" {
-		delete(c.entries, key)
+	entry, ok := c.entries[key]
+	if !ok || entry.done {
+		return
 	}
+	if entry.messageID == "" {
+		delete(c.entries, key)
+		return
+	}
+	entry.done = true
+	entry.expiresAt = time.Now().Add(chatIdempotencyTTL)
+	c.entries[key] = entry
 }
 
 // Record stores a (senderID, idempotencyKey) -> messageID mapping.
@@ -143,6 +177,7 @@ func (c *ChatIdempotencyCache) Record(senderID, idempotencyKey, messageID string
 	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
 	c.entries[key] = chatIdempotencyEntry{
 		messageID: messageID,
+		done:      true,
 		expiresAt: now.Add(chatIdempotencyTTL),
 	}
 }

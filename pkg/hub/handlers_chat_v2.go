@@ -1030,11 +1030,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if begin == IdempotencyNew {
-			// Release the key if this send ends without a message, so a
-			// retry may send.
+			// End the key if this send did not Record its outcome (an
+			// error, or a panic during dispatch): a persisted message makes
+			// it done, otherwise it is released so a retry may send.
 			defer func() {
 				if !idempotencyRecorded {
-					s.chatIdempotency.Abandon(user.ID(), body.IdempotencyKey)
+					s.chatIdempotency.Finish(user.ID(), body.IdempotencyKey)
 				}
 			}()
 		}
@@ -1196,11 +1197,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	if len(plan.Agents) > 0 {
 		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata,
 			chatSendOptions{Interrupt: body.Interrupt, Wake: body.Wake, OfferWake: body.OfferWake,
-				OnPersisted: recordIdempotency})
+				OnPersisted: func(messageID string) {
+					s.chatIdempotency.MarkPersisted(user.ID(), body.IdempotencyKey, messageID)
+				}})
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
-		recordIdempotency(msgID) // already recorded via OnPersisted; harmless
+		// Dispatch has ended and the row holds its final state: replays
+		// may now answer with it.
+		recordIdempotency(msgID)
 		// DM registration now happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return
@@ -1400,9 +1405,11 @@ type chatSendOptions struct {
 	// failed row is kept, so the user sees the ordinary non-wake error.
 	OfferWake bool
 	// OnPersisted, when set, is called with the message ID right after the
-	// row is stored and before any dispatch, so the idempotency key is
-	// recorded even if dispatch panics or the request dies mid-dispatch
-	// (a released key would let a retry send a duplicate).
+	// row is stored and before any dispatch. The caller notes the message
+	// against its idempotency key while keeping the key in flight (the
+	// row's dispatch state is not final yet), so a panic or dropped
+	// request mid-dispatch cannot release the key and let a retry send a
+	// duplicate.
 	OnPersisted func(messageID string)
 }
 

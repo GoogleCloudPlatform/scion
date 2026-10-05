@@ -25,7 +25,7 @@ func peekIdempotency(c *ChatIdempotencyCache, senderID, key string) (string, boo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[idempotencyCacheKey{senderID: senderID, idempotencyKey: key}]
-	if !ok || time.Now().After(entry.expiresAt) || entry.messageID == "" {
+	if !ok || time.Now().After(entry.expiresAt) || !entry.done {
 		return "", false
 	}
 	return entry.messageID, true
@@ -99,7 +99,7 @@ func TestChatIdempotencyCache_ExpiresAfterTTL(t *testing.T) {
 	}
 }
 
-func TestChatIdempotencyCache_BeginRecordAbandon(t *testing.T) {
+func TestChatIdempotencyCache_BeginRecordFinish(t *testing.T) {
 	c := NewChatIdempotencyCache()
 
 	if _, r := c.Begin("u", "k"); r != IdempotencyNew {
@@ -109,23 +109,52 @@ func TestChatIdempotencyCache_BeginRecordAbandon(t *testing.T) {
 		t.Fatalf("second Begin = %v, want in flight", r)
 	}
 	if _, ok := peekIdempotency(c, "u", "k"); ok {
-		t.Fatal("Check must not report an unfinished send")
+		t.Fatal("an unfinished send must not be replayable")
 	}
 	c.Record("u", "k", "msg-1")
 	if id, r := c.Begin("u", "k"); r != IdempotencyDone || id != "msg-1" {
 		t.Fatalf("Begin after Record = %q %v, want msg-1 done", id, r)
 	}
-	// Abandon leaves a finished key alone.
-	c.Abandon("u", "k")
+	// Finish leaves a done key alone.
+	c.Finish("u", "k")
 	if id, ok := peekIdempotency(c, "u", "k"); !ok || id != "msg-1" {
-		t.Fatalf("Check after Abandon of finished key = %q %v", id, ok)
+		t.Fatalf("after Finish of a done key = %q %v", id, ok)
 	}
 
-	// Abandon frees an unfinished key.
+	// Finish releases a key without a persisted message.
 	c.Begin("u", "k2")
-	c.Abandon("u", "k2")
+	c.Finish("u", "k2")
 	if _, r := c.Begin("u", "k2"); r != IdempotencyNew {
-		t.Fatalf("Begin after Abandon = %v, want new", r)
+		t.Fatalf("Begin after Finish without message = %v, want new", r)
+	}
+}
+
+func TestChatIdempotencyCache_PersistedStaysInFlightUntilFinished(t *testing.T) {
+	c := NewChatIdempotencyCache()
+	c.Begin("u", "k")
+	c.MarkPersisted("u", "k", "msg-1")
+	// Dispatch still running: the row's state is not final.
+	if _, r := c.Begin("u", "k"); r != IdempotencyInFlight {
+		t.Fatalf("Begin while persisted = %v, want in flight", r)
+	}
+	// The send ends without Record (an error or a panic during dispatch):
+	// Finish makes the persisted message done rather than releasing it.
+	c.Finish("u", "k")
+	if id, r := c.Begin("u", "k"); r != IdempotencyDone || id != "msg-1" {
+		t.Fatalf("Begin after Finish = %q %v, want msg-1 done", id, r)
+	}
+}
+
+func TestChatIdempotencyCache_MarkPersistedNeedsAdmittedKey(t *testing.T) {
+	c := NewChatIdempotencyCache()
+	c.MarkPersisted("u", "unseen", "msg-1")
+	if _, r := c.Begin("u", "unseen"); r != IdempotencyNew {
+		t.Fatalf("MarkPersisted must not create entries; Begin = %v", r)
+	}
+	c.Record("u", "k", "msg-1")
+	c.MarkPersisted("u", "k", "msg-2")
+	if id, _ := c.Begin("u", "k"); id != "msg-1" {
+		t.Fatalf("MarkPersisted must not change a done key; got %q", id)
 	}
 }
 
