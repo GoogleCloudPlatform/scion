@@ -540,6 +540,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field from the stored config (the same view GET
+	// masked) before any section document is built. This runs after the 422
+	// checks so a Layer-0 request is still rejected as such.
+	//
+	// github_app private_key and webhook_secret are not persisted in DB mode
+	// (the github_app section has no secret fields), so for them this check
+	// only validates the request; their handling is tracked in
+	// ptone/scion#2938.
+	if req.Server != nil {
+		stored, err := storedServerConfigDB(ops)
+		if err != nil {
+			slog.Error("PUT server-config: failed to load stored config for masked values", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {

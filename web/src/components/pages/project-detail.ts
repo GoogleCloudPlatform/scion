@@ -45,6 +45,7 @@ import {
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -58,6 +59,8 @@ import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
@@ -320,6 +323,11 @@ export class ScionPageProjectDetail extends LitElement {
   /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
   @state()
   private windowTick = 0;
+
+  /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
+  );
 
   /**
    * The list view's window (design §4.3, §6.1). Only the small and paged
@@ -2002,6 +2010,13 @@ export class ScionPageProjectDetail extends LitElement {
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
+        if (response.status === 202) {
+          // Still deleting (ptone/scion#2483): keep the card, show
+          // "Deleting…" now, and let the SSE `deleted` remove it in place.
+          stateManager.applyDeleteAccepted(agentId, await readAcceptedDeletion(response));
+          return;
+        }
+
         // Server confirmed — remove from local list
         this.agents = this.agents.filter((a) => a.id !== agentId);
         this.backgroundRefresh();
@@ -3130,6 +3145,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentRow(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
 
     return html`
       <tr>
@@ -3151,9 +3169,13 @@ export class ScionPageProjectDetail extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
@@ -3189,7 +3211,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing}
             ${isAgentRunning(agent)
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     ${agent.harnessCapabilities?.resume?.support !== 'no'
                       ? html`
@@ -3224,7 +3246,7 @@ export class ScionPageProjectDetail extends LitElement {
                   `
                 : nothing
               : agent.phase === 'suspended'
-                ? canLifecycle(agent._capabilities)
+                ? lifecycleOk
                   ? html`
                       <sl-tooltip content="Resume">
                         <sl-button
@@ -3241,7 +3263,7 @@ export class ScionPageProjectDetail extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing
-                : canLifecycle(agent._capabilities)
+                : lifecycleOk
                   ? html`
                       ${agent.phase === 'error'
                         ? html`
@@ -3274,7 +3296,7 @@ export class ScionPageProjectDetail extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing}
-            ${can(agent._capabilities, 'delete')
+            ${can(agent._capabilities, 'delete') && !deleting
               ? html`
                   <sl-tooltip content="Delete">
                     <sl-button
@@ -3299,6 +3321,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentCard(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
 
     return html`
       <div class="agent-card">
@@ -3324,9 +3349,13 @@ export class ScionPageProjectDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
         </div>
 
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
@@ -3350,7 +3379,7 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
           ${isAgentRunning(agent)
-            ? canLifecycle(agent._capabilities)
+            ? lifecycleOk
               ? html`
                   ${agent.harnessCapabilities?.resume?.support !== 'no'
                     ? html`
@@ -3385,7 +3414,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-tooltip content="Resume">
                       <sl-button
@@ -3402,7 +3431,7 @@ export class ScionPageProjectDetail extends LitElement {
                     </sl-tooltip>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -3435,7 +3464,7 @@ export class ScionPageProjectDetail extends LitElement {
                     </sl-tooltip>
                   `
                 : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-tooltip content="Delete">
                   <sl-button

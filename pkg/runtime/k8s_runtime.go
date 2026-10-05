@@ -2190,6 +2190,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
 		// in F-111.
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
+		// #2670: the sentinel and the provisioning lock live in the
+		// project's provisioning state directory, mounted next to the
+		// workspace (init containers only).
+		stateMount, stateEnv, err := nfsProvisionStateInitMount(config, nfsAgentDir)
+		if err != nil {
+			return nil, fmt.Errorf("workspace-provision init container: %w", err)
+		}
+		if stateMount != nil {
+			initVolumeMounts = append(initVolumeMounts, *stateMount)
+		}
 		// F-111 review (tf-lead nit): SCION_SHARED_DIR_PATHS carries
 		// "name=mountPath" pairs, comma-joined — keyed explicitly by each
 		// shared dir's own name (nfsSharedDirMount.Name), not derived from
@@ -2209,6 +2219,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 
 		initEnv := nfsProvisionEnv(initGitClone)
+		if stateEnv != nil {
+			initEnv = append(initEnv, *stateEnv)
+		}
 		// SCION_PROJECT_ID lets the init container's own provisioning logs
 		// (cmd/sciontool/commands/provision.go) identify which project they're
 		// provisioning, instead of falling back to "unknown" — unconditional
@@ -3105,10 +3118,14 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 }
 
 func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, id)
+	return r.Delete(ctx, RunRef{ID: id})
 }
 
-func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the pod ref.ID and its secrets.
+// P2/P4: enforce ref.RunID (ptone/scion#2550). Today the pod name is reused
+// across runs, so this still targets whatever pod holds the name.
+func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	var namespace string
 
 	// Support namespace/pod format
@@ -3391,6 +3408,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     p.Name, // Pod name serves as the container identifier
+			RunID:           p.Labels[api.LabelRunID],
 			Name:            p.Labels["scion.name"],
 			Template:        p.Labels["scion.template"],
 			Project:         projectkeys.ProjectNameFromLabels(p.Labels),

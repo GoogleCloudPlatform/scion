@@ -40,41 +40,40 @@ func TestQualifies_ThresholdEdges(t *testing.T) {
 	at := strings.Repeat("a", threshold)
 	above := strings.Repeat("a", threshold+1)
 
-	assert.False(t, Qualifies(below, false, false, pol), "threshold-1 must not qualify")
-	assert.False(t, Qualifies(at, false, false, pol), "exactly threshold must not qualify")
-	assert.True(t, Qualifies(above, false, false, pol), "threshold+1 must qualify")
+	assert.False(t, Qualifies(below, false, pol), "threshold-1 must not qualify")
+	assert.False(t, Qualifies(at, false, pol), "exactly threshold must not qualify")
+	assert.True(t, Qualifies(above, false, pol), "threshold+1 must qualify")
 
 	// Multi-byte and 4-byte runes: rune count, not byte count, drives the edge.
 	multiByte := strings.Repeat("é", threshold+1) // 2 bytes/rune
 	fourByte := strings.Repeat("🚀", threshold+1)  // 4 bytes/rune
-	assert.True(t, Qualifies(multiByte, false, false, pol))
-	assert.True(t, Qualifies(fourByte, false, false, pol))
+	assert.True(t, Qualifies(multiByte, false, pol))
+	assert.True(t, Qualifies(fourByte, false, pol))
 
 	// Byte length (12) exceeds a threshold of 10 while the rune count (6)
 	// does not: the byte-length early return in Qualifies must not fire
 	// here, and the rune-based check it falls through to must say no.
 	shortThreshold := OffloadPolicy{ThresholdRunes: 10}
-	assert.False(t, Qualifies(strings.Repeat("é", 6), false, false, shortThreshold),
+	assert.False(t, Qualifies(strings.Repeat("é", 6), false, shortThreshold),
 		"byte length over threshold but rune count under threshold must not qualify")
 }
 
 func TestQualifies_ThresholdZeroOrNegativeNeverOffloads(t *testing.T) {
 	long := strings.Repeat("a", 100000)
-	assert.False(t, Qualifies(long, false, false, OffloadPolicy{ThresholdRunes: 0}))
-	assert.False(t, Qualifies(long, false, false, OffloadPolicy{ThresholdRunes: -5}))
+	assert.False(t, Qualifies(long, false, OffloadPolicy{ThresholdRunes: 0}))
+	assert.False(t, Qualifies(long, false, OffloadPolicy{ThresholdRunes: -5}))
 }
 
 func TestQualifies_InvalidUTF8NeverQualifies(t *testing.T) {
 	pol := OffloadPolicy{ThresholdRunes: 10}
 	invalid := strings.Repeat("a", 20) + "\xff\xfe" + strings.Repeat("b", 20)
-	assert.False(t, Qualifies(invalid, false, false, pol))
+	assert.False(t, Qualifies(invalid, false, pol))
 }
 
-func TestQualifies_RawOrPlainNeverQualifies(t *testing.T) {
+func TestQualifies_PlainNeverQualifies(t *testing.T) {
 	pol := OffloadPolicy{ThresholdRunes: 10}
 	long := strings.Repeat("a", 1000)
-	assert.False(t, Qualifies(long, true, false, pol), "raw must never qualify")
-	assert.False(t, Qualifies(long, false, true, pol), "plain must never qualify")
+	assert.False(t, Qualifies(long, true, pol), "plain must never qualify")
 }
 
 func TestStripReservedMetadata_NoMutationSameMapWhenClean(t *testing.T) {
@@ -123,9 +122,8 @@ func sameMap(a, b map[string]string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// U2: guards. Raw/Plain, empty body, empty MessageID, unusable conversation
-// form all suppress offload; Raw/Plain/Urgent are always preserved on the
-// copy, and a stub copy never carries Raw=true.
+// U2: guards. Plain, empty body, empty MessageID, unusable conversation
+// form all suppress offload; Plain/Urgent are always preserved on the copy.
 // ---------------------------------------------------------------------------
 
 func TestOffloadForDelivery_Guards(t *testing.T) {
@@ -136,16 +134,6 @@ func TestOffloadForDelivery_Guards(t *testing.T) {
 		name string
 		in   OffloadInput
 	}{
-		{
-			name: "raw",
-			in: OffloadInput{
-				Msg:                  &messages.StructuredMessage{Msg: long, Raw: true},
-				PersistedBody:        long,
-				MessageID:            "msg-1",
-				ConversationID:       "conv-1",
-				RecipientCanReadConv: true,
-			},
-		},
 		{
 			name: "plain",
 			in: OffloadInput{
@@ -202,30 +190,10 @@ func TestOffloadForDelivery_Guards(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out, result := OffloadForDelivery(tc.in, pol)
 			assert.False(t, result.Offloaded, "must not offload")
-			assert.Equal(t, tc.in.Msg.Raw, out.Raw)
 			assert.Equal(t, tc.in.Msg.Plain, out.Plain)
 			assert.Equal(t, tc.in.Msg.Urgent, out.Urgent)
-			assert.False(t, out.Raw && out.Msg != tc.in.Msg.Msg, "a stub copy must never carry Raw=true")
 		})
 	}
-}
-
-func TestOffloadForDelivery_RawRepresentsScionKeys(t *testing.T) {
-	// #2184: scion keys sends a Raw=true StructuredMessage through the DM
-	// path. It must never be converted, regardless of body size.
-	pol := OffloadPolicy{ThresholdRunes: 4000}
-	body := strings.Repeat("x", 5000)
-	in := OffloadInput{
-		Msg:                  &messages.StructuredMessage{Msg: body, Raw: true},
-		PersistedBody:        body,
-		MessageID:            "msg-1",
-		ConversationID:       "conv-1",
-		RecipientCanReadConv: true,
-	}
-	out, result := OffloadForDelivery(in, pol)
-	assert.False(t, result.Offloaded)
-	assert.True(t, out.Raw)
-	assert.Equal(t, body, out.Msg)
 }
 
 func TestOffloadForDelivery_UrgentPreservedWhenOffloaded(t *testing.T) {

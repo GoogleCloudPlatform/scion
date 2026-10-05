@@ -281,7 +281,7 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	return nil
 }
 
-func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/restart", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
@@ -300,18 +300,25 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal restart request: %w", err)
+			return nil, fmt.Errorf("failed to marshal restart request: %w", err)
 		}
 	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return nil, brokerHTTPError(resp)
 	}
-	return nil
+	// The broker answers a restart with the entry it started (or found
+	// still running), including its run ID. An empty or undecodable body
+	// (an older broker) is not an error: the restart succeeded.
+	var result RemoteAgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, nil
+	}
+	return &result, nil
 }
 
 // resetAuthBody builds the broker reset-auth request body. The transport
@@ -345,17 +352,9 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	return nil
 }
 
-func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?deleteFiles=%t&removeBranch=%t",
-		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteFiles, removeBranch)
-	if projectID != "" {
-		endpoint += "&projectId=" + url.QueryEscape(projectID)
-	}
-	endpoint += deleteProjectPathQuery(ctx)
-	if softDelete {
-		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
-	}
-	endpoint = withRecordedRuntimeURL(ctx, endpoint)
+func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?%s",
+		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteAgentQuery(ctx, projectID, opts))
 
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {

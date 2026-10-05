@@ -97,9 +97,8 @@ const StatusDispatched = "dispatched"
 // subsequent response and audit record for the request: OutcomeKeysDenied,
 // OutcomeNotFound, OutcomeAgentNotRunning, OutcomeTerminalNotReady,
 // OutcomeCrossProjectKeysUnsupported, OutcomeKeysUnsupported,
-// OutcomeRawInputRemoved, OutcomeRawCombinationUnsupported,
-// OutcomeKeysRateLimited, OutcomeKeysUnavailable, OutcomeKeysOutcomeUnknown,
-// and OutcomeDispatched. Only OutcomeUnauthorized (never reaches a handler),
+// OutcomeRawInputRemoved, OutcomeKeysRateLimited, OutcomeKeysUnavailable,
+// OutcomeKeysOutcomeUnknown, and OutcomeDispatched. Only OutcomeUnauthorized (never reaches a handler),
 // OutcomeInvalidRequest and OutcomePayloadTooLarge (both failures during
 // validation itself, inside the handler but before an operation is
 // recognized to exist) carry no operation ID. #2184 only requires
@@ -160,18 +159,6 @@ const (
 	// from a human operator selecting another project under their live
 	// permissions and credential boundary, which is allowed — see the
 	// contract's authorization table.
-	//
-	// From task 2.3 onward, the temporary `message --raw` / top-level raw
-	// bridge returns this same code for an agent-to-agent DM that crosses
-	// project boundaries — the bridge's decision must match a direct /keys
-	// call's decision (AK-24/25 auth parity), and this code governs both.
-	// Before 2.3 ships, the pre-existing pkg/hub message-path denial code
-	// "cross_project_raw_unsupported" (authorize_message.go:46, enforced at
-	// agent_dm_operation.go:329) keeps governing that same DM path — it is
-	// not touched or duplicated by this contract until 2.3 lands and removes
-	// that branch in favor of routing through ExecuteAgentKeys. See the
-	// contract's §8 GCP#2053 reconciliation section and §6.1's bridge field
-	// table for the same decision recorded in one place.
 	OutcomeCrossProjectKeysUnsupported Outcome = "cross_project_keys_unsupported"
 
 	// OutcomeKeysUnsupported means a managed backend, unsupported runtime,
@@ -179,23 +166,12 @@ const (
 	// message-based fallback.
 	OutcomeKeysUnsupported Outcome = "keys_unsupported"
 
-	// OutcomeRawInputRemoved is returned after cutover for old
-	// message-raw-input requests, with /keys guidance (HTTP 422).
+	// OutcomeRawInputRemoved is returned for a message request that still
+	// carries the retired raw field (top level or nested, any value), with
+	// guidance naming the keys route (HTTP 422). Raw keystroke delivery
+	// through messages has been removed; nothing is delivered and no side
+	// effect runs.
 	OutcomeRawInputRemoved Outcome = "raw_input_removed"
-
-	// OutcomeRawCombinationUnsupported (HTTP 422) is the temporary bridge's
-	// (task 2.3) code for a legacy envelope field that implies routing,
-	// fan-out, conversation, attachment, or lifecycle semantics the keys
-	// path does not support — the contract's §6.1 legacy field table's
-	// "Rejected" rows that are not simply malformed input. A raw+plain
-	// conflict, or a conflicting nonempty legacy `message` and nested
-	// `structured_message.msg`, is malformed input instead and uses
-	// OutcomeInvalidRequest (400) per #2184's own text ("400 for raw+plain
-	// or 422 for unsupported delivery semantics"). Every rejection under
-	// this code affects zero targets and happens before any message side
-	// effect, the same as every other pre-dispatch rejection in this
-	// contract.
-	OutcomeRawCombinationUnsupported Outcome = "raw_combination_unsupported"
 
 	// OutcomeKeysRateLimited means an independent per-principal/project or
 	// per-target budget was exceeded (HTTP 429). Retry-After describes
@@ -234,7 +210,7 @@ func HTTPStatus(o Outcome) (int, bool) {
 		return http.StatusNotFound, true
 	case OutcomeAgentNotRunning, OutcomeTerminalNotReady:
 		return http.StatusConflict, true
-	case OutcomeCrossProjectKeysUnsupported, OutcomeKeysUnsupported, OutcomeRawInputRemoved, OutcomeRawCombinationUnsupported:
+	case OutcomeCrossProjectKeysUnsupported, OutcomeKeysUnsupported, OutcomeRawInputRemoved:
 		return http.StatusUnprocessableEntity, true
 	case OutcomeKeysRateLimited:
 		return http.StatusTooManyRequests, true

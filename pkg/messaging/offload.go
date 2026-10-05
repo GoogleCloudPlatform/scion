@@ -69,7 +69,7 @@ type OffloadPolicy struct {
 
 // OffloadInput carries everything OffloadForDelivery needs from a call site.
 type OffloadInput struct {
-	// Msg is the dispatched copy of the StructuredMessage. Raw and Plain are
+	// Msg is the dispatched copy of the StructuredMessage. Plain is
 	// assumed already normalized by the caller.
 	Msg *messages.StructuredMessage
 
@@ -109,8 +109,8 @@ type OffloadResult struct {
 //
 // The UTF-8 check keeps the fetched bytes equal to the hashed bytes: a body
 // with invalid UTF-8 would come back as U+FFFD through JSON transport.
-func Qualifies(persistedBody string, raw, plain bool, p OffloadPolicy) bool {
-	if raw || plain {
+func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
+	if plain {
 		return false
 	}
 	if p.ThresholdRunes <= 0 {
@@ -163,7 +163,7 @@ func StripReservedMetadata(md map[string]string) map[string]string {
 // non-empty ConversationID the recipient can read — and MessageID != "", the
 // copy's Msg is replaced by the stub and the reserved keys are set.
 // Threshold, body_chars, body_sha256 and the preview are ALL computed from
-// PersistedBody, never from Msg.Msg. Raw, Plain and Urgent on the copy
+// PersistedBody, never from Msg.Msg. Plain and Urgent on the copy
 // always equal the input's.
 func OffloadForDelivery(in OffloadInput, p OffloadPolicy) (*messages.StructuredMessage, OffloadResult) {
 	var out messages.StructuredMessage
@@ -186,7 +186,7 @@ func OffloadForDelivery(in OffloadInput, p OffloadPolicy) (*messages.StructuredM
 
 	result := OffloadResult{}
 
-	if !Qualifies(in.PersistedBody, out.Raw, out.Plain, p) {
+	if !Qualifies(in.PersistedBody, out.Plain, p) {
 		return &out, result
 	}
 	if in.MessageID == "" {

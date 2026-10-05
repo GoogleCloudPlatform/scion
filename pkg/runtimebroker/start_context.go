@@ -123,6 +123,10 @@ type startContextInputs struct {
 	// runLaunch), so it is threaded here only so the workspace-source
 	// checks see it as the explicit source it is.
 	WorkspaceStoragePath string
+	// RunID is the hub-minted per-run identity for this dispatch
+	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
+	// hub; pkg/agent then mints one itself.
+	RunID string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -712,6 +716,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
 		FreshProvision: in.Operation == opCreate,
+		RunID:          in.RunID,
 	}
 
 	if in.Attach {
@@ -1358,12 +1363,12 @@ func validateMountedWorktree(workspacePath, base string) error {
 // ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
 // assumes no worktree can exist yet whenever the sentinel is missing, and
 // would otherwise wipe every worktree under the shared base.
+//
+// The sentinel is looked for in exactly the directories ProvisionShared
+// checks (in.SentinelDirs: the sentinel directory, the base's parent by
+// default, and LegacyDir when set), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
-	sentinelDir := in.SentinelDir
-	if sentinelDir == "" {
-		sentinelDir = filepath.Dir(in.Resolved.HostPath)
-	}
-	if _, err := os.Stat(filepath.Join(sentinelDir, provision.ProvisionSentinelFile)); err != nil {
+	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); err != nil {

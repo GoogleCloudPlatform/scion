@@ -143,6 +143,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			// A delete claimed the row after the start gate passed: the
+			// running intent was refused (ptone/scion#2550).
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),
@@ -153,6 +158,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)

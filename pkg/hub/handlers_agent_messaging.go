@@ -81,18 +81,9 @@ type OutboundMessageRequest struct {
 	// ignored for user and group recipients (zero resumes invoked).
 	Wake bool `json:"wake,omitempty"`
 
-	// Deliberately no Raw field (ptone/scion#2192 inventory): this is the
-	// agent-to-user/agent-to-agent outbound path
-	// (handleAgentOutboundMessage). A "raw" key in the request body is an
-	// unrecognized field, dropped by JSON decoding rather than tombstoned.
-	// This is a deliberate decision, not an oversight: raw keystroke
-	// delivery only applies when the *recipient* is an agent runtime with
-	// an attached terminal. For a user recipient there is never a terminal;
-	// for an agent-to-agent DM sent via this outbound path, "raw" has no
-	// defined semantics either (the direct single-agent raw shape this
-	// phase preserves is reached through handleAgentMessage's inbound DM
-	// fork, not here). Do not add a Raw field or a rejection guard for it
-	// unless a future phase defines outbound raw semantics.
+	// This outbound path never accepted a raw field. A "raw" member in the
+	// request body is an unknown field and is ignored by JSON decoding; it
+	// is not a message-raw ingress (see .design/agent-keys-raw-inventory.md).
 }
 
 // deliveryPath identifies how an outbound message should be persisted and dispatched.
@@ -152,6 +143,91 @@ type routingResult struct {
 	ConvRefResolved bool
 	// Def152DerivedRecipient tracks whether S5 derived the addressee from the conversation.
 	Def152DerivedRecipient bool
+}
+
+// outboundThreadState is the result of outboundThreadConversationState.
+type outboundThreadState int
+
+const (
+	// outboundThreadMissing: nothing the resolver would reuse exists, so it
+	// would mint a new, participant-less group conversation.
+	outboundThreadMissing outboundThreadState = iota
+	// outboundThreadExists: a live webchat topic or a native conversation
+	// with the thread's external_ref exists and will be reused.
+	outboundThreadExists
+	// outboundThreadDeleted: the thread is a webchat topic that has been
+	// soft-deleted. The resolver would reuse its conversation, but nobody can
+	// see it any more.
+	outboundThreadDeleted
+)
+
+// outboundThreadGateApplies reports whether the ptone/scion#2026
+// existing-thread check applies to an outbound send on channel (after S2
+// reply affinity). It applies only to native delivery: the web channel or no
+// channel. External channel plugins (Slack, Teams, Google Chat, ...) deliver
+// to the ThreadID themselves, so for them the thread need not exist as a
+// conversation on the Hub. ChannelToSurfaceStrict is used rather than
+// ChannelToSurface because the latter maps unknown channel names (plugins
+// can be registered under any name) to "native".
+//
+// An empty channel is gated on purpose, even though on a broker deployment
+// with no reply affinity it can fan out to plugin spokes (Slack and Teams
+// accept an empty channel and deliver to the ThreadID). A direct API caller
+// sending a plugin-format thread_id with no channel therefore gets a 422 and
+// must name the channel. The CLI cannot reach this case: --thread-id
+// requires --channel.
+func outboundThreadGateApplies(channel string) bool {
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	return err == nil && surface == "native"
+}
+
+// outboundThreadConversationState reports whether a free-text thread key
+// (extRef = "thread:<project>:<threadID>") names a conversation that
+// ResolveOrCreateConversationByKey would reuse rather than mint, and whether
+// that conversation is still visible:
+//
+//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//     has no conversation_id yet also counts; the resolver refuses to mint
+//     for it and reports its own error.
+//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//     than the resolver, which reuses a deleted topic's conversation.
+//   - otherwise, a native conversation whose external_ref is extRef: exists.
+//   - otherwise: missing.
+//
+// Lookup failures other than "not found" are returned as errors.
+//
+// The check and the resolver's upsert are not atomic: if the conversation is
+// deleted in between, the resolver mints a fresh row. The window is tiny and
+// needs a concurrent deletion, so it is accepted.
+func outboundThreadConversationState(
+	ctx context.Context,
+	cr messaging.ConversationReader,
+	tl messaging.TopicConversationLookup,
+	extRef, threadID string,
+) (outboundThreadState, error) {
+	if tl != nil {
+		_, err := tl.GetTopicConversationID(ctx, threadID)
+		if err == nil {
+			return outboundThreadExists, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
+		}
+		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		if err == nil {
+			return outboundThreadDeleted, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup (including deleted): %w", err)
+		}
+	}
+	if _, err := cr.GetConversationByExternalRef(ctx, "native", extRef); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, nil
+		}
+		return outboundThreadMissing, fmt.Errorf("conversation lookup: %w", err)
+	}
+	return outboundThreadExists, nil
 }
 
 // resolveOutboundRouting consolidates recipient resolution, conversation
@@ -542,6 +618,41 @@ func (s *Server) resolveOutboundRouting(
 			s.mu.RLock()
 			wcs := s.webChatStore
 			s.mu.RUnlock()
+			// #2026: on native delivery (web or no channel), a free-text
+			// (non-dm:) thread_id may only address a thread conversation that
+			// already exists and is visible. Minting one here would create a
+			// participant-less group conversation that the recipient never
+			// sees, while the sender is told "sent". Reject instead, before
+			// any conversation or message row is written. External channels
+			// are exempt: their plugin delivers to the ThreadID itself.
+			if kind == "group" && outboundThreadGateApplies(req.Channel) {
+				var tl messaging.TopicConversationLookup
+				if wcs != nil {
+					tl = wcs
+				}
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				if stateErr != nil {
+					s.messageLog.Error("thread conversation lookup failed",
+						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"thread conversation lookup failed", nil)
+					return nil, stateErr
+				}
+				switch state {
+				case outboundThreadMissing:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
+							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+				case outboundThreadDeleted:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
+							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
+				}
+			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 			}
@@ -1331,6 +1442,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
 	}
+	// #2026: report the conversation the message landed in, so a caller
+	// that addressed a thread or a user can tell where it went.
+	if result.ConversationID != "" {
+		respBody["conversation_id"] = result.ConversationID
+	}
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
 	}
@@ -1494,9 +1610,9 @@ type MessageRequest struct {
 	// Structured message (new field, used by default).
 	StructuredMessage *messages.StructuredMessage `json:"structured_message,omitempty"`
 
-	// Raw delivers the message as raw terminal keystrokes without envelope
-	// formatting or trailing Enter. Merged onto StructuredMessage when set.
-	Raw bool `json:"raw,omitempty"`
+	// There is no raw field: a request carrying "raw" (top level or inside
+	// structured_message) is rejected with raw_input_removed before it is
+	// decoded (rejectRetiredRawMessageBody in raw_tombstone.go).
 
 	// Plain delivers the message as plain text without ---BEGIN SCION MESSAGE---
 	// envelope formatting. Merged onto StructuredMessage when set.
@@ -1542,9 +1658,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
 		plainMessage = req.StructuredMessage.Msg
-		if req.Raw {
-			structuredMsg.Raw = true
-		}
 		if req.Plain {
 			structuredMsg.Plain = true
 		}
@@ -1604,31 +1717,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
-		structuredMsg.Raw = req.Raw
 		structuredMsg.Plain = req.Plain
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
-		return
-	}
-
-	// Phase 0.2 (ptone/scion#2192): reject unsafe raw combinations before any
-	// side effect. Raw is normalized above (top-level req.Raw OR'd onto the
-	// nested StructuredMessage.Raw, GoogleCloudPlatform/scion#2053
-	// compatibility); this guard must run before mention validation,
-	// conversation resolution, attachment ingestion, wake handling and
-	// persistence, all of which start below.
-	if v := evaluateRawMessageGuard(rawMessageGuardInput{
-		Msg:              structuredMsg,
-		ExplicitMentions: len(req.Mentions),
-		Wake:             req.Wake,
-		Interrupt:        req.Interrupt,
-		Surface:          req.Surface,
-		ExternalRef:      req.ExternalRef,
-		ParentRef:        req.ParentRef,
-		IsGroupRecipient: structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient),
-	}); v != nil {
-		writeRawGuardViolation(w, v)
 		return
 	}
 
@@ -1692,73 +1784,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					Agent:      agent.Slug,
 					AgentPhase: agent.Phase,
 				})
-				return
-			}
-		}
-	}
-
-	// Phase 0.2 (ptone/scion#2192): raw to a managed-runtime target is
-	// rejected here, before any persistence, mention or
-	// conversation-resolution side effects, so raw never reaches a managed
-	// backend (CreateInteraction). managedAgentMessage below only accepts a
-	// plain-text body.
-	if structuredMsg != nil && structuredMsg.Raw && isManagedAgentRuntime(agent.Runtime) {
-		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawManagedUnsupported,
-			"raw delivery is not supported for managed-runtime agents"))
-		return
-	}
-
-	// Phase 0.2 (ptone/scion#2192): reject cross-project agent-sender raw
-	// here, before conversation resolution starts further down
-	// (storeMsg/conversation build begins later in this function). As of
-	// task 2.3 (ptone/scion#2197), this branch and its managed-runtime
-	// sibling above are vestigial for production traffic on the single-
-	// agent route: the message-raw bridge (agent_keys_message_bridge.go)
-	// classifies and fully handles every raw request in the routers,
-	// before authorizeAgentMessage runs, which is strictly before
-	// handleAgentMessage -- where this function lives -- is ever reached.
-	// The former second check inside ExecuteAgentDM (agent_dm_operation.go
-	// step 4b) was removed for the same reason; it cannot drift from this
-	// one because there is no longer a second copy. Left in place as a
-	// harmless, unreachable-in-practice defense until Phase 4 removes raw
-	// delivery entirely (contract §8).
-	//
-	// Compares the stored sender record (not the token claim) with the same
-	// crossProjectRawUnsupported predicate agent_dm_operation.go used to
-	// call before its own copy was removed.
-	if structuredMsg != nil && structuredMsg.Raw {
-		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
-			senderAgentRecord, senderErr := s.store.GetAgent(ctx, senderAgent.ID())
-			if senderErr != nil {
-				s.messageLog.Error("raw guard: sender agent lookup failed",
-					"sender_id", senderAgent.ID(), "error", senderErr)
-				writeErrorFromErr(w, senderErr, "")
-				return
-			}
-			if senderAgentRecord == nil {
-				s.messageLog.Error("raw guard: sender agent lookup returned nil record",
-					"sender_id", senderAgent.ID())
-				writeErrorFromErr(w, store.ErrNotFound, "")
-				return
-			}
-			if crossProjectRawUnsupported(senderAgentRecord.ProjectID, agent.ProjectID) {
-				LogCrossProjectDecision(CrossProjectAuditEntry{
-					Timestamp:        time.Now(),
-					Action:           "deny",
-					SenderID:         senderAgentRecord.ID,
-					SenderProjectID:  senderAgentRecord.ProjectID,
-					RecipientID:      agent.ID,
-					RecipientProject: agent.ProjectID,
-					DecisionCode:     MessageDenialCrossProjectRawUnsupported,
-					Reason:           "cross-project raw keystroke delivery not supported",
-					CrossProject:     true,
-					Surface:          "agent_msg",
-				})
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability,
-					"cross-project raw message delivery is not supported",
-					map[string]interface{}{
-						"reason": string(MessageDenialCrossProjectRawUnsupported),
-					})
 				return
 			}
 		}
@@ -2356,7 +2381,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				TargetAgent:    agent,
 				Msg:            plainMessage,
 				Type:           structuredMsg.Type,
-				Raw:            structuredMsg.Raw,
 				Plain:          structuredMsg.Plain,
 				Urgent:         structuredMsg.Urgent,
 				Interrupt:      req.Interrupt,
@@ -2402,33 +2426,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// referenced this group conversation by an existing,
 			// already-authorized ID, never one minted on demand from
 			// free-text thread_id.
-			//
-			// Phase 0.2 (ptone/scion#2192): skipped entirely for raw.
-			// fanOutAgentMentions extracts mentions from the message body
-			// text itself (messages.ExtractProseMentions), not just the
-			// explicit Mentions field the raw guard already checks earlier
-			// in this function — a literal "@agent-slug" inside a raw
-			// keystroke payload must never be parsed as a mention or
-			// fanned out.
-			var mentionResults []messages.MentionResult
-			if !structuredMsg.Raw {
-				var groupConv *messaging.ConversationResult
-				if convResult != nil && convResult.Kind == "group" {
-					groupConv = convResult
-				}
-				mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-					Sender:             senderAgentRec,
-					SenderIdent:        senderAgentIdent,
-					Primary:            agent,
-					Msg:                plainMessage,
-					Type:               structuredMsg.Type,
-					Explicit:           req.Mentions,
-					ParentConv:         groupConv,
-					ParentConvVerified: groupConvIsExistingReference,
-					ParentMessageID:    dmResult.MessageID,
-					Channel:            structuredMsg.Channel,
-				})
+			var groupConv *messaging.ConversationResult
+			if convResult != nil && convResult.Kind == "group" {
+				groupConv = convResult
 			}
+			mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+				Sender:             senderAgentRec,
+				SenderIdent:        senderAgentIdent,
+				Primary:            agent,
+				Msg:                plainMessage,
+				Type:               structuredMsg.Type,
+				Explicit:           req.Mentions,
+				ParentConv:         groupConv,
+				ParentConvVerified: groupConvIsExistingReference,
+				ParentMessageID:    dmResult.MessageID,
+				Channel:            structuredMsg.Channel,
+			})
 
 			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689),
 			// "deferred" while the recipient is mid-migration (design
@@ -2498,7 +2511,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// MessageID guard never offloads — the body is delivered inline, as
 		// today.
 		pol := s.offloadPolicy()
-		if messaging.Qualifies(storeMsg.Msg, structuredMsg.Raw, structuredMsg.Plain, pol) {
+		if messaging.Qualifies(storeMsg.Msg, structuredMsg.Plain, pol) {
 			convRow := assertedConvRow
 			if convRow == nil && storeMsg.ConversationID != "" {
 				convRow, _ = s.store.GetConversation(ctx, storeMsg.ConversationID)
@@ -2640,11 +2653,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// #1687: For cross-project DMs, strip body and attachment metadata from
 			// the observer message so unrelated project members receive no content
 			// through the broker publication sink.
-			//
-			// Phase 0.2 (ptone/scion#2192): do not mirror terminal input to
-			// message observers — raw carries literal keystrokes, not a
-			// message body, so it must never reach this publication.
-			if !structuredMsg.Raw && strings.HasPrefix(structuredMsg.Sender, "agent:") &&
+			if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
 				strings.HasPrefix(structuredMsg.Recipient, "agent:") {
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
 					observerMsg := *structuredMsg
@@ -3283,6 +3292,14 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// A retired raw member (top level or structured_message.raw) is rejected
+	// before decoding, so no sender is stamped, no target is computed and
+	// nothing is published.
+	if s.rejectRetiredRawMessageBody(w, r, rawIngressBroadcast,
+		agentKeysAuditTarget{ProjectID: projectID}, "", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
+		return
+	}
+
 	var req BroadcastMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -3291,23 +3308,6 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 
 	if req.StructuredMessage == nil {
 		ValidationError(w, "structured_message is required", nil)
-		return
-	}
-
-	// Phase 0.2 (ptone/scion#2192): raw delivery is a single-agent-only
-	// compatibility shape; broadcast fan-out is always rejected before
-	// sender identity is stamped, targets are computed, or anything is
-	// published. Check Plain first so raw+plain answers 400 here exactly as
-	// it does on every other route (raw+plain is a request-shape conflict,
-	// independent of which route received it; raw-without-plain is then the
-	// broadcast-specific 422).
-	if req.StructuredMessage.Raw && req.StructuredMessage.Plain {
-		writeRawGuardViolation(w, rawPlainConflict())
-		return
-	}
-	if req.StructuredMessage.Raw {
-		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBroadcastUnsupported,
-			"raw delivery does not support broadcast"))
 		return
 	}
 
