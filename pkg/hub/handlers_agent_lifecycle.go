@@ -835,7 +835,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// mid-dispatch case does, rather than writing the status and answering
 	// 200 (delete-claimed or soft-deleted row) or 404 (row gone). The
 	// delete engine owns the row and its reservation; nothing is written or
-	// published here. sd is non-nil exactly when a start leg was dispatched.
+	// published here. Reached only after a successful dispatch
+	// (dispatchErr == nil above), and sd is non-nil only when a start leg
+	// was dispatched to a broker.
 	landed := sd != nil && (action == api.AgentActionStart || action == api.AgentActionRestart)
 	if landed {
 		if s.deleteWonAfterLanding(ctx, id) {

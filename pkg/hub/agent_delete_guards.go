@@ -240,8 +240,10 @@ func writeDeletedDuringCreate(w http.ResponseWriter, agentID string, warnings []
 
 // deletedWhileStartingMessage is the message of the 409 a synchronous start
 // or restart answers when a delete won after the broker start landed
-// (deleteWonAfterLanding).
-const deletedWhileStartingMessage = "agent was deleted while it was starting"
+// (deleteWonAfterLanding). The row may be gone or soft-deleted, or only held
+// by a delete that has not finished (and may still fail), so the message
+// covers both.
+const deletedWhileStartingMessage = "agent was deleted, or is being deleted, while it was starting"
 
 // writeDeleteWon writes the 409 delete_in_progress answer to a synchronous
 // create, start or restart that lost to a delete after its dispatch: no

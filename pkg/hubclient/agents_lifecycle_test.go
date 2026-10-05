@@ -93,7 +93,7 @@ func TestAgentLifecycle_ErrorStatusReturnsError(t *testing.T) {
 // delete_in_progress with no agent body (ptone/scion#3255): the client
 // returns the API error, not a response.
 func TestAgentLifecycle_DeleteInProgressReturnsError(t *testing.T) {
-	body := `{"error":{"code":"delete_in_progress","message":"a delete is in progress for this agent; wait for it to finish, or force the delete",` +
+	body := `{"error":{"code":"delete_in_progress","message":"agent was deleted, or is being deleted, while it was starting",` +
 		`"details":{"agentId":"a1","warnings":["agent was deleted while it was starting; its container was removed"]}}}`
 	calls := map[string]func(Client) (*LifecycleResponse, error){
 		"start":   func(c Client) (*LifecycleResponse, error) { return c.Agents().Start(context.Background(), "a1") },
@@ -108,7 +108,7 @@ func TestAgentLifecycle_DeleteInProgressReturnsError(t *testing.T) {
 			require.True(t, errors.As(err, &apiErr), "%T", err)
 			assert.Equal(t, http.StatusConflict, apiErr.StatusCode)
 			assert.Equal(t, "delete_in_progress", apiErr.Code)
-			assert.Contains(t, err.Error(), "delete is in progress")
+			assert.Contains(t, err.Error(), "while it was starting")
 		})
 	}
 }
