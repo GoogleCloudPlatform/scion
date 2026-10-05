@@ -172,6 +172,29 @@ func ResolveOrCreateDMConversation(
 	}, nil
 }
 
+// DMReadExternalRef returns the "native" surface external ref that
+// ResolveDMConversationForRead looks up for a DM between the two
+// participants. ok is false when no lookup should happen — an empty
+// participant ID or inputs that do not form a valid DM key — in which case
+// the DM has no conversation to read. Callers resolving many DMs at once
+// use it to build the refs for one batched lookup with the same outcome as
+// calling ResolveDMConversationForRead per DM.
+func DMReadExternalRef(log *slog.Logger, idAKind, idA, idBKind, idB string) (extRef string, ok bool) {
+	if idA == "" || idB == "" {
+		return "", false
+	}
+
+	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
+	if err != nil {
+		log.Debug("read-switch: invalid DM key inputs, skipping lookup",
+			"id_a_kind", idAKind, "id_a", idA,
+			"id_b_kind", idBKind, "id_b", idB,
+			"error", err)
+		return "", false
+	}
+	return extRef, true
+}
+
 // ResolveDMConversationForRead looks up a DM conversation without creating it.
 // This is the read-only counterpart of ResolveOrCreateDMConversation,
 // used by the Phase 8 read-switch to query by ConversationID.
@@ -186,16 +209,8 @@ func ResolveDMConversationForRead(
 	log *slog.Logger,
 	idAKind, idA, idBKind, idB string,
 ) (*ConversationResult, error) {
-	if idA == "" || idB == "" {
-		return nil, nil
-	}
-
-	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
-	if err != nil {
-		log.Debug("read-switch: invalid DM key inputs, skipping lookup",
-			"id_a_kind", idAKind, "id_a", idA,
-			"id_b_kind", idBKind, "id_b", idB,
-			"error", err)
+	extRef, ok := DMReadExternalRef(log, idAKind, idA, idBKind, idB)
+	if !ok {
 		return nil, nil
 	}
 

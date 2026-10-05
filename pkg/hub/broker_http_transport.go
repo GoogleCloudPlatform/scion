@@ -24,8 +24,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -489,9 +491,22 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 		slog.Debug("Outgoing keys request to broker", "method", agentkeys.BrokerRouteMethod, "endpoint", endpoint)
 	}
 
+	// Record whether the transport ever handed this request a connection.
+	// Until GotConn fires, net/http has not written a single byte of the
+	// request (HTTP/1 calls it from getConn before writeLoop sees the
+	// request; HTTP/2 calls it before cc.RoundTrip encodes any frame), so a
+	// failure with no connection is proven pre-send. This covers the cases
+	// a bare dial *net.OpError does not: a dial still pending when the
+	// request context or the client timeout expires (net/http then returns
+	// only the context error), and a TLS handshake failure.
+	var gotConn atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	}))
+
 	resp, err := t.keysClient.Do(httpReq)
 	if err != nil {
-		return agentkeys.BrokerResult{}, classifyKeysSendError(err)
+		return agentkeys.BrokerResult{}, classifyKeysSendError(err, gotConn.Load())
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -504,18 +519,27 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 
 // classifyKeysSendError turns a transport-level send failure into
 // agentkeys.ErrNotDispatched only when the failure provably occurred before
-// any bytes reached the broker — a dial failure, where no connection was ever
-// established. Any other transport error (a timeout waiting for a response, a
-// connection reset while reading one, a TLS failure after the handshake
-// completed) does not prove the broker never received or began acting on the
-// request, so it must not be reported as a definite non-dispatch: it is
+// any bytes reached the broker: either the transport never obtained a
+// connection for the request (gotConn is false: a refused or still-pending
+// dial, a DNS failure, a TLS handshake failure, or the request context
+// expiring while waiting for a connection), or the error is itself a dial
+// failure. Any other transport error (a timeout waiting for a response, a
+// connection reset while reading one, a write failure on an established
+// connection) does not prove the broker never received or began acting on
+// the request, so it must not be reported as a definite non-dispatch: it is
 // returned as a plain, unclassified error instead, which
 // agentkeys.ClassifyDispatchError maps to OutcomeKeysOutcomeUnknown — the
 // honest "may have run" outcome required by
 // .design/agent-keys-contract.md §2.5/§4.3.
-func classifyKeysSendError(err error) error {
+//
+// The Op == "dial" clause only matters when gotConn is true: the transport
+// handed the request a connection that proved unusable before any write
+// (an HTTP/2 errClientConnUnusable retry) and the replacement dial then
+// failed, which is still pre-send. Do not remove it as redundant or widen
+// it to other ops.
+func classifyKeysSendError(err error, gotConn bool) error {
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
+	if !gotConn || (errors.As(err, &opErr) && opErr.Op == "dial") {
 		return fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 	return fmt.Errorf("keys: uncertain dispatch outcome: %w", err)
