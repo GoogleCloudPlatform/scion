@@ -36,6 +36,21 @@ import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import './admin-experiments.js';
 
+/** GET /api/v1/admin/server-config returns this in place of each secret. */
+const MASKED_VALUE = '********';
+
+/**
+ * True when a value (or anything nested in it) is the masked placeholder.
+ * The save payload omits raw config blocks that still contain it: they are
+ * the unedited GET value, and an omitted block keeps its stored value.
+ */
+export function containsMaskedValue(v: unknown): boolean {
+  if (v === MASKED_VALUE) return true;
+  if (Array.isArray(v)) return v.some(containsMaskedValue);
+  if (v && typeof v === 'object') return Object.values(v).some(containsMaskedValue);
+  return false;
+}
+
 // ── Type definitions matching the Go API response ──
 
 interface V1CORSConfig {
@@ -1958,12 +1973,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     // all Layer-0, omitted
 
     // Preserve notification channels and GitHub App from raw config
-    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload)
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload).
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored.
+    const ncDb = this.rawConfig?.server?.notification_channels;
+    if (ncDb && !containsMaskedValue(ncDb)) {
+      server.notification_channels = ncDb;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    const ghDb = this.rawConfig?.server?.github_app;
+    if (ghDb && !containsMaskedValue(ghDb)) {
+      server.github_app = ghDb;
     }
 
     if (Object.keys(server).length > 0) payload.server = server;
@@ -2229,15 +2248,21 @@ export class ScionPageAdminServerConfig extends LitElement {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
 
-    // Preserve notification channels, OAuth, and GitHub App from raw config
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // Preserve notification channels, OAuth, and GitHub App from raw config.
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored (file mode merges the server
+    // section key by key).
+    const ncFile = this.rawConfig?.server?.notification_channels;
+    if (ncFile && !containsMaskedValue(ncFile)) {
+      server.notification_channels = ncFile;
     }
-    if (this.rawConfig?.server?.oauth) {
-      server.oauth = this.rawConfig.server.oauth;
+    const oauthFile = this.rawConfig?.server?.oauth;
+    if (oauthFile && !containsMaskedValue(oauthFile)) {
+      server.oauth = oauthFile;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    const ghFile = this.rawConfig?.server?.github_app;
+    if (ghFile && !containsMaskedValue(ghFile)) {
+      server.github_app = ghFile;
     }
 
     payload.server = server;

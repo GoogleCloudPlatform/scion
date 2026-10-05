@@ -55,6 +55,8 @@ Schedules are evaluated in **UTC (Coordinated Universal Time) only**. A cron exp
 An expression that starts with a `CRON_TZ=` or `TZ=` prefix is rejected with `400`. Schedules created with such a prefix before this rule were paused when the Hub upgraded, with a warning in the Hub log. To bring one back, edit its expression to UTC and resume it; a prefixed schedule cannot be resumed or enabled as is.
 :::
 
+For how Scion handles times and zones elsewhere (API timestamps, display zone, agent `TZ`), see [Times and Timezones](/scion/reference/times-and-timezones/).
+
 ### Creating a Recurring Schedule via CLI
 
 ```bash

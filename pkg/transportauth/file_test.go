@@ -15,6 +15,7 @@
 package transportauth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -355,4 +356,146 @@ func TestReadTransportTokenFile_RefusesNonRegular(t *testing.T) {
 	require.NoError(t, os.Mkdir(sub, 0700))
 	_, err = ReadTransportTokenFile(sub)
 	assert.Error(t, err, "directory must be refused")
+}
+
+// isolateLateFileSource models an agent that started without an injected
+// transport token: no SCION_TRANSPORT_TOKEN(_FILE), no metadata source.
+func isolateLateFileSource(t *testing.T, mode string) string {
+	t.Helper()
+	path := isolateTransportTokenFile(t)
+	t.Setenv(EnvTransportToken, "")
+	t.Setenv(EnvTransportAudience, "")
+	t.Setenv(EnvHubOIDCAudience, "")
+	t.Setenv(EnvMetadataMode, "")
+	t.Setenv(EnvTransportMode, mode)
+	orig := IsOnGCEFunc
+	IsOnGCEFunc = func() bool { return false }
+	t.Cleanup(func() { IsOnGCEFunc = orig })
+	return path
+}
+
+// TestFromEnv_ProxyModeLateFile: in a proxy mode without an injected
+// token, FromEnv returns nothing until the default file appears, then a
+// FileSource for it (no bootstrap), sent in the mode's header.
+func TestFromEnv_ProxyModeLateFile(t *testing.T) {
+	for mode, header := range map[string]string{
+		"iap":              "Proxy-Authorization",
+		"cloudrun_invoker": "X-Serverless-Authorization",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			path := isolateLateFileSource(t, mode)
+
+			src, err := FromEnv()
+			require.NoError(t, err)
+			assert.Nil(t, src, "no file yet: no source")
+
+			fresh := makeTestJWT(time.Now().Add(time.Hour))
+			writeTokenFile(t, path, fresh)
+			src, err = FromEnv()
+			require.NoError(t, err)
+			fs, ok := src.(*FileSource)
+			require.True(t, ok, "got %T", src)
+			assert.Equal(t, path, fs.Path())
+			st := fs.Status()
+			assert.Equal(t, SourceLabelFile, st.InUse)
+			assert.False(t, st.EnvPresent)
+
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get(header)
+			}))
+			defer srv.Close()
+			resp, err := (&http.Client{Transport: Wrap(nil, src, ModeFromEnv())}).Get(srv.URL)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			assert.Equal(t, "Bearer "+fresh, got)
+		})
+	}
+}
+
+// TestFromEnv_LateFileNeedsProxyMode: without a proxy mode the default
+// file alone selects nothing.
+func TestFromEnv_LateFileNeedsProxyMode(t *testing.T) {
+	for _, mode := range []string{"", "unknown"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			path := isolateLateFileSource(t, mode)
+			writeTokenFile(t, path, makeTestJWT(time.Now().Add(time.Hour)))
+			src, err := FromEnv()
+			require.NoError(t, err)
+			assert.Nil(t, src)
+		})
+	}
+}
+
+// TestFromEnv_LateFileDoesNotDisplaceMetadata: a metadata source that
+// would be selected is kept even in a proxy mode with the file present.
+func TestFromEnv_LateFileDoesNotDisplaceMetadata(t *testing.T) {
+	path := isolateLateFileSource(t, "iap")
+	IsOnGCEFunc = func() bool { return true }
+	t.Setenv(EnvTransportAudience, "test-audience")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(time.Hour)))
+	src, err := FromEnv()
+	require.NoError(t, err)
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "got %T", src)
+}
+
+func TestIsProxyMode(t *testing.T) {
+	assert.True(t, IsProxyMode("iap"))
+	assert.True(t, IsProxyMode("cloudrun_invoker"))
+	assert.False(t, IsProxyMode(""))
+	assert.False(t, IsProxyMode("IAP"))
+	assert.False(t, IsProxyMode("other"))
+}
+
+// FromEnvWithReader uses the given reader for both file-backed steps.
+func TestFromEnvWithReader_BothFileSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  func(t *testing.T, path string)
+	}{
+		{"injected file", func(t *testing.T, path string) {
+			t.Setenv(EnvTransportTokenFile, path)
+		}},
+		{"proxy-mode late file", func(t *testing.T, path string) {
+			t.Setenv(EnvTransportMode, "iap")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for _, k := range []string{EnvTransportToken, EnvTransportTokenFile, EnvTransportMode,
+				EnvTransportAudience, EnvHubOIDCAudience} {
+				t.Setenv(k, "")
+			}
+			orig := IsOnGCEFunc
+			IsOnGCEFunc = func() bool { return false }
+			t.Cleanup(func() { IsOnGCEFunc = orig })
+
+			path := DefaultTransportTokenFilePath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("placeholder-file-value"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			tc.env(t, path)
+
+			var calls []string
+			read := func(p string) (string, error) {
+				calls = append(calls, p)
+				return "", errors.New("refused by test reader")
+			}
+			src, err := FromEnvWithReader(read)
+			if err != nil || src == nil {
+				t.Fatalf("FromEnvWithReader: src=%v err=%v", src, err)
+			}
+			if got, _ := src.Token(); got == "placeholder-file-value" {
+				t.Errorf("default reader used instead of the injected one")
+			}
+			if len(calls) == 0 || calls[0] != path {
+				t.Errorf("injected reader not called for %s: calls=%v", path, calls)
+			}
+		})
+	}
 }

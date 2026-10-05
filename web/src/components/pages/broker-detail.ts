@@ -33,6 +33,7 @@ import type {
 } from '../../shared/types.js';
 import { getAgentDisplayStatus } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -1093,7 +1094,7 @@ export class ScionPageBrokerDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
         </div>

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -2190,7 +2191,7 @@ func (s *Server) createAgentInProject(
 		}
 		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
 			corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-			writeCreateFailure(w, corrID, func() { writeErrorFromErr(w, err, "") })
+			writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 			return
 		}
 		if !req.ProvisionOnly {
@@ -2205,7 +2206,7 @@ func (s *Server) createAgentInProject(
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
-					writeLaunchInvalidPhase(w)
+					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2214,7 +2215,7 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
 					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err) })
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2254,7 +2255,7 @@ func (s *Server) createAgentInProject(
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
-					writeLaunchInvalidPhase(w)
+					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2263,7 +2264,7 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
 					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err) })
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2357,8 +2358,14 @@ const launchInFlightInputsWarning = "agent is already launching; request inputs 
 
 // writeLaunchInvalidPhase answers a create, env submit or workspace finalize
 // whose launch could not begin because the agent left the created and
-// provisioning phases (for example it was stopped meanwhile).
-func writeLaunchInvalidPhase(w http.ResponseWriter) {
+// provisioning phases (for example it was stopped meanwhile). When a delete
+// holds the row (err wraps store.ErrDeleteInProgress) it answers 409
+// delete_in_progress instead (ptone/scion#2550).
+func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
+	if refusal := deleteClaimedDuringDispatch(err, agentID); refusal != nil {
+		refusal.write(w)
+		return
+	}
 	writeError(w, http.StatusConflict, "invalid_state",
 		"agent is no longer in a phase that can be launched (it may have been stopped or deleted)", nil)
 }
@@ -2681,7 +2688,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
 	if errors.Is(err, ErrLaunchInvalidPhase) {
-		writeLaunchInvalidPhase(w)
+		writeLaunchInvalidPhase(w, err, agent.ID)
 		return
 	}
 	if err != nil {
@@ -2689,6 +2696,10 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
 				s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements))
+			return
+		}
+		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+			ref.write(w)
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -3351,7 +3362,16 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			agent.AppliedConfig.HarnessAuth = cfg.AuthSelectedType
 		}
 		if cfg.Env != nil {
-			agent.AppliedConfig.Env = cfg.Env
+			// AppliedConfig.Env is a copy, so the auto-expose resolution
+			// below never leaks a derived value into InlineConfig.Env.
+			agent.AppliedConfig.Env = maps.Clone(cfg.Env)
+			project, err := s.store.GetProject(ctx, agent.ProjectID)
+			if err != nil {
+				slog.WarnContext(ctx, "applyAgentUpdate: project lookup failed; auto-expose project tier not re-derived",
+					"agent", agent.ID, "project", agent.ProjectID, "error", err)
+				project = nil
+			}
+			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
 		// Narrow carve-out, ptone/scion#2493 R3-1/R4-1 -- NOT part of
 		// recordExplicitEdits/invariant E above, which has already run and
@@ -3582,6 +3602,18 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
+	return s.brokerRecordReachable(broker)
+}
+
+// brokerRecordReachable reports whether an already-loaded broker looks
+// reachable: connected over the control channel, or marked online in the
+// store. It is the shared rule behind brokerReachable (lifecycle actions) and
+// the explicit-broker check in resolveRuntimeBroker (agent create), so the
+// two cannot disagree about what "offline" means.
+func (s *Server) brokerRecordReachable(broker *store.RuntimeBroker) bool {
+	if s.controlChannel != nil && s.controlChannel.IsConnected(broker.ID) {
+		return true
+	}
 	return broker.Status == store.BrokerStatusOnline
 }
 
@@ -4298,7 +4330,15 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 //
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
-func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+//
+// A delete that claimed agentID while the create was in flight refuses the
+// dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
+// delete_in_progress, as start does (ptone/scion#2550).
+func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
+		ref.write(w)
+		return
+	}
 	if writeAgentTokenIssueError(w, err) {
 		return
 	}

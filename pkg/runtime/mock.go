@@ -25,7 +25,7 @@ type MockRuntime struct {
 	NameFunc             func() string
 	RunFunc              func(ctx context.Context, config RunConfig) (string, error)
 	StopFunc             func(ctx context.Context, id string) error
-	DeleteFunc           func(ctx context.Context, id string) error
+	DeleteFunc           func(ctx context.Context, ref RunRef) error
 	ListFunc             func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogsFunc          func(ctx context.Context, id string) (string, error)
 	AttachFunc           func(ctx context.Context, id string) error
@@ -64,9 +64,9 @@ func (m *MockRuntime) Stop(ctx context.Context, id string) error {
 	return nil
 }
 
-func (m *MockRuntime) Delete(ctx context.Context, id string) error {
+func (m *MockRuntime) Delete(ctx context.Context, ref RunRef) error {
 	if m.DeleteFunc != nil {
-		return m.DeleteFunc(ctx, id)
+		return m.DeleteFunc(ctx, ref)
 	}
 	return nil
 }

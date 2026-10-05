@@ -54,10 +54,13 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import {
@@ -138,6 +141,11 @@ function formatDurationHMS(totalSeconds: number): string {
 export class ScionPageAgentDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
   readonly _zone = new DisplayZoneController(this);
+
+  /** Lease timer for this agent's delete view (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agent ? [this.agent] : []
+  );
 
   @property({ type: Object })
   pageData: PageData | null = null;
@@ -755,6 +763,16 @@ export class ScionPageAgentDetail extends LitElement {
     }, DELETE_REDIRECT_DELAY_MS);
   }
 
+  /**
+   * DELETE returned 202: the hub is still deleting (ptone/scion#2483). Stay
+   * on the page with "Deleting…" shown from the response's `deletion`; the
+   * SSE `deleted` event then runs `showDeletedStateThenRedirect` through
+   * `onAgentsUpdated`, as it does for a delete started elsewhere.
+   */
+  private async keepDeletingAgent(response: Response): Promise<void> {
+    stateManager.applyDeleteAccepted(this.agentId, await readAcceptedDeletion(response));
+  }
+
   private onProjectsUpdated(): void {
     if (this.agent?.projectId) {
       const updatedProject = stateManager.getProject(this.agent.projectId);
@@ -964,11 +982,20 @@ export class ScionPageAgentDetail extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
+              if (forceResponse.status === 202) {
+                await this.keepDeletingAgent(forceResponse);
+                return;
+              }
               this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
+        }
+
+        if (response.status === 202) {
+          await this.keepDeletingAgent(response);
+          return;
         }
 
         this.showDeletedStateThenRedirect();
@@ -1285,6 +1312,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderHeader() {
     const agent = this.agent!;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
       <div class="header">
         <div class="header-info">
@@ -1293,8 +1323,12 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
+              label=${stateLabel(getAgentDisplayStatus(agent))}
             ></scion-status-badge>
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              live
+            ></scion-deletion-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1380,7 +1414,7 @@ export class ScionPageAgentDetail extends LitElement {
             : nothing}
           ${isAgentRunning(agent)
             ? html`
-                ${canLifecycle(agent._capabilities)
+                ${lifecycleOk
                   ? html`
                       ${agent.harnessCapabilities?.resume?.support !== 'no'
                         ? html`
@@ -1412,7 +1446,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-button
                       variant="success"
@@ -1426,7 +1460,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -1465,7 +1499,7 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
                   variant="danger"
@@ -1532,6 +1566,10 @@ export class ScionPageAgentDetail extends LitElement {
                 label=${agent.phase}
                 size="small"
               ></scion-status-badge>
+              <scion-deletion-badge
+                .deletion=${this.deletionLease.view(agent)}
+                size="small"
+              ></scion-deletion-badge>
             </span>
           </div>
           <div class="info-item">
@@ -1540,7 +1578,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
@@ -1698,23 +1736,35 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `
