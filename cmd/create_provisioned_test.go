@@ -56,12 +56,14 @@ func TestDisplayAgents_ProvisionedOnlyLabel(t *testing.T) {
 	agents := []api.AgentInfo{
 		{Name: "po-agent", Template: "default", Phase: "created", ProvisionedOnly: true},
 		{Name: "full-agent", Template: "default", Phase: "created"},
+		// A stale flag on an agent that has left created adds no suffix.
+		{Name: "run-agent", Template: "default", Phase: "running", ProvisionedOnly: true},
 	}
 	var err error
 	out := captureStdout(t, func() { err = displayAgents(agents, false, true) })
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 3, out)
+	require.Len(t, lines, 4, out)
 	for _, l := range lines[1:] {
 		if strings.HasPrefix(l, "po-agent") {
 			assert.Contains(t, l, "created (not started)")
