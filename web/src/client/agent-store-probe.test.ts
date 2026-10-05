@@ -452,6 +452,22 @@ describe('AgentStore delta probe', () => {
       expect(h.server.walks()).toBe(1);
     });
 
+    it('an hour of heartbeats on 400 agents costs one page per probe and a walk every five minutes', async () => {
+      const h = await loaded(Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1)));
+      const requests = h.server.requests.length;
+      const walkMinutes: number[] = [];
+      for (let i = 1; i <= 120; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        const walks = h.server.walks();
+        await tick();
+        if (h.server.walks() > walks) walkMinutes.push((i * 30) / 60);
+      }
+      expect(walkMinutes).toEqual([5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]);
+      expect(h.server.probes()).toBe(120 - 12);
+      // Each walk of 400 rows reads two pages.
+      expect(h.server.requests.length - requests).toBe(h.server.probes() + 12 * 2);
+    });
+
     it('orders a row whose activity time is the zero time by `updated`', async () => {
       const h = await loaded([active('a1', 1)]);
       const burst = Array.from({ length: 2 * AGENT_PROBE_LIMIT + 20 }, (_, i) =>
