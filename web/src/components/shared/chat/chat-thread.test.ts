@@ -7501,6 +7501,104 @@ describe('scion-chat-thread jump during the initial load', () => {
     expect(bottom).toHaveBeenCalledTimes(1);
   });
 
+  it('a Retry after a failed load and a failed jump opens at the bottom', async () => {
+    lastReadMessageId = '';
+    const failed = {
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({}),
+    } as unknown as Response;
+    const releaseHistory = hold('history');
+    const releaseAround = hold('around:gone');
+    const { el, bottom } = create();
+    await el.updateComplete;
+
+    const jump = el.scrollToMessageById('gone');
+    await flush();
+    releaseHistory(failed);
+    await flush();
+    releaseAround(failed);
+    await jump;
+    await flush();
+    await el.updateComplete;
+
+    const retry = el.shadowRoot?.querySelector('.state-msg sl-button') as HTMLElement | null;
+    expect(retry).not.toBeNull();
+    bottom.mockClear();
+    retry?.click();
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'latest-3')).toBe(true);
+    expect(bottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('a jump from before leaving and coming back leaves the reopened view alone', async () => {
+    hold('history');
+    const releaseAround = hold('around:latest-2');
+    const { el, unread } = create();
+    await el.updateComplete;
+
+    const jump = el.scrollToMessageById('latest-2');
+    await flush();
+    // Away and straight back while the jump's page is still loading: the
+    // reopened conversation runs its own load and opens at its divider.
+    el.conversationKey = 'other-thread';
+    await el.updateComplete;
+    await flush();
+    el.conversationKey = CONVERSATION_KEY;
+    await el.updateComplete;
+    await flush();
+    await el.updateComplete;
+    expect(rendered(el, 'latest-2')).toBe(true);
+    // Opened at the divider (once for the other thread, once on return).
+    expect(unread).toHaveBeenCalledTimes(2);
+    scrolledTo = [];
+
+    releaseAround(around('latest-2', 51));
+    await jump;
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'latest-3')).toBe(true);
+    expect(scrolledTo).not.toContain('msg-latest-2');
+    expect(el.shadowRoot?.querySelector('.permalink-highlight')).toBeNull();
+  });
+
+  it('a superseded jump that finds no target does not reset the view', async () => {
+    lastReadMessageId = '';
+    const missing = {
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({}),
+    } as unknown as Response;
+    const releaseHistory = hold('history');
+    const releaseFirst = hold('around:first');
+    const releaseSecond = hold('around:second');
+    const { el, bottom } = create();
+    await el.updateComplete;
+
+    const first = el.scrollToMessageById('first');
+    await flush();
+    const second = el.scrollToMessageById('second');
+    await flush();
+    releaseHistory(page(LATEST));
+    await flush();
+    releaseFirst(missing);
+    await first;
+    await flush();
+    expect(bottom).not.toHaveBeenCalled();
+
+    releaseSecond(around('second', 30));
+    await second;
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'second')).toBe(true);
+    expect(scrolledTo.at(-1)).toBe('msg-second');
+    expect(bottom).not.toHaveBeenCalled();
+  });
+
   it('two overlapping jumps resolve to the newer one', async () => {
     const { el } = create();
     await flush();
