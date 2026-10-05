@@ -12,7 +12,7 @@ Neither one changes how times are stored or sent. Stored and transmitted times a
 
 ## API contract: UTC with `Z`
 
-Every timestamp the Hub returns, over REST, SSE and the Hub↔broker wire, is an RFC 3339 instant in UTC with a `Z` suffix, for example `2026-10-04T17:30:00Z`. This holds whatever zone the Hub host runs in.
+Every timestamp the Hub returns, over REST, SSE and the Hub↔broker wire, is an RFC 3339 instant in UTC with a `Z` suffix, for example `2026-10-04T17:30:00Z`. This holds regardless of the timezone the Hub host runs in.
 
 - **Inputs** may carry any offset (for example a schedule `fireAt` of `2026-10-05T09:00:00+02:00`). The Hub stores the instant and returns it in UTC.
 - **Zones** are never baked into a timestamp. Where a zone matters, it travels as a separate IANA name field, such as the user preference `timezone` or the agent field `explicitTimezone`.
@@ -137,7 +137,7 @@ Two maintenance migrations relate to times. An admin runs them from **Admin → 
 
 | Key | What it does | When to run it |
 | :--- | :--- | :--- |
-| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows a Hub wrote in a numeric-abbreviation zone (for example `Asia/Kathmandu`) are also repaired automatically at Hub start, after a database snapshot. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
+| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows that the database driver cannot read are also repaired automatically, at Hub start, after a database snapshot. Such rows come from a Hub running in a zone that has no letter abbreviation and an offset that is not a whole hour (for example `Asia/Kathmandu`). For such a zone Go prints the four-digit numeric offset in place of the abbreviation, so the stored value ends in `+0545 +0545`. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
 | `applied-config-tz-cleanup` | Converts `TZ` values that older Hubs saved in agents' applied config env into `legacy` pins, in one pass, and reports how many agents it converted. | Optional, because the Hub already converts each agent lazily. Run it **before** `applied-config-env-cleanup` to keep every saved `TZ` as a pin; if the env cleanup runs first, saved values with no live source are removed and those agents follow the chain instead. Safe to re-run, and it can run again after it completes; a second run converts 0. |
 
 The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed. To re-run one of these after it has completed, use `POST /api/v1/admin/maintenance/migrations/<key>/run`.

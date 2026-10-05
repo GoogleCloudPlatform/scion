@@ -75,3 +75,9 @@ Each fix was checked against the code at upstream 92c805cf:
 ## Upstream merge
 
 - Merged upstream main b0ac40a0 as merge commit 3eaf5e54. There were no conflicts and the remerge-diff is empty. The only change main made to `api.md` is the user `DELETE` line, which has nothing to do with timezones; the agent TZ chain link still points at this page. Main's other docs changes do not mention timezones. With the task 18b fix now on main, `applied-config-tz-cleanup` is re-runnable as the page says. The docs build passes: 95 pages, and all internal links are valid.
+
+## Gemini comments on GoogleCloudPlatform/scion#2458
+
+- **Profile `env` row.** Removed from the `orchestrator-settings.md` profiles table. Neither `V1ProfileConfig` (`pkg/config/settings_v1.go:2136`) nor `ProfileConfig` (`pkg/config/settings.go:59`) has an `Env` field. The schema's `profileConfig` has no `env` property and sets `additionalProperties: false`.
+- **"whatever zone".** Reworded to "regardless of the timezone the Hub host runs in". The meaning is unchanged.
+- **"numeric-abbreviation zone".** Spelled out. The affected zones have no letter abbreviation and an offset that is not a whole hour, so Go prints a four-digit numeric offset as the abbreviation (`TZ=Asia/Kathmandu date +%Z` gives `+0545`), and the stored value ends in `+0545 +0545`. Two-digit offsets such as `-03` (`America/Sao_Paulo`) can be read and are not affected, which matches the four-digit probe in `pkg/store/entadapter/timestamp_normalize.go`.
