@@ -113,6 +113,21 @@ are not adopted automatically; the status view lists them as
 stop the Hub from starting: the remaining hops keep their current denial and
 the next start resumes the same snapshot.
 
+The migration stops at the first hop whose write fails rather than skipping
+it and continuing. Hops run top-down and a descendant needs its parent
+recorded, so continuing would mostly record skips for the descendants. The
+trade-off: a write error that repeats on every start leaves every later
+pending hop pending, and they are not adopted automatically. The start-up
+summary and the status view report them, and an admin commit can adopt them.
+
+If planning or the snapshot write fails on the first start, the Hub serves
+requests with no snapshot (the status view reports `snapshotTaken: false`),
+and the next start takes the snapshot, including edges written in between.
+Every path rule applies to those edges.
+
+Adoption records are retained indefinitely as evidence. They have no foreign
+keys, so they outlive the edges and agents they name.
+
 At start the Hub logs a summary of record counts, and a warning of the form:
 
 ```text
@@ -132,20 +147,27 @@ adds these keys to the error `details`:
 }
 ```
 
-No edge or ancestor ID is returned to the caller. The Hub's server log names
-the delegate of the unrecorded hop.
+No edge or ancestor ID is returned to the caller. The Hub's server log, at
+debug level, names the delegate of the unrecorded hop. A hop denied only
+because its provenance version is not supported keeps the same denial
+without these keys, because adoption does not apply to it.
 
 ## Admin recovery API
 
-All routes require a Hub system admin authenticated by an interactive session
-or by the local development credential. Agent tokens and user access tokens
-are refused with 403. No permission is registered for these routes, so they
+All routes require a Hub system admin on an interactive or dev credential: an
+interactive session, or the local development credential on a Hub that
+accepts it. The credential kind is read from the request's credential, and a
+request with any other credential is refused with 403, including agent
+tokens, user access tokens, federated identities and broker requests made on
+behalf of a user. No permission is registered for these routes, so they
 cannot be delegated.
 
 ### `GET /api/v1/admin/delegation-adoption`
 
-Returns the marker, the cohort header, counts by status and by reason, a page
-of records, and the adoptable unrecorded hops that no record covers.
+Returns `snapshotTaken`, the marker, the cohort header, counts by status and
+by reason, a page of records, and the adoptable unrecorded hops that no record
+covers. `snapshotTaken` is `false`, and the cohort header `null`, until the
+boot cohort snapshot exists.
 
 | Query | Meaning |
 |-------|---------|
@@ -185,6 +207,11 @@ Repeat the preview request and add `planFingerprint` (and optionally
   contains a record that cannot be reverted;
 - otherwise writes every hop, or nothing.
 
+A revert writes the reverting admin to the record's `revertedByKind`,
+`revertedById` and `revertedAt` and the restored edge's summary to
+`revertSummary`; the adopter (`actorKind`, `actorId`) and `afterSummary` are
+kept.
+
 Each written hop gets a `delegation_adoptions` record (origin `admin_commit`)
 and a mutation audit record (`delegation_provenance_adoption` or
 `delegation_provenance_adoption_revert`) with before and after summaries.
@@ -196,6 +223,11 @@ Adopted edges from a commit record the admin as initiator.
 A revert deactivates the adopted edge (cause `adoption_reverted`) and
 reactivates the original unrecorded row, so the original denials return.
 Adopting again needs a new preview and commit.
+
+An edge is reverted once. When several records point at the same adopted
+edge (for example an admin commit and a later boot record that recognized
+it), the revert of that edge covers all of them: the preview lists the others
+under `coveredRecordIds`, and the commit marks them all `reverted`.
 
 Revoking access does not need a revert: deactivating an adopted ancestor's
 edge, deleting the ancestor, or suspending the root user denies descendants
