@@ -407,6 +407,40 @@ describe('hub members: hub presence fetch', () => {
     }
   });
 
+  it('a presence response dropped by a view change releases its claim: the next rail load asks again', async () => {
+    const presence = deferred<Response>();
+    let held = true;
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p1/members' && held) {
+        held = false;
+        return presence.promise;
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(1);
+
+      // A join call claims the sidebar again (its view token moves on).
+      page.loadHubMembers();
+      presence.resolve(
+        new Response(JSON.stringify({ humans: [{ id: 'u1', presenceState: 'active' }] }), {
+          status: 200,
+        })
+      );
+      await settle();
+
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('is fetched once per hub view, not again on every rail reload', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
@@ -1061,6 +1095,96 @@ describe('hub members: guards', () => {
     } finally {
       unmount(page);
     }
+  });
+
+  it('a failed first store read is retried by the next join call, with no users re-walk', async () => {
+    serveUsers(() => usersPage(['u1']));
+    harness.server.status = 500;
+    const page = await mountPage();
+    try {
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      const usersBefore = usersRequests();
+      const walksBefore = storeWalks();
+      harness.server.status = 200;
+
+      page.loadHubMembers();
+      await settle();
+
+      expect(usersRequests()).toBe(usersBefore);
+      expect(storeWalks()).toBeGreaterThan(walksBefore);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a users walk dropped for a space claim does not mark the users loaded: the returning hub view walks them', async () => {
+    const held = deferred<Response>();
+    let call = 0;
+    serveUsers(() => (++call === 1 ? held.promise : usersPage(['hub-user'])));
+    const page = await mountPage();
+    try {
+      vi.mocked(apiFetch).mockImplementation((url) => {
+        if (url.startsWith('/api/v1/users')) {
+          return ++call === 1 ? held.promise : Promise.resolve(usersPage(['hub-user']));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }], agents: [] }),
+            { status: 200 }
+          )
+        );
+      });
+      await page.loadV2Members('p1');
+      held.resolve(usersPage(['hub-user']));
+      await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+      const usersBefore = usersRequests();
+
+      page.loadHubMembers();
+      await settle();
+
+      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(ids(page.v2HumanMembers)).toEqual(['hub-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a DM opened without the hub view live scopes agents-updated to nothing, not to a space visited earlier', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({ humans: [], agents: [] }), { status: 200 }))
+    );
+    await page.loadV2Members('p1');
+    serveUsers(() => usersPage(['u1']));
+    page.loadHubMembers();
+    await settle();
+    document.body.removeChild(page);
+
+    page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
+    page.v2AgentMembers = [];
+    globalMap.agents.set('elsewhere', agent('elsewhere', { projectId: 'p2' }));
+    page._handleAgentsUpdated();
+
+    expect(ids(page.v2AgentMembers)).toEqual(['elsewhere']);
+  });
+
+  it("a disconnect aborts a space's members request in flight", async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    let signal: AbortSignal | null | undefined;
+    vi.mocked(apiFetch).mockImplementation((_url, init) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => {});
+    });
+    void page.loadV2Members('p1');
+    expect(signal?.aborted).toBe(false);
+
+    document.body.removeChild(page);
+
+    expect(signal?.aborted).toBe(true);
   });
 
   it('agents-updated during a first walk does not show its partial rows', async () => {
