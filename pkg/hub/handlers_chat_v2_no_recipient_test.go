@@ -22,16 +22,56 @@
 package hub
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// bindProjectMember gives userID the project member role so
+// resolveProjectHumanMembers finds it.
+func bindProjectMember(t *testing.T, s store.Store, projectID, userID string) {
+	t.Helper()
+	ctx := t.Context()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName: %v", err)
+	}
+	if _, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding: %v", err)
+	}
+}
+
+// addHumanMember creates a user and makes it a project member.
+func addHumanMember(t *testing.T, s store.Store, projectID, email, name string) *store.User {
+	t.Helper()
+	u := &store.User{ID: api.NewUUID(), Email: email, DisplayName: name,
+		Role: "member", Status: "active", Created: time.Now()}
+	if err := s.CreateUser(t.Context(), u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	bindProjectMember(t, s, projectID, u.ID)
+	return u
+}
+
 // noRecipientSetup creates a topic with no default agent and an idle agent
 // that has already posted in the thread and is a group participant.
 func noRecipientSetup(t *testing.T) (*Server, store.Store, string, *store.Agent, *brokerMockDispatcher) {
+	srv, s, topicID, a, d, _ := noRecipientSetupProject(t)
+	return srv, s, topicID, a, d
+}
+
+func noRecipientSetupProject(t *testing.T) (*Server, store.Store, string, *store.Agent, *brokerMockDispatcher, string) {
 	t.Helper()
 	srv, s, wcs, proj, db := setupSendTest(t)
 	d := &brokerMockDispatcher{}
@@ -55,7 +95,7 @@ func noRecipientSetup(t *testing.T) (*Server, store.Store, string, *store.Agent,
 	}
 	srv.ensureGroupParticipants(ctx, topic.ConversationID, []*store.Agent{a})
 	seedAgentMessage(t, s, proj, topicID, a, "agent was here")
-	return srv, s, topicID, a, d
+	return srv, s, topicID, a, d, proj.ID
 }
 
 // An un-mentioned, untargeted thread reply reaches no agent (not even the
@@ -122,5 +162,55 @@ func TestNoRecipient_DefaultAgentStillDispatched(t *testing.T) {
 	}
 	if resp["dispatchState"] != store.MessageDispatchDispatched {
 		t.Fatalf("expected response dispatchState=dispatched, got %v", resp["dispatchState"])
+	}
+}
+
+// A thread message that @mentions a project human and no agent was meant
+// for that person, who is notified: no "not delivered to any agent"
+// warning. It keeps the dispatched state main records today.
+func TestNoRecipient_HumanOnlyMentionKeepsDispatched(t *testing.T) {
+	srv, s, topicID, _, d, projectID := noRecipientSetupProject(t)
+	addHumanMember(t, s, projectID, "alice@example.com", "Alice Smith")
+
+	for _, content := range []string{"@alice-smith can you look", "thanks @alice"} {
+		code, resp, m := unreachableSend(t, srv, s, topicID, content)
+		if code != 201 {
+			t.Fatalf("%q: expected 201, got %d (body=%v)", content, code, resp)
+		}
+		if m == nil || m.DispatchState != store.MessageDispatchDispatched {
+			t.Fatalf("%q: expected row dispatched, got %+v", content, m)
+		}
+		if v, ok := resp["dispatchState"]; ok && v != store.MessageDispatchDispatched {
+			t.Fatalf("%q: expected no no_recipient in response, got %v", content, v)
+		}
+	}
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+}
+
+// Mentions that resolve to no project human (an unknown name, or only the
+// sender) do not count: still no_recipient.
+func TestNoRecipient_UnresolvedOrSelfMentionIsNoRecipient(t *testing.T) {
+	srv, s, topicID, _, _, projectID := noRecipientSetupProject(t)
+	addHumanMember(t, s, projectID, "alice@example.com", "Alice")
+	dev, err := s.GetUser(t.Context(), DevUserID)
+	if err != nil || dev == nil {
+		t.Fatalf("GetUser(dev): %v", err)
+	}
+	bindProjectMember(t, s, projectID, DevUserID)
+	self := dev.Email
+	if at := strings.IndexByte(self, '@'); at > 0 {
+		self = self[:at]
+	}
+
+	for _, content := range []string{"@nobody are you there", "note to self @" + self} {
+		_, resp, m := unreachableSend(t, srv, s, topicID, content)
+		if m == nil || m.DispatchState != store.MessageDispatchNoRecipient {
+			t.Fatalf("%q: expected row no_recipient, got %+v", content, m)
+		}
+		if resp["dispatchState"] != store.MessageDispatchNoRecipient {
+			t.Fatalf("%q: expected response no_recipient, got %v", content, resp["dispatchState"])
+		}
 	}
 }
