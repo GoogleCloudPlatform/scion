@@ -143,16 +143,14 @@ type HubServerConfig struct {
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
-	// API already advertises the remaining budget (`launch.remainingSeconds`,
-	// design §3.2) so a client can size its own wait around it, but no
-	// client does that yet (planned CLI behavior, design §3.11).
+	// API advertises the remaining budget (`launch.remainingSeconds`, design
+	// §3.2), and the CLI sizes its default launch wait from it.
 	LaunchTimeout time.Duration `json:"launchTimeout" yaml:"launchTimeout" koanf:"launchTimeout"`
 
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
-	// (design §3.7). Today it only sets the reaper's staleness window (8x
-	// this value); it will also be sent to the broker as
-	// launchKeepaliveSeconds in the create request once the async dispatch
-	// path lands. Default 15.
+	// (design §3.7). It is sent to the broker as launchKeepaliveSeconds in
+	// each asynchronous create request, and sets the reaper's staleness
+	// window (8x this value). Default 15.
 	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
 }
 
