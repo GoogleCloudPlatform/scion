@@ -29,8 +29,9 @@
  *
  * Known staleness: off the chat page only DM events arrive (thread messages
  * come on project subjects a page may not subscribe to), and a read or mute
- * in another tab publishes nothing, so the count can lag until the next
- * event. Both are fixed on the hub side: fanning thread messages out to
+ * in another tab publishes nothing (mark-unread does: it publishes the
+ * reader's own read-state, which the counter refreshes on), so the count
+ * can lag until the next event. Both are fixed on the hub side: fanning thread messages out to
  * member participants on `user.<id>.chat.message`, and publishing the
  * reader's own read and mute changes on `user.<id>.chat.read-state`.
  */
