@@ -860,19 +860,20 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 
 // Restart of an agent whose pod is already gone, in the issue's setup: the
 // best-effort search of the other runtimes meets the Forbidden default
-// namespace, which is logged and does not abort the restart (no 503 lookup
-// failure); the restart goes on to start the agent. (The start itself then
-// needs a project path, which a restart of a gone pod does not have here;
-// that is outside this test.)
+// namespace, which is logged and skipped (no 503 lookup failure); the
+// restart goes on to start the agent.
 func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", false)
 
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-	if w.Code == http.StatusServiceUnavailable {
-		t.Fatalf("restart status = 503, body %s; the other runtimes' list failure must not abort it", w.Body.String())
+	// The start that follows fails: with the pod gone, restart has no
+	// project path for the agent (unchanged behaviour), so it answers 500,
+	// not the 503 a failed lookup would give.
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to restart agent") {
+		t.Fatalf("restart status = %d, body %s; want 500 from the start", w.Code, w.Body.String())
 	}
-	if recs := f.logRecords(t, "could not search the other runtimes"); len(recs) != 1 {
-		t.Fatalf("got %d search warnings, want 1; logs:\n%s", len(recs), f.logs.String())
+	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
+		t.Fatalf("no skipped-runtime warning; logs:\n%s", f.logs.String())
 	}
 	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 1 {
 		t.Fatalf("restart did not proceed to start; logs:\n%s", f.logs.String())
@@ -900,6 +901,195 @@ func TestDeleteAgent_ProfileNamespace_RunIDFilter(t *testing.T) {
 	}
 	if f.podExists(t) {
 		t.Fatal("pod still present in the profile namespace")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
+	}
+}
+
+// useSettingsNamespace makes the profile runtime resolver read the profile's
+// namespace from the project settings, as runtime.GetRuntime does.
+func (f *ownRTFixture) useSettingsNamespace(t *testing.T) {
+	t.Helper()
+	inner := f.srv.resolveAuxiliaryRuntime
+	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+		vs, _, err := config.LoadEffectiveSettings(projectPath)
+		if err != nil {
+			t.Errorf("load settings: %v", err)
+			return inner(projectPath, agentName, profile)
+		}
+		rc, _, err := vs.ResolveRuntime(profile)
+		if err != nil {
+			t.Errorf("resolve runtime: %v", err)
+		}
+		saved := f.wrapOwn
+		f.wrapOwn = nil
+		rt := inner(projectPath, agentName, profile).(*runtime.KubernetesRuntime)
+		f.wrapOwn = saved
+		rt.DefaultNamespace = rc.Namespace
+		if f.wrapOwn != nil {
+			return f.wrapOwn(rt)
+		}
+		return rt
+	}
+}
+
+// setProfileNamespace edits the agents profile's namespace in settings.
+func (f *ownRTFixture) setProfileNamespace(t *testing.T, ns string) {
+	t.Helper()
+	p := filepath.Join(f.projectDir, "settings.yaml")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(data), "namespace: "+ownRTProfileNS, "namespace: "+ns, 1)
+	if edited == string(data) {
+		t.Fatal("settings edit did not apply")
+	}
+	if err := os.WriteFile(p, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// registerOldRuntime registers a Kubernetes runtime for namespace ns as an
+// auxiliary runtime, as a broker does for a profile's earlier settings.
+func (f *ownRTFixture) registerOldRuntime(ns string) {
+	client := k8s.NewTestClient(fake.NewSimpleDynamicClient(k8sruntime.NewScheme()), f.cs)
+	client.CurrentContext = "old-ctx"
+	rt := runtime.NewKubernetesRuntime(client)
+	rt.DefaultNamespace = ns
+	f.srv.auxiliaryRuntimesMu.Lock()
+	f.srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(rt)] = auxiliaryRuntime{Runtime: rt, Manager: agent.NewManager(rt)}
+	f.srv.auxiliaryRuntimesMu.Unlock()
+}
+
+func (f *ownRTFixture) createPod(t *testing.T, ns string, labels, annotations map[string]string) {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: ownRTAgent, Namespace: ns, Labels: labels, Annotations: annotations},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	if _, err := f.cs.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *ownRTFixture) podExistsIn(t *testing.T, ns string) bool {
+	t.Helper()
+	_, err := f.cs.CoreV1().Pods(ns).Get(context.Background(), ownRTAgent, metav1.GetOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		t.Fatalf("get pod: %v", err)
+	}
+	return err == nil
+}
+
+// Restart after the profile's namespace changed: the agent's own runtime
+// (the new namespace) holds no pod, the broker's default namespace cannot
+// be listed, and the old pod runs in a third runtime (the old namespace).
+// The search skips the runtime it cannot list, stops the old pod, and the
+// agent is started once in the new namespace.
+func TestRestartAgent_NamespaceChanged_SkipsUnlistableRuntime_StopsOldPod(t *testing.T) {
+	f := newOwnRTFixture(t, "agents", true) // old pod in scion-agents
+	writeRestartTemplates(t, f.projectDir)
+	f.registerOldRuntime(ownRTProfileNS)
+	f.setProfileNamespace(t, "scion-agents-2")
+	var runs atomic.Int32
+	f.wrapOwn = func(k *runtime.KubernetesRuntime) runtime.Runtime {
+		return &startRecordingRuntime{KubernetesRuntime: k, runs: &runs}
+	}
+	f.useSettingsNamespace(t)
+
+	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
+	if w.Code >= 300 {
+		t.Fatalf("restart status = %d, body %s; want success; logs:\n%s", w.Code, w.Body.String(), f.logs.String())
+	}
+	if f.podExistsIn(t, ownRTProfileNS) {
+		t.Fatal("old pod still running beside the new one")
+	}
+	if n := runs.Load(); n != 1 {
+		t.Fatalf("starts = %d, want 1", n)
+	}
+	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
+		t.Fatalf("the unlistable runtime was not skipped with a warning; logs:\n%s", f.logs.String())
+	}
+}
+
+// The restart search applies delete's legacy-container rule: a container
+// with no project label is stopped only when its recorded project path
+// identifies as the requested project.
+func TestRestartAgent_LegacyContainerInOtherRuntime_PathIdentityChecked(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ownPath     bool
+		wantStopped bool
+	}{
+		{name: "path of this project", ownPath: true, wantStopped: true},
+		{name: "path of no project", ownPath: false, wantStopped: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOwnRTFixture(t, "agents", false)
+			writeRestartTemplates(t, f.projectDir)
+			const legacyNS = "scion-legacy"
+			f.registerOldRuntime(legacyNS)
+			path := filepath.Join(t.TempDir(), "elsewhere", ".scion")
+			if tc.ownPath {
+				path = f.projectDir
+			}
+			f.createPod(t, legacyNS,
+				map[string]string{"scion.name": ownRTAgent, "scion.agent": "true"},
+				map[string]string{projectkeys.LabelProjectPath: path})
+			var runs atomic.Int32
+			f.wrapOwn = func(k *runtime.KubernetesRuntime) runtime.Runtime {
+				return &startRecordingRuntime{KubernetesRuntime: k, runs: &runs}
+			}
+
+			_ = f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
+			if stopped := !f.podExistsIn(t, legacyNS); stopped != tc.wantStopped {
+				t.Fatalf("legacy pod stopped = %v, want %v; logs:\n%s", stopped, tc.wantStopped, f.logs.String())
+			}
+		})
+	}
+}
+
+// Terminal attach passes the hub's projectPath hint, so an agent of a
+// linked project outside the hub-managed directory is found in its profile
+// namespace without listing the default namespace.
+func TestAttachLookup_LinkedProject_UsesProjectPathHint(t *testing.T) {
+	f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, linked: true})
+
+	if _, err := f.srv.LookupAgent(context.Background(), ownRTAgent, ownRTProjectID); err == nil {
+		t.Fatal("lookup without the hint found the agent; the test needs the hint to matter")
+	}
+	f.mu.Lock()
+	f.nsRequests = map[string][]string{}
+	f.mu.Unlock()
+
+	ctx := withProjectPathHint(context.Background(), filepath.Dir(f.projectDir))
+	res, err := f.srv.LookupAgent(ctx, ownRTAgent, ownRTProjectID)
+	if err != nil {
+		t.Fatalf("LookupAgent with hint: %v", err)
+	}
+	if k, ok := res.Runtime.(*runtime.KubernetesRuntime); !ok || k.DefaultNamespace != ownRTProfileNS {
+		t.Fatalf("LookupAgent runtime = %#v; want the profile runtime in %s", res.Runtime, ownRTProfileNS)
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
+	}
+}
+
+// The HTTP attach handler reads projectPath from the request and hands it to
+// the lookup.
+func TestHandleAgentAttach_PassesProjectPathHint(t *testing.T) {
+	f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, linked: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+ownRTAgent+"/attach?projectId="+ownRTProjectID+"&projectPath="+filepath.Dir(f.projectDir), nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	w := httptest.NewRecorder()
+	f.srv.handleAgentAttach(w, req)
+
+	if n := f.resolverCalls.Load(); n != 1 {
+		t.Fatalf("profile runtime resolved %d times, want 1 (hint not passed); status %d body %s", n, w.Code, w.Body.String())
 	}
 	if got := f.requests("default"); len(got) != 0 {
 		t.Fatalf("requests sent to the default namespace: %v", got)

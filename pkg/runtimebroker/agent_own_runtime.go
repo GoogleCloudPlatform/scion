@@ -76,6 +76,37 @@ func withoutAgentOwnRuntime(ctx context.Context) context.Context {
 	return context.WithValue(ctx, agentOwnRuntimeKey{}, (*agentOwnRuntime)(nil))
 }
 
+// otherManagers returns the managers a request carrying ctx may target
+// other than the agent's own runtime, for the best-effort searches delete
+// and restart make when that runtime holds no container for the agent.
+func (s *Server) otherManagers(ctx context.Context, own *agentOwnRuntime) []agent.Manager {
+	var others []agent.Manager
+	for _, mgr := range s.allManagers(withoutAgentOwnRuntime(ctx)) {
+		if mgr != own.mgr {
+			others = append(others, mgr)
+		}
+	}
+	return others
+}
+
+type projectPathHintKey struct{}
+
+// withProjectPathHint attaches the hub's projectPath hint for callers that
+// reach ensureAgentOwnRuntime through an interface without that argument
+// (LookupAgent, used by terminal attach).
+func withProjectPathHint(ctx context.Context, hint string) context.Context {
+	if hint == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, projectPathHintKey{}, hint)
+}
+
+// projectPathHintFrom returns the hint attached with withProjectPathHint.
+func projectPathHintFrom(ctx context.Context) string {
+	hint, _ := ctx.Value(projectPathHintKey{}).(string)
+	return hint
+}
+
 // ownRuntimeFor returns the agent's own runtime for a request carrying ctx,
 // or nil when it is unknown or excluded by the recorded runtime type.
 func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {

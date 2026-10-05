@@ -2663,22 +2663,44 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	agentName := id
 	var projectPath string
 	match, matchErr := s.lookupAgentMatch(ctx, id, projectID)
-	if s.ownRuntimeFor(ctx) != nil && errors.Is(matchErr, ErrAgentNotFound) {
+	ownHasNoContainer := errors.Is(matchErr, ErrAgentNotFound) || (matchErr == nil && match.entry.ContainerID == "")
+	if own := s.ownRuntimeFor(ctx); own != nil && ownHasNoContainer {
 		// Restart starts the agent in the runtime its saved profile selects
 		// now, which can differ from the one it is running in (the
-		// profile's runtime was changed). If the agent's own runtime holds
-		// no container for it, look in every other runtime too, best
-		// effort, so the stop below reaches a container left in a previous
-		// runtime instead of leaving it running beside the new one. A
-		// runtime that cannot be listed there is logged and does not fail
-		// the restart.
-		walked, walkErr := s.lookupAgentMatch(withoutAgentOwnRuntime(ctx), id, projectID)
-		switch {
-		case walkErr == nil && walked.containerID != "":
-			match, matchErr = walked, nil
-		case walkErr != nil && !errors.Is(walkErr, ErrAgentNotFound):
-			s.agentLifecycleLog.Warn("Restart: could not search the other runtimes for the agent; continuing",
-				"agent_id", id, "project_id", projectID, "error", walkErr)
+		// profile's runtime or namespace was changed). If the agent's own
+		// runtime holds no container for it, search the other registered
+		// runtimes the way delete does (collectAgentCandidates, with its
+		// project and legacy-path checks), so the stop below reaches a
+		// container left in a previous runtime instead of leaving it running
+		// beside the new one. Each runtime is listed separately: one that
+		// cannot be listed is logged and skipped, and the others are still
+		// searched. More than one container found is ambiguous and fails
+		// the restart rather than stopping a guess.
+		cands, _ := s.collectAgentCandidates(ctx, s.otherManagers(ctx, own), id, projectID,
+			"Restart: runtime list failed while searching the other runtimes; skipped")
+		var containers []agentCandidate
+		for _, c := range cands {
+			if c.entry.ContainerID != "" {
+				containers = append(containers, c)
+			}
+		}
+		switch len(containers) {
+		case 0:
+			// No container anywhere. An entry for the agent's files found
+			// elsewhere still names the agent's project, which the start
+			// below reads its saved profile from; nothing is stopped for it.
+			if !match.matched && len(cands) == 1 {
+				c := cands[0]
+				match = agentMatch{manager: c.mgr, runtime: s.runtimeOfManager(c.mgr), entry: c.entry, matched: true}
+				matchErr = &agentNotFoundError{slug: strings.ToLower(id)}
+			}
+		case 1:
+			c := containers[0]
+			if m, err := agentMatchFrom(strings.ToLower(id), []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr)); err == nil {
+				match, matchErr = m, nil
+			}
+		default:
+			match, matchErr = agentMatch{}, fmt.Errorf("agent '%s' is ambiguous: %d containers match in other runtimes", id, len(containers))
 		}
 	}
 	if match.matched {
@@ -5225,13 +5247,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 	// and does not fail the delete. A container found there is the target.
 	// The run filter below applies to what this search finds as well.
 	if own := s.ownRuntimeFor(ctx); own != nil && listErr == nil && !candidatesHaveContainer(matches) {
-		var others []agent.Manager
-		for _, mgr := range s.allManagers(withoutAgentOwnRuntime(ctx)) {
-			if mgr != own.mgr {
-				others = append(others, mgr)
-			}
-		}
-		walked, _ := s.collectAgentCandidates(ctx, others, id, projectID,
+		walked, _ := s.collectAgentCandidates(ctx, s.otherManagers(ctx, own), id, projectID,
 			"Agent delete: runtime list failed while searching the other runtimes; skipped")
 		if candidatesHaveContainer(walked) {
 			matches = matches[:0]

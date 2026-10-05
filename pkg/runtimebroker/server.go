@@ -1742,10 +1742,11 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	filter := scopedNameFilter(slug, projectID)
 
 	// The PTY attach paths reach here without handleAgentByID, so the
-	// agent's own runtime is resolved here (see ensureAgentOwnRuntime).
-	// When known, it is the only runtime searched.
+	// agent's own runtime is resolved here (see ensureAgentOwnRuntime),
+	// with the hub's projectPath hint when the caller attached one
+	// (withProjectPathHint). When known, it is the only runtime searched.
 	if agentOwnRuntimeFrom(ctx) == nil {
-		ctx = s.ensureAgentOwnRuntime(ctx, slug, projectID, "")
+		ctx = s.ensureAgentOwnRuntime(ctx, slug, projectID, projectPathHintFrom(ctx))
 	}
 	own := s.ownRuntimeFor(ctx)
 
