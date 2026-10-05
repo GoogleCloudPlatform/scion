@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -859,6 +860,11 @@ func (w *writeCountingStore) DeleteThreadDefault(ctx context.Context, channelID,
 	return w.Store.DeleteThreadDefault(ctx, channelID, threadID)
 }
 
+func (w *writeCountingStore) SetNotificationPref(ctx context.Context, pref *NotificationPref) error {
+	w.count()
+	return w.Store.SetNotificationPref(ctx, pref)
+}
+
 func (w *writeCountingStore) writeCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -977,4 +983,174 @@ func TestDefaultAgentButtons_RequireLinkedUser(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestSettingsAndNotificationButtons_RequireLinkedUser(t *testing.T) {
+	ctx := context.Background()
+
+	readLink := func(t *testing.T, e *linkedUserEnv) *ChannelLink {
+		t.Helper()
+		link, err := e.store.GetChannelLink(ctx, luChannel)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		return link
+	}
+	notifPrefs := func(t *testing.T, e *linkedUserEnv, user string) string {
+		t.Helper()
+		prefs, err := e.store.GetNotificationPrefs(ctx, user, luProject)
+		require.NoError(t, err)
+		var out []string
+		for _, p := range prefs {
+			out = append(out, p.AgentSlug+"="+map[bool]string{true: "on", false: "off"}[p.Enabled])
+		}
+		return strings.Join(out, ",")
+	}
+
+	arms := []struct {
+		name     string
+		customID string
+		// read returns the state the button writes for user; want is its
+		// value after a linked user's click.
+		read func(t *testing.T, e *linkedUserEnv, user string) string
+		want string
+	}{
+		{
+			name:     "toggle observe",
+			customID: "settings:observe:" + luChannel,
+			read: func(t *testing.T, e *linkedUserEnv, _ string) string {
+				return strconv.FormatBool(readLink(t, e).ShowAgentToAgent)
+			},
+			want: "true",
+		},
+		{
+			name:     "toggle state changes",
+			customID: "settings:statechange:" + luChannel,
+			read: func(t *testing.T, e *linkedUserEnv, _ string) string {
+				return strconv.FormatBool(readLink(t, e).ShowStateChanges)
+			},
+			want: "true",
+		},
+		{
+			name:     "notifications on",
+			customID: "notif:on:worker",
+			read:     notifPrefs,
+			want:     "worker=on",
+		},
+		{
+			name:     "notifications off",
+			customID: "notif:off:worker",
+			read:     notifPrefs,
+			want:     "worker=off",
+		},
+	}
+
+	users := []struct {
+		name    string
+		user    string
+		mapping *DiscordUserMapping
+		reply   string
+	}{
+		{name: "linked", user: luDiscordUser},
+		{name: "no link", user: luOtherUser, reply: msgLinkAccountFirst},
+		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
+			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
+		}, reply: msgReRegisterForEmail},
+	}
+
+	for _, arm := range arms {
+		for _, u := range users {
+			t.Run(arm.name+"/"+u.name, func(t *testing.T) {
+				e := newLinkedUserEnv(t)
+				e.linkChannel(t)
+				if u.mapping != nil {
+					require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
+				}
+				before := arm.read(t, e, u.user)
+
+				ws := &writeCountingStore{Store: e.store}
+				e.callback.store = ws
+				i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+					CustomID: arm.customID,
+				}), u.user)
+				e.callback.Dispatch(e.session, i, arm.customID, nil)
+
+				if u.reply == "" {
+					assert.Equal(t, 1, ws.writeCount())
+					assert.Equal(t, arm.want, arm.read(t, e, u.user))
+					return
+				}
+				assert.Zero(t, ws.writeCount(), "no write without a linked account")
+				assert.Equal(t, before, arm.read(t, e, u.user))
+				assert.Contains(t, e.discord.allBodies(), jsonText(t, u.reply))
+			})
+		}
+	}
+}
+
+func TestSettingsButtons_ActOnTheChannelTheyArePressedIn(t *testing.T) {
+	const otherChannel = "chan-2"
+	const threadID = "thread-9"
+	ctx := context.Background()
+
+	setup := func(t *testing.T) (*linkedUserEnv, *writeCountingStore) {
+		t.Helper()
+		e := newLinkedUserEnv(t)
+		e.linkChannel(t)
+		require.NoError(t, e.store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID:   otherChannel,
+			GuildID:     testGuildID,
+			ProjectID:   "p2",
+			ProjectSlug: "proj-two",
+			LinkedBy:    luOtherUser,
+			LinkedAt:    time.Now(),
+			Active:      true,
+		}))
+		ws := &writeCountingStore{Store: e.store}
+		e.callback.store = ws
+		return e, ws
+	}
+	press := func(e *linkedUserEnv, channelID, customID string) {
+		i := luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+			CustomID: customID,
+		})
+		i.ChannelID = channelID
+		e.callback.Dispatch(e.session, i, customID, nil)
+	}
+	observe := func(t *testing.T, e *linkedUserEnv, channelID string) bool {
+		t.Helper()
+		link, err := e.store.GetChannelLink(ctx, channelID)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		return link.ShowAgentToAgent
+	}
+
+	for _, action := range []string{"observe", "statechange"} {
+		t.Run(action+"/panel for another channel", func(t *testing.T) {
+			e, ws := setup(t)
+
+			press(e, luChannel, "settings:"+action+":"+otherChannel)
+
+			assert.Zero(t, ws.writeCount(), "no write for a panel from another channel")
+			for _, ch := range []string{luChannel, otherChannel} {
+				link, err := e.store.GetChannelLink(ctx, ch)
+				require.NoError(t, err)
+				assert.False(t, link.ShowAgentToAgent, ch)
+				assert.False(t, link.ShowStateChanges, ch)
+			}
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, msgSettingsOtherChannel))
+		})
+	}
+
+	t.Run("thread press updates the linked parent channel", func(t *testing.T) {
+		e, ws := setup(t)
+		require.NoError(t, e.session.State.ChannelAdd(&discordgo.Channel{
+			ID: threadID, GuildID: testGuildID, ParentID: luChannel, Type: discordgo.ChannelTypeGuildPublicThread,
+		}))
+
+		press(e, threadID, "settings:observe:"+luChannel)
+
+		assert.Equal(t, 1, ws.writeCount())
+		assert.True(t, observe(t, e, luChannel))
+		assert.False(t, observe(t, e, otherChannel))
+	})
 }
