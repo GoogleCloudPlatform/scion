@@ -498,7 +498,9 @@ export class AgentStore {
    * the entry is fresh and the feed is live, otherwise after a walk (joining
    * one already in flight). Rejects with the walk's error, or with an
    * `AbortError` when `signal` aborts or the store is reset. Aborting
-   * detaches this caller only.
+   * detaches this caller only. A caller that joins a background walk (one
+   * waiting for the feed, say) is rejected with that walk's error even when
+   * the walk fails quietly and the snapshot stays ready.
    */
   ensure(q: AgentQuery, opts: EnsureOptions = {}): Promise<AgentListSnapshot> {
     const { signal, onProgress } = opts;
@@ -788,7 +790,8 @@ export class AgentStore {
       feedDropped: false,
       background: options.background === true,
     };
-    // The walk reads everything a probe would, or a walk it replaces.
+    // The walk reads everything a probe would. No caller starts a walk over
+    // another; aborting one in flight only guards against that.
     entry.probe?.abort();
     entry.probe = null;
     entry.walk?.controller.abort();
