@@ -467,22 +467,63 @@ func withLaunchReaperFailureHook(t *testing.T, fn func(point string) error) {
 	t.Cleanup(func() { launchReaperFailureHook = prev })
 }
 
+// disarmObserveParams is used by the "a failed tick disarms" tests
+// (R10_4, R10_5). It makes the arming threshold (8x keepalive = 8 minutes)
+// and the stale-ok_at re-disarm window (ReaperInterval + 5s margin) far
+// longer than any CI scheduling delay. With testReaperParams' 160ms
+// threshold, the tick that checks "now disarmed" could itself see the
+// cluster re-armed: under CPU load, more than 160ms can pass between the
+// best-effort disarm's storeNow and that tick's storeNow (ptone/scion#3002).
+var disarmObserveParams = store.ReaperParams{
+	KeepaliveInterval: time.Minute,
+	ReaperInterval:    time.Minute,
+}
+
+// armLaunchReaperForDisarmTest arms the cluster without relying on real
+// sleeps: one tick creates the arming row, then armed_since is backdated an
+// hour on the store clock, well past disarmObserveParams' 8-minute arming
+// threshold. It returns the backdated armed_since. A later tick using
+// disarmObserveParams then reports Armed == false only if something reset
+// armed_since to a recent value, such as the best-effort disarm write.
+func armLaunchReaperForDisarmTest(t *testing.T, ctx context.Context, s *AgentStore) time.Time {
+	t.Helper()
+	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	require.NoError(t, err)
+	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
+	armedSince := readStoreNow(t, ctx, s).Add(-time.Hour)
+	setLaunchReaperArmedSince(t, ctx, s, armedSince)
+	result, err = s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	require.NoError(t, err)
+	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
+	require.True(t, result.Armed, "setup: the cluster must be armed before this test exercises disarming it")
+	return armedSince
+}
+
+// requireDisarmedAfterFailedTick checks that the failed tick reset
+// armed_since: first by reading the persisted row, then through a normal
+// tick. Both checks are deterministic. Without the best-effort disarm
+// write, armed_since stays an hour old and both fail.
+func requireDisarmedAfterFailedTick(t *testing.T, ctx context.Context, s *AgentStore, armedBefore time.Time, msg string) {
+	t.Helper()
+	rs, err := s.client.LaunchReaperState.Get(ctx, launchReaperStateID)
+	require.NoError(t, err)
+	require.NotNil(t, rs.ArmedSince)
+	assert.True(t, rs.ArmedSince.After(armedBefore.Add(30*time.Minute)), "%s: armed_since must be reset to the disarm write's storeNow (was %v, now %v)", msg, armedBefore, *rs.ArmedSince)
+
+	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReaperTickCompleted, result.Outcome)
+	assert.False(t, result.Armed, msg)
+}
+
 func TestReaper_R10_4_TickLevelFailureDisarms(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newTestAgentStore(t)
 
-	// Arm the cluster first: a single healthy tick is not enough — arming
-	// requires 8x keepalive (160ms here) since armed_since. Without this
-	// setup, Armed == false would hold on the failing tick below regardless
-	// of whether the disarm write actually runs, making the assertion
-	// vacuous.
-	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
-	time.Sleep(300 * time.Millisecond)
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	require.True(t, result.Armed, "setup: the cluster must be armed before this test exercises disarming it")
+	// Arm the cluster first. Otherwise Armed == false would hold after the
+	// failing tick whether or not the disarm write runs, so the check
+	// would prove nothing.
+	armedBefore := armLaunchReaperForDisarmTest(t, ctx, s)
 
 	withLaunchReaperFailureHook(t, func(point string) error {
 		if point == "ok_at_write" {
@@ -490,21 +531,12 @@ func TestReaper_R10_4_TickLevelFailureDisarms(t *testing.T) {
 		}
 		return nil
 	})
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickFailed, result.Outcome)
 	launchReaperFailureHook = nil
 
-	// If the best-effort disarm write ran, armed_since was just reset to
-	// "now" (on a fresh connection/context), so the very next tick — run
-	// immediately, well within 8x keepalive of that reset — observes the
-	// cluster as freshly disarmed. Without the best-effort disarm write,
-	// armed_since stays at its old, already-8x-keepalive-old value from the
-	// arming step above, and this tick would still see Armed == true.
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	assert.Equal(t, store.ReaperTickCompleted, result.Outcome)
-	assert.False(t, result.Armed, "a tick-level failure must disarm the cluster (best-effort disarm write)")
+	requireDisarmedAfterFailedTick(t, ctx, s, armedBefore, "a tick-level failure must disarm the cluster (best-effort disarm write)")
 }
 
 // TestReaper_R10_5_LockAndSetLocalErrorsMapToUnavailable is PG-only: the
@@ -744,15 +776,9 @@ func TestReaper_R10_5_CommitFailureDisarms(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newTestAgentStore(t)
 
-	// Arm the cluster first: a single tick is not enough time to be armed,
-	// so a commit failure's disarm would be unobservable without this setup.
-	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
-	time.Sleep(300 * time.Millisecond)
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	require.True(t, result.Armed, "setup: the cluster must be armed before this test exercises disarming it")
+	// Arm the cluster first: a commit failure's disarm would be
+	// unobservable without this setup.
+	armedBefore := armLaunchReaperForDisarmTest(t, ctx, s)
 
 	withLaunchReaperFailureHook(t, func(point string) error {
 		if point == "commit" {
@@ -760,15 +786,12 @@ func TestReaper_R10_5_CommitFailureDisarms(t *testing.T) {
 		}
 		return nil
 	})
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
+	result, err := s.RunLaunchReaperTick(ctx, disarmObserveParams)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReaperTickFailed, result.Outcome)
 	launchReaperFailureHook = nil
 
-	result, err = s.RunLaunchReaperTick(ctx, testReaperParams)
-	require.NoError(t, err)
-	assert.Equal(t, store.ReaperTickCompleted, result.Outcome)
-	assert.False(t, result.Armed, "a failed commit must disarm the cluster via the best-effort disarm write")
+	requireDisarmedAfterFailedTick(t, ctx, s, armedBefore, "a failed commit must disarm the cluster via the best-effort disarm write")
 }
 
 // --- design §6 H-2: extended arming scenarios (store outage, two replicas) --
