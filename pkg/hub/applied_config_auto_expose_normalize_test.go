@@ -476,7 +476,7 @@ func (s *aeConflictOnceStore) UpdateAgent(ctx context.Context, a *store.Agent) e
 	}
 	s.conflicted = true
 	if s.concurrentPatch {
-		latest, err := s.Store.GetAgent(ctx, a.ID)
+		latest, err := s.GetAgent(ctx, a.ID)
 		if err != nil {
 			return err
 		}
