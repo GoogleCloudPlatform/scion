@@ -388,10 +388,7 @@ func (s *postgresStore) CreatePendingAskUser(ctx context.Context, req *PendingAs
 	const q = `
 INSERT INTO teams_pending_ask_users (request_id, activity_id, conversation_id, agent_slug, project_id, choices, expires_at, responded)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT(request_id) DO UPDATE SET
-	activity_id=EXCLUDED.activity_id, conversation_id=EXCLUDED.conversation_id, agent_slug=EXCLUDED.agent_slug,
-	project_id=EXCLUDED.project_id, choices=EXCLUDED.choices, expires_at=EXCLUDED.expires_at,
-	responded=EXCLUDED.responded`
+ON CONFLICT(request_id) DO NOTHING`
 	_, err = s.db.ExecContext(ctx, q,
 		req.RequestID, req.ActivityID, req.ConversationID,
 		req.AgentSlug, req.ProjectID, string(choicesJSON),
@@ -418,8 +415,20 @@ func (s *postgresStore) GetPendingAskUser(ctx context.Context, requestID string)
 	return &p, nil
 }
 
-func (s *postgresStore) MarkAskUserResponded(ctx context.Context, requestID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE teams_pending_ask_users SET responded = TRUE WHERE request_id = $1`, requestID)
+func (s *postgresStore) MarkAskUserResponded(ctx context.Context, requestID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE teams_pending_ask_users SET responded = TRUE WHERE request_id = $1 AND responded = FALSE`, requestID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *postgresStore) ResetAskUserResponded(ctx context.Context, requestID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE teams_pending_ask_users SET responded = FALSE WHERE request_id = $1`, requestID)
 	return err
 }
 

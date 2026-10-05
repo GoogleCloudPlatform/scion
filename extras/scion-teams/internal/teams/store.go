@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
@@ -64,9 +65,16 @@ type Store interface {
 	GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error)
 
 	// Pending ask-user requests
+	// CreatePendingAskUser stores req unless a request with the same ID
+	// already exists, in which case the existing request is kept unchanged.
 	CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error
 	GetPendingAskUser(ctx context.Context, requestID string) (*PendingAskUser, error)
-	MarkAskUserResponded(ctx context.Context, requestID string) error
+	// MarkAskUserResponded marks an unanswered request as answered. It
+	// returns false when the request was already answered or does not exist.
+	MarkAskUserResponded(ctx context.Context, requestID string) (bool, error)
+	// ResetAskUserResponded marks a request as unanswered again so it can
+	// be retried.
+	ResetAskUserResponded(ctx context.Context, requestID string) error
 	DeleteExpiredAskUsers(ctx context.Context) (int, error)
 
 	// Callback lookup
@@ -99,7 +107,16 @@ func NewSQLiteStore(dbPath string) (Store, error) {
 		dbPath = expanded
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Apply the busy timeout on every pooled connection, not just the first,
+	// so concurrent writes wait for the lock instead of failing.
+	dsn := dbPath
+	if strings.Contains(dsn, "?") {
+		dsn += "&_pragma=busy_timeout(5000)"
+	} else {
+		dsn += "?_pragma=busy_timeout(5000)"
+	}
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
@@ -487,10 +504,7 @@ func (s *sqliteStore) CreatePendingAskUser(ctx context.Context, req *PendingAskU
 	const q = `
 INSERT INTO pending_ask_users (request_id, activity_id, conversation_id, agent_slug, project_id, choices, expires_at, responded)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(request_id) DO UPDATE SET
-	activity_id=excluded.activity_id, conversation_id=excluded.conversation_id, agent_slug=excluded.agent_slug,
-	project_id=excluded.project_id, choices=excluded.choices, expires_at=excluded.expires_at,
-	responded=excluded.responded`
+ON CONFLICT(request_id) DO NOTHING`
 	_, err = s.db.ExecContext(ctx, q,
 		req.RequestID, req.ActivityID, req.ConversationID,
 		req.AgentSlug, req.ProjectID, string(choicesJSON),
@@ -523,8 +537,20 @@ func (s *sqliteStore) GetPendingAskUser(ctx context.Context, requestID string) (
 	return &p, nil
 }
 
-func (s *sqliteStore) MarkAskUserResponded(ctx context.Context, requestID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 1 WHERE request_id = ?`, requestID)
+func (s *sqliteStore) MarkAskUserResponded(ctx context.Context, requestID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 1 WHERE request_id = ? AND responded = 0`, requestID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *sqliteStore) ResetAskUserResponded(ctx context.Context, requestID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 0 WHERE request_id = ?`, requestID)
 	return err
 }
 

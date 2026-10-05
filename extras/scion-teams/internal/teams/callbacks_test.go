@@ -19,6 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,8 +392,8 @@ func askUserPayloadFor(t *testing.T) inboundPayload {
 	t.Helper()
 	var payload inboundPayload
 	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
 		w.WriteHeader(http.StatusOK)
 	})
 	linkTestUser(t, broker)
@@ -750,4 +754,155 @@ func TestCallbackHandler_AskInput_RetryableFailuresKeepCard(t *testing.T) {
 		require.NoError(t, err)
 		assertReplacesCard(t, resp)
 	})
+}
+
+// pendingAsk stores an open ask-user request req-1 for dev-1 in proj-1,
+// first posted to conversationID.
+func pendingAsk(t *testing.T, store Store, conversationID string) {
+	t.Helper()
+	require.NoError(t, store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+		RequestID:      "req-1",
+		ConversationID: conversationID,
+		AgentSlug:      "dev-1",
+		ProjectID:      "proj-1",
+		Choices:        []string{"approve", "reject"},
+		ExpiresAt:      time.Now().Add(10 * time.Minute),
+	}))
+}
+
+func askResponse(choice string) *Activity {
+	return invokeActivity(map[string]string{"action": "ask_response", "request_id": "req-1", "choice": choice})
+}
+
+func TestCallbackHandler_AskResponse_RoutesToAnsweringConversation(t *testing.T) {
+	var payload inboundPayload
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestUser(t, broker)
+	pendingAsk(t, broker.store, "conv-first")
+
+	activity := askResponse("approve")
+	activity.Conversation.ID = "conv-1;messageid=123"
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), activity)
+	require.NoError(t, err)
+	assertReplacesCard(t, resp)
+
+	require.NotNil(t, payload.Message)
+	assert.Equal(t, "conv-1", payload.Message.ThreadID)
+	assert.Equal(t, "conv-1", payload.Message.Metadata["teams_conversation_id"])
+}
+
+func TestCallbackHandler_AskResponse_InvalidChoiceKeepsCard(t *testing.T) {
+	tests := []struct {
+		name     string
+		activity *Activity
+		want     string
+	}{
+		{"choice not offered", askResponse("delete-everything"), "That choice isn't available for this question. Please use one of the buttons."},
+		{"empty custom reply", invokeActivity(map[string]string{"action": "ask_response", "request_id": "req-1", "choice": "custom", "reply_text": "  "}), "Please type a reply before sending."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hubCalled := false
+			broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+				hubCalled = true
+				w.WriteHeader(http.StatusOK)
+			})
+			linkTestUser(t, broker)
+			pendingAsk(t, broker.store, "conv-1")
+
+			resp, err := broker.callbackHandler.HandleInvoke(context.Background(), tt.activity)
+			require.NoError(t, err)
+			assertKeepsCard(t, resp, tt.want)
+			assert.False(t, hubCalled)
+
+			pending, err := broker.store.GetPendingAskUser(context.Background(), "req-1")
+			require.NoError(t, err)
+			assert.False(t, pending.Responded)
+		})
+	}
+}
+
+func TestCallbackHandler_AskResponse_CustomReplyIsDelivered(t *testing.T) {
+	var payload inboundPayload
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestUser(t, broker)
+	pendingAsk(t, broker.store, "conv-1")
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action": "ask_response", "request_id": "req-1", "choice": "custom", "reply_text": "ship it tomorrow",
+	}))
+	require.NoError(t, err)
+	assertReplacesCard(t, resp)
+	require.NotNil(t, payload.Message)
+	assert.Equal(t, "ship it tomorrow", payload.Message.Msg)
+}
+
+func TestCallbackHandler_AskResponse_ConcurrentClicksDeliverOnce(t *testing.T) {
+	var deliveries int32
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&deliveries, 1)
+		w.WriteHeader(http.StatusOK)
+	})
+	// Use a file-backed store so concurrent clicks share one database.
+	fileStore, err := NewSQLiteStore(filepath.Join(t.TempDir(), "teams.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { fileStore.Close() })
+	broker.store = fileStore
+	linkTestUser(t, broker)
+	pendingAsk(t, broker.store, "conv-1")
+
+	const clicks = 8
+	responses := make([]*InvokeResponse, clicks)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < clicks; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			resp, err := broker.callbackHandler.HandleInvoke(context.Background(), askResponse("approve"))
+			assert.NoError(t, err)
+			responses[i] = resp
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&deliveries), "exactly one click is delivered")
+	answered, already := 0, 0
+	for _, resp := range responses {
+		raw, err := json.Marshal(resp.Body)
+		require.NoError(t, err)
+		switch {
+		case strings.Contains(string(raw), "Responded:"):
+			answered++
+		case strings.Contains(string(raw), "already been responded to"):
+			already++
+			assertReplacesCard(t, resp)
+		default:
+			t.Errorf("unexpected response %s", raw)
+		}
+	}
+	assert.Equal(t, 1, answered)
+	assert.Equal(t, clicks-1, already)
+}
+
+func TestCallbackHandler_AskInput_SendReplyHasVerb(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, nil)
+	pendingAsk(t, broker.store, "conv-1")
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action": "ask_input", "request_id": "req-1",
+	}))
+	require.NoError(t, err)
+	raw, err := json.Marshal(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"type":"Action.Execute"`)
+	assert.Contains(t, string(raw), `"verb":"ask_response"`)
 }

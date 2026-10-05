@@ -466,9 +466,21 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	// Store ask-user requests before the card is sent so button clicks can
-	// be answered.
-	if msg.Type == messages.TypeInputNeeded && store != nil {
-		b.storePendingAskUser(ctx, store, msg, projectID, agentSlug, targets[0].conversationID)
+	// be answered. Plain-text messages have no buttons and need no request.
+	// If the request cannot be stored, send the question without buttons and
+	// ask for a reply message instead.
+	if msg.Type == messages.TypeInputNeeded && len(activity.Attachments) > 0 {
+		var storeErr error
+		if store == nil {
+			storeErr = fmt.Errorf("store not initialized")
+		} else {
+			storeErr = b.storePendingAskUser(ctx, store, msg, projectID, agentSlug, targets[0].conversationID)
+		}
+		if storeErr != nil {
+			b.log.Error("Failed to store pending ask-user request, sending question without buttons",
+				"request_id", msg.Metadata["request_id"], "error", storeErr)
+			activity = askUserWithoutButtons(msg)
+		}
 	}
 
 	// TODO(Phase 3): Add dedup guard before sending. Discord has dedup
@@ -514,8 +526,28 @@ func newAskRequestID() string {
 	return "ask-" + hex.EncodeToString(b)
 }
 
+// askUserNoButtonsNote is appended when an ask-user question is sent
+// without buttons.
+const askUserNoButtonsNote = "_Buttons are unavailable for this question. To answer, reply with a message._"
+
+// askUserWithoutButtons returns a plain-text activity for an ask-user
+// question, listing the choices and asking for a reply message.
+func askUserWithoutButtons(msg *messages.StructuredMessage) *Activity {
+	var sb strings.Builder
+	if slug := deriveAgentSlug(msg.Sender); slug != "" {
+		fmt.Fprintf(&sb, "[%s] ", slug)
+	}
+	sb.WriteString(msg.Msg)
+	if choices := askUserMetadataChoices(msg); len(choices) > 0 {
+		fmt.Fprintf(&sb, "\n\nChoices: %s", strings.Join(choices, ", "))
+	}
+	sb.WriteString("\n\n" + askUserNoButtonsNote)
+	return &Activity{Type: "message", Text: sb.String()}
+}
+
 // storePendingAskUser records an ask-user request posted to conversationID.
-func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg *messages.StructuredMessage, projectID, topicAgentSlug, conversationID string) {
+// An existing request with the same ID is left unchanged.
+func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg *messages.StructuredMessage, projectID, topicAgentSlug, conversationID string) error {
 	agentSlug := topicAgentSlug
 	if strings.HasPrefix(msg.Sender, "agent:") {
 		agentSlug = strings.TrimPrefix(msg.Sender, "agent:")
@@ -535,9 +567,7 @@ func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg 
 		b.log.Warn("Ask-user message without project or agent, buttons cannot be answered",
 			"request_id", pending.RequestID, "project_id", pending.ProjectID, "agent_slug", pending.AgentSlug)
 	}
-	if err := store.CreatePendingAskUser(ctx, pending); err != nil {
-		b.log.Error("Failed to store pending ask-user request", "request_id", pending.RequestID, "error", err)
-	}
+	return store.CreatePendingAskUser(ctx, pending)
 }
 
 // parsePublishTopic extracts projectID and agentSlug from a topic string.

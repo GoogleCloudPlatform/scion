@@ -935,8 +935,8 @@ func linkDefaultAgentChannel(t *testing.T, broker *TeamsBroker) {
 func TestBroker_HandleMessage_DeliversAsLinkedUser(t *testing.T) {
 	var payload inboundPayload
 	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
 		w.WriteHeader(http.StatusOK)
 	})
 	linkTestUser(t, broker)
@@ -1028,9 +1028,10 @@ func TestCommands_LinkLookupErrorRepliesGenerically(t *testing.T) {
 	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
 }
 
-// publishAskUserCard publishes an ask-user message for agent dev-1 in
-// proj-1 to a linked conversation and returns the broker and the card sent.
-func publishAskUserCard(t *testing.T, metadata map[string]string) (*TeamsBroker, map[string]interface{}) {
+// newAskUserBroker returns a broker with conv-1 linked to proj-1 and a
+// function returning the activities sent to Teams. wrap, when non-nil,
+// wraps the broker's store.
+func newAskUserBroker(t *testing.T, wrap func(Store) Store) (*TeamsBroker, func() []Activity) {
 	t.Helper()
 	var mu sync.Mutex
 	var sent []Activity
@@ -1061,29 +1062,55 @@ func publishAskUserCard(t *testing.T, metadata map[string]string) (*TeamsBroker,
 		ServiceURL:     apiServer.URL,
 		UpdatedAt:      time.Now(),
 	}))
+	if wrap != nil {
+		broker.mu.Lock()
+		broker.store = wrap(broker.store)
+		broker.mu.Unlock()
+	}
+	return broker, func() []Activity {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]Activity(nil), sent...)
+	}
+}
 
-	msg := &messages.StructuredMessage{
+// publishAskUser publishes an ask-user message from agent dev-1 in proj-1
+// and waits until want activities have been sent in total.
+func publishAskUser(t *testing.T, broker *TeamsBroker, sent func() []Activity, msg *messages.StructuredMessage, want int) []Activity {
+	t.Helper()
+	require.NoError(t, broker.Publish(context.Background(), projectkeys.AgentTopic("proj-1", "dev-1"), msg))
+	require.Eventually(t, func() bool { return len(sent()) >= want }, 5*time.Second, 10*time.Millisecond)
+	return sent()
+}
+
+func askUserMessage(metadata map[string]string) *messages.StructuredMessage {
+	return &messages.StructuredMessage{
 		Version:  messages.Version,
 		Sender:   "agent:dev-1",
 		Msg:      "Deploy to production?",
 		Type:     messages.TypeInputNeeded,
 		Metadata: metadata,
 	}
-	require.NoError(t, broker.Publish(ctx, projectkeys.AgentTopic("proj-1", "dev-1"), msg))
+}
 
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(sent) > 0
-	}, 5*time.Second, 10*time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, sent[0].Attachments, 1)
-	raw, err := json.Marshal(sent[0].Attachments[0].Content)
+// cardOf decodes the Adaptive Card attached to a.
+func cardOf(t *testing.T, a Activity) map[string]interface{} {
+	t.Helper()
+	require.Len(t, a.Attachments, 1)
+	raw, err := json.Marshal(a.Attachments[0].Content)
 	require.NoError(t, err)
 	var card map[string]interface{}
 	require.NoError(t, json.Unmarshal(raw, &card))
-	return broker, card
+	return card
+}
+
+// publishAskUserCard publishes an ask-user message for agent dev-1 in
+// proj-1 to a linked conversation and returns the broker and the card sent.
+func publishAskUserCard(t *testing.T, metadata map[string]string) (*TeamsBroker, map[string]interface{}) {
+	t.Helper()
+	broker, sent := newAskUserBroker(t, nil)
+	activities := publishAskUser(t, broker, sent, askUserMessage(metadata), 1)
+	return broker, cardOf(t, activities[0])
 }
 
 func TestBroker_Publish_AskUserStoresPendingRequest(t *testing.T) {
@@ -1130,8 +1157,8 @@ func TestBroker_AskUserCardButtonDeliversAnswer(t *testing.T) {
 
 	var payload inboundPayload
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(hubServer.Close)
@@ -1181,4 +1208,61 @@ func TestBroker_AskUserCardButtonDeliversAnswer(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.True(t, pending.Responded)
+}
+
+func TestBroker_Publish_AskUserRepublishKeepsAnsweredRequest(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	ctx := context.Background()
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-42"}), 1)
+	claimed, err := broker.store.MarkAskUserResponded(ctx, "req-42")
+	require.NoError(t, err)
+	require.True(t, claimed)
+	before, err := broker.store.GetPendingAskUser(ctx, "req-42")
+	require.NoError(t, err)
+
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-42"}), 2)
+
+	after, err := broker.store.GetPendingAskUser(ctx, "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.True(t, after.Responded, "re-publishing must not reopen an answered request")
+	assert.True(t, before.ExpiresAt.Equal(after.ExpiresAt), "re-publishing must not extend the expiry")
+}
+
+// pendingAskCreateErrorStore fails every pending ask-user write.
+type pendingAskCreateErrorStore struct {
+	Store
+}
+
+func (pendingAskCreateErrorStore) CreatePendingAskUser(context.Context, *PendingAskUser) error {
+	return errors.New("database unavailable")
+}
+
+func TestBroker_Publish_AskUserStoreFailureSendsWithoutButtons(t *testing.T) {
+	broker, sent := newAskUserBroker(t, func(s Store) Store { return pendingAskCreateErrorStore{Store: s} })
+
+	activities := publishAskUser(t, broker, sent, askUserMessage(map[string]string{
+		"request_id": "req-42",
+		"choices":    `["Yes","No"]`,
+	}), 1)
+
+	require.Len(t, activities, 1)
+	a := activities[0]
+	assert.Empty(t, a.Attachments, "no buttons when the request could not be stored")
+	assert.Contains(t, a.Text, "[dev-1] Deploy to production?")
+	assert.Contains(t, a.Text, "Choices: Yes, No")
+	assert.Contains(t, a.Text, "reply with a message")
+}
+
+func TestBroker_Publish_PlainAskUserIsNotStored(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	msg := askUserMessage(map[string]string{"request_id": "req-plain"})
+	msg.Plain = true
+
+	activities := publishAskUser(t, broker, sent, msg, 1)
+
+	assert.Empty(t, activities[0].Attachments)
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-plain")
+	require.NoError(t, err)
+	assert.Nil(t, pending, "plain-text questions have no buttons to answer")
 }

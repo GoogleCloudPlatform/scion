@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -141,13 +142,22 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		return h.respondWithUpdatedCard(activity, "This request has expired."), nil
 	}
 
-	// When the choice is "custom", use the text typed into the Input.Text field.
+	// When the choice is "custom", use the text typed into the Input.Text
+	// field. Other choices must be one of the request's choices. Invalid input
+	// keeps the card so the user can answer again.
 	responseText := choice
 	if choice == "custom" {
-		if replyText, ok := data["reply_text"].(string); ok && replyText != "" {
-			responseText = replyText
+		replyText, _ := data["reply_text"].(string)
+		if strings.TrimSpace(replyText) == "" {
+			return h.respondWithMessage("Please type a reply before sending."), nil
 		}
+		responseText = replyText
+	} else if !containsChoice(pending.Choices, choice) {
+		return h.respondWithMessage("That choice isn't available for this question. Please use one of the buttons."), nil
 	}
+
+	// Replies go back to the conversation the answer came from.
+	conversationID := stripThreadSuffix(activity.Conversation.ID)
 
 	// Answers are sent as the linked user. Without a usable link, show what to
 	// do next and keep the card so the request can still be answered.
@@ -160,17 +170,26 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		return h.respondWithMessage(problem), nil
 	}
 
-	// Deliver the response to the hub. On failure keep the card so the
-	// answer can be retried.
-	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, responseText); err != nil {
-		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		return h.respondWithMessage(
-			hubErrorText(err, mapping, h.projectSlugFor(ctx, pending.ConversationID), "Failed to deliver your response. Please try again.")), nil
+	// Claim the request so only one click is delivered. A click that loses
+	// the claim is told the request was already answered.
+	claimed, err := store.MarkAskUserResponded(ctx, requestID)
+	if err != nil {
+		h.log.Error("Failed to mark ask-user as responded", "request_id", requestID, "error", err)
+		return h.respondWithMessage("An error occurred processing your response. Please try again."), nil
+	}
+	if !claimed {
+		return h.respondWithUpdatedCard(activity, "This request has already been responded to."), nil
 	}
 
-	// Mark as responded.
-	if err := store.MarkAskUserResponded(ctx, requestID); err != nil {
-		h.log.Warn("Failed to mark ask-user as responded", "error", err)
+	// Deliver the response to the hub. On failure release the claim and keep
+	// the card so the answer can be retried.
+	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, conversationID, responseText); err != nil {
+		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
+		if resetErr := store.ResetAskUserResponded(ctx, requestID); resetErr != nil {
+			h.log.Error("Failed to reopen ask-user request", "request_id", requestID, "error", resetErr)
+		}
+		return h.respondWithMessage(
+			hubErrorText(err, mapping, h.projectSlugFor(ctx, conversationID), "Failed to deliver your response. Please try again.")), nil
 	}
 
 	// Build updated card showing the response.
@@ -229,7 +248,7 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 			InputText{Type: "Input.Text", ID: "reply_text", IsMultiline: true, Placeholder: "Type your reply..."},
 		},
 		Actions: []CardAction{
-			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive",
+			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive", Verb: "ask_response",
 				Data: map[string]interface{}{"action": "ask_response", "request_id": requestID, "choice": "custom"}},
 		},
 	}
@@ -358,8 +377,10 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 // --- Helpers ---
 
 // deliverAskUserResponse sends the user's choice to the hub via inbound
-// delivery as the linked user.
-func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, mapping *TeamsUserMapping, responseText string) error {
+// delivery as the linked user. conversationID is the conversation the answer
+// came from; the agent's follow-up is routed there. pending.ConversationID is
+// where the card was first posted and is informational only.
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, mapping *TeamsUserMapping, conversationID, responseText string) error {
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
 		return fmt.Errorf("hub client not configured")
@@ -377,9 +398,9 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 		Msg:       responseText,
 		Type:      messages.TypeInstruction,
 		Channel:   "teams",
-		ThreadID:  pending.ConversationID,
+		ThreadID:  conversationID,
 		Metadata: map[string]string{
-			"teams_conversation_id": pending.ConversationID,
+			"teams_conversation_id": conversationID,
 			"project_id":            pending.ProjectID,
 			"ask_request_id":        pending.RequestID,
 		},
@@ -388,6 +409,16 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 
 	return hubClient.DeliverInbound(ctx, topic, msg)
+}
+
+// containsChoice reports whether choice is one of choices.
+func containsChoice(choices []string, choice string) bool {
+	for _, c := range choices {
+		if c == choice {
+			return true
+		}
+	}
+	return false
 }
 
 // respondWithMessage creates an InvokeResponse that shows text to the user

@@ -712,12 +712,80 @@ func TestPendingAskUser(t *testing.T) {
 			ExpiresAt:      time.Now().Add(time.Hour).UTC(),
 		}))
 
-		require.NoError(t, store.MarkAskUserResponded(ctx, "req-123"))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
 
 		got, err := store.GetPendingAskUser(ctx, "req-123")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.True(t, got.Responded)
+
+		// A second mark does not claim the request again.
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+
+		// Unknown requests are not claimed.
+		claimed, err = store.MarkAskUserResponded(ctx, "missing")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+	})
+
+	t.Run("ResetResponded", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID: "req-123",
+			ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.ResetAskUserResponded(ctx, "req-123"))
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, got.Responded)
+
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
+	})
+
+	t.Run("CreateKeepsExisting", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-1",
+			AgentSlug:      "dev-1",
+			Choices:        []string{"yes"},
+			ExpiresAt:      expires,
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-2",
+			AgentSlug:      "dev-2",
+			Choices:        []string{"no"},
+			ExpiresAt:      expires.Add(24 * time.Hour),
+		}))
+
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.True(t, got.Responded)
+		assert.Equal(t, "conv-1", got.ConversationID)
+		assert.Equal(t, "dev-1", got.AgentSlug)
+		assert.Equal(t, []string{"yes"}, got.Choices)
+		assert.True(t, expires.Equal(got.ExpiresAt))
 	})
 
 	t.Run("DeleteExpired", func(t *testing.T) {
