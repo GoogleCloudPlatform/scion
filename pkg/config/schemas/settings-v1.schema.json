@@ -1243,19 +1243,35 @@
         "cloudrun_volume": {
           "type": "object",
           "properties": {
-            "volume_name": { "type": "string" },
+            "volume_name": { "type": "string", "description": "Cloud Run volume declared in the service; mounted at /mnt/<volume_name>. Required when backend is cloudrun-volume." },
             "subpath_root": { "type": "string", "default": "projects" }
           }
         },
         "gke_shared_volume": {
           "type": "object",
           "properties": {
-            "volume_name": { "type": "string" },
+            "volume_name": { "type": "string", "description": "Pod volume that mounts the shared PVC at /mnt/<volume_name>. Required when backend is gke-shared-volume." },
             "pv_claim_name": { "type": "string" },
             "subpath_root": { "type": "string", "default": "projects" }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "backend": { "const": "cloudrun-volume" } }, "required": ["backend"] },
+          "then": {
+            "required": ["cloudrun_volume"],
+            "properties": { "cloudrun_volume": { "required": ["volume_name"], "properties": { "volume_name": { "minLength": 1 } } } }
+          }
+        },
+        {
+          "if": { "properties": { "backend": { "const": "gke-shared-volume" } }, "required": ["backend"] },
+          "then": {
+            "required": ["gke_shared_volume"],
+            "properties": { "gke_shared_volume": { "required": ["volume_name"], "properties": { "volume_name": { "minLength": 1 } } } }
+          }
+        }
+      ]
     },
     "serverWorkspaceStorageNFS": {
       "type": "object",

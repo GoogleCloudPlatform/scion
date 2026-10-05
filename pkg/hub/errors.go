@@ -57,6 +57,10 @@ const (
 	ErrCodeUnavailable          = "unavailable"
 	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
 	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
+	// broker (by ID, name or slug) that does not exist at all, as opposed to
+	// one that exists but is offline/unreachable (runtime_broker_unavailable).
+	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
 
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
@@ -309,6 +313,12 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = deleteInProgressRefusal("").Message
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -495,6 +505,29 @@ func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableB
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 		"Specified runtime broker is unavailable", details)
+}
+
+// RuntimeBrokerNotFound writes a 404 Not Found response when the explicitly
+// requested runtime broker does not exist. The message names the requested
+// broker and the brokers the caller may use, because CLI clients print only
+// the message (not Details).
+func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBrokers []RuntimeBrokerSummary) {
+	names := make([]string, 0, len(usableBrokers))
+	for _, b := range usableBrokers {
+		names = append(names, fmt.Sprintf("%q", b.Name))
+	}
+	var message string
+	if len(names) > 0 {
+		message = fmt.Sprintf("Runtime broker %q not found. Brokers you can use for this project: %s",
+			requested, strings.Join(names, ", "))
+	} else {
+		message = fmt.Sprintf("Runtime broker %q not found, and no runtime brokers are currently available to you for this project", requested)
+	}
+	details := map[string]interface{}{
+		"requestedBrokerId": requested,
+		"availableBrokers":  usableBrokers,
+	}
+	writeError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
 }
 
 // MissingEnvVars writes a 422 Unprocessable Entity response when required

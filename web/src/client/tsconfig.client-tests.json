@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
+  "include": [
+    "agent-store.test.ts",
+    "agent-store-feed.test.ts",
+    "paginate-all.test.ts",
+    "state.test.ts",
+    "__fixtures__/agent-store-harness.ts"
+  ],
+  "exclude": []
+}

@@ -38,7 +38,7 @@ type RenderDeliveryInput struct {
 
 	// Msg is the StructuredMessage being dispatched. The helper reads
 	// sender, recipient, type, body, attachments, metadata, visibility,
-	// and transport flags (Plain, Raw) from it.
+	// and transport flag (Plain) from it.
 	Msg *messages.StructuredMessage
 
 	// CreatedAt is the message timestamp. When zero, time.Now().UTC() is
@@ -82,8 +82,8 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		return ""
 	}
 
-	// Transport flags: plain/raw messages deliver body text only.
-	if in.Msg.Plain || in.Msg.Raw {
+	// Transport flag: plain messages deliver body text only.
+	if in.Msg.Plain {
 		return in.Msg.Msg
 	}
 
@@ -126,7 +126,6 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	// FormatNewDelivery handles the envelope framing.
 	opts := DeliveryOptions{
 		Plain: in.Msg.Plain,
-		Raw:   in.Msg.Raw,
 	}
 	return FormatNewDelivery(msg, addrs, convInfo, opts, in.IsMention, in.ReplyToID != "")
 }

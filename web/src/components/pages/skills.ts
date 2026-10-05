@@ -25,12 +25,15 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Skill, SkillScope, Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { paginateAll, PaginationError, PaginationStoppedError } from '../../client/paginate-all.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
+
+/** Skills requested per page; the server's maximum list limit. */
+const SKILLS_PAGE_SIZE = 200;
 
 type SkillSortField = 'name' | 'updated' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -44,6 +47,9 @@ export class ScionPageSkills extends LitElement {
   @state() private error: string | null = null;
   @state() private skills: Skill[] = [];
   @state() private scopeCapabilities: Capabilities | undefined;
+  /** Set when a page after the first failed; the loaded pages are still shown. */
+  @state() private partialLoadError: string | null = null;
+  private loadGeneration = 0;
   @state() private viewMode: ViewMode = 'grid';
   @state() private searchQuery = '';
   @state() private scopeFilter: SkillScope | '' = '';
@@ -207,9 +213,11 @@ export class ScionPageSkills extends LitElement {
     }
 
     const ssrData = this.pageData?.data as
-      | { skills?: Skill[]; _capabilities?: Capabilities }
+      | { skills?: Skill[]; nextCursor?: string; _capabilities?: Capabilities }
       | undefined;
-    if (ssrData?.skills && this.scopeFilter === '' && !this.searchQuery) {
+    // The server prefetch is a single page; when it has more, walk every
+    // page on the client instead (ptone/scion#1949).
+    if (ssrData?.skills && !ssrData.nextCursor && this.scopeFilter === '' && !this.searchQuery) {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
       this.loading = false;
@@ -219,8 +227,16 @@ export class ScionPageSkills extends LitElement {
   }
 
   private async loadSkills(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.loading = true;
     this.error = null;
+    this.partialLoadError = null;
+
+    // Pages are collected here as they arrive, so a failure after the first
+    // page can still show what was loaded (ptone/scion#1949).
+    const loaded: Skill[] = [];
+    let capabilities: Capabilities | undefined;
+    let firstPage = true;
 
     try {
       const params = new URLSearchParams();
@@ -228,28 +244,48 @@ export class ScionPageSkills extends LitElement {
       if (this.scopeFilter) params.set('scope', this.scopeFilter);
       if (this.searchQuery) params.set('search', this.searchQuery);
 
-      const response = await apiFetch(`/api/v1/skills?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const data = (await response.json()) as
-        | { skills?: Skill[]; items?: Skill[]; _capabilities?: Capabilities }
-        | Skill[];
-      if (Array.isArray(data)) {
-        this.skills = data;
-        this.scopeCapabilities = undefined;
-      } else {
-        this.skills = data.skills || data.items || [];
-        this.scopeCapabilities = data._capabilities;
-      }
+      await paginateAll<Skill>({
+        path: `/api/v1/skills?${params.toString()}`,
+        pageSize: SKILLS_PAGE_SIZE,
+        label: 'Skills',
+        // A newer load (search or scope change) supersedes this one, and a
+        // detached page needs no more pages.
+        shouldContinue: () => generation === this.loadGeneration && this.isConnected,
+        parsePage: (body) => {
+          const data = body as {
+            skills?: Skill[];
+            items?: Skill[];
+            nextCursor?: string;
+            _capabilities?: Capabilities;
+          };
+          // Scope capabilities (e.g. create) come with the first page.
+          if (firstPage) capabilities = data._capabilities;
+          firstPage = false;
+          const items = data.skills || data.items || [];
+          loaded.push(...items);
+          return { items, ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
+        },
+      });
+      if (generation !== this.loadGeneration) return;
+      this.skills = loaded;
+      this.scopeCapabilities = capabilities;
     } catch (err) {
+      if (generation !== this.loadGeneration || err instanceof PaginationStoppedError) return;
       console.error('Failed to load skills:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load skills';
+      const message = err instanceof Error ? err.message : 'Failed to load skills';
+      if (firstPage) {
+        // paginateAll's errors are terse ("Skills request failed: 403"), so
+        // say what failed; other errors (e.g. network) read as they are.
+        this.error =
+          err instanceof PaginationError ? `Failed to load skills (${message})` : message;
+      } else {
+        // A later page failed: keep the pages that loaded and say so.
+        this.skills = loaded;
+        this.scopeCapabilities = capabilities;
+        this.partialLoadError = message;
+      }
     } finally {
-      this.loading = false;
+      if (generation === this.loadGeneration) this.loading = false;
     }
   }
 
@@ -344,7 +380,9 @@ export class ScionPageSkills extends LitElement {
         ? this.renderLoading()
         : this.error
           ? this.renderError()
-          : html` ${this.renderFilterBar()} ${this.renderSkills()} `}
+          : html`
+              ${this.renderFilterBar()} ${this.renderPartialLoadNotice()} ${this.renderSkills()}
+            `}
     `;
   }
 
@@ -402,6 +440,24 @@ export class ScionPageSkills extends LitElement {
             `
           : nothing}
       </div>
+    `;
+  }
+
+  private renderPartialLoadNotice() {
+    if (!this.partialLoadError) return nothing;
+    return html`
+      <sl-alert class="partial-load-notice" variant="warning" open>
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        Showing ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'}; the rest could
+        not be loaded (${this.partialLoadError}).
+        <sl-button
+          size="small"
+          variant="text"
+          class="partial-load-retry"
+          @click=${() => this.loadSkills()}
+          >Retry</sl-button
+        >
+      </sl-alert>
     `;
   }
 
