@@ -168,7 +168,7 @@ func TestConduitAdmission_ReusedContainerAdoptedRunID(t *testing.T) {
 
 	d := NewHTTPAgentDispatcherWithClient(f.store, nil, false, slog.Default())
 	agent := *f.launched
-	minted, _, err := d.beginRun(ctx, &agent)
+	minted, _, _, err := d.beginRun(ctx, &agent)
 	require.NoError(t, err)
 	require.NotEqual(t, containerRun, minted)
 
