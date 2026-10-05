@@ -980,6 +980,33 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(bannerText(el, 'stale')).toBe(STALE);
     });
 
+    it('a probe sent after a late first connect has come up shows no stale banner', async () => {
+      vi.stubGlobal('EventSource', SilentEventSource);
+      stateManager.setScope({ type: 'agent-detail', agentId: 'x' });
+      const fake = newFake(25);
+      const h = holdable(fakeFetch(fake), (u) => !u.searchParams.has('sort'));
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      h.hold(1);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const el = await mountUnsettled('', { connectTimeoutMs: 60_000 });
+      vi.advanceTimersByTime(3000);
+      expect((el as unknown as { firstConnectLate: boolean }).firstConnectLate).toBe(true);
+      // The unscoped drain is still waiting for the connection, so no banner yet.
+      expect(g(el).stale).toBe(false);
+      vi.useRealTimers();
+      stateManager.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      g(el).setProjectFilter('p-1');
+      await settle(el);
+      // The aborted unscoped drain page never reached the server.
+      expect(h.sent.map((r) => r.url)).toEqual([ALL_PAGE()]);
+      expect(h.sent[0].signal?.aborted).toBe(true);
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(g(el).stale).toBe(false);
+      expect(banner(el, 'stale')).toBeNull();
+    });
+
     it('live changes during the probe are kept, a resync during it shows the stale banner, and its epoch closes', async () => {
       const fake = newFake(25);
       const h = holdable(fakeFetch(fake), (u) => u.searchParams.has('fit'));
@@ -1265,6 +1292,48 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       );
     });
 
+    it('a picker change after a failed Refresh of a held set clears the kept-previous banner', async () => {
+      const fake = newFake(25);
+      let fail = false;
+      vi.stubGlobal('fetch', vi.fn(failingFetch(fake, () => fail)));
+      holdInState(fake.agents, true);
+      const el = await mountGraph();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      reconnect();
+      await el.updateComplete;
+      fail = true;
+      await clickBanner(el, 'stale');
+      expect(bannerText(el, 'incomplete')).toBe(
+        'Incomplete: loaded 25 · showing the previous graph'
+      );
+      const before = fake.requests.length;
+      await pick(el, 'p-1');
+      expect(fake.requests).toHaveLength(before);
+      expect(banner(el, 'incomplete')).toBeNull();
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+    });
+
+    it('after an error view, a failed first page for the earlier project shows the error, not a previous graph', async () => {
+      const fake = newFake(1200);
+      const failing = new Set(['p-2']);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(failingFetch(fake, (u) => failing.has(u.searchParams.get('projectId') ?? '')))
+      );
+      const el = await mountGraph('?project=p-1');
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      await pick(el, 'p-2');
+      expect(g(el).error).toBe('HTTP 500');
+      expect(g(el).agents).toEqual([]);
+      expect(g(el).memberScope).toBeNull();
+      failing.add('p-1');
+      await pick(el, 'p-1');
+      expect(g(el).error).toBe('HTTP 500');
+      expect(g(el).agents).toEqual([]);
+      expect(banner(el, 'incomplete')).toBeNull();
+      expect(treeView(el)).toBeNull();
+    });
+
     it('a first-page failure for another project shows the error, not the previous graph', async () => {
       const fake = newFake(1200);
       vi.stubGlobal(
@@ -1322,6 +1391,35 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       h.release();
       await settle(el);
       expect(graphRequests(fake, 2)).toEqual([PROJECT_PAGE('p-1')]);
+      expect(banner(el, 'stale')).toBeNull();
+    });
+
+    it('a picker change during a Refresh of a held set clears the reloading state and leaves Refresh enabled', async () => {
+      const fake = newFake(25);
+      const h = holdable(fakeFetch(fake), () => true);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      holdInState(fake.agents, true);
+      const el = await mountGraph();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      reconnect();
+      await el.updateComplete;
+      h.hold(1);
+      (banner(el, 'stale')?.querySelector('sl-button') as HTMLElement).click();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      expect(g(el).reloading).toBe(true);
+      g(el).setProjectFilter('p-2');
+      await el.updateComplete;
+      expect(h.sent[0].signal?.aborted).toBe(true);
+      expect(g(el).reloading).toBe(false);
+      await settle(el);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-2'));
+      const button = banner(el, 'stale')?.querySelector('sl-button');
+      expect(button?.hasAttribute('disabled')).toBe(false);
+      expect(button?.hasAttribute('loading')).toBe(false);
+      // A later Refresh still drains.
+      await clickBanner(el, 'stale');
+      expect(h.sent.map((r) => r.url)).toEqual([ALL_PAGE(), ALL_PAGE()]);
+      expect(graphRequests(fake)).toEqual([ALL_PAGE()]);
       expect(banner(el, 'stale')).toBeNull();
     });
 
@@ -1540,6 +1638,30 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       ]);
       expect(g(el).agents.some((a) => a.id === victim)).toBe(false);
     });
+
+    it('a re-attached page ignores the first-connect timer of its earlier attachment', async () => {
+      vi.stubGlobal('EventSource', SilentEventSource);
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      holdInState(fake.agents, true);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const el = await mountUnsettled();
+      vi.advanceTimersByTime(1000);
+      el.remove();
+      document.body.appendChild(el);
+      await el.updateComplete;
+      // The earlier attachment's 3 s would end here.
+      vi.advanceTimersByTime(2000);
+      await el.updateComplete;
+      expect(g(el).stale).toBe(false);
+      stateManager.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+      await stateManager.sseConnected(stateManager.scopeGeneration);
+      vi.advanceTimersByTime(3000);
+      await el.updateComplete;
+      expect(g(el).stale).toBe(false);
+      expect(banner(el, 'stale')).toBeNull();
+      expect(fake.requests).toEqual([]);
+    });
   });
 
   describe('an agent whose delete the hub accepted', () => {
@@ -1651,6 +1773,27 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await el.updateComplete;
       expect(member(el, id)).toBeUndefined();
       expect(g(el).visibleAgents.some((a) => a.id === id)).toBe(false);
+    });
+
+    it('a deletion view and full fields the store held before the fit probe survive its compact seed', async () => {
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const [id, fullId] = projectIds(fake, 'p-1');
+      // An earlier page loaded full objects (with their applied config); the set is not marked complete.
+      holdInState(
+        fake.agents.map((a) =>
+          a.id === fullId ? ({ ...a, appliedConfig: { image: 'img:full' } } as Agent) : a
+        ),
+        false
+      );
+      expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      (stateManager as unknown as { flush(): void }).flush();
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(member(el, fullId)?.appliedConfig?.image).toBe('img:full');
+      expect(stateManager.getAgent(fullId)?.appliedConfig?.image).toBe('img:full');
     });
 
     it('a held complete set shows the row with its deletion view, with no request', async () => {
