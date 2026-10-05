@@ -27,6 +27,7 @@ export { ScionStatusBadge } from './status-badge.js';
 export type { StatusType } from './status-badge.js';
 export { ScionDeletionBadge, DeletionLeaseController } from './deletion-badge.js';
 export type { DeletionClock } from './deletion-badge.js';
+export { ScionDeletionBanner } from './deletion-banner.js';
 export { ScionEnvVarList } from './env-var-list.js';
 export { ScionSecretList } from './secret-list.js';
 export { ScionNotificationTray } from './notification-tray.js';
