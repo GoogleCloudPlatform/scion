@@ -2031,6 +2031,10 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if isBotMentioned(tgMsg, botUsername) {
 			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
 			if len(unresolved) > 0 {
+				if isForbiddenHubError(agentsErr) {
+					replyDenied()
+					return
+				}
 				if agentsErr != nil {
 					listUnavailable("")
 					return
@@ -2054,7 +2058,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 						typos = append(typos, "@"+name)
 					}
 				}
-				if len(typos) > 0 && agentsErr != nil {
+				if len(typos) > 0 && isForbiddenHubError(agentsErr) {
+					replyDenied()
+				} else if len(typos) > 0 && agentsErr != nil {
 					listUnavailable("")
 				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))

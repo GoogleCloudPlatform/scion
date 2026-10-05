@@ -453,4 +453,37 @@ func TestV2_DeniedSender_AddressedMessagesGetDenialText(t *testing.T) {
 			assert.Equal(t, want, sent[0].Text)
 		})
 	}
+	t.Run("repeated message gets one reply", deniedSenderRepeatGetsOneReply)
+}
+
+// deniedSenderRepeatGetsOneReply checks that repeating an addressed message
+// gives a denied sender one reply per suppression window.
+func deniedSenderRepeatGetsOneReply(t *testing.T) {
+	cases := map[string]func() *TGMessage{
+		"unknown agent @token": func() *TGMessage { return plainGroupMessage(456, "hey @reviewer take a look") },
+		"bot mention plus unresolved token, no default": func() *TGMessage {
+			msg := plainGroupMessage(456, "@test_bot @reviewer take a look")
+			msg.Entities = []MessageEntity{{Type: "mention", Offset: 0, Length: 9}}
+			return msg
+		},
+	}
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			b, tgSrv, hub := newRoutingTestBroker(t)
+			saveTestGroupLink(t, b.store, -200, "proj-1", "my-project", "") // no default agent
+			hub.listAgentsErr = forbiddenListAgents()
+			saveStaleAgentCache(t, b.store, "proj-1", "coder")
+			linkTestUser(t, b.store, 456, "alice@example.com")
+			delivered := false
+			b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+			b.handleGroupMessage(mk())
+			b.handleGroupMessage(mk())
+
+			assert.False(t, delivered)
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1, "the same sender is told once per suppression window")
+			assert.Contains(t, sent[0].Text, "doesn't have permission")
+		})
+	}
 }
