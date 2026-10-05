@@ -339,6 +339,10 @@ export class ChatNotificationDispatcher {
    * user created the thread, posted in it (seen on this page), or is
    * @mentioned in it. An event on the user's own subject is addressed to
    * them, and so counts as membership by itself.
+   *
+   * This is an approximation. Once the hub fans thread messages out to
+   * member participants on `user.<id>.chat.message`, every member thread
+   * message arrives with `deliveredToUser` set and the check is exact.
    */
   private isThreadMember(n: ChatMessagePayload, info: ConversationInfo | null): boolean {
     const key = n.threadId ?? '';

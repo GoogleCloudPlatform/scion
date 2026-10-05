@@ -117,6 +117,20 @@ describe('StateManager own chat subject', () => {
     expect(created).toHaveBeenCalledTimes(1);
   });
 
+  it('raises no legacy user-message-created event for user-message subjects', () => {
+    const sm = new StateManager();
+    const legacy = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('user-message-created', legacy);
+    sm.addEventListener('chat-message-received', message);
+
+    emit(sm, 'project.p1.user.message', { id: 'm1' });
+    emit(sm, 'project.p1.chat.message', { id: 'm2', threadId: 't1' });
+
+    expect(legacy).not.toHaveBeenCalled();
+    expect(message).toHaveBeenCalledTimes(1);
+  });
+
   it('subscribes to the own chat subject in every view scope', () => {
     const sm = new StateManager();
     expect(subjectsFor(sm, { type: 'dashboard' })).not.toContain('user.me.chat.>');

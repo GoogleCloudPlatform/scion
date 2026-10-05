@@ -1315,7 +1315,6 @@ export class ScionChatSpaceRail extends LitElement {
               projectId: s.projectId,
               projectSlug: s.projectSlug,
               projectName: s.projectName,
-              unreadCount: s.unreadCount,
             })),
           },
           bubbles: true,

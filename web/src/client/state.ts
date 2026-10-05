@@ -432,7 +432,6 @@ export type StateEventType =
   | 'disconnected'
   | 'scope-changed'
   | 'notification-created'
-  | 'user-message-created'
   | 'chat-message-received'
   | 'chat-topic-updated'
   | 'chat-presence-updated'
@@ -908,16 +907,13 @@ export class StateManager extends EventTarget {
         } else if (chatEventType === 'typing') {
           this.notifyWithData('chat-typing-received', chatDetail);
         }
-        // Also dispatch the legacy user-message-created for v1 compat
-        if (chatEventType === 'message') {
-          this.notify('user-message-created');
-        }
         return;
       }
 
-      // User-targeted message events: project.{projectId}.user.{userId}
+      // User-targeted message events: project.{projectId}.user.{userId}.
+      // Nothing consumes these any more; stop them reaching the project
+      // metadata handler below.
       if (parts[2] === 'user') {
-        this.notify('user-message-created');
         return;
       }
 

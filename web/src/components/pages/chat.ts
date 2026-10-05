@@ -1561,7 +1561,6 @@ export class ScionPageChat extends LitElement {
         projectId: string;
         projectSlug: string;
         projectName: string;
-        unreadCount?: number;
       }>;
     };
 
