@@ -31,6 +31,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import { isProjectMembersGroup } from '../../shared/groups.js';
 
 /** Group fields the picker reads from the group search API. */
 export interface PickerGroup {
@@ -39,26 +40,6 @@ export interface PickerGroup {
   slug: string;
   projectId?: string;
   annotations?: Record<string, string>;
-}
-
-/**
- * Marker annotation keys for system project members groups. Mirrors
- * store.AnnotationProjectMembersGroup and
- * store.LegacyAnnotationProjectMembersGroup.
- */
-const PROJECT_MEMBERS_GROUP_ANNOTATIONS = [
-  'scion.io/project-members-group',
-  'scion.io/system-project-members-group',
-];
-
-/**
- * Reports whether a group is a system project members group: it belongs to a
- * project and carries either marker annotation with the value "true". Mirrors
- * store.IsProjectMembersGroup.
- */
-export function isProjectMembersGroup(group: PickerGroup): boolean {
-  if (!group.projectId || !group.annotations) return false;
-  return PROJECT_MEMBERS_GROUP_ANNOTATIONS.some((key) => group.annotations?.[key] === 'true');
 }
 
 /**

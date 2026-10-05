@@ -84,23 +84,23 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('isProjectMembersGroup', () => {
-  it('matches the canonical and the legacy marker', () => {
-    expect(mod.isProjectMembersGroup(CANONICAL)).toBe(true);
-    expect(mod.isProjectMembersGroup(LEGACY)).toBe(true);
+describe('selectableGroups', () => {
+  it('drops the canonical and the legacy marker', () => {
+    expect(mod.selectableGroups([CANONICAL, LEGACY])).toEqual([]);
   });
 
-  it('matches conflicting markers (legacy "true", canonical "false")', () => {
-    expect(mod.isProjectMembersGroup(CONFLICTING)).toBe(true);
+  it('drops conflicting markers (legacy "true", canonical "false")', () => {
+    expect(mod.selectableGroups([CONFLICTING])).toEqual([]);
   });
 
-  it('does not match ordinary groups', () => {
-    expect(mod.isProjectMembersGroup(NORMAL)).toBe(false);
-    expect(mod.isProjectMembersGroup(PROJECT_UNMARKED)).toBe(false);
-    expect(mod.isProjectMembersGroup(MARKER_FALSE)).toBe(false);
-    expect(mod.isProjectMembersGroup({ ...CANONICAL, projectId: undefined } as PickerGroup)).toBe(
-      false
-    );
+  it('keeps ordinary groups', () => {
+    const noProject = { ...CANONICAL, projectId: undefined } as PickerGroup;
+    expect(mod.selectableGroups([NORMAL, PROJECT_UNMARKED, MARKER_FALSE, noProject])).toEqual([
+      NORMAL,
+      PROJECT_UNMARKED,
+      MARKER_FALSE,
+      noProject,
+    ]);
   });
 });
 

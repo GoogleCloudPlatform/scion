@@ -370,7 +370,7 @@ func TestIsProjectMembersGroup(t *testing.T) {
 		{"marker false", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectMembersGroup: "false"}}, false},
 		{"legacy marker false", &Group{ProjectID: "p", Annotations: map[string]string{LegacyAnnotationProjectMembersGroup: "false"}}, false},
 		{"marker without project", &Group{Annotations: map[string]string{AnnotationProjectMembersGroup: "true"}}, false},
-		{"other annotation", &Group{ProjectID: "p", Annotations: map[string]string{"scion.io/project-agents-group": "true"}}, false},
+		{"other annotation", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectAgentsGroup: "true"}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
