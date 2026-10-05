@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -25,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Run-scoped Kubernetes deletes (ptone/scion#2550 P2).
@@ -50,6 +52,16 @@ import (
 // another run never does.
 func k8sRunMatches(objRun, runID string) bool {
 	return objRun == "" || objRun == runID
+}
+
+// validateRunIDLabel checks that runID is a valid label value before it is
+// put into a label selector, so a malformed ID cannot change the
+// selector's meaning (a "," or "!" would add or negate terms).
+func validateRunIDLabel(runID string) error {
+	if errs := k8svalidation.IsValidLabelValue(runID); len(errs) > 0 {
+		return fmt.Errorf("invalid run ID %q for a label selector: %s", runID, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // k8sPodIsLive reports whether pod is Pending or Running and is not already
@@ -153,6 +165,9 @@ func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, na
 // podDeleteOptions(pod); the same options apply here, alongside the UID
 // precondition, when the two are combined.
 func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, runID string) error {
+	if err := validateRunIDLabel(runID); err != nil {
+		return err
+	}
 	warn := func(kind, name string, err error) {
 		runtimeLog.Warn("Failed to delete per-agent object of a run",
 			"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", runID, "error", err)
@@ -221,8 +236,13 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 //     precondition. A pod replaced between the Get and the delete belongs
 //     to a concurrent start; Run then fails with ErrRunConflict.
 //
-// A failure to read the pod fails the start (retryable) rather than
-// deleting without knowing whose pod holds the name.
+// A failure to read the pod, or to delete it (other than NotFound), fails
+// the start (retryable) rather than deleting without knowing whose pod
+// holds the name or creating against a pod still there.
+//
+// A live legacy pod (no run label, created before run IDs) is deleted on
+// purpose: during the upgrade window such a pod has no run identity to
+// fence on, and the name-based pre-clean it replaces deleted it too.
 //
 // The Secret/SPC selection must stay a superset of every same-name object
 // of another run with no live pod: replaceExistingAgentObject refuses any
@@ -231,6 +251,9 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 // name only, never by other labels (a project recreated under the same
 // name gets a new project ID but the same object names).
 func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string) error {
+	if err := validateRunIDLabel(runID); err != nil {
+		return err
+	}
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	switch {
@@ -282,10 +305,10 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	case k8serrors.IsConflict(err):
 		return fmt.Errorf("%w: pod %s/%s was recreated by another start", ErrRunConflict, namespace, podName)
 	default:
-		// As the name-based pre-clean: the pod create reports a pod that is
-		// still there.
-		runtimeLog.Debug("Failed to clean up stale pod", "pod", podName, "namespace", namespace, "error", err)
-		return nil
+		// Fail the start (retryable) rather than go on to a pod create
+		// that would only report the old pod as still there; a Forbidden
+		// or API error is surfaced as itself.
+		return fmt.Errorf("failed to delete stale pod %s/%s before start: %w", namespace, podName, err)
 	}
 }
 

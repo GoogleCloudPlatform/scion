@@ -253,7 +253,7 @@ func TestDeleteRunRef(t *testing.T) {
 func TestCreateAgent_RunConflictIs409(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
-	mgr.startErr = identityRunConflict
+	mgr.startErr = errIdentityRunConflict
 
 	body := `{"name": "new-agent", "config": {"template": "claude"}, "runId": "run-x"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -271,7 +271,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, msg := classifyStartError(context.Background(), identityRunConflict)
+	code, msg := classifyStartError(context.Background(), errIdentityRunConflict)
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}
@@ -324,10 +324,10 @@ func TestRestoreAgentDeleteState_OnlyUndoesOwnMark(t *testing.T) {
 	}
 }
 
-// identityRunConflict is an ErrRunConflict wrapped the way the Kubernetes
+// errIdentityRunConflict is an ErrRunConflict wrapped the way the Kubernetes
 // runtime wraps it, carrying a namespace, an object name and a run ID that
 // must not reach HTTP clients.
-var identityRunConflict = fmt.Errorf("start: %w", fmt.Errorf("%w: secretproviderclass leakns/scion-agent-leakobj belongs to run %q",
+var errIdentityRunConflict = fmt.Errorf("start: %w", fmt.Errorf("%w: secretproviderclass leakns/scion-agent-leakobj belongs to run %q",
 	runtime.ErrRunConflict, "run-leak-123"))
 
 func assertNoRunConflictLeak(t *testing.T, body string) {
@@ -347,7 +347,7 @@ func TestStartAndRestart_RunConflict_409NoLeak(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			srv := newTestServer(t)
 			mgr := srv.manager.(*mockManager)
-			mgr.startErr = identityRunConflict
+			mgr.startErr = errIdentityRunConflict
 			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"runId":"run-x"}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()

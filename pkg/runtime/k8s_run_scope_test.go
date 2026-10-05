@@ -768,3 +768,89 @@ func runUntilPodSubmittedLate(t *testing.T, rt *KubernetesRuntime, cs *k8sfake.C
 	}
 	return submitted
 }
+
+// Delete honours the namespace in a namespace/pod ref: only the objects in
+// that namespace are removed, never same-named ones in the default
+// namespace.
+func TestK8sDeleteRun_NamespacedRef_DeletesOnlyInThatNamespace(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	const otherNS = "other-ns"
+	ctx := context.Background()
+	labels := rsLabels(rsRunA, "start-a")
+	// The same run's objects exist under the same names in both namespaces.
+	rsSeedRun(t, rt, labels, corev1.PodRunning, "default")
+	if _, err := rt.Client.Clientset.CoreV1().Pods(otherNS).Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: otherNS, UID: "pod-other", Labels: labels},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{rsAgentSecret, rsAuthSecret} {
+		if _, err := rt.Client.Clientset.CoreV1().Secrets(otherNS).Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: otherNS, UID: types.UID("other-" + n), Labels: labels},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spc := &unstructured.Unstructured{}
+	spc.SetGroupVersionKind(schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"})
+	spc.SetName(rsSPC)
+	spc.SetNamespace(otherNS)
+	spc.SetUID("spc-other")
+	spc.SetLabels(labels)
+	if _, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(otherNS).Create(ctx, spc, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rt.Delete(ctx, RunRef{ID: otherNS + "/" + rsAgent, RunID: rsRunA}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := rt.Client.Clientset.CoreV1().Pods(otherNS).Get(ctx, rsAgent, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+		t.Errorf("pod in %s not deleted (err=%v)", otherNS, err)
+	}
+	for _, n := range []string{rsAgentSecret, rsAuthSecret} {
+		if secretExists(t, rt, otherNS, n) {
+			t.Errorf("Secret %s/%s not deleted", otherNS, n)
+		}
+	}
+	if spcExists(t, rt, otherNS, rsSPC) {
+		t.Errorf("SPC in %s not deleted", otherNS)
+	}
+	rsExpect(t, rt, rsAllPresent) // default namespace untouched
+	enf.assertAllConditional(t)
+}
+
+// A malformed run ID never reaches a label selector: Delete and pre-clean
+// refuse it and delete nothing.
+func TestK8sRunScope_InvalidRunID_Refused(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	rsSeedRun(t, rt, rsLabels(rsRunB, "start-b"), corev1.PodSucceeded, "b")
+	bad := rsRunA + ",scion.agent"
+	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: bad}); err == nil {
+		t.Error("Delete accepted a malformed run ID")
+	}
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, bad); err == nil {
+		t.Error("preCleanForRun accepted a malformed run ID")
+	}
+	rsExpect(t, rt, rsAllPresent)
+	if n := enf.count(); n != 0 {
+		t.Errorf("issued %d deletes for a malformed run ID", n)
+	}
+}
+
+// A pre-clean pod delete that fails for any reason other than NotFound or
+// Conflict (here Forbidden) fails the start.
+func TestK8sPreCleanForRun_PodDeleteError_FailsStart(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	rsSeedPod(t, rt, "pod-b", rsLabels(rsRunB, "start-b"), corev1.PodSucceeded)
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("rbac"))
+	})
+	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA)
+	if err == nil || !k8serrors.IsForbidden(err) {
+		t.Fatalf("preCleanForRun error = %v, want the Forbidden error", err)
+	}
+	if errors.Is(err, ErrRunConflict) {
+		t.Errorf("a delete failure is not a run conflict: %v", err)
+	}
+}
