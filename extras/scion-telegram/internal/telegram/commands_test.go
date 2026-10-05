@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"testing"
@@ -685,4 +686,107 @@ func TestTGChatMember_IsCurrentMember(t *testing.T) {
 	}
 	assert.True(t, (&TGChatMember{Status: "restricted", IsMember: true}).IsCurrentMember())
 	assert.False(t, (&TGChatMember{Status: "restricted"}).IsCurrentMember())
+}
+
+func TestCommandHandler_Status_FailedCheckIsNotedNotHidden(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 456, "alice@example.com")
+	saveStatusTestLinks(t, store)
+	tgSrv.setChatMember(-101, 456, "member")
+	tgSrv.mu.Lock()
+	tgSrv.failChatMember = map[int64]bool{-103: true}
+	tgSrv.mu.Unlock()
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Member Group")
+	assert.NotContains(t, sent[0].Text, "Other Team")
+	assert.Contains(t, sent[0].Text, statusUncheckedNote)
+}
+
+func TestCommandHandler_Status_AllChecksFailedDoesNotClaimNone(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 777, "bob@example.com")
+	saveStatusTestLinks(t, store)
+	tgSrv.mu.Lock()
+	tgSrv.failChatMember = map[int64]bool{-101: true, -102: true, -103: true, -104: true, -105: true, -106: true}
+	tgSrv.mu.Unlock()
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 777}, Chat: TGChat{ID: 777, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.NotContains(t, sent[0].Text, "No groups you linked or belong to")
+	assert.Contains(t, sent[0].Text, "could be confirmed")
+	assert.Contains(t, sent[0].Text, statusUncheckedNote)
+}
+
+func TestCommandHandler_GroupsVisibleTo_CancelledContextIsNoted(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	saveStatusTestLinks(t, store)
+	tgSrv.setChatMember(-101, 456, "member")
+	links, err := store.GetAllGroupLinks(context.Background())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	visible, unchecked := h.groupsVisibleTo(ctx, 456, links)
+
+	assert.True(t, unchecked)
+	require.Len(t, visible, 1, "only the group the user linked is known without a check")
+	assert.Equal(t, int64(-102), visible[0].ChatID)
+	calls, _ := tgSrv.chatMemberStats()
+	assert.Zero(t, calls)
+}
+
+func TestCommandHandler_GroupsVisibleTo_CachesMembershipAndBoundsConcurrency(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	const groups = 20
+	for i := 1; i <= groups; i++ {
+		chatID := int64(-1000 - i)
+		require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+			ChatID: chatID, ChatTitle: fmt.Sprintf("G%02d", i), ProjectID: fmt.Sprintf("p%d", i),
+			LinkedBy: "999", LinkedAt: time.Now().UTC(), Active: true,
+		}))
+		if i%2 == 0 {
+			tgSrv.setChatMember(chatID, 456, "member")
+		} else {
+			tgSrv.setChatMember(chatID, 456, "left")
+		}
+	}
+	tgSrv.mu.Lock()
+	tgSrv.chatMemberDelay = 20 * time.Millisecond
+	tgSrv.mu.Unlock()
+	links, err := store.GetAllGroupLinks(ctx)
+	require.NoError(t, err)
+
+	visible, unchecked := h.groupsVisibleTo(ctx, 456, links)
+	assert.False(t, unchecked)
+	assert.Len(t, visible, groups/2)
+	calls, maxInFlight := tgSrv.chatMemberStats()
+	assert.Equal(t, groups, calls)
+	assert.LessOrEqual(t, maxInFlight, memberCheckWorkers)
+	assert.Greater(t, maxInFlight, 1, "checks run concurrently")
+
+	// Order of the input links is kept.
+	var want []int64
+	for _, l := range links {
+		if (-l.ChatID-1000)%2 == 0 {
+			want = append(want, l.ChatID)
+		}
+	}
+	var got []int64
+	for _, l := range visible {
+		got = append(got, l.ChatID)
+	}
+	assert.Equal(t, want, got)
+
+	// A second call within the cache window makes no new checks.
+	visible2, _ := h.groupsVisibleTo(ctx, 456, links)
+	assert.Len(t, visible2, groups/2)
+	calls2, _ := tgSrv.chatMemberStats()
+	assert.Equal(t, groups, calls2)
 }

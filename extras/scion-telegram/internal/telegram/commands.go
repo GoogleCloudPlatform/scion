@@ -17,12 +17,14 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -63,7 +65,26 @@ type CommandHandler struct {
 	botUsername    string
 	log            *slog.Logger
 	cachedProjects []ProjectOption
+
+	// memberCache remembers successful group-membership checks for /status,
+	// keyed by "userID:chatID".
+	memberCache   map[string]memberCacheEntry
+	memberCacheMu sync.Mutex
 }
+
+type memberCacheEntry struct {
+	member    bool
+	checkedAt time.Time
+}
+
+const (
+	// memberCacheTTL bounds how long a group-membership check is reused.
+	memberCacheTTL = 2 * time.Minute
+	// memberCheckWorkers bounds concurrent membership checks for /status.
+	memberCheckWorkers = 6
+	// statusUncheckedNote is appended when some groups could not be checked.
+	statusUncheckedNote = "(some groups could not be checked)"
+)
 
 // NewCommandHandler creates a new CommandHandler.
 func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient, botUsername string, log *slog.Logger) *CommandHandler {
@@ -482,7 +503,7 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	}
 
 	// List only groups the sender linked or is currently a member of.
-	links := h.groupsVisibleTo(ctx, msg.From.ID, allLinks)
+	links, unchecked := h.groupsVisibleTo(ctx, msg.From.ID, allLinks)
 
 	var lines []string
 	for _, link := range links {
@@ -531,31 +552,118 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	groups := "No groups you linked or belong to are linked to a project."
 	if len(lines) > 0 {
 		groups = "Linked groups:\n" + strings.Join(lines, "\n")
+	} else if unchecked {
+		groups = "No linked groups could be confirmed for you."
+	}
+	if unchecked {
+		groups += "\n" + statusUncheckedNote
 	}
 	h.reply(chatID, "Registration: "+regStatus+"\n\n"+groups)
 }
 
-// groupsVisibleTo returns the group links that the Telegram user linked or
-// is currently a member of. A group whose membership cannot be checked is
-// left out.
-func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, links []*GroupLink) []*GroupLink {
+// groupsVisibleTo returns, in their original order, the group links that
+// the Telegram user linked or is currently a member of. Membership is
+// checked with bounded concurrency and cached briefly per user and chat.
+// unchecked reports that some groups could not be checked (check failed or
+// ctx ended); those groups are left out.
+func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, links []*GroupLink) (visible []*GroupLink, unchecked bool) {
 	senderID := strconv.FormatInt(userID, 10)
-	var visible []*GroupLink
-	for _, link := range links {
+	const (
+		notMember = iota
+		member
+		failed
+	)
+	results := make([]int, len(links))
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < memberCheckWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				ok, err := h.isGroupMember(ctx, links[i].ChatID, userID)
+				switch {
+				case err != nil:
+					results[i] = failed
+				case ok:
+					results[i] = member
+				}
+			}
+		}()
+	}
+	for i, link := range links {
 		if link.LinkedBy == senderID {
-			visible = append(visible, link)
+			results[i] = member
 			continue
 		}
-		member, err := h.api.GetChatMember(ctx, link.ChatID, userID)
-		if err != nil {
-			h.log.Debug("Could not check group membership for /status", "chat_id", link.ChatID, "error", err)
-			continue
-		}
-		if member.IsCurrentMember() {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	for i, link := range links {
+		switch results[i] {
+		case member:
 			visible = append(visible, link)
+		case failed:
+			unchecked = true
 		}
 	}
-	return visible
+	return visible, unchecked
+}
+
+// isUserNotInChatError reports whether a getChatMember error means the user
+// is not in the chat, as opposed to the check itself failing.
+func isUserNotInChatError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusBadRequest {
+		return false
+	}
+	desc := strings.ToLower(apiErr.Description)
+	return strings.Contains(desc, "user not found") ||
+		strings.Contains(desc, "member not found") ||
+		strings.Contains(desc, "participant_id_invalid")
+}
+
+// isGroupMember reports whether the user is currently in the chat, using a
+// short-lived cache of successful checks.
+func (h *CommandHandler) isGroupMember(ctx context.Context, chatID, userID int64) (bool, error) {
+	key := strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
+	h.memberCacheMu.Lock()
+	entry, ok := h.memberCache[key]
+	h.memberCacheMu.Unlock()
+	if ok && time.Since(entry.checkedAt) < memberCacheTTL {
+		return entry.member, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	isMember := false
+	m, err := h.api.GetChatMember(ctx, chatID, userID)
+	switch {
+	case err == nil:
+		isMember = m.IsCurrentMember()
+	case isUserNotInChatError(err):
+		// Telegram does not know the user in this chat: not a member.
+	default:
+		h.log.Debug("Could not check group membership for /status", "chat_id", chatID, "error", err)
+		return false, err
+	}
+
+	h.memberCacheMu.Lock()
+	defer h.memberCacheMu.Unlock()
+	if h.memberCache == nil {
+		h.memberCache = make(map[string]memberCacheEntry)
+	}
+	for k, e := range h.memberCache {
+		if time.Since(e.checkedAt) >= memberCacheTTL {
+			delete(h.memberCache, k)
+		}
+	}
+	h.memberCache[key] = memberCacheEntry{member: isMember, checkedAt: time.Now()}
+	return isMember, nil
 }
 
 func (h *CommandHandler) handleSettings(msg *TGMessage) {

@@ -136,6 +136,23 @@ type fakeTGServerV2 struct {
 	webhookURL        string
 	// chatMembers maps chatID → userID → member status for getChatMember.
 	chatMembers map[int64]map[int64]string
+	// failChatMember makes getChatMember fail with a server error for
+	// these chats.
+	failChatMember map[int64]bool
+	// chatMemberCalls counts getChatMember requests.
+	chatMemberCalls int
+	// chatMemberDelay, when set, delays each getChatMember response;
+	// chatMemberInFlight/chatMemberMaxInFlight track concurrency.
+	chatMemberDelay       time.Duration
+	chatMemberInFlight    int
+	chatMemberMaxInFlight int
+}
+
+// chatMemberStats returns the getChatMember call count and peak concurrency.
+func (f *fakeTGServerV2) chatMemberStats() (calls, maxInFlight int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.chatMemberCalls, f.chatMemberMaxInFlight
 }
 
 // setChatMember records a user's status in a chat for getChatMember.
@@ -264,8 +281,23 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
 			userID, _ := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64)
 			f.mu.Lock()
+			f.chatMemberCalls++
+			f.chatMemberInFlight++
+			if f.chatMemberInFlight > f.chatMemberMaxInFlight {
+				f.chatMemberMaxInFlight = f.chatMemberInFlight
+			}
+			delay := f.chatMemberDelay
+			fail := f.failChatMember[chatID]
 			status, ok := f.chatMembers[chatID][userID]
 			f.mu.Unlock()
+			time.Sleep(delay)
+			f.mu.Lock()
+			f.chatMemberInFlight--
+			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
 			if !ok {
 				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: user not found"})
 				return
