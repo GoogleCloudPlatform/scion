@@ -1768,29 +1768,45 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	return nil
 }
 
-// splitEnvCommaLists normalizes single-element list fields: koanf's env
-// provider loads a list env var as one string (it does not split slices),
-// e.g. SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b. Any
-// single-element list, from env or file, is split on commas, its items
-// trimmed, and empty items dropped, so "  https://only  " becomes
-// ["https://only"] and "" becomes []. None of these fields (emails, domains,
-// CORS origins, methods, headers) can legitimately contain a comma.
+// splitEnvCommaLists normalizes list settings after load (from env or
+// file). koanf's env provider loads a list env var as one string (it does
+// not split slices), e.g. SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b.
+//
+//   - admin_emails and authorized_domains keep their original rule: a
+//     single-element list containing a comma is split (trimmed, empty items
+//     dropped); anything else is left as loaded. authorized_domains is
+//     authorization-relevant (an empty list allows every domain), so its
+//     handling is deliberately unchanged; admin_emails is then cleaned by
+//     SanitizeEmailList.
+//   - The hub and broker CORS origins, methods and headers lists are
+//     normalized at every length: each item is split on commas and trimmed,
+//     and empty items are dropped. An empty CORS list behaves like a list of
+//     blank entries (no origin matches; methods/headers join to "").
 func splitEnvCommaLists(gc *GlobalConfig) {
+	for _, list := range []*[]string{&gc.Hub.AdminEmails, &gc.Auth.AuthorizedDomains} {
+		if len(*list) == 1 && strings.Contains((*list)[0], ",") {
+			*list = parseCommaSeparatedList((*list)[0])
+		}
+	}
 	for _, list := range []*[]string{
-		&gc.Hub.AdminEmails,
-		&gc.Auth.AuthorizedDomains,
 		&gc.Hub.CORSAllowedOrigins, &gc.Hub.CORSAllowedMethods, &gc.Hub.CORSAllowedHeaders,
 		&gc.RuntimeBroker.CORSAllowedOrigins, &gc.RuntimeBroker.CORSAllowedMethods, &gc.RuntimeBroker.CORSAllowedHeaders,
 	} {
-		if len(*list) != 1 {
-			continue
-		}
-		items := parseCommaSeparatedList((*list)[0])
-		if items == nil {
-			items = []string{}
-		}
-		*list = items
+		*list = normalizeCORSList(*list)
 	}
+}
+
+// normalizeCORSList splits every item on commas, trims it and drops empty
+// items. A nil or empty list is returned unchanged.
+func normalizeCORSList(list []string) []string {
+	if len(list) == 0 {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		out = append(out, parseCommaSeparatedList(item)...)
+	}
+	return out
 }
 
 // LoadServerMode reads just the server mode from settings.yaml without loading the full config.

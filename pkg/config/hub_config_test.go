@@ -1812,20 +1812,27 @@ func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
 }
 
 // TestLoadGlobalConfig_ListFieldNormalization pins splitEnvCommaLists on
-// both load paths: a single-element list (from env or file) is split on
-// commas, trimmed, and emptied of blank items, for every list field it
-// covers.
+// both load paths. CORS lists are normalized at every length (each item
+// split on commas, trimmed, empty items dropped). authorized_domains keeps
+// its original behaviour exactly: only a single comma-containing element is
+// split; empty, blank and padded values are left as loaded, because an empty
+// list means "allow every domain" in checkUserAuthorized.
 func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 	type row struct {
 		name   string
 		env    map[string]string
 		legacy string // server.yaml body (legacy path)
-		v1     string // settings.yaml server: body (settings path)
+		v1     string // appended under settings.yaml "server:" (settings path)
 		get    func(*GlobalConfig) []string
 		want   []string
 	}
 	hubOrigins := func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedOrigins }
+	domains := func(gc *GlobalConfig) []string { return gc.Auth.AuthorizedDomains }
+	domainsFile := func(list string) (string, string) {
+		return "auth:\n  authorizedDomains: " + list + "\n", "  auth:\n    authorized_domains: " + list + "\n"
+	}
 	rows := []row{
+		// CORS: normalized.
 		{name: "env origins split and trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "https://a, https://b"},
 			get: hubOrigins, want: []string{"https://a", "https://b"}},
 		{name: "env single origin trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "  https://only.example  "},
@@ -1844,7 +1851,37 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 			legacy: "hub:\n  corsAllowedOrigins: [\"https://f1,https://f2\"]\n",
 			v1:     "  hub:\n    cors:\n      allowed_origins: [\"https://f1,https://f2\"]\n",
 			get:    hubOrigins, want: []string{"https://f1", "https://f2"}},
+		{name: "file multi-element origins padded and empty items",
+			legacy: "hub:\n  corsAllowedOrigins: [\" https://f1 \", \"\", \"  \", \"https://f2\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\" https://f1 \", \"\", \"  \", \"https://f2\"]\n",
+			get:    hubOrigins, want: []string{"https://f1", "https://f2"}},
+		{name: "file multi-element methods with blank",
+			legacy: "hub:\n  corsAllowedMethods: [\"GET\", \" \", \" POST\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_methods: [\"GET\", \" \", \" POST\"]\n",
+			get:    func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
+
+		// authorized_domains: unchanged behaviour.
+		{name: "domains env comma list split", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "a.com, b.com"},
+			get: domains, want: []string{"a.com", "b.com"}},
+		{name: "domains env empty kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": ""},
+			get: domains, want: []string{""}},
+		{name: "domains env blank kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "   "},
+			get: domains, want: []string{"   "}},
+		{name: "domains env padded single kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": " a.com "},
+			get: domains, want: []string{" a.com "}},
 	}
+	for _, f := range []struct {
+		name, list string
+		want       []string
+	}{
+		{"domains file one empty kept", `[""]`, []string{""}},
+		{"domains file two blanks kept", `["", " "]`, []string{"", " "}},
+		{"domains file padded multi-element kept", `[" a.com ", "b.com"]`, []string{" a.com ", "b.com"}},
+	} {
+		legacy, v1 := domainsFile(f.list)
+		rows = append(rows, row{name: f.name, legacy: legacy, v1: v1, get: domains, want: f.want})
+	}
+
 	for _, r := range rows {
 		for _, mode := range []string{"legacy", "settings"} {
 			t.Run(r.name+"/"+mode, func(t *testing.T) {
