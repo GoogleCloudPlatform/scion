@@ -1293,6 +1293,9 @@ func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
+	if ev.Kind != "artifact" {
+		t.Fatalf("first response event kind = %q, want artifact", ev.Kind)
+	}
 	result, err := b.taskEventToTaskResult(taskID, "ctx-1", ev)
 	if err != nil {
 		t.Fatalf("taskEventToTaskResult: %v", err)
@@ -1301,7 +1304,8 @@ func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
 		t.Errorf("result artifacts = %+v, want the explicit reply", result.Artifacts)
 	}
 
-	// The SDK executor completes the task with the reply as its message.
+	// The SDK executor maps the artifact event to COMPLETED with the reply
+	// as its status message (taskEventToSDKEvent, "artifact" case).
 	sdkEv, err := taskEventToSDKEvent(&a2asrv.ExecutorContext{TaskID: a2a.TaskID(taskID)}, ev)
 	if err != nil {
 		t.Fatalf("taskEventToSDKEvent: %v", err)
