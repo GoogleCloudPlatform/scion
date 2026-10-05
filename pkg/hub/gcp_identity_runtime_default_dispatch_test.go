@@ -83,6 +83,10 @@ func metadataEnvSlice(env map[string]string) map[string]string {
 //     SCION_METADATA_MODE, so the broker applies its runtime default.
 //   - agent_block, project_default_block, hub_default_block: an explicit
 //     "block" at each rung. The hub sends it explicitly.
+//   - hub_default_passthrough_denied_kubernetes: a hub default of
+//     "passthrough" on the embedded broker whose profile is kubernetes-type.
+//     The grant is denied, the identity stays unset, and the dispatch
+//     matches no_identity: the broker applies its runtime default.
 //   - project_default_assign_without_sa: a stored project default of
 //     "assign" with no service account selected. It stays an explicit
 //     "block" (fail closed) rather than following the runtime default.
@@ -103,6 +107,16 @@ func TestDispatch_GCPIdentityRuntimeDefault_MatchesBrokerFixture(t *testing.T) {
 		}},
 		{"hub_default_block", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultGCPIdentityMode: store.GCPMetadataModeBlock})
+			return CreateAgentRequest{}
+		}},
+		{"hub_default_passthrough_denied_kubernetes", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
+			ctx := context.Background()
+			b, err := f.store.GetRuntimeBroker(ctx, f.project.DefaultRuntimeBrokerID)
+			require.NoError(t, err)
+			b.Profiles = []store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}
+			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+			f.srv.SetEmbeddedBrokerID(b.ID)
+			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultGCPIdentityMode: store.GCPMetadataModePassthrough})
 			return CreateAgentRequest{}
 		}},
 		{"project_default_assign_without_sa", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {

@@ -45,7 +45,8 @@ type hubGCPIdentityDispatchCase struct {
 // kept in sync with the hub by a pkg/hub test) into buildStartContext on the
 // Kubernetes and docker runtimes:
 //
-//   - no identity configured: Kubernetes gets "passthrough" (no metadata
+//   - no identity configured, or a hub-default "passthrough" denied for a
+//     Kubernetes profile: Kubernetes gets "passthrough" (no metadata
 //     redirect); docker keeps "block".
 //   - an explicit "block" (agent, project default or hub default), and a
 //     stored project default of "assign" with no service account: refused
@@ -67,11 +68,12 @@ func TestBuildStartContext_HubGCPIdentityDispatchFixture(t *testing.T) {
 	// Every fixture case must have an expectation here, and vice versa, so a
 	// case added on the hub side cannot go unchecked on this side.
 	wantK8s := map[string]string{
-		"no_identity":                       store.GCPMetadataModePassthrough,
-		"agent_block":                       "",
-		"project_default_block":             "",
-		"hub_default_block":                 "",
-		"project_default_assign_without_sa": "",
+		"no_identity":           store.GCPMetadataModePassthrough,
+		"agent_block":           "",
+		"project_default_block": "",
+		"hub_default_block":     "",
+		"hub_default_passthrough_denied_kubernetes": store.GCPMetadataModePassthrough,
+		"project_default_assign_without_sa":         "",
 	}
 	names := make([]string, 0, len(fixture))
 	for n := range fixture {

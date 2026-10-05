@@ -29,6 +29,18 @@
       }
     }
   },
+  "hub_default_passthrough_denied_kubernetes": {
+    "create": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
   "no_identity": {
     "create": {
       "resolvedEnv": {
