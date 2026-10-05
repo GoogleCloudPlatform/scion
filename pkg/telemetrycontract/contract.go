@@ -23,6 +23,11 @@
 // .design/hosted/usage-telemetry.md.
 package telemetrycontract
 
+import (
+	"strings"
+	"unicode/utf8"
+)
+
 // Canonical metric names. Both are exported under the
 // "workload.googleapis.com/" prefix by the GCP exporter, and unprefixed by
 // the generic OTLP exporter.
@@ -78,7 +83,9 @@ type LabelKV struct{ Key, Value string }
 
 // UsageTokenPointAttrs returns the producer point-label set for
 // MetricUsageTokens (design §3.2): harness and model only, each omitted if
-// empty. token_type is per-point (one of the TokenType* values) and added
+// empty. Producers pass a model already resolved through ResolveModelLabel,
+// so in practice the model label is always present (UnknownModel at
+// worst). token_type is per-point (one of the TokenType* values) and added
 // by the caller alongside these.
 //
 // Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud
@@ -98,6 +105,46 @@ func UsageTokenPointAttrs(harness, model string) []LabelKV {
 		attrs = append(attrs, LabelKV{ModelLabel, model})
 	}
 	return attrs
+}
+
+// MaxModelLabelBytes caps the ModelLabel value (design §3.2: "truncated to
+// 128 characters"). The cut is made on a UTF-8 rune boundary, so a value is
+// never split mid-character.
+const MaxModelLabelBytes = 128
+
+// UnknownModel is the ModelLabel value used when neither the source event
+// nor SCION_MODEL names a model (design §3.2).
+const UnknownModel = "unknown"
+
+// ResolveModelLabel applies design §3.2's model label precedence: the
+// source event's own model value when present (the actual model, including
+// sub-agent models), then fallback (the agent's configured SCION_MODEL),
+// then UnknownModel. Values are whitespace-trimmed before the emptiness
+// check and truncated to MaxModelLabelBytes, so the result is always a
+// non-empty, bounded string. Both usage producers -- the native
+// UsageDeriver and the hook handler -- resolve the label through this one
+// function so their precedence can't drift apart.
+func ResolveModelLabel(native, fallback string) string {
+	model := strings.TrimSpace(native)
+	if model == "" {
+		model = strings.TrimSpace(fallback)
+	}
+	if model == "" {
+		return UnknownModel
+	}
+	return truncateUTF8(model, MaxModelLabelBytes)
+}
+
+// truncateUTF8 cuts s to at most maxBytes bytes without splitting a
+// multi-byte rune.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 // Status values for StatusLabel.

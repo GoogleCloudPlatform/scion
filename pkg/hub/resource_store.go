@@ -104,6 +104,9 @@ type ResourceStore struct {
 	srv   *Server
 	pers  resourcePersistence
 	hubID string
+	// excludePatterns are extra transfer.CollectFiles exclude patterns for
+	// this kind (e.g. harness-config backups and temp files).
+	excludePatterns []string
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -114,7 +117,18 @@ func (s *Server) templateStore() *ResourceStore {
 // harnessConfigStore returns a ResourceStore for harness-configs. harness is the
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
-	return &ResourceStore{srv: s, pers: &harnessConfigPersistence{s: s, harness: harness}, hubID: s.HubID()}
+	return &ResourceStore{
+		srv:             s,
+		pers:            &harnessConfigPersistence{s: s, harness: harness},
+		hubID:           s.HubID(),
+		excludePatterns: config.HarnessConfigTransientPatterns,
+	}
+}
+
+// collectFiles collects the files of a resource directory, applying the
+// kind's exclude patterns on top of transfer.DefaultExcludePatterns.
+func (rs *ResourceStore) collectFiles(dir string) ([]transfer.FileInfo, error) {
+	return transfer.CollectFiles(dir, rs.excludePatterns)
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
@@ -133,7 +147,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	if err := transfer.NormalizeDir(dir); err != nil {
 		return false, fmt.Errorf("normalize dir: %w", err)
 	}
-	files, err := transfer.CollectFiles(dir, nil)
+	files, err := rs.collectFiles(dir)
 	if err != nil {
 		return false, err
 	}
