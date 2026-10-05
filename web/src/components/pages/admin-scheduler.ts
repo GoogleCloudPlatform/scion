@@ -25,6 +25,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
 
 interface RecurringHandlerInfo {
   name: string;
@@ -427,54 +429,15 @@ export class ScionPageAdminScheduler extends LitElement {
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
-    if (!dateString) return 'Never';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return 'Never';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (!dateString || Number.isNaN(new Date(dateString).getTime())) return 'Never';
+    return formatRelative(dateString);
   }
 
   private formatFutureTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = date.getTime() - Date.now();
-      if (diffMs <= 0) return 'now';
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(diffMinutes, 'minute');
-      } else {
-        return rtf.format(diffHours, 'hour');
-      }
-    } catch {
-      return dateString;
-    }
+    const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return dateString;
+    if (date.getTime() <= Date.now()) return 'now';
+    return formatRelative(dateString);
   }
 
   private renderProjectCell(projectId: string) {
@@ -587,7 +550,7 @@ export class ScionPageAdminScheduler extends LitElement {
         <div class="stats-row">
           <div class="stat-card">
             <span class="stat-label">Tick Count</span>
-            <span class="stat-value">${scheduler.tickCount.toLocaleString()}</span>
+            <span class="stat-value">${formatNumber(scheduler.tickCount)}</span>
           </div>
           <div class="stat-card">
             <span class="stat-label">Tick Interval</span>

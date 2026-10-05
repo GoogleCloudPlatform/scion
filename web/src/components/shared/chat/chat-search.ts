@@ -31,6 +31,11 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiFetch } from '../../../client/api.js';
+import { formatInstant, formatInstantWithZone, formatRelative } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+
+/** Ages under this are shown relative; older ones as an absolute date. */
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shape of a search result from GET /api/v1/chat/search */
 interface SearchResult {
@@ -51,6 +56,9 @@ interface SearchResponse {
 
 @customElement('scion-chat-search')
 export class ScionChatSearch extends LitElement {
+  /** Re-renders absolute result dates when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Current project ID for scoped search. */
   @property()
   projectId = '';
@@ -174,6 +182,8 @@ export class ScionChatSearch extends LitElement {
       flex: 1;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
       padding: 0.25rem 0;
     }
 
@@ -262,6 +272,19 @@ export class ScionChatSearch extends LitElement {
 
     .load-more button:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    /* Clear a landscape phone's notch and rounded corners (the page uses
+       viewport-fit=cover) on whichever sides this column meets the screen
+       edge. Each inset is a transparent border, so the row's background still
+       paints to the screen edge and only its content moves in. The chat page
+       sets --chat-inset-left and --chat-inset-right for the edges the
+       conversation touches; both are 0 everywhere else. */
+    .search-header,
+    .scope-toggle,
+    .results-list {
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
     }
   `;
 
@@ -393,18 +416,15 @@ export class ScionChatSearch extends LitElement {
   private formatTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
+    const ageMs = Date.now() - d.getTime();
+    // A future instant is clock skew between hub and browser.
+    if (ageMs < 0) return 'now';
+    // Under a week: a compact relative age.
+    if (ageMs < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
 
-    if (diffMin < 1) return 'now';
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
-
-    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    // Older than a week: a compact absolute date in the display zone; the
+    // zone is named in the element's title (the slot does not shrink).
+    return formatInstant(iso, 'date');
   }
 
   /** Sanitize snippet HTML to only allow <mark> tags. */
@@ -501,7 +521,11 @@ export class ScionChatSearch extends LitElement {
       <div class="result-item" @click=${() => this.handleResultClick(result)}>
         <div class="result-top">
           <span class="result-thread">${result.threadName || result.conversationKey}</span>
-          <span class="result-time">${this.formatTime(result.timestamp)}</span>
+          <span
+            class="result-time"
+            title=${formatInstantWithZone(result.timestamp, 'datetime-full')}
+            >${this.formatTime(result.timestamp)}</span
+          >
         </div>
         <span class="result-sender">${result.senderName}</span>
         <span class="result-snippet">${unsafeHTML(this.sanitizeSnippet(result.snippet))}</span>

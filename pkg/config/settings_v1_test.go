@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -4238,7 +4239,6 @@ func TestGetVersionedSettingValueNestedMaps(t *testing.T) {
 			"staging": {
 				Runtime:       "docker",
 				ImageRegistry: "ghcr.io/myorg",
-				Timezone:      "America/Los_Angeles",
 				HarnessOverrides: map[string]V1HarnessOverride{
 					"claude": {Image: "override-image"},
 				},
@@ -4275,7 +4275,6 @@ func TestGetVersionedSettingValueNestedMaps(t *testing.T) {
 	}{
 		{"profiles.staging.runtime", "docker"},
 		{"profiles.staging.image_registry", "ghcr.io/myorg"},
-		{"profiles.staging.timezone", "America/Los_Angeles"},
 		{"profiles.staging.default_template", ""},
 		{"runtimes.local.type", "docker"},
 		{"runtimes.local.namespace", "ns1"},
@@ -4386,7 +4385,7 @@ func TestCredentialLikeFieldPatternAlternatives(t *testing.T) {
 		// never be refused, or config get would break for every user.
 		"runtime",
 		"namespace",
-		"timezone",
+		"default_template",
 		"image_registry",
 		"list_all_namespaces",
 		// A documented gap (see credentialLikeFieldPattern's comment): a
@@ -4975,6 +4974,13 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 		assert.Nil(t, ws.NFS)
 	})
 
+	t.Run("backend name is case-sensitive", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "NFS"}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS, "only the exact name \"nfs\" selects the NFS backend")
+		assert.NoError(t, ws.ValidateNFS(), "ValidateNFS ignores non-nfs backends; ValidateWorkspaceStorage rejects the name")
+	})
+
 	t.Run("nil receiver is safe", func(t *testing.T) {
 		var ws *V1WorkspaceStorageConfig
 		ws.ApplyNFSDefaults() // should not panic
@@ -5013,6 +5019,163 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 		err := ws.ValidateNFS()
 		require.NoError(t, err)
 	})
+}
+
+func TestWorkspaceStorageConfig_ApplyWorkspaceStorageDefaults(t *testing.T) {
+	t.Run("nfs delegates to ApplyNFSDefaults", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyWorkspaceStorageDefaults()
+		require.NotNil(t, ws.NFS)
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.NFS.SubPathRoot)
+		assert.Equal(t, 1000, ws.NFS.UID)
+	})
+
+	t.Run("cloudrun-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.CloudRunVolume.SubPathRoot)
+	})
+
+	t.Run("gke-shared-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("explicit subpath_root is preserved", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "trees"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, "trees", ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("missing volume block stays nil", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Nil(t, ws.CloudRunVolume)
+	})
+
+	t.Run("local, unknown and nil are left alone", func(t *testing.T) {
+		for _, backend := range []string{"", "local", "s3", "NFS"} {
+			ws := &V1WorkspaceStorageConfig{Backend: backend}
+			ws.ApplyWorkspaceStorageDefaults()
+			assert.Equal(t, &V1WorkspaceStorageConfig{Backend: backend}, ws)
+		}
+		var ws *V1WorkspaceStorageConfig
+		ws.ApplyWorkspaceStorageDefaults() // must not panic
+	})
+}
+
+func TestWorkspaceStorageConfig_ValidateWorkspaceStorage(t *testing.T) {
+	nfsShares := []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}}
+	tests := []struct {
+		name    string
+		ws      *V1WorkspaceStorageConfig
+		wantErr string // empty means valid
+	}{
+		{name: "nil", ws: nil},
+		{name: "empty backend", ws: &V1WorkspaceStorageConfig{}},
+		{name: "local", ws: &V1WorkspaceStorageConfig{Backend: "local"}},
+		{name: "unknown backend", ws: &V1WorkspaceStorageConfig{Backend: "s3"}, wantErr: `workspace_storage.backend "s3" is not supported`},
+		{name: "backend names are case-sensitive", ws: &V1WorkspaceStorageConfig{Backend: "NFS"}, wantErr: "is not supported"},
+		{name: "nfs without shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs"}, wantErr: "no NFS shares are defined"},
+		{name: "nfs with shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares}}},
+		{
+			name:    "nfs with absolute subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares, SubPathRoot: "/projects"}},
+			wantErr: "workspace_storage.nfs.subpath_root must be relative",
+		},
+		{name: "cloudrun-volume", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}},
+		{name: "cloudrun-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}, wantErr: "cloudrun_volume.volume_name is not set"},
+		{
+			name:    "cloudrun-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{SubPathRoot: "projects"}},
+			wantErr: "cloudrun_volume.volume_name is not set",
+		},
+		{
+			name:    "cloudrun-volume with traversing subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol", SubPathRoot: "../x"}},
+			wantErr: "workspace_storage.cloudrun_volume.subpath_root",
+		},
+		{name: "gke-shared-volume", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", PVClaimName: "pvc"}}},
+		{name: "gke-shared-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume"}, wantErr: "gke_shared_volume.volume_name is not set"},
+		{
+			name:    "gke-shared-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{PVClaimName: "pvc"}},
+			wantErr: "gke_shared_volume.volume_name is not set",
+		},
+		{
+			name:    "gke-shared-volume with unclean subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "projects/"}},
+			wantErr: "workspace_storage.gke_shared_volume.subpath_root",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.ws.ApplyWorkspaceStorageDefaults()
+			err := tt.ws.ValidateWorkspaceStorage()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateSubPathRoot_SuggestsCleanValue pins the clean-path check: it
+// runs before the component checks so an unclean value names the value to
+// use instead, and gives no suggestion for ".." or for a value that cleans
+// to ".".
+func TestValidateSubPathRoot_SuggestsCleanValue(t *testing.T) {
+	suggest := map[string]string{
+		"projects/":        "projects",
+		"./projects":       "projects",
+		"projects/.":       "projects",
+		"a//b":             "a/b",
+		"team/./projects/": "team/projects",
+	}
+	for in, want := range suggest {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.Contains(t, err.Error(), fmt.Sprintf("must be a clean path (got %q, use %q)", in, want))
+	}
+
+	noSuggestion := map[string]string{
+		"projects/../escape": `".." path component`,
+		"../projects":        `".." path component`,
+		"a/..":               `".." path component`,
+		"./a/../b":           `".." path component`,
+		".":                  `"." path component`,
+	}
+	for in, want := range noSuggestion {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.NotContains(t, err.Error(), "use ", in)
+		assert.Contains(t, err.Error(), want, in)
+	}
+
+	for _, valid := range []string{"projects", "team/projects", "a.b/c-d"} {
+		assert.NoError(t, ValidateSubPathRoot(valid), valid)
+	}
+}
+
+func TestResolveSubPathRoot(t *testing.T) {
+	got, err := ResolveSubPathRoot("")
+	require.NoError(t, err)
+	assert.Equal(t, DefaultWorkspaceSubPathRoot, got)
+
+	for _, valid := range []string{"projects", "trees", "team/trees"} {
+		got, err := ResolveSubPathRoot(valid)
+		require.NoError(t, err, valid)
+		assert.Equal(t, valid, got)
+	}
+
+	for _, invalid := range []string{"/projects", "../projects", "a/../b", "a/./b", "./a", "a/", "a//b", "..", "."} {
+		_, err := ResolveSubPathRoot(invalid)
+		assert.Error(t, err, invalid)
+	}
 }
 
 func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
@@ -5114,9 +5277,9 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 		want  string
 	}{
 		{"absolute", "/projects", "must be relative"},
-		{"empty component", "projects//nested", "empty path component"},
+		{"empty component", "projects//nested", `must be a clean path (got "projects//nested", use "projects/nested")`},
 		{"leading slash empty component", "/", "must be relative"},
-		{"dot component", "projects/./nested", "\".\" path component"},
+		{"dot component", "projects/./nested", `use "projects/nested"`},
 		{"dotdot component", "projects/../escape", "\"..\" path component"},
 		{"bare dotdot", "..", "\"..\" path component"},
 	}
@@ -6110,4 +6273,488 @@ func TestRewriteImageRegistry_Idempotent(t *testing.T) {
 			assert.Equal(t, once, RewriteImageRegistry(once, registry), "registry %q image %q", registry, image)
 		}
 	}
+}
+
+// TestResolveKubernetesServiceAccountMapping covers the precedence for GCP
+// identity mode "assign" on Kubernetes (ptone/scion#2328): a
+// profile-level entry for a given GSA wins over the runtime-level entry for
+// the same GSA, mirroring ResolveImageRegistry's profile-overrides-runtime
+// precedent but evaluated per map key.
+func TestResolveKubernetesServiceAccountMapping(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    *VersionedSettings
+		profileName string
+		gsaEmail    string
+		wantKSA     string
+		wantOK      bool
+	}{
+		{
+			name: "runtime-level mapping",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "agent-worker-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "profile-level entry overrides runtime-level entry for the same GSA",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {
+						Runtime: "gke",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "profile-ksa",
+						},
+					},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "profile-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "profile mapping for a different GSA does not shadow the runtime mapping",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {
+						Runtime: "gke",
+						KubernetesServiceAccountMappings: map[string]string{
+							"other@my-project.iam.gserviceaccount.com": "other-ksa",
+						},
+					},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "runtime-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "empty profile name uses active profile",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+						},
+					},
+				},
+			},
+			profileName: "",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "agent-worker-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "no mapping for the requested GSA",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {Type: "kubernetes"},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "unmapped@my-project.iam.gserviceaccount.com",
+			wantKSA:     "",
+			wantOK:      false,
+		},
+		{
+			name:        "unknown profile",
+			settings:    &VersionedSettings{ActiveProfile: "prod"},
+			profileName: "does-not-exist",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "",
+			wantOK:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotKSA, gotOK := tt.settings.ResolveKubernetesServiceAccountMapping(tt.profileName, tt.gsaEmail)
+			assert.Equal(t, tt.wantKSA, gotKSA)
+			assert.Equal(t, tt.wantOK, gotOK)
+		})
+	}
+}
+
+// TestValidateKubernetesServiceAccountMappings covers the three GSA email
+// shapes GCP actually issues (user-managed, App Engine default, Compute
+// Engine default) plus rejection of malformed emails and KSA names.
+func TestValidateKubernetesServiceAccountMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		mappings map[string]string
+		wantErr  bool
+	}{
+		{
+			name:     "user-managed GSA (iam.gserviceaccount.com)",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "App Engine default GSA (appspot.gserviceaccount.com)",
+			mappings: map[string]string{"my-project@appspot.gserviceaccount.com": "appengine-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "Compute Engine default GSA (developer.gserviceaccount.com)",
+			mappings: map[string]string{"123456789012-compute@developer.gserviceaccount.com": "compute-default-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "malformed GSA email",
+			mappings: map[string]string{"not-an-email": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email not ending in gserviceaccount.com",
+			mappings: map[string]string{"agent-worker@my-project.iam.example.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "KSA name with uppercase characters",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "Agent-Worker-KSA"},
+			wantErr:  true,
+		},
+		{
+			name:     "KSA name with underscore",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "agent_worker_ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "empty KSA name",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": ""},
+			wantErr:  true,
+		},
+		{
+			name:     "empty mapping set",
+			mappings: map[string]string{},
+			wantErr:  false,
+		},
+		{
+			name:     "KSA name with a dot (DNS-1123 subdomain, not just a label)",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "team.agent-worker"},
+			wantErr:  false,
+		},
+		{
+			name:     "uppercase GSA email is rejected, not silently lowercased",
+			mappings: map[string]string{"Agent-Worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with an empty domain label",
+			mappings: map[string]string{"agent-worker@.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with a domain label starting with a hyphen",
+			mappings: map[string]string{"agent-worker@-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with a disallowed local-part character",
+			mappings: map[string]string{"agent!worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "empty GSA email",
+			mappings: map[string]string{"": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateKubernetesServiceAccountMappings(tt.mappings)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestResolveKubernetesServiceAccountMapping_CaseInsensitiveLookup proves the
+// lookup lower-cases the requested GSA email before matching, so a caller
+// that received the email in mixed case (e.g. from an upstream API) still
+// resolves the mapping against a validated, lowercase settings key.
+func TestResolveKubernetesServiceAccountMapping_CaseInsensitiveLookup(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "prod",
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {Runtime: "gke"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke": {
+				Type: "kubernetes",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+				},
+			},
+		},
+	}
+	ksa, ok := vs.ResolveKubernetesServiceAccountMapping("prod", "Agent-Worker@My-Project.IAM.GServiceAccount.com")
+	assert.True(t, ok)
+	assert.Equal(t, "agent-worker-ksa", ksa)
+}
+
+// TestResolveKubernetesServiceAccountMapping_ProfileEmptyValueFallsThrough
+// proves that an explicit but empty-string profile-level entry for a GSA
+// does not shadow the runtime-level entry for the same GSA — it is treated
+// as unset, per the resolver's documented fall-through behavior.
+func TestResolveKubernetesServiceAccountMapping_ProfileEmptyValueFallsThrough(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "prod",
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {
+				Runtime: "gke",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "",
+				},
+			},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke": {
+				Type: "kubernetes",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+				},
+			},
+		},
+	}
+	ksa, ok := vs.ResolveKubernetesServiceAccountMapping("prod", "agent-worker@my-project.iam.gserviceaccount.com")
+	assert.True(t, ok)
+	assert.Equal(t, "runtime-ksa", ksa)
+}
+
+// TestResolveKubernetesNamespace covers the namespace lookup used by GCP
+// identity mode "assign": only the selected runtime entry's namespace is
+// consulted, and an entry without one (or no entry) reports false so the
+// caller falls back to the runtime's default.
+func TestResolveKubernetesNamespace(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {Runtime: "gke"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":      {Namespace: "scion-agents"},
+			"gke-team": {Namespace: "team-agents"},
+			"gke-bare": {},
+		},
+	}
+	tests := []struct {
+		name          string
+		runtimeEntry  string
+		wantNamespace string
+		wantOK        bool
+	}{
+		{name: "runtime entry namespace", runtimeEntry: "gke", wantNamespace: "scion-agents", wantOK: true},
+		{name: "second runtime entry namespace", runtimeEntry: "gke-team", wantNamespace: "team-agents", wantOK: true},
+		{name: "runtime entry without namespace", runtimeEntry: "gke-bare"},
+		{name: "unknown runtime entry", runtimeEntry: "missing"},
+		{name: "no runtime entry", runtimeEntry: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotNamespace, gotOK := vs.ResolveKubernetesNamespace(tt.runtimeEntry)
+			assert.Equal(t, tt.wantNamespace, gotNamespace)
+			assert.Equal(t, tt.wantOK, gotOK)
+		})
+	}
+}
+
+// TestProjectSettingsHasKubernetesServiceAccountMappings covers the
+// project-root-vs-.scion-dir resolution this function must get right (via
+// GetResolvedProjectDir) and confirms it reads the project's settings.yaml
+// directly rather than through LoadEffectiveSettings/LoadVersionedSettings —
+// which merge the global settings in underneath the project's own, making a
+// key the project never set indistinguishable from one it did (see the
+// function's own doc comment). Each subtest uses a fresh HOME and project
+// dir so a mapping written to one is never visible by accident from the
+// other.
+func TestProjectSettingsHasKubernetesServiceAccountMappings(t *testing.T) {
+	writeProjectSettings := func(t *testing.T, yaml string) string {
+		t.Helper()
+		projectDir := t.TempDir()
+		dotScion := filepath.Join(projectDir, ".scion")
+		if err := os.MkdirAll(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return projectDir
+	}
+	writeGlobalSettingsWithMapping := func(t *testing.T) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		globalDir := filepath.Join(home, ".scion")
+		if err := os.MkdirAll(globalDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: global-ksa
+`
+		if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("project runtime entry sets the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected true: the project's own settings.yaml sets this runtime entry's mapping")
+		}
+	})
+
+	t.Run("project profile sets the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+profiles:
+    prod:
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "", "prod") {
+			t.Error("expected true: the project's own settings.yaml sets this profile's mapping")
+		}
+	})
+
+	// The regression case this function exists for: a project settings.yaml
+	// that never mentions kubernetes_service_account_mappings at all must
+	// read as false here, even though the broker's global settings (merged
+	// in underneath by LoadEffectiveSettings/LoadVersionedSettings for every
+	// other caller) do have one for the same runtime entry name. A naive
+	// LoadEffectiveSettings(projectDir)-based check cannot tell these two
+	// cases apart.
+	t.Run("project settings silent, global has the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+`)
+		if ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected false: the project's own settings.yaml never mentions this mapping, even though the merged/global view would show one")
+		}
+	})
+
+	t.Run("no project settings file at all", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		emptyDir := t.TempDir()
+		if ProjectSettingsHasKubernetesServiceAccountMappings(emptyDir, "kubernetes", "") {
+			t.Error("expected false when there is no project settings file")
+		}
+	})
+
+	t.Run("project root path (not yet resolved to its .scion dir)", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		// projectDir itself is the project root, not projectDir/.scion —
+		// GetResolvedProjectDir must resolve it before the file is read.
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected true: a project-root path must resolve to its .scion settings file")
+		}
+	})
+}
+
+// TestLoadGlobalSettingsWithOverlay_IgnoresProjectConfigsSettings checks
+// that only the global settings file is read, even when the global directory
+// carries a project-id file whose project-configs settings.yaml sets runtime
+// values. The overlay itself is covered by TestLoadGlobalSettingsWithOverlay.
+func TestLoadGlobalSettingsWithOverlay_IgnoresProjectConfigsSettings(t *testing.T) {
+	prev := GetGlobalSettingsOverlay()
+	t.Cleanup(func() { SetGlobalSettingsOverlay(prev) })
+	SetGlobalSettingsOverlay(nil)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	globalScionDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    namespace: ns-global
+`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "project-id"),
+		[]byte("11111111-2222-3333-4444-555555555555\n"), 0644))
+	externalDir, err := GetGitProjectExternalConfigDir(globalScionDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, externalDir)
+	require.NoError(t, os.MkdirAll(externalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "settings.yaml"), []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    namespace: ns-project-config
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: project-config-ksa
+`), 0644))
+
+	vs, _, err := LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	assert.Equal(t, "ns-global", vs.Runtimes["k8s"].Namespace)
+	_, mapped := vs.ResolveKubernetesServiceAccountMappingForSelection("", "k8s", "agent-worker@my-project.iam.gserviceaccount.com")
+	assert.False(t, mapped, "the project-configs mapping must not be used")
 }

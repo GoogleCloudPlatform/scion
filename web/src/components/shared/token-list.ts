@@ -59,7 +59,9 @@ interface ScopeOption {
    * "flat_role" or "relationship" (ptone/scion#2122). Relationship-eligible
    * scopes (agent:attach, agent:port_access) are checked against the
    * specific target on every later request -- own agents and their
-   * descendants -- never against a target enumerated at selection time.
+   * descendants, plus (for agent:port_access) agents in projects where the
+   * holder's role grants it -- never against a target enumerated at
+   * selection time.
    */
   eligibilityKind?: string | undefined;
   /**
@@ -94,6 +96,18 @@ export function formatEligibilityReason(reason?: string): string {
 }
 
 /**
+ * Badge text for a relationship-eligible scope. agent:port_access also
+ * reaches agents in projects where the holder's role grants port access
+ * (the built-in project owner and admin roles do).
+ */
+export function relationshipBadgeText(scope: string): string {
+  if (scope === 'agent:port_access') {
+    return 'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent';
+  }
+  return 'Own agents & descendants — checked per agent';
+}
+
+/**
  * Human-friendly labels for resource type groups in the scope selector.
  */
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
@@ -113,7 +127,11 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  * fails. This is a static, best-effort snapshot for that offline case only:
  * it never carries eligibility (every entry is selectable), so it must not
  * be used to answer "may I select this restriction" -- only the live
- * /api/v1/auth/scopes response does that.
+ * /api/v1/auth/scopes response does that. The list mirrors every registry
+ * selector, including boundary-restricted ones such as broker:create
+ * (hub-boundary tokens only): the live response marks those
+ * boundary_not_allowed for a project-scoped token, and the server rejects
+ * them on submit.
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
   {
@@ -185,6 +203,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'agent:read',
     description: 'Read agent status/metadata',
     resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'broker:create',
+    label: 'broker:create',
+    description: 'Create brokers',
+    resource: 'broker',
     isAlias: false,
   },
   {
@@ -1528,7 +1553,7 @@ export class ScionTokenList extends LitElement {
           <span class="scope-checkbox-label">${scope.label}</span>
           ${scope.eligibilityKind === 'relationship'
             ? html`<span class="scope-relationship-badge"
-                >Own agents &amp; descendants — checked per agent</span
+                >${relationshipBadgeText(scope.value)}</span
               >`
             : nothing}
           <br />

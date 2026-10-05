@@ -250,6 +250,20 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The project members group marker keys are system-written only
+	// (ptone/scion#2599): createProjectMembersGroup and the entadapter set
+	// them directly through the store, never through this handler. This
+	// guard is hygiene, not a fix for a reachable state: CreateGroupRequest
+	// has no ProjectID, and every marker consumer requires one, so a
+	// POST-created group is never treated as a members group. Rejecting the
+	// keys here, as updateGroup does on PATCH, keeps "markers are
+	// system-written only" true on every group API path, and stops a stray
+	// marker from becoming meaningful if a group ever gains a ProjectID.
+	if setsProjectMembersGroupMarkerKey(nil, req.Annotations) {
+		ValidationError(w, "project members group marker annotations are system-written and cannot be added", nil)
+		return
+	}
+
 	ownerID := req.OwnerID
 	createdBy := ""
 	if identity := GetIdentityFromContext(ctx); identity != nil {
@@ -403,6 +417,48 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// A project members group carries no owner (ptone/scion#2599): the
+	// owner relationship would grant group.* outside the project's role
+	// bindings. Reject setting one, even by a hub admin. Both the stored
+	// group and the patched annotations are checked. A PATCH that adds the
+	// marker and an owner together is also rejected by the add-marker guard
+	// below; checking the patched annotations here is defence in depth.
+	if req.OwnerID != "" {
+		patched := *group
+		if req.Annotations != nil {
+			patched.Annotations = req.Annotations
+		}
+		if hasProjectMembersGroupMarker(group) || hasProjectMembersGroupMarker(&patched) {
+			ValidationError(w, "ownerId cannot be set on a project members group", nil)
+			return
+		}
+	}
+
+	// The marker annotations identify a project members group to the owner
+	// guard above and to the owner-clearing startup backfill. req.Annotations
+	// replaces the whole map, so without this check a PATCH could strip the
+	// marker and a later PATCH could then set an owner that no guard or
+	// backfill would catch. Reject any PATCH that removes or changes either
+	// marker key on a marked group (ptone/scion#2599).
+	//
+	// The markers are system-written only: createProjectMembersGroup and the
+	// entadapter set them directly through the store, never through the
+	// group API. createGroup rejects them on POST, and a PATCH may not add
+	// either marker key to an unmarked group either. On a group that has a
+	// ProjectID, a mistaken request adding a marker would otherwise become
+	// irreversible through the API once the immutability check above
+	// applied to it.
+	if req.Annotations != nil && changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
+		if hasProjectMembersGroupMarker(group) {
+			ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
+			return
+		}
+		if setsProjectMembersGroupMarkerKey(group.Annotations, req.Annotations) {
+			ValidationError(w, "project members group marker annotations are system-written and cannot be added", nil)
+			return
+		}
 	}
 
 	if req.Name != "" {

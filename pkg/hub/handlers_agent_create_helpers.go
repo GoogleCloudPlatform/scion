@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -153,7 +154,12 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 
 	if req.Config != nil {
 		ac.Image = req.Config.Image
-		ac.Env = req.Config.Env
+		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
+		// below IS req.Config, so sharing the map would let every later
+		// AppliedConfig.Env writer (the template-env fill, the project
+		// auto-expose tier, the post-dispatch resolved-env merge) leak into
+		// InlineConfig.Env, which holds the requester's explicit keys only.
+		ac.Env = maps.Clone(req.Config.Env)
 		ac.Model = req.Config.Model
 		ac.ThinkingLevel = req.Config.ThinkingLevel
 
@@ -249,8 +255,8 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -265,7 +271,9 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate workspace path for hub-managed projects and shared-workspace git projects.
 	// When the user provided a relative workspace (project subdirectory), preserve it
 	// verbatim -- the broker will resolve it against its own project root.
-	if project != nil && (project.GitRemote == "" || project.IsSharedWorkspace()) {
+	// Empty-per-agent projects are skipped: Workspace stays empty and the
+	// broker provisions a private per-agent directory (design #2703 §2.1).
+	if syncsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
 			workspacePath, err := s.hubManagedProjectPath(project.Slug)
@@ -278,7 +286,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// For shared-workspace git projects, default the branch to the project's
 	// default branch (the workspace's current branch) instead of the agent slug.
 	if project != nil && project.IsSharedWorkspace() && agent.AppliedConfig.Branch == "" {
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -423,26 +431,22 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
-// — template/hub/project telemetry defaults, the project- or hub-level
-// SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
-// alias, and InlineConfig.Skills (see above). It also receives the template
-// env merge below by aliasing, not by a write in this function: the create
-// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
-// to req.Config itself and AppliedConfig.Env to req.Config.Env, so
-// InlineConfig *is* the request object and AppliedConfig.Env is its Env
-// field — every InlineConfig write listed above also mutates the request,
-// and, in the same direction, when the requester supplied any env, the
-// template-env-merge writes below land in InlineConfig.Env too (and the
-// auto-expose key also appears in AppliedConfig.Env). InlineConfig.Telemetry
-// can also be aliased, by this function's own template-telemetry fill, to
-// resolvedTemplate.Config.Telemetry, so the project TelemetryEnabled write
-// above can mutate the template object through that shared pointer.
-// InlineConfig therefore cannot be stripped back to explicit inputs by
-// removing known hub/project keys — the aliased template-env keys are
-// indistinguishable from explicit ones by inspecting InlineConfig. A caller
-// that needs the original explicit request inputs (reincarnate does) must
-// capture them before this runs, not read them back out of InlineConfig
-// afterward.
+// — template/hub/project telemetry defaults, the resolved Model alias, and
+// InlineConfig.Skills (see above). The create path's config builder,
+// buildAppliedConfig, sets AppliedConfig.InlineConfig to req.Config itself,
+// so every InlineConfig write listed above also mutates the request.
+// InlineConfig.Telemetry can also be aliased, by this function's own
+// template-telemetry fill, to resolvedTemplate.Config.Telemetry, so the
+// project TelemetryEnabled write above can mutate the template object through
+// that shared pointer. A caller that needs the original explicit request
+// inputs (reincarnate does) must capture them before this runs, not read them
+// back out of InlineConfig afterward.
+//
+// InlineConfig.Env is the exception: nothing here writes it. AppliedConfig.Env
+// is a separate map (buildAppliedConfig clones it), so the template-env merge
+// and the SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
+// AppliedConfig.Env only, and InlineConfig.Env keeps the requester's explicit
+// keys.
 //
 // Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
 // caller-facing guard covers today's only call site; a direct caller must
@@ -718,42 +722,12 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		}
 	}
 
-	// Apply project-level AutoExposePortsEnabled override.
-	// Only set the env var if the agent's own config does not already specify it,
-	// so agent-level settings take priority over project-level.
-	if project != nil && project.Annotations != nil {
-		if val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]; ok {
-			enabled, err := strconv.ParseBool(val)
-			if err == nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Env == nil {
-					agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
-				}
-				if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-					agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(enabled)
-				}
-			}
-		}
-	}
-
-	// Apply hub-level AutoExposePortsDefault as lowest-priority fallback.
-	// Injects SCION_AUTO_EXPOSE_PORTS if neither the agent config nor
-	// the project annotation already set it, respecting both true and false defaults.
-	s.mu.RLock()
-	hubAutoExposeDefault := s.config.AutoExposePortsDefault
-	s.mu.RUnlock()
-	if hubAutoExposeDefault != nil {
-		if agent.AppliedConfig.InlineConfig == nil {
-			agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-		}
-		if agent.AppliedConfig.InlineConfig.Env == nil {
-			agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
-		}
-		if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-			agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(*hubAutoExposeDefault)
-		}
+	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
+	// template-env fill above so the project tier can overwrite a template
+	// value. The hub default is never written here; see resolveAutoExposeEnv.
+	// Explicit keys come from explicitEnvOf.
+	if agent.AppliedConfig != nil {
+		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnvOf(agent.AppliedConfig))
 	}
 
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
@@ -767,6 +741,67 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)
+}
+
+// resolveAutoExposeEnv resolves SCION_AUTO_EXPOSE_PORTS into ac.Env by the
+// B1 order in settings-precedence.md, highest first:
+//
+//  1. user-explicit: the key is in explicit (the request's env snapshot,
+//     CreateInputs.InlineConfig.Env). That value is already in ac.Env, so
+//     nothing is written.
+//  2. project annotation scion.io/auto-expose-ports-enabled: written into
+//     ac.Env, overwriting a template-derived value.
+//  3. template env, already merged into ac.Env by the template-env fill, is
+//     left as is; harness-config env applies at the broker below it.
+//  4. hub AutoExposePortsDefault: never written to the agent record. The
+//     dispatcher sends it in api.HubAgentDefaults and the broker's
+//     buildAgentEnv applies it only when no higher tier set the key.
+//
+// explicit must be the request snapshot, not ac.Env, so a template-derived
+// value is never mistaken for an explicit one. Neither InlineConfig.Env nor
+// CreateInputs is written: the resolved value is derived, not explicit.
+func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, explicit map[string]string) {
+	if ac == nil {
+		return
+	}
+	if _, ok := explicit[api.EnvAutoExposePorts]; ok {
+		return
+	}
+	if project == nil || project.Annotations == nil {
+		return
+	}
+	val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]
+	if !ok {
+		return
+	}
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		return
+	}
+	if ac.Env == nil {
+		ac.Env = make(map[string]string)
+	}
+	ac.Env[api.EnvAutoExposePorts] = strconv.FormatBool(enabled)
+}
+
+// explicitEnvOf returns the requester's explicit env for ac: the
+// CreateInputs snapshot every create path takes before derivation, or, for a
+// config without CreateInputs, InlineConfig.Env, which holds explicit keys
+// only. The returned map is not a copy.
+func explicitEnvOf(ac *store.AgentAppliedConfig) map[string]string {
+	if ac == nil {
+		return nil
+	}
+	if ci := ac.CreateInputs; ci != nil {
+		if ci.InlineConfig != nil {
+			return ci.InlineConfig.Env
+		}
+		return nil
+	}
+	if ac.InlineConfig != nil {
+		return ac.InlineConfig.Env
+	}
+	return nil
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
@@ -1039,10 +1074,16 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
-	// start gate runs first, after the lifecycle authz above.
+	// start gate runs first, after the lifecycle authz above. An agent whose
+	// create is in flight is returned as it is, without applying the
+	// request.
 	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		if ref.InFlight {
+			s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
+			return existingAgentStarted
+		}
 		ref.write(w)
 		return existingAgentErrored
 	}
@@ -1092,11 +1133,28 @@ func (s *Server) handleExistingAgent(
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			writeRunIntentError(w, err, existingAgent.ID)
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			if isContainerNameConflict(err) {
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
+			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
+			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1172,11 +1230,28 @@ func (s *Server) handleExistingAgent(
 			if !ok {
 				return existingAgentErrored
 			}
+			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				writeRunIntentError(w, err, existingAgent.ID)
+				return existingAgentErrored
+			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				if isContainerNameConflict(err) {
+				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+					return res
+				}
+				switch {
+				case errors.Is(err, store.ErrDeleteInProgress):
+					deleteInProgressRefusal(existingAgent.ID).write(w)
+				case writeAgentTokenIssueError(w, err):
+					// Response written.
+				case writeEmptyPerAgentCapabilityError(w, err):
+					// 412 already written (design #2703 D3).
+				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				} else {
+				case relaySkillResolutionError(w, err):
+					// Required-skill resolution failure relayed with the broker's status.
+				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
@@ -1211,6 +1286,10 @@ func (s *Server) handleExistingAgent(
 
 	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
@@ -1282,10 +1361,26 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			writeRunIntentError(w, err, existingAgent.ID)
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
-			if isContainerNameConflict(err) {
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
+			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
+			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1375,18 +1470,66 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		brokerSummaries = append([]RuntimeBrokerSummary{*defaultBrokerSummary}, brokerSummaries...)
 	}
 
+	// Every error response below lists only the brokers the caller may use
+	// for this project (online providers that pass canDispatchToBroker),
+	// default first. Computed only on error paths: it costs a dispatch check
+	// per online provider.
+	usableBrokers := func() []RuntimeBrokerSummary {
+		return s.usableBrokerSummaries(ctx, brokerSummaries, availableBrokers)
+	}
+
 	// Case 1: Explicit runtime broker specified
 	if requestedBrokerID != "" {
-		// Check if the requested broker is a provider to this project (by ID, Name, or Slug)
+
+		// acceptProvider resolves to an existing provider of this project,
+		// refusing it with 503 if its broker record shows it offline. If the
+		// broker record cannot be read (rec == nil), let it through, as
+		// brokerReachable does.
+		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
+			if rec != nil && !s.brokerRecordReachable(rec) {
+				// The broker exists but is offline: refuse at resolution,
+				// before any agent row is created (ptone/scion#2715).
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", rec.ID,
+					"status", rec.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
+				return "", store.ErrNotFound
+			}
+			return brokerID, nil
+		}
+
+		// Check if the requested broker is a provider to this project. Match
+		// the ID exactly and the name/slug case-insensitively, the same way
+		// findBrokerByIDOrSlug does, so a case variant of an existing
+		// provider never falls through to the auto-link path below (which
+		// would rewrite the provider row).
+		matchedID := ""
 		for _, p := range allProviders {
-			if p.BrokerID == requestedBrokerID || p.BrokerName == requestedBrokerID {
-				return p.BrokerID, nil
+			if p.BrokerID == requestedBrokerID || strings.EqualFold(p.BrokerName, requestedBrokerID) {
+				matchedID = p.BrokerID
+				break
 			}
-			// Fetch broker to check slug
-			broker, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-			if err == nil && broker.Slug == requestedBrokerID {
-				return broker.ID, nil
+		}
+		var matched *store.RuntimeBroker
+		var matchedErr error
+		if matchedID != "" {
+			matched, matchedErr = s.store.GetRuntimeBroker(ctx, matchedID)
+		} else {
+			// Slug lives on the broker record, so fetch per provider only
+			// when ID and name did not match.
+			for _, p := range allProviders {
+				b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
+				if err == nil && b.Slug != "" && strings.EqualFold(b.Slug, requestedBrokerID) {
+					matchedID, matched = b.ID, b
+					break
+				}
 			}
+		}
+		if matchedID != "" {
+			if matchedErr != nil {
+				matched = nil
+			}
+			return acceptProvider(matchedID, matched)
 		}
 
 		// Broker is not yet a provider — try to auto-link it.
@@ -1395,6 +1538,17 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
+			// The lookup can find a broker that already is a provider even
+			// though the passes above missed it, e.g. by its current name
+			// after a rename (provider rows keep the name from link time).
+			// Treat that as the provider match: never re-link (the upsert
+			// would rewrite the provider row) or require project update.
+			for _, p := range allProviders {
+				if p.BrokerID == broker.ID {
+					return acceptProvider(broker.ID, broker)
+				}
+			}
+
 			// Linking a new provider (and possibly setting it as the project
 			// default) changes where the project's agents may run, so it
 			// requires the same authorization as the providers-add endpoint:
@@ -1414,6 +1568,16 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				return "", store.ErrNotFound
 			}
 
+			// Do not link (or dispatch to) a broker that exists but is
+			// offline: 503 before anything is written (ptone/scion#2715).
+			if !s.brokerRecordReachable(broker) {
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
+					"status", broker.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
+				return "", store.ErrNotFound
+			}
+
 			provider := &store.ProjectProvider{
 				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
@@ -1424,7 +1588,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
 				return "", store.ErrNotFound
 			}
 			slog.Info("Auto-linked broker as project provider",
@@ -1441,11 +1605,14 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			return broker.ID, nil
 		}
 
-		// Broker doesn't exist at all
+		// Broker doesn't exist at all (not by ID, name or slug). This is a
+		// 404, not a 503: nothing is unavailable, the name is simply wrong
+		// (ptone/scion#2715). The message lists the brokers the caller can
+		// actually dispatch to for this project.
 		slog.Warn("Requested broker not found during agent creation",
 			"requestedBrokerID", requestedBrokerID, "project_id", project.ID,
 			"providerCount", len(allProviders))
-		RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+		RuntimeBrokerNotFound(w, requestedBrokerID, usableBrokers())
 		return "", store.ErrNotFound
 	}
 
@@ -1462,10 +1629,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 		}
 		// Default broker is not available or not dispatchable
-		if len(availableBrokers) > 0 {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", brokerSummaries)
+		if usable := usableBrokers(); len(usable) > 0 {
+			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", usable)
 		} else {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", brokerSummaries)
+			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", usable)
 		}
 		return "", store.ErrNotFound
 	}
@@ -1496,7 +1663,11 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
 			return allProviders[0].BrokerID, nil
 		}
-		NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", brokerSummaries)
+		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	}
 
@@ -1510,13 +1681,20 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 	switch len(dispatchable) {
 	case 0:
-		NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", brokerSummaries)
+		if len(availableBrokers) > 0 {
+			// Online brokers exist, but none the caller may use.
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else if len(allProviders) == 0 {
+			NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "None of this project's runtime brokers are online", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	case 1:
 		return dispatchable[0].ID, nil
 	default:
 		// Multiple dispatchable brokers - require explicit selection
-		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", brokerSummaries)
+		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", usableBrokers())
 		return "", store.ErrNotFound
 	}
 }
@@ -1616,6 +1794,22 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 	return availableBrokers, nil
 }
 
+// usableBrokerSummaries filters summaries (already default-first) down to the
+// brokers the caller may dispatch to, preserving order. available is the
+// project's online providers that summaries was built from.
+func (s *Server) usableBrokerSummaries(ctx context.Context, summaries []RuntimeBrokerSummary, available []store.RuntimeBroker) []RuntimeBrokerSummary {
+	usable := make([]RuntimeBrokerSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		for i := range available {
+			if available[i].ID == summary.ID && s.canDispatchToBroker(ctx, &available[i]) {
+				usable = append(usable, summary)
+				break
+			}
+		}
+	}
+	return usable
+}
+
 // findBrokerByIDOrSlug looks up a runtime broker by ID, slug, or name.
 func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*store.RuntimeBroker, error) {
 	// Try by ID first
@@ -1628,6 +1822,19 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	broker, err = s.store.GetRuntimeBrokerByName(ctx, identifier)
 	if err == nil {
 		return broker, nil
+	}
+
+	// Try by slug (case-insensitive, matching the hub-default lookup). The
+	// store has no slug index for brokers; the broker table is small, so a
+	// bounded scan is fine (same pattern as broker_quota.go).
+	result, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	for i := range result.Items {
+		if result.Items[i].Slug != "" && strings.EqualFold(result.Items[i].Slug, identifier) {
+			return &result.Items[i], nil
+		}
 	}
 
 	return nil, store.ErrNotFound

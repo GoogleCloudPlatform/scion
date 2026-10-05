@@ -83,6 +83,11 @@ func (RuntimeBroker) Fields() []ent.Field {
 		// itself resolves at dispatch time.
 		field.String("default_profile").
 			Optional(),
+		// workspace_storage is the broker's JSON-encoded
+		// api.BrokerWorkspaceStorage descriptor, reported at registration
+		// and refreshed on every heartbeat. Empty means never reported.
+		field.String("workspace_storage").
+			Optional(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).

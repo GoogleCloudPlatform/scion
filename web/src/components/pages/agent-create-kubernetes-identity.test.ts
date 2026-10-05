@@ -295,8 +295,9 @@ async function chooseSelect(el: MountedEl, select: Element, value: string): Prom
 
 describe('Create Agent: block is not offered for a Kubernetes target', () => {
   // Mounting the full Create Agent page (5 concurrent fetches, a large
-  // render tree) is slower than the default 5s test timeout under happy-dom.
-  vi.setConfig({ testTimeout: 15000 });
+  // render tree) is slower than the default 5s test timeout under happy-dom,
+  // so the suite sets a longer timeout (third describe argument). A suite
+  // timeout is used rather than vi.setConfig, which changes worker-global config.
 
   it('hides Block when the selected broker has a single, kubernetes-only profile', async () => {
     const el = await mountAgentCreate();
@@ -1644,4 +1645,210 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(tracker.bodies).toHaveLength(1);
     expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
-});
+}, 15_000);
+
+/**
+ * ptone/scion#2548: loadGCPServiceAccounts is fired unawaited on a project
+ * switch, so its responses can land out of order, or after the user already
+ * picked an identity. A stale load must not apply its accounts or default,
+ * and an arriving default must never overwrite an explicit user pick.
+ */
+describe('Create Agent: GCP identity defaults do not race', () => {
+  // Mounts the full Create Agent page; see the suite timeout (third describe
+  // argument) on the suite above for why.
+
+  interface Deferred {
+    promise: Promise<Response>;
+    resolve: (body: unknown) => void;
+  }
+
+  function deferred(): Deferred {
+    let resolve!: (body: unknown) => void;
+    const promise = new Promise<Response>((r) => {
+      resolve = (body: unknown) => r({ ok: true, status: 200, json: async () => body } as Response);
+    });
+    return { promise, resolve };
+  }
+
+  /**
+   * Routes per-URL-fragment responses: a Deferred entry is held until the
+   * test resolves it; a plain object is returned immediately. Anything
+   * unmatched gets an empty list response.
+   */
+  function stubRoutes(routes: Record<string, Deferred | unknown>): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        for (const [fragment, route] of Object.entries(routes)) {
+          if (url.includes(fragment)) {
+            if (route && typeof route === 'object' && 'promise' in route) {
+              return (route as Deferred).promise;
+            }
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              json: async () => route,
+            } as Response);
+          }
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        } as Response);
+      })
+    );
+  }
+
+  const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
+
+  type Page = AgentCreateInternals & { projectId: string; defaultGcpServiceAccountId: string };
+
+  it("does not apply project A's accounts or default when A's account fetch finishes after project B's load", async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el) as Page;
+
+    const aAccounts = deferred();
+    const aSettings = deferred();
+    stubRoutes({
+      '/projects/pA/gcp-service-accounts': aAccounts,
+      '/projects/pA/settings': aSettings,
+      '/projects/pB/gcp-service-accounts': { items: [] },
+      '/projects/pB/settings': { defaultGCPIdentityMode: 'passthrough' },
+    });
+
+    page.projectId = 'pA';
+    const loadA = page.loadGCPServiceAccounts();
+    page.projectId = 'pB';
+    await page.loadGCPServiceAccounts();
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    // A's responses land late.
+    aAccounts.resolve({ items: [makeServiceAccount('sa-a')] });
+    aSettings.resolve({
+      defaultGCPIdentityMode: 'assign',
+      defaultGCPIdentityServiceAccountID: 'sa-a',
+    });
+    await loadA;
+    await flush();
+    await el.updateComplete;
+
+    expect(page.gcpServiceAccounts).toEqual([]);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+    expect(page.defaultGcpMetadataMode).toBe('passthrough');
+    expect(page.gcpServiceAccountId).toBe('');
+    expect(page.defaultGcpServiceAccountId).toBe('');
+  });
+
+  it("does not apply project A's default when A's settings fetch finishes after project B's load", async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el) as Page;
+
+    const aSettings = deferred();
+    stubRoutes({
+      '/projects/pA/gcp-service-accounts': { items: [makeServiceAccount('sa-a')] },
+      '/projects/pA/settings': aSettings,
+      '/projects/pB/gcp-service-accounts': { items: [makeServiceAccount('sa-b')] },
+      '/projects/pB/settings': {
+        defaultGCPIdentityMode: 'assign',
+        defaultGCPIdentityServiceAccountID: 'sa-b',
+      },
+    });
+
+    page.projectId = 'pA';
+    const loadA = page.loadGCPServiceAccounts();
+    // Let A's account fetch complete so A is parked on its settings await.
+    await flush();
+    page.projectId = 'pB';
+    await page.loadGCPServiceAccounts();
+    expect(page.gcpServiceAccountId).toBe('sa-b');
+
+    aSettings.resolve({ defaultGCPIdentityMode: 'passthrough' });
+    await loadA;
+    await flush();
+    await el.updateComplete;
+
+    expect(page.gcpServiceAccounts.map((sa) => sa.id)).toEqual(['sa-b']);
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.defaultGcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-b');
+  });
+
+  it('drops an older load for the same project after switching A -> B -> A', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el) as Page;
+
+    // The first pA accounts request is held; later ones answer at once with
+    // newer data. projectId is pA again by the time the held one lands, so
+    // only the load sequence number can tell it is stale.
+    const firstAAccounts = deferred();
+    let aAccountCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const ok = (body: unknown): Promise<Response> =>
+          Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+        if (url.includes('/projects/pA/gcp-service-accounts')) {
+          aAccountCalls++;
+          return aAccountCalls === 1
+            ? firstAAccounts.promise
+            : ok({ items: [makeServiceAccount('sa-a2')] });
+        }
+        if (url.includes('/projects/pA/settings')) {
+          return ok({ defaultGCPIdentityMode: 'passthrough' });
+        }
+        return ok({ items: [] });
+      })
+    );
+
+    page.projectId = 'pA';
+    const load1 = page.loadGCPServiceAccounts();
+    page.projectId = 'pB';
+    await page.loadGCPServiceAccounts();
+    page.projectId = 'pA';
+    await page.loadGCPServiceAccounts();
+    expect(page.gcpServiceAccounts.map((sa) => sa.id)).toEqual(['sa-a2']);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    firstAAccounts.resolve({ items: [makeServiceAccount('sa-a1')] });
+    await load1;
+    await flush();
+    await el.updateComplete;
+
+    expect(page.gcpServiceAccounts.map((sa) => sa.id)).toEqual(['sa-a2']);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+    expect(page.defaultGcpMetadataMode).toBe('passthrough');
+  });
+
+  it('keeps a user pick made while the settings fetch is in flight when the default arrives', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el) as Page;
+
+    const settings = deferred();
+    stubRoutes({
+      '/projects/pC/gcp-service-accounts': { items: [] },
+      '/projects/pC/settings': settings,
+    });
+
+    page.projectId = 'pC';
+    const load = page.loadGCPServiceAccounts();
+    await flush();
+    await el.updateComplete;
+
+    // Non-Kubernetes target (no brokers), so Block is offered; the user picks
+    // it before the project's passthrough default arrives.
+    await chooseSelect(el, gcpIdentitySelect(el)!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    settings.resolve({ defaultGCPIdentityMode: 'passthrough' });
+    await load;
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+    // The project default is still recorded, for normalization and hints.
+    expect(page.defaultGcpMetadataMode).toBe('passthrough');
+  });
+}, 15_000);

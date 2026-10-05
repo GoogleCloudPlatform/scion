@@ -34,6 +34,7 @@ import '../shared/status-badge.js';
 import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import '../shared/security-review-dialog.js';
+import { formatRelative } from '../../utils/time.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
@@ -1105,30 +1106,8 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
-    if (!dateString) return 'Never';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return 'Never';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (!dateString || Number.isNaN(new Date(dateString).getTime())) return 'Never';
+    return formatRelative(dateString);
   }
 
   private getInitials(name: string): string {

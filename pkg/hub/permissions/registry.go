@@ -134,10 +134,10 @@ type Permission struct {
 	NonRouteUse    []string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
-	// permissions (agent.attach, agent.port_access) that project owners/admins
-	// no longer hold through their role, so that they can still mint
-	// agent:manage tokens (miller79/scion#88). The scope remains available
-	// for explicit selection.
+	// permissions (agent.attach, agent.port_access) that some project roles
+	// do not hold (owners/admins lack attach; members lack
+	// port_access), so that holders of those roles can still mint
+	// agent:manage tokens. The scope remains available for explicit selection.
 	ExcludeFromManageAlias bool
 }
 
@@ -206,15 +206,10 @@ var Registry = []Permission{
 
 	// broker.create is a hub-level permission: registration is gated by an
 	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
-	// mere authentication. The agreed cross-workstream UAT selector name for
-	// this permission is "broker:create" (ptone/scion#2104, ptone/scion#2107),
-	// but it has no UATScope yet: today's UATs are project-bound, and
-	// enforceUATConstraints already rejects any project-scoped UAT against
-	// this hub-level resource. ptone/scion#2123 introduces hub-bound UAT
-	// boundaries; only then does a broker:create selector become
-	// mintable/usable, and this entry gains UATScope: "broker:create" at that
-	// point.
-	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
+	// mere authentication. Its UAT selector "broker:create" is mintable only
+	// on a hub-boundary token (PermissionAllowedBoundaries). Broker creation
+	// does not admit bearer credentials (authorizeBrokerCreate).
+	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "broker:create", Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},

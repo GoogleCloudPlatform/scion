@@ -37,6 +37,9 @@ const (
 	DeletionCodeAbandoned      = "abandoned"
 	DeletionCodeRevokeFailed   = "revoke_failed"
 	DeletionCodeFinalizeFailed = "finalize_failed"
+	// DeletionCodeRuntimeUnavailable: the broker does not have the agent's
+	// runtime available, so the delete did not run there; retryable.
+	DeletionCodeRuntimeUnavailable = "runtime_unavailable"
 )
 
 // DeletionDisplayTTL is how long a failed delete stays visible in the view
@@ -50,14 +53,25 @@ const DeletionDisplayTTL = 15 * time.Minute
 // failed.
 type DeletionInfo struct {
 	State          string     `json:"state"`          // "deleting" (incl. finalizing) | "failed"
-	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed
+	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
 	Error          string     `json:"error,omitempty"`
 	Soft           bool       `json:"soft"`
 	Claim          int64      `json:"claim"` // named to avoid confusion with Agent.Generation (reincarnation)
 	StartedAt      time.Time  `json:"startedAt"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"` // deleting
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`      // failed, except in_doubt and finalizing
+	// Stage is "finalizing" when the row's stored state is finalizing
+	// (teardown done, finalize running or interrupted), on both the
+	// deleting and the failed view; omitted otherwise. The deleting view
+	// otherwise hides finalizing, so without it a client that flips a
+	// lapsed lease itself cannot tell that the row never expires from view
+	// and blocks start until a retry or force (design note D4, phase 2).
+	Stage string `json:"stage,omitempty"`
 }
+
+// DeletionStageFinalizing is the DeletionInfo.Stage value for a row whose
+// stored state is finalizing.
+const DeletionStageFinalizing = "finalizing"
 
 // DeletionPriorState is the JSON stored in Agent.DeletionPrior: the state a
 // failed delete restores (design §2.1 claim).
@@ -115,6 +129,29 @@ func (a *Agent) DeletionActive(now time.Time) bool {
 	return a.DeletionLeaseAt != nil && a.DeletionLeaseAt.After(now)
 }
 
+// DeletionHoldsRow reports whether a delete holds the row against a start:
+// the row is finalizing (teardown has run, even if the lease expired: only a
+// retry or force moves it on), or deleting under a live lease. A deleting row
+// whose lease has passed or was never set does not hold it. This is the
+// in-flight part of the start gate (the hub's deleteBlocksStart) and the
+// rule SetAgentRunID refuses under (entadapter's runIDWritable is its SQL
+// form, plus deleted_at IS NULL), so both read one definition
+// (ptone/scion#2550 P1).
+func DeletionHoldsRow(state string, leaseAt *time.Time, now time.Time) bool {
+	switch state {
+	case DeletionStateFinalizing:
+		return true
+	case DeletionStateDeleting:
+		return leaseAt != nil && leaseAt.After(now)
+	}
+	return false
+}
+
+// DeletionHoldsRow is DeletionHoldsRow over the agent's deletion fields.
+func (a *Agent) DeletionHoldsRow(now time.Time) bool {
+	return a != nil && DeletionHoldsRow(a.DeletionState, a.DeletionLeaseAt, now)
+}
+
 // DeletionEffectiveCode returns the code a failed or lease-expired delete
 // reads as: the stored code if one is set, otherwise "abandoned" for a
 // lease-expired deleting/finalizing row (a dead engine). Empty for a row
@@ -151,7 +188,8 @@ func (a *Agent) DeletionEffectiveCode(now time.Time) string {
 //     leaseAt on a claim, so this fallback is defensive). A row with none of
 //     the three has no expiresAt;
 //   - lease-expired finalizing rows and in_doubt rows have no expiresAt and
-//     never expire from view.
+//     never expire from view;
+//   - a finalizing row (live or lease-expired) carries stage "finalizing".
 //
 // A soft-deleted row (DeletedAt set) has no view.
 func ComputeAgentDeletion(a *Agent, now time.Time) *DeletionInfo {
@@ -165,6 +203,9 @@ func ComputeAgentDeletion(a *Agent, now time.Time) *DeletionInfo {
 	}
 	if a.DeletionStartedAt != nil {
 		info.StartedAt = *a.DeletionStartedAt
+	}
+	if a.DeletionState == DeletionStateFinalizing {
+		info.Stage = DeletionStageFinalizing
 	}
 	if a.DeletionActive(now) {
 		info.State = DeletionStateDeleting

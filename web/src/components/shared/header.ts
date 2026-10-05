@@ -47,7 +47,6 @@ import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
 import {
   GRAPH_PALETTE_AVAILABILITY_EVENT,
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
@@ -186,8 +185,17 @@ export class ScionHeader extends LitElement {
          is the one element here that can lose characters harmlessly. */
       grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
       align-items: center;
+      /* The page uses viewport-fit=cover, so the header runs under a notch
+         or status bar. The top inset is padding on top of the content
+         height (content-box, stated explicitly so the header never loses
+         its 60px row to the inset), and the side insets (landscape) widen
+         the inline padding. Every inset is 0 on devices without one. A shell
+         that already clears the left inset beside the header (a sidebar)
+         sets --scion-header-inset-left to 0px so it is not applied twice. */
+      box-sizing: content-box;
       height: var(--scion-header-height, 60px);
-      padding: 0 1.5rem;
+      padding: env(safe-area-inset-top, 0px) max(1.5rem, env(safe-area-inset-right, 0px)) 0
+        max(1.5rem, var(--scion-header-inset-left, env(safe-area-inset-left, 0px)));
       background: var(--scion-surface, #ffffff);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
@@ -888,10 +896,11 @@ export class ScionHeader extends LitElement {
 
   // =========================================================================
   // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, the terminal view's agents-only "Jump to
-  // agent" palette on /terminals, or a graph view's "Jump to agent" palette
+  // switcher on a chat route, or a graph view's "Jump to agent" palette
   // while one is on screen. One button, one render path, shared by every
-  // host -- see renderPaletteButton's own doc comment.
+  // host -- see renderPaletteButton's own doc comment. The terminal view
+  // has none here: its "Jump to agent" button is a labelled footer in its
+  // Open terminals column (TerminalWorkspaceRoot.buildRailFooter).
   // =========================================================================
 
   /**
@@ -912,14 +921,11 @@ export class ScionHeader extends LitElement {
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
     const isChat = this.isChatView();
-    const isTerminal = this.isTerminalView();
-    const isGraph = !isChat && !isTerminal && this.graphPaletteAvailable;
-    if (!isChat && !isTerminal && !isGraph) return nothing;
+    const isGraph = !isChat && !this.isTerminalView() && this.graphPaletteAvailable;
+    if (!isChat && !isGraph) return nothing;
     const openRequestEvent = isChat
       ? CHAT_PALETTE_OPEN_REQUEST_EVENT
-      : isTerminal
-        ? TERMINAL_PALETTE_OPEN_REQUEST_EVENT
-        : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
+      : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();

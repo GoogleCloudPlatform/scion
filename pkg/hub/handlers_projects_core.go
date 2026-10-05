@@ -46,11 +46,19 @@ type ListProjectsResponse struct {
 }
 
 type CreateProjectRequest struct {
-	ID            string            `json:"id,omitempty"`
-	Slug          string            `json:"slug,omitempty"`
-	Name          string            `json:"name"`
-	GitRemote     string            `json:"gitRemote,omitempty"`
-	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
+	ID        string `json:"id,omitempty"`
+	Slug      string `json:"slug,omitempty"`
+	Name      string `json:"name"`
+	GitRemote string `json:"gitRemote,omitempty"`
+	// WorkspaceMode is the create-only workspace sharing mode, stored as the
+	// server-owned scion.dev/workspace-mode label. Git projects accept
+	// "shared", "per-agent" (own git clone per agent) or "worktree-per-agent";
+	// non-git (hub-managed) projects accept "shared" or "per-agent" (empty
+	// private directory per agent). Absent means no label (non-git: shared).
+	// Unknown values and worktree-per-agent without a git remote are 400s; a
+	// raw Labels entry for the key must match this field (or is stripped when
+	// this field is empty).
+	WorkspaceMode string            `json:"workspaceMode,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
@@ -308,6 +316,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
 
+	// Workspace mode is create-only and server-owned: validate the requested
+	// mode against the project's git-ness and set the label only from the
+	// validated field (design #2703 §2.4).
+	labels, err := resolveCreateWorkspaceModeLabels(req.WorkspaceMode, req.Labels, normalizedRemote != "")
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	req.Labels = labels
+
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
@@ -347,9 +365,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	baseSlug := req.Slug
 	if baseSlug == "" {
 		baseSlug = api.Slugify(req.Name)
+	} else if isReservedProjectSlug(baseSlug) {
+		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
 	}
 
-	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -358,17 +379,6 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	displayName := req.Name
 	if slug != baseSlug {
 		displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
-	}
-
-	// Apply workspace mode label for git projects with explicit workspace mode.
-	if normalizedRemote != "" {
-		switch req.WorkspaceMode {
-		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
-			if req.Labels == nil {
-				req.Labels = make(map[string]string)
-			}
-			req.Labels[store.LabelWorkspaceMode] = req.WorkspaceMode
-		}
 	}
 
 	project := &store.Project{
@@ -584,7 +594,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 		ProjectID: project.ID,
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
@@ -683,9 +693,6 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 	return nil
 }
 
-const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
-const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
-
 func projectMembersGroupSlug(projectSlug string) string {
 	return "project:" + projectSlug + ":members"
 }
@@ -694,14 +701,67 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectMembersGroup] == "true"
+}
+
+// hasProjectMembersGroupMarker reports whether g carries either
+// project-members-group marker key and belongs to any project. It is used by
+// the owner-clearing backfill and the group PATCH guards.
+//
+// Its semantics differ from isSystemProjectMembersGroup on purpose:
+// isSystemProjectMembersGroup matches only the canonical key
+// (store.AnnotationProjectMembersGroup) for one specific project, and
+// decides whether createProjectMembersGroup may adopt a group. This
+// predicate also accepts the legacy key
+// (store.LegacyAnnotationProjectMembersGroup) for any project. The startup
+// migration rewrites the legacy key, but an older binary may still write it
+// during a rolling upgrade, so the guards keep protecting such a group
+// (ptone/scion#2556).
+func hasProjectMembersGroupMarker(g *store.Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[store.AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[store.LegacyAnnotationProjectMembersGroup] == "true"
+}
+
+// changesProjectMembersGroupMarker reports whether replacing the stored
+// annotations with patched would remove, add or change the value of either
+// project-members-group marker key.
+func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
+		sv, sok := stored[key]
+		pv, pok := patched[key]
+		if sok != pok || sv != pv {
+			return true
+		}
+	}
+	return false
+}
+
+// setsProjectMembersGroupMarkerKey reports whether replacing the stored
+// annotations with patched would add either project-members-group marker key
+// or change its value. Unlike changesProjectMembersGroupMarker it ignores the
+// removal of a key, so a PATCH may still drop a stray non-marking value from
+// an unmarked group.
+func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
+		pv, pok := patched[key]
+		if !pok {
+			continue
+		}
+		if sv, sok := stored[key]; !sok || sv != pv {
+			return true
+		}
+	}
+	return false
 }
 
 func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectAgentsGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectAgentsGroup] == "true"
 }
 
 // createProjectMembersGroup creates the project's collaboration
@@ -726,21 +786,19 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
-		OwnerID:   project.OwnerID,
+		// OwnerID is deliberately left empty (ptone/scion#2599). The
+		// owner/user/group relationship row grants group.* to Group.OwnerID,
+		// and Project.OwnerID is display metadata that confers no authority
+		// (ptone/scion#2586). Copying it here would let a creator removed
+		// without an ownership transfer keep managing the members group.
+		// Members are managed through the project members endpoints;
+		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectMembersGroupAnnotation: "true",
+			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
-	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
-		// FK violation: the owner user does not exist in the store. Retry
-		// without OwnerID so the group is still created for collaboration.
-		s.projectsLogger().Warn("project members group owner not found, retrying without owner",
-			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
-		membersGroup.OwnerID = ""
-		createErr = s.store.CreateGroup(ctx, membersGroup)
-	}
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
@@ -762,15 +820,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 					"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
 				return
 			} else {
+				// Adopt the existing group as is. Its OwnerID is never
+				// (re)filled from Project.OwnerID (ptone/scion#2599); the
+				// startup backfill clears any legacy value.
 				membersGroup = existing
-				// Update the owner in case it changed.
-				if membersGroup.OwnerID == "" && project.OwnerID != "" {
-					membersGroup.OwnerID = project.OwnerID
-					if updateErr := s.store.UpdateGroup(ctx, membersGroup); updateErr != nil {
-						s.projectsLogger().Warn("failed to update existing project members group",
-							"project_id", project.ID, "slug", membersSlug, "error", updateErr.Error())
-					}
-				}
 			}
 		}
 	} else {
@@ -834,53 +887,9 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 		return nfsPath, nil
 	}
 
-	// --- Cloud Run volume backend ---
-	// Unlike the GKE branch below, this one does not require a non-empty
-	// volume name: guarding it would change where existing Cloud Run
-	// deployments look for content, which needs its own migration (#1073).
-	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
-		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
-		if subPathRoot == "" {
-			subPathRoot = "projects"
-		}
-		crPath := filepath.Join(volumeMountBase, wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
-		if hasWorkspaceContent(crPath) {
-			return crPath, nil
-		}
-		// Fallback: check legacy local path
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		return crPath, nil
-	}
-
-	// --- GKE shared volume backend ---
-	// The mount root comes from workspaceMountRoot, the same resolver
-	// checkWorkspaceStorageHealth probes for readiness, so the two cannot
-	// drift. An empty root means no volume name was configured: there is no
-	// mount point to build a path from, so the config is treated as unset and
-	// this falls through to the local path. A deployment in that state fails
-	// its readiness check and never serves.
-	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil {
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
-			if subPathRoot == "" {
-				subPathRoot = "projects"
-			}
-			gkePath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-			if hasWorkspaceContent(gkePath) {
-				return gkePath, nil
-			}
-			// Fallback: check legacy local path
-			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-				// Worth saying out loud: on GKE the local path is always pod
-				// ephemeral storage, so this content disappears on the next
-				// reschedule and the project silently moves to the volume.
-				s.warnEphemeralProjectPath(slug, localPath, gkePath)
-				return localPath, nil
-			}
-			return gkePath, nil
-		}
+	// --- Cloud Run volume and GKE shared volume backends ---
+	if volPath, ok := s.volumeBackedProjectPath(wsCfg, slug); ok {
+		return volPath, nil
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---
@@ -1001,9 +1010,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Build clone URL from the project's git remote.
 	// The clone-url label may be an explicit override (e.g. local path for testing).
 	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
-	defaultBranch := project.Labels["scion.dev/default-branch"]
+	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
@@ -1134,8 +1143,12 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || (project.GitRemote != "" && !project.IsSharedWorkspace()) {
-		return // Not hub-native/shared-workspace or project not found
+	if err != nil || !syncsHubProjectWorkspace(project) {
+		// Project not found, not hub-native/shared-workspace, or
+		// empty-per-agent: an empty-per-agent agent's directory is private
+		// and broker-local, and syncing it would overwrite the project's
+		// hub workspace (design #2703).
+		return
 	}
 
 	// Check if broker is co-located (embedded or has local path)
@@ -1213,6 +1226,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+
+	// The workspace-mode label is server-owned (design #2703 §2.4): reject
+	// values register cannot honour before any lookup or mutation.
+	if err := resolveRegisterWorkspaceModeLabels(req.Labels, normalizedRemote != ""); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
 	// Try to find existing project
 	var project *store.Project
@@ -1317,6 +1337,26 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A provider path that is the broker's global directory is only valid
+	// for the global project. Checked before any project or provider write.
+	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
+		// A project created by this request is the global project only when
+		// it takes the reserved global slug, which only a register without a
+		// git remote can do (and only while no project holds it: the slug
+		// lookup above found none).
+		targetName, targetSlug := req.Name, ""
+		if normalizedRemote == "" {
+			targetSlug = api.Slugify(req.Name)
+		}
+		if project != nil {
+			targetName, targetSlug = project.Name, project.Slug
+		}
+		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
+			return
+		}
+	}
+
 	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker
 	// path's target and decide authorization for it BEFORE any project
 	// mutation below. Only the lookup and the authorization decision happen
@@ -1413,8 +1453,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			projectID = api.NewUUID()
 		}
 
+		// Only a register without a git remote (the CLI global-project
+		// flow) may take the reserved global slug.
 		baseSlug := api.Slugify(req.Name)
-		slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+		nextSlug := s.store.NextAvailableSlug
+		if normalizedRemote != "" {
+			nextSlug = s.nextAvailableUnreservedSlug
+		}
+		slug, err := nextSlug(ctx, baseSlug)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1554,15 +1600,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		broker = existingBroker
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -1580,7 +1619,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// directory structure so agents and templates directories exist.
 		if localPath != "" {
 			scionDir := filepath.Join(localPath, ".scion")
-			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
 			}
@@ -1656,15 +1695,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -2219,8 +2251,8 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	// Legacy mode. identity is resolved generically (user or agent) because
-	// the new project cursor binding below covers both callers (design 4.4:
-	// "This is new in both modes"; the CLI walk test exercises both).
+	// the new project cursor binding below covers both callers (it applies
+	// in both legacy and sorted mode; the CLI walk test exercises both).
 	identity := GetIdentityFromContext(ctx)
 	cursorBinding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, "", ""), filter, identity)
 	cursor := query.Get("cursor")
@@ -2290,7 +2322,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
 	}
 
-	writeJSON(w, http.StatusOK, ListAgentsResponse{
+	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   result.NextCursor,
 		TotalCount:   result.TotalCount,
@@ -2572,14 +2604,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
-		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
-		// Classify raw before authorizeAgentMessage runs (contract §6.1's
-		// branch-point invariant), reusing the agent already resolved above
-		// (the same shared resolution block every other action on this route
-		// uses -- the bridge introduces no separate resolution step). A
-		// raw-selected request is handled here entirely; a non-raw request
-		// falls through completely unaffected, body restored byte-for-byte.
-		if s.tryAgentKeysMessageBridge(w, r, agent, agentID, "/api/v1/projects/"+projectID+"/agents/"+agent.ID+"/keys", true) {
+		// Raw keystroke delivery through /message has been removed; see
+		// the matching tombstone on the top-level route.
+		if s.rejectRetiredRawMessageBody(w, r, rawIngressProjectAgentMessage,
+			agentKeysAuditTarget{AgentID: agent.ID, ProjectID: agent.ProjectID},
+			rawInputRemovedProjectReplacement, rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 			return
 		}
 
@@ -2731,6 +2760,10 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
 			return
 		}
+		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
+			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+			return
+		}
 		if newSlug != oldSlug {
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
@@ -2746,7 +2779,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
-		project.Labels = updates.Labels
+		// PATCH replaces the labels map wholesale; keep the server-owned
+		// workspace-mode label and refuse attempts to change it (design
+		// #2703 §2.4 / D6).
+		merged, err := mergePatchWorkspaceModeLabel(project.Labels, updates.Labels)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		project.Labels = merged
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID
@@ -3028,6 +3069,12 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 			continue
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// Usually the row is already gone with the project; record the
+			// stop intent for any that remains.
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.agentLifecycleLog.Warn("failed to record run intent during project deletion",
+					"agent_id", agent.ID, "error", err)
+			}
 			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
 				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)

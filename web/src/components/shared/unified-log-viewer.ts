@@ -28,6 +28,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import './json-browser.js';
+import { formatInstant, formatInstantWithZone, zoneLabel } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface DiagnosticLogEntry {
   timestamp: string;
@@ -68,6 +70,9 @@ const AUTO_SCROLL_THRESHOLD = 50; // px from bottom
 
 @customElement('scion-unified-log-viewer')
 export class ScionUnifiedLogViewer extends LitElement {
+  /** Re-renders timestamps and date dividers when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: String })
   gcpProjectId = '';
 
@@ -195,7 +200,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     }
 
     .log-scroller {
-      max-height: calc(100vh - 22rem);
+      max-height: calc(var(--scion-app-height, 100dvh) - 22rem);
       min-height: 400px;
       overflow-y: auto;
       font-family: var(--scion-font-mono, monospace);
@@ -808,14 +813,10 @@ export class ScionUnifiedLogViewer extends LitElement {
     const rows: unknown[] = [];
     for (const entry of filtered) {
       const config = SOURCE_CONFIG[entry.source] || SOURCE_CONFIG.server;
-      const d = new Date(entry.timestamp);
-      const timeStr = d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        fractionalSecondDigits: 3,
-      } as Intl.DateTimeFormatOptions);
+      // Row time in the effective display zone (24-hour); the tooltip adds
+      // the date and names the zone.
+      const timeStr = formatInstant(entry.timestamp, 'time-millis');
+      const timeTitle = formatInstantWithZone(entry.timestamp, 'datetime-full');
       const subsystem =
         (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
       const isExpanded = this.expandedIds.has(entry.insertId);
@@ -826,7 +827,7 @@ export class ScionUnifiedLogViewer extends LitElement {
           style="border-left-color: ${config.color}"
           @click=${() => this.toggleExpand(entry.insertId)}
         >
-          <span class="ts">${timeStr}</span>
+          <span class="ts" title=${timeTitle}>${timeStr}</span>
           <span class="source-badge" style="background: ${config.bg}; color: ${config.color};"
             >${config.badge}</span
           >
@@ -845,8 +846,13 @@ export class ScionUnifiedLogViewer extends LitElement {
   }
 
   private renderDetailPanel(entry: DiagnosticLogEntry) {
-    const d = new Date(entry.timestamp);
-    const fullTimestamp = d.toISOString();
+    // The instant in the display zone (with milliseconds and the zone named),
+    // then the raw UTC ISO value for correlating with Cloud Logging. An
+    // unparsable timestamp is shown as given.
+    const date = formatInstant(entry.timestamp, 'date');
+    const fullTimestamp = date
+      ? `${date}, ${formatInstant(entry.timestamp, 'time-millis')} (${zoneLabel()}) · ${new Date(entry.timestamp).toISOString()} UTC`
+      : entry.timestamp;
 
     return html`
       <div class="detail-row">

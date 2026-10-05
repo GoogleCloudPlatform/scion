@@ -15,18 +15,18 @@
  */
 
 /**
- * Agent list pager (design §6.1, §6.2).
+ * Agent list pager.
  *
  * "a-b of N", Prev/Next, a page size of 25/50/100 (default 25, persisted),
  * loading and error states, the paged-state "may have changed - Refresh"
- * chip, and the capped-drain banner. Used by the project page's list view
- * in the paged window state (design §11); the capped banner and
- * count-only wording are plumbed through for a later capped-drain phase
- * but are never reached while only the small and paged states exist.
+ * chip, and the capped-drain total. Used by the project page's grid and
+ * list views in every window state; a capped drain renders its total as
+ * "X loaded (newest 2,000 checked), more exist" instead of "a-b of N".
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { cappedTotalText } from '../../client/agent-list-window.js';
 
 export type AgentPagerTotal = number | { loaded: number; capped: true };
 
@@ -41,9 +41,8 @@ export class ScionAgentPager extends LitElement {
   pageIndex = 0;
 
   /**
-   * Rows before this page, i.e. `a - 1` in "a-b of N" (design §6.1). Not
-   * assumed to be `pageIndex * pageSize` — a page can be short (design §5.3
-   * step 5a), so the host tracks the real running offset.
+   * Rows before this page, i.e. `a - 1` in "a-b of N". Not
+   * assumed to be `pageIndex * pageSize` — a page can be short, so the host tracks the real running offset.
    */
   @property({ type: Number })
   rangeStart = 0;
@@ -52,7 +51,7 @@ export class ScionAgentPager extends LitElement {
   @property({ type: Number })
   rowsOnPage = 0;
 
-  /** Exact total, or `{loaded, capped: true}` for a capped drain (design §4.6). */
+  /** Exact total, or `{loaded, capped: true}` for a capped drain. */
   @property({ attribute: false })
   total: AgentPagerTotal = 0;
 
@@ -71,9 +70,13 @@ export class ScionAgentPager extends LitElement {
   @property({ type: String })
   error: string | null = null;
 
-  /** The zero-cost "may have changed - Refresh" chip (design §6.2). */
+  /** The zero-cost "may have changed - Refresh" chip. */
   @property({ type: Boolean })
   showChip = false;
+
+  /** The chip's text; the global page's count-only mode says that the counts may have changed. */
+  @property({ type: String })
+  chipText = 'may have changed · Refresh';
 
   /**
    * localStorage key to persist a page-size change to; empty disables
@@ -147,9 +150,7 @@ export class ScionAgentPager extends LitElement {
 
   private renderRange() {
     if (typeof this.total === 'object' && this.total.capped) {
-      return html`<span class="capped-banner"
-        >${this.total.loaded} loaded (newest 2,000 checked), more exist</span
-      >`;
+      return html`<span class="capped-banner">${cappedTotalText(this.total.loaded)}</span>`;
     }
     if (this.rowsOnPage === 0) {
       return html`<span class="range">0 of ${this.total}</span>`;
@@ -204,7 +205,7 @@ export class ScionAgentPager extends LitElement {
               @click=${() => this.onChipClick()}
             >
               <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              may have changed · Refresh
+              ${this.chipText}
             </sl-tag>`
           : nothing}
       </div>

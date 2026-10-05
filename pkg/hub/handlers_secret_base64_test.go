@@ -36,6 +36,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,95 @@ func TestSetSecret_PathTraversal_ReturnsJSONError(t *testing.T) {
 	checkJSONError(t, rec.Body.String())
 }
 
+// TestSetSecret_ReservedTargetOnEnvironmentSecret_Rejected confirms that an
+// environment-type secret targeting a name reserved for scion's own
+// control-plane environment variables is rejected at creation time,
+// regardless of the value supplied.
+func TestSetSecret_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "SCION_METADATA_MODE",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RESERVED_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+// TestSetSecret_ReservedTarget_EmptySecretType_Rejected confirms that a
+// secret with an unset (empty) type is treated as environment-type for the
+// reserved-target check, matching how an empty type is resolved downstream.
+// The PUT handler defaults an empty type to environment before validating;
+// the direct validateEnvSecretTarget call covers callers (such as the update
+// path with a stored empty type) that pass the empty type through as-is.
+func TestSetSecret_ReservedTarget_EmptySecretType_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "",
+		Target: "SCION_FOO",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RESERVED_EMPTY_TYPE_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target with empty type: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+
+	direct := httptest.NewRecorder()
+	if validateEnvSecretTarget(direct, "", "SCION_FOO") {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected reserved target to be rejected")
+	}
+	if direct.Code != http.StatusBadRequest {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected 400, got %d: %s", direct.Code, direct.Body.String())
+	}
+	checkJSONError(t, direct.Body.String())
+	if !validateEnvSecretTarget(httptest.NewRecorder(), "", "MY_APP_TOKEN") {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected non-reserved target to be allowed")
+	}
+}
+
+// TestSetSecret_ReservedGCEMetadataTarget_Rejected confirms that the
+// GCE_METADATA_* prefix is reserved in the same way as SCION_*.
+func TestSetSecret_ReservedGCEMetadataTarget_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "GCE_METADATA_HOST",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RESERVED_GCE_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+// TestSetSecret_NonReservedEnvironmentTarget_Allowed confirms the reserved-
+// target check does not reject ordinary environment-secret targets.
+func TestSetSecret_NonReservedEnvironmentTarget_Allowed(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "MY_APP_TOKEN",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/NONRESERVED_KEY", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-reserved target: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSetSecret_SizeLimit_ReturnsJSONError confirms the size-limit validation
 // still produces structured JSON; uses encoding=raw to reach that check with
 // an oversized value.
@@ -309,6 +399,24 @@ func TestAgentSecrets_PathTraversal_ReturnsJSONError(t *testing.T) {
 		"/api/v1/agents/"+agentID+"/secrets/TRAV_KEY", body, agentToken)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("path traversal: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+// TestAgentSecrets_ReservedTargetOnEnvironmentSecret_Rejected confirms that
+// agent-initiated secret creation also enforces the reserved-target check.
+func TestAgentSecrets_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
+	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
+
+	body := AgentSetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "SCION_METADATA_MODE",
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
+		"/api/v1/agents/"+agentID+"/secrets/AGENT_RESERVED_KEY", body, agentToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	checkJSONError(t, rec.Body.String())
 }
@@ -434,6 +542,24 @@ func TestProjectSecretByKey_PathTraversal_ReturnsJSONError(t *testing.T) {
 	checkJSONError(t, rec.Body.String())
 }
 
+// TestProjectSecretByKey_ReservedTargetOnEnvironmentSecret_Rejected confirms
+// that the project-scoped create path also enforces the reserved-target check.
+func TestProjectSecretByKey_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
+	srv, projectID := setupProjectSecretTest(t)
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "SCION_METADATA_MODE",
+	}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/projects/"+projectID+"/secrets/PROJ_RESERVED_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
 func TestProjectSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, projectID := setupProjectSecretTest(t)
 
@@ -553,6 +679,24 @@ func TestBrokerSecretByKey_PathTraversal_ReturnsJSONError(t *testing.T) {
 		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_TRAV_KEY", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("path traversal: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+// TestBrokerSecretByKey_ReservedTargetOnEnvironmentSecret_Rejected confirms
+// that the broker-scoped create path also enforces the reserved-target check.
+func TestBrokerSecretByKey_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
+	srv, brokerID := setupBrokerSecretTest(t)
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "environment",
+		Target: "SCION_METADATA_MODE",
+	}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_RESERVED_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	checkJSONError(t, rec.Body.String())
 }

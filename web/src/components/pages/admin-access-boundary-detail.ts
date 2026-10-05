@@ -53,6 +53,8 @@ import '../shared/access-boundary-preview.js';
 import type { PageRequestDetail } from '../shared/affected-principals-table.js';
 import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-timeline.js';
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 
@@ -60,6 +62,9 @@ const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
 
 @customElement('scion-page-admin-access-boundary-detail')
 export class ScionPageAdminAccessBoundaryDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private boundaryId = '';
   @state() private phase: PagePhase = 'loading';
   @state() private boundary: AccessBoundaryDetail | null = null;
@@ -741,35 +746,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private formatDatetime(iso: string | null): string {
     if (!iso) return '—';
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   private subjectDescription(): string {
@@ -1014,9 +991,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             <div class="header-meta">
               <span>${this.scopeDescription()}</span>
               <span>${this.subjectDescription()}</span>
-              ${b.updatedAt
-                ? html`<span>Updated ${this.formatRelativeTime(b.updatedAt)}</span>`
-                : nothing}
+              ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
               ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
             </div>
           </div>

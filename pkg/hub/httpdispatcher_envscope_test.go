@@ -490,6 +490,40 @@ func TestResolveEnvFromStorage_PairwisePrecedence(t *testing.T) {
 	}
 }
 
+// TestResolveEnvFromStorage_DropsReservedTarget verifies that a stored plain
+// env var targeting a name reserved for scion's own control-plane env vars
+// is dropped, even at user scope (which otherwise wins the precedence
+// ladder), while an ordinary key in the same scope still resolves normally.
+func TestResolveEnvFromStorage_DropsReservedTarget(t *testing.T) {
+	ctx := context.Background()
+	d, _ := newEnvScopeDispatcher(t, "SCION_METADATA_MODE", map[string]string{
+		store.ScopeUser: "passthrough",
+	})
+	// Seed a second, ordinary key in the same store/dispatcher to confirm the
+	// drop is specific to the reserved name.
+	if _, err := d.store.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:            api.NewUUID(),
+		Key:           "ORDINARY_KEY",
+		Value:         "from-user",
+		Scope:         store.ScopeUser,
+		ScopeID:       envScopeTestScopeID(t, store.ScopeUser),
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("seeding ordinary env var: %v", err)
+	}
+
+	resolved, _, err := d.resolveEnvFromStorage(ctx, envScopeTestAgent())
+	if err != nil {
+		t.Fatalf("resolveEnvFromStorage: %v", err)
+	}
+	if v, present := resolved["SCION_METADATA_MODE"]; present {
+		t.Errorf("expected SCION_METADATA_MODE to be dropped, got %q", v)
+	}
+	if got, want := resolved["ORDINARY_KEY"], "from-user"; got != want {
+		t.Errorf("ORDINARY_KEY resolved to %q, want %q", got, want)
+	}
+}
+
 // TestBuildEnvSources_ReportsBrokerScope covers the provenance reporter's
 // blind spot: a key defined ONLY in runtime_broker scope must be reported with
 // source "broker", not blank.

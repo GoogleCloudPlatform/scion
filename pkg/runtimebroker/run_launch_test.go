@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -118,6 +119,17 @@ func TestClassifyStartError(t *testing.T) {
 		code, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound)
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
+		}
+	})
+
+	t.Run("required skill resolution failure", func(t *testing.T) {
+		skillErr := &agent.SkillResolutionError{URI: "gh://owner/repo/my-skill@main", Code: agent.SkillErrCodeNotFound, Message: "skill not found"}
+		code, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr))
+		if code != ErrCodeSkillResolution {
+			t.Fatalf("code = %q, want %q", code, ErrCodeSkillResolution)
+		}
+		if !strings.Contains(message, "gh://owner/repo/my-skill@main") {
+			t.Fatalf("message %q does not name the skill", message)
 		}
 	})
 

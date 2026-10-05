@@ -64,10 +64,13 @@ type mockManager struct {
 	provisionErr          error
 	stopErr               error
 	listErr               error
+	deleteTargetErr       error
+	messageErr            error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
 	lastDeleteContainerID string
+	lastDeleteRunID       string
 	lastDeleteFiles       bool
 	lastStopAgentID       string
 	// lastStartCtx captures the context passed to Start, so tests can assert
@@ -132,6 +135,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 		ID:    "test-container-id",
 		Name:  opts.Name,
 		Phase: "running",
+		RunID: opts.RunID, // as pkg/agent.Start labels the new entry
 	}
 	m.mu.Lock()
 	m.agents = append(m.agents, *agent)
@@ -156,14 +160,18 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 	return true, nil
 }
 
-func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
 	m.lastDeleteAgentID = agentName
-	m.lastDeleteContainerID = containerID
+	m.lastDeleteContainerID = ref.ID
+	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
+	if m.deleteTargetErr != nil {
+		return false, m.deleteTargetErr
+	}
 	return true, nil
 }
 
@@ -278,11 +286,7 @@ func (m *mockManager) LastListFilter() map[string]string {
 }
 
 func (m *mockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
-}
-
-func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
@@ -470,7 +474,35 @@ func TestHostInfo(t *testing.T) {
 	}
 
 	if resp.Capabilities == nil {
-		t.Error("expected capabilities to be present")
+		t.Fatal("expected capabilities to be present")
+	}
+	if !resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
+	}
+}
+
+// TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info
+// advertises EmptyPerAgentWorkspace per default runtime (false for one that
+// opts out, as Cloud Run does), matching the heartbeat.
+func TestHostInfo_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.runtime = &noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp BrokerInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Capabilities == nil {
+		t.Fatal("expected capabilities to be present")
+	}
+	if resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("capabilities.emptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 
@@ -1440,7 +1472,10 @@ runtimes:
 }
 
 // envCapturingManager captures the environment variables passed to Start().
-// Used for testing that Hub credentials are properly set.
+// Used for testing that Hub credentials are properly set. The embedded
+// mockManager's own lastStartOpts captures the full options struct, for
+// tests that need a field with no dedicated lastXxx accessor here (e.g.
+// ResolvedKubernetesServiceAccountName).
 type envCapturingManager struct {
 	mockManager
 	lastEnv           map[string]string
@@ -1933,9 +1968,10 @@ func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *tes
 // plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
 // handler must return the generic 500 — not the 409 the sentinel-wrapped
 // path gets — and must not echo reprovisioned:true for a request that never
-// actually succeeded. A neutral error message (no "reprovision refused"
-// substring) keeps this test from being satisfied by accident if the 409
-// path's body text ever changed to also contain "error".
+// actually succeeded. The body must carry the fixed, identity-free
+// "Failed to provision agent" message, never Reprovision's own raw error
+// text, which could carry a runtime-specific detail this response must not
+// disclose.
 func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 	mgr.reprovisionErr = errors.New("boom: transient broker failure")
@@ -1960,8 +1996,11 @@ func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing
 	if !mgr.reprovisionCalled {
 		t.Error("expected Reprovision to have been attempted")
 	}
-	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
-		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("the error body must never surface Reprovision's own raw error text, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to provision agent") {
+		t.Errorf("expected the fixed, identity-free provision-failure message, got: %s", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
 		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
@@ -2432,6 +2471,130 @@ func TestStartAgentEndpoint(t *testing.T) {
 	}
 }
 
+// TestStartAgentEndpoint_SkillResolutionError checks that a required skill
+// that cannot be resolved while starting gets the typed skill response
+// (status from the cause, {skill, cause} details, Retry-After) instead of a
+// generic 500.
+func TestStartAgentEndpoint_SkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		retryAfter     string
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{"not found", agent.SkillErrCodeNotFound, "", http.StatusNotFound, ""},
+		{"rate limited", agent.SkillErrCodeRateLimited, "42", http.StatusTooManyRequests, "42"},
+		{"forbidden", "forbidden", "", http.StatusForbidden, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = fmt.Errorf("provision: %w", &agent.SkillResolutionError{
+				URI:        "gh://example-org/example-skills/my-skill@main",
+				Code:       tt.code,
+				Message:    "could not resolve",
+				RetryAfter: tt.retryAfter,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("expected Retry-After %q, got %q", tt.wantRetryAfter, got)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeSkillResolution {
+				t.Errorf("expected code %q, got %q", ErrCodeSkillResolution, resp.Error.Code)
+			}
+			if resp.Error.Details["skill"] != "gh://example-org/example-skills/my-skill@main" {
+				t.Errorf("expected details.skill to name the ref, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
+			}
+			// The failure came from inside Manager.Start, so the hub must
+			// also see the start marker it uses to settle the run ID.
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// TestRestartAgentEndpoint_SkillResolutionError checks that a restart whose
+// start fails on a required skill gets the typed skill response with the
+// start run details, the same as start. A not_found cause must not be
+// reported as a missing agent.
+func TestRestartAgentEndpoint_SkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		message    string
+		wantStatus int
+	}{
+		{"not found cause", agent.SkillErrCodeNotFound, "skill not found", http.StatusNotFound},
+		{"forbidden", agent.SkillErrCodeForbidden, "could not resolve", http.StatusForbidden},
+		{"timeout", agent.SkillErrCodeTimeout, "could not resolve", http.StatusGatewayTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = fmt.Errorf("provision: %w", &agent.SkillResolutionError{
+				URI:     "gh://example-org/example-skills/my-skill@main",
+				Code:    tt.code,
+				Message: tt.message,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeSkillResolution {
+				t.Errorf("expected code %q, got %q (%s)", ErrCodeSkillResolution, resp.Error.Code, resp.Error.Message)
+			}
+			if resp.Error.Details["skill"] != "gh://example-org/example-skills/my-skill@main" || resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details {skill, cause}, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// TestStartAgentEndpoint_OtherErrorStays500 checks that a start failure that
+// is not a skill resolution failure keeps the generic 500.
+func TestStartAgentEndpoint_OtherErrorStays500(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = errors.New("container runtime unavailable")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+}
+
 // TestCreateAgentHubEndpointFromProjectSettings tests that hub endpoint is resolved
 // from the project's settings.yaml when projectPath is provided.
 func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
@@ -2667,7 +2830,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 		"name": "hub-managed-agent",
 		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "` + projectPath + `"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3905,7 +4068,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"projectId": "project-abc",
 		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

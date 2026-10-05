@@ -285,6 +285,15 @@ func appendCredentialMetadataAuditFields(summaryJSON string, hasPurpose bool, la
 	return string(out)
 }
 
+// isDisplayUnsafeRune reports whether r can alter how surrounding text is
+// displayed rather than being displayed itself: control characters (Cc),
+// format characters (Cf: bidi overrides and isolates, zero-width
+// characters, BOM, ...) and line/paragraph separators (Zl, Zp). Shared by
+// sanitizeForLog and sanitizeFailureReason so the two stay on one set.
+func isDisplayUnsafeRune(r rune) bool {
+	return unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
 // sanitizeForLog is the render-time defence for legacy rows (created before
 // validation existed) and general defence in depth: it never trusts stored
 // text to already satisfy the bounded schema. Cc/Cf/Zl/Zp runes are replaced
@@ -292,7 +301,7 @@ func appendCredentialMetadataAuditFields(summaryJSON string, hasPurpose bool, la
 func sanitizeForLog(s string, maxBytes int) string {
 	var b strings.Builder
 	for _, r := range s {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		if isDisplayUnsafeRune(r) {
 			b.WriteRune(utf8.RuneError)
 		} else {
 			b.WriteRune(r)
