@@ -63,6 +63,20 @@ func ComputeAgentLaunch(a *Agent, now time.Time) *AgentLaunch {
 	return l
 }
 
+// ComputeAgentProvisionedOnly reports whether a was provisioned but not
+// started (ptone/scion#2929): phase "created", run intent "stopped" (a
+// provision-only create records that), no active launch, and not deleted
+// or being deleted. A full create that is still in phase "created" has run
+// intent "running", so it is not provision-only.
+func ComputeAgentProvisionedOnly(a *Agent) bool {
+	return a != nil &&
+		a.Phase == "created" &&
+		a.RunIntent == RunIntentStopped &&
+		a.LaunchState != LaunchStateActive &&
+		a.DeletedAt.IsZero() &&
+		a.DeletionState == ""
+}
+
 // ceilSeconds rounds d up to the nearest whole second (design §3.2: "ceil").
 func ceilSeconds(d time.Duration) int {
 	if d <= 0 {

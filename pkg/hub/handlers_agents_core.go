@@ -2762,6 +2762,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
 		agents[i].Deletion = store.ComputeAgentDeletion(&agents[i], now)
+		agents[i].ProvisionedOnly = store.ComputeAgentProvisionedOnly(&agents[i])
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -2802,6 +2803,7 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	agent.Launch = store.ComputeAgentLaunch(agent, now)
 	// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
 	agent.Deletion = store.ComputeAgentDeletion(agent, now)
+	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {

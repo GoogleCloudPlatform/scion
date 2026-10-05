@@ -661,6 +661,9 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
+	// ProvisionedOnly: the Hub reports the agent provisioned but not
+	// started (ptone/scion#2929).
+	ProvisionedOnly bool `json:"provisionedOnly,omitempty"`
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection

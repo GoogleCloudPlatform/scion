@@ -189,9 +189,14 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 				Command: "create",
 				Agent:   agentName,
 				Message: fmt.Sprintf("Agent '%s' created successfully.", agentName),
+				Details: map[string]interface{}{
+					"started": false,
+					"hint":    provisionedStartHint(agentName),
+				},
 			})
 		}
 		fmt.Printf("Agent '%s' created successfully.\n", agentName)
+		fmt.Println(provisionedStartHint(agentName))
 		return nil
 	},
 }
@@ -309,6 +314,10 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 			if resp.Agent.RuntimeBrokerName != "" {
 				result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
 			}
+			if resp.Agent.ProvisionedOnly {
+				result.Details["started"] = false
+				result.Details["hint"] = provisionedStartHint(agentName)
+			}
 		}
 		return outputJSON(result)
 	}
@@ -323,12 +332,15 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		statusf("Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
 		statusf("Agent Slug: %s\n", resp.Agent.Slug)
 		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		statusf("Phase: %s\n", phase)
+		statusf("Phase: %s\n", provisionedPhaseLabel(phase, resp.Agent.ProvisionedOnly))
 
 		// For local broker, print the agent directory path so the user can inspect/tweak files
 		if hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
 			agentDir := filepath.Join(hubCtx.ProjectPath, "agents", agentName)
 			statusf("Agent directory: %s\n", agentDir)
+		}
+		if resp.Agent.ProvisionedOnly {
+			statusf("%s\n", provisionedStartHint(agentName))
 		}
 	} else {
 		statusf("Agent '%s' created via Hub.\n", agentName)

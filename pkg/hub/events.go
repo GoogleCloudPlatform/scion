@@ -193,6 +193,10 @@ type AgentCreatedEvent struct {
 	// no launch (e.g. a synchronous create, or before any dispatch path
 	// starts one).
 	Launch *store.AgentLaunch `json:"launch,omitempty"`
+	// ProvisionedOnly mirrors the agent's computed provisionedOnly view
+	// (ptone/scion#2929), so a browser shows a provision-only create as
+	// "provisioned, not started" without a refetch.
+	ProvisionedOnly bool `json:"provisionedOnly,omitempty"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -536,6 +540,7 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")

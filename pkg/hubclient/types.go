@@ -74,6 +74,9 @@ type Agent struct {
 	// Launch describes the agent's current or most recent launch. It is
 	// absent when the Hub does not report launches or the agent has none.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+	// ProvisionedOnly is true when the agent was provisioned but not
+	// started (ptone/scion#2929). Absent from Hubs that predate it.
+	ProvisionedOnly bool `json:"provisionedOnly,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
