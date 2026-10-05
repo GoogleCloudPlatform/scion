@@ -27,6 +27,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -89,10 +90,18 @@ func startDiscardingReceiver(t *testing.T) int {
 	return port
 }
 
-// Each harness hook event runs `sciontool hook` in a new process with a new
-// telemetry handler. A session's events, delivered that way, must produce
-// exactly one session-metrics report to the Hub, carrying the harness
-// session ID and the counts from every event.
+// Pins the session-metrics wiring fixed by ptone/scion#3248, through the
+// real setup code of both processes:
+//
+//   - The init daemon's lifecycle handler, registered on a LifecycleManager
+//     by registerLifecycleTelemetryHandler (init.go), sees only lifecycle
+//     events and reports nothing; its session-end carries no session ID.
+//   - Each harness hook event runs processHookData (hook.go) with a new
+//     telemetry handler. Those runs share the session's counts through the
+//     state file and the session-end run reports.
+//
+// Together a session produces exactly one session-metrics report to the
+// Hub, carrying the harness session ID and the counts from every event.
 func TestProcessHookData_SessionMetricsReportedAcrossHookRuns(t *testing.T) {
 	home := t.TempDir()
 	scrubScionEnv(t)
@@ -109,6 +118,20 @@ func TestProcessHookData_SessionMetricsReportedAcrossHookRuns(t *testing.T) {
 	t.Setenv("SCION_TELEMETRY_ENABLED", "true")
 	t.Setenv("SCION_TELEMETRY_CLOUD_ENABLED", "false")
 	t.Setenv("SCION_OTEL_GRPC_PORT", strconv.Itoa(startDiscardingReceiver(t)))
+
+	// Init daemon side, as RunInit sets it up.
+	manager := hooks.NewLifecycleManager()
+	manager.HooksDirs = []string{t.TempDir()} // no script hooks
+	lifecycle := registerLifecycleTelemetryHandler(manager, nil, nil)
+	if lifecycle.OnSessionEnd != nil {
+		t.Fatal("init's lifecycle telemetry handler must not report session metrics")
+	}
+	if err := manager.RunPreStart(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RunPostStart(); err != nil {
+		t.Fatal(err)
+	}
 
 	hookDialect = "claude"
 	statePath := filepath.Join(home, ".scion", handlers.SessionStateFileName)
@@ -137,6 +160,11 @@ func TestProcessHookData_SessionMetricsReportedAcrossHookRuns(t *testing.T) {
 				t.Errorf("state file mode = %o, want 600", mode)
 			}
 		}
+	}
+
+	// Container shutdown: init's session-end must not add a report.
+	if err := manager.RunSessionEnd(); err != nil {
+		t.Fatal(err)
 	}
 
 	reports := fake.Reports()

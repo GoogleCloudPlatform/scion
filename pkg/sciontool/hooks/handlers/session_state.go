@@ -102,15 +102,11 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 	defer unlock()
 
 	if st, ok := s.load(); ok {
-		switch {
-		case st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID:
+		if st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID {
 			log.Info("Session metrics: %s event for session %s discards the unreported state of session %s",
 				event.Name, event.Data.SessionID, st.SessionID)
 			agg.RestoreState(telemetry.AggregatorState{})
-		default:
-			if event.Name == hooks.EventSessionStart && st.Open && !st.Implicit && st.SessionID != "" {
-				log.Info("Session metrics: repeated session-start for open session %s resets its counts", st.SessionID)
-			}
+		} else {
 			agg.RestoreState(st)
 		}
 	}

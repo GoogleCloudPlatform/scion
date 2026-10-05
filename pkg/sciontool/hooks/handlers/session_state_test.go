@@ -244,3 +244,17 @@ func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
 		t.Errorf("state file should be left in place: %v", err)
 	}
 }
+
+// A repeated session-start with the same ID (Claude on /compact or resume)
+// keeps the session's counts across hook processes.
+func TestFileSessionState_SameIDSessionStartKeepsCounts(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
+	hookRun(t, store, toolEvent("s1", "Bash"))
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
+	hookRun(t, store, toolEvent("s1", "Read"))
+	s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
+	if s == nil || s.ToolCalls["Bash"].Calls != 1 || s.ToolCalls["Read"].Calls != 1 {
+		t.Errorf("summary = %+v, want Bash 1 and Read 1", s)
+	}
+}
