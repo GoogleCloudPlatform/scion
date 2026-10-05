@@ -4309,6 +4309,11 @@ func isSkillResolutionDispatchError(err error) bool {
 // The broker reports a skill the caller cannot read as not_found (404), the
 // same as a skill that does not exist, so relaying the status unchanged
 // keeps the two indistinguishable.
+//
+// Only the skill and cause details reach the client. The broker also sends
+// its start markers (startAttempted, runId, currentRunId); the dispatcher
+// reads those to settle the agent's run ID before this point, and they are
+// not part of the error the client sees.
 func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
 	se, ok := skillResolutionDispatchError(err)
 	if !ok {
@@ -4317,8 +4322,24 @@ func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
 	if se.RetryAfter != "" {
 		w.Header().Set("Retry-After", se.RetryAfter)
 	}
-	writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
+	writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), skillResolutionClientDetails(se.brokerErrorDetails()))
 	return true
+}
+
+// skillResolutionClientDetails keeps the skill and cause entries of a
+// broker skill resolution failure's details, or returns nil when neither is
+// present.
+func skillResolutionClientDetails(details map[string]interface{}) map[string]interface{} {
+	var out map[string]interface{}
+	for _, k := range []string{"skill", "cause"} {
+		if v, ok := details[k]; ok {
+			if out == nil {
+				out = make(map[string]interface{}, 2)
+			}
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // recordDelegationEdgeWithType creates a delegation edge with an explicitly

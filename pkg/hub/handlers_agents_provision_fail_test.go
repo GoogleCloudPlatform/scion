@@ -205,6 +205,30 @@ func TestAgentLifecycle_StartRelaysSkillResolutionError(t *testing.T) {
 	}
 }
 
+// TestAgentLifecycle_SkillErrorClientDetails checks that a relayed skill
+// failure gives the client only the skill and cause details, not the
+// broker's start markers, which the dispatcher reads for the run ID.
+func TestAgentLifecycle_SkillErrorClientDetails(t *testing.T) {
+	body := `{"error":{"code":"skill_resolution_failed","message":"Failed to provision agent: required skill \"` +
+		testSkillRef + `\" could not be resolved: not_found","details":{"skill":"` + testSkillRef +
+		`","cause":"not_found","startAttempted":true,"runId":"run-1","currentRunId":"run-0"}}}`
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			disp := &skillFailDispatcher{startErr: &brokerStatusError{StatusCode: http.StatusNotFound, Body: body}}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			agent := createLifecycleTestAgent(t, s, project, "lc-details-"+action, state.PhaseStopped)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+
+			assertSkillErrorRelayed(t, rec, http.StatusNotFound, "not_found")
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, map[string]interface{}{"skill": testSkillRef, "cause": "not_found"}, resp.Error.Details,
+				"only skill and cause reach the client")
+		})
+	}
+}
+
 // TestAgentLifecycle_StartCallerDenialStays404 pins that a skill the caller
 // cannot read (reported by the broker as not_found) stays a 404 on start.
 func TestAgentLifecycle_StartCallerDenialStays404(t *testing.T) {
