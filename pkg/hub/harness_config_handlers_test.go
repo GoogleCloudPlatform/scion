@@ -510,6 +510,7 @@ func TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths(t *testing.T) {
 		"./config.yaml",
 		"scripts//provision.py",
 		"scripts/../config.yaml",
+		"a/../b",
 		"scripts/",
 		"/config.yaml",
 		`scripts\provision.py`,
@@ -517,7 +518,7 @@ func TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths(t *testing.T) {
 	} {
 		t.Run(bad, func(t *testing.T) {
 			srv, s, hc, root := localStorageHarnessConfig(t, []string{"config.yaml"},
-				[]string{"config.yaml", "scripts/provision.py", `scripts\provision.py`})
+				[]string{"config.yaml", "b", "scripts/provision.py", `scripts\provision.py`})
 			writeOutsideFile(t, root)
 
 			if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml", bad); code != http.StatusBadRequest {
@@ -529,6 +530,25 @@ func TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths(t *testing.T) {
 			}
 			if len(got.Files) != 1 || got.Files[0].Path != "config.yaml" {
 				t.Errorf("record must be unchanged after a rejected finalize, got %+v", got.Files)
+			}
+		})
+	}
+
+	// Names that merely start with ".." are ordinary file names.
+	for _, ok := range []string{"..x", "scripts/..x"} {
+		t.Run("allowed "+ok, func(t *testing.T) {
+			srv, s, hc, _ := localStorageHarnessConfig(t, []string{"config.yaml"},
+				[]string{"config.yaml", ok})
+
+			if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml", ok); code != http.StatusOK {
+				t.Fatalf("expected 200 for manifest path %q, got %d", ok, code)
+			}
+			got, err := s.GetHarnessConfig(context.Background(), hc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Files) != 2 || got.Files[1].Path != ok {
+				t.Errorf("expected record to list config.yaml and %q, got %+v", ok, got.Files)
 			}
 		})
 	}

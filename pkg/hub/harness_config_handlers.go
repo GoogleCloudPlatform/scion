@@ -825,14 +825,28 @@ func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor stora
 
 // isCanonicalHarnessConfigFilePath reports whether p is a relative,
 // slash-separated, already-clean file path inside a harness-config: not empty
-// or ".", no "..", leading "/", "./", repeated or trailing slashes,
-// backslashes or NUL bytes. Only such paths map one-to-one onto a storage
-// object below the config's storage path.
+// or ".", not absolute, no ".." element, no "./", repeated or trailing
+// slashes, backslashes or NUL bytes. Only such paths map one-to-one onto a
+// storage object below the config's storage path.
+//
+// Manifest paths are logical slash-separated paths, so the checks use the
+// path package and give the same result on every platform. The local storage
+// backend joins object paths with OS paths, so filepath.IsLocal on the
+// OS-form path is kept as an extra guard; on Windows it also rejects drive
+// letters and reserved names, which is stricter and safe.
 func isCanonicalHarnessConfigFilePath(p string) bool {
-	return p != "." &&
-		filepath.IsLocal(p) &&
-		path.Clean(p) == p &&
-		!strings.ContainsAny(p, "\\\x00")
+	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(p, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(filepath.FromSlash(p))
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.
