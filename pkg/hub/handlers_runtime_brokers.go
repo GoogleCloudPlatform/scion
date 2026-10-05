@@ -697,10 +697,15 @@ func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfile
 		if profiles[i].Attach != nil && *profiles[i].Attach == v {
 			continue
 		}
-		profiles[i].Attach = &v
+		profiles[i].Attach = boolPtr(v)
 		changed = true
 	}
 	return changed
+}
+
+// boolPtr returns a pointer to a copy of b.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
