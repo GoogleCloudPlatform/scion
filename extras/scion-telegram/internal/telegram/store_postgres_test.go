@@ -321,6 +321,33 @@ func TestPostgres_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
 	testProjectAgentsEviction(t, newPostgresTestStore(t))
 }
 
+func TestPostgres_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
+	testProjectAgentsExpiredNotServed(t, newPostgresTestStore(t))
+}
+
+func TestPostgres_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
+	dbURL := os.Getenv("TELEGRAM_TEST_POSTGRES_URL")
+	if dbURL == "" {
+		t.Skip("TELEGRAM_TEST_POSTGRES_URL not set, skipping Postgres store tests")
+	}
+	db, err := sql.Open("pgx", dbURL)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`DROP TABLE IF EXISTS telegram_project_agents`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE telegram_project_agents (project_id TEXT PRIMARY KEY, agent_slugs TEXT NOT NULL DEFAULT '[]', refreshed_at TIMESTAMPTZ NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO telegram_project_agents VALUES ('proj-1', '[{"slug":"coder"}]', $1)`, time.Now().UTC())
+	require.NoError(t, err)
+
+	store := newPostgresTestStore(t)
+
+	var oldTables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'telegram_project_agents'`).Scan(&oldTables))
+	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
+	testProjectAgentsDropsProjectKeyedCache(t, store)
+}
+
 // --- Postgres UserMapping ---
 
 func TestPostgres_UserMapping_SaveAndGet(t *testing.T) {

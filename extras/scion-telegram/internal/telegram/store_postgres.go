@@ -313,8 +313,8 @@ func (s *postgresStore) GetProjectAgents(ctx context.Context, user, projectID st
 	if user == "" {
 		return nil, nil
 	}
-	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM telegram_user_project_agents WHERE user_principal = $1 AND project_id = $2`
-	row := s.db.QueryRowContext(ctx, q, user, projectID)
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM telegram_user_project_agents WHERE user_principal = $1 AND project_id = $2 AND refreshed_at >= $3`
+	row := s.db.QueryRowContext(ctx, q, user, projectID, time.Now().Add(-agentCacheRetention).UTC())
 
 	var pa ProjectAgents
 	var slugsJSON string

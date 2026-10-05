@@ -106,9 +106,17 @@ type ConversationContext struct {
 	LastMessageAt  time.Time
 }
 
-// agentCacheRetention bounds how long a cached agent list is kept; older
-// entries are evicted when any list is saved.
+// agentCacheRetention bounds how long a cached agent list is kept: older
+// entries are never returned and are evicted when any list is saved. It
+// must stay at least three times every TTL applied to the cache (routing
+// agent_cache_ttl, clamped to maxAgentCacheTTL, and
+// notificationAgentCacheTTL), so a fresh entry is never dropped before its
+// TTL and a stale one can still cover a hub outage for a while.
 const agentCacheRetention = time.Hour
+
+// maxAgentCacheTTL is the longest accepted agent_cache_ttl; longer values
+// are clamped (see agentCacheRetention).
+const maxAgentCacheTTL = agentCacheRetention / 3
 
 // ProjectAgents caches the list of agents of a project as fetched by one
 // linked user.
@@ -471,8 +479,9 @@ func (s *sqliteStore) GetProjectAgents(ctx context.Context, user, projectID stri
 	if user == "" {
 		return nil, nil
 	}
-	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM user_project_agents WHERE user_principal = ? AND project_id = ?`
-	row := s.db.QueryRowContext(ctx, q, user, projectID)
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM user_project_agents WHERE user_principal = ? AND project_id = ? AND refreshed_at >= ?`
+	cutoff := time.Now().Add(-agentCacheRetention).UTC().Format(time.RFC3339)
+	row := s.db.QueryRowContext(ctx, q, user, projectID, cutoff)
 
 	var pa ProjectAgents
 	var slugsJSON, refreshedAt string

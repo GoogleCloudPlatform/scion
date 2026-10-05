@@ -208,6 +208,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
 		}
+		if d > maxAgentCacheTTL {
+			b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
+				"agent_cache_ttl", d, "max", maxAgentCacheTTL)
+			d = maxAgentCacheTTL
+		}
 		b.agentCacheTTL = d
 	}
 

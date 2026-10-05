@@ -377,6 +377,10 @@ func TestStore_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
 	testProjectAgentsEviction(t, newTestStore(t))
 }
 
+func TestStore_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
+	testProjectAgentsExpiredNotServed(t, newTestStore(t))
+}
+
 func TestStore_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -390,10 +394,7 @@ INSERT INTO project_agents VALUES ('proj-1', '[{"slug":"coder"}]', '` + time.Now
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 
-	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
-	require.NoError(t, err)
-	assert.Nil(t, got, "a list cached per project is not served to any user")
-	testProjectAgentsPerUser(t, store)
+	testProjectAgentsDropsProjectKeyedCache(t, store)
 }
 
 // testProjectAgentsPerUser checks that a cached agent list is only returned
@@ -454,6 +455,32 @@ func testProjectAgentsEviction(t *testing.T, store Store) {
 	kept, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-2")
 	require.NoError(t, err)
 	assert.NotNil(t, kept, "an entry within retention is kept")
+}
+
+// testProjectAgentsExpiredNotServed checks that an entry older than the
+// retention window is not returned even when no later save evicted it.
+func testProjectAgentsExpiredNotServed(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	// Saved last, so no later save evicts it.
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now().Add(-agentCacheRetention - time.Minute),
+	}))
+
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "an entry past retention is not served")
+}
+
+// testProjectAgentsDropsProjectKeyedCache checks that a list cached per
+// project before the store opened is not served to any user.
+func testProjectAgentsDropsProjectKeyedCache(t *testing.T, store Store) {
+	t.Helper()
+	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "a list cached per project is not served to any user")
+	testProjectAgentsPerUser(t, store)
 }
 
 // --- TelegramUserMapping ---

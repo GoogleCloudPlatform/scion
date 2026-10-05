@@ -453,6 +453,45 @@ func TestV2_Configure(t *testing.T) {
 	assert.NotNil(t, b.registration)
 }
 
+func TestV2_Configure_AgentCacheTTL(t *testing.T) {
+	cases := map[string]struct {
+		value string
+		want  time.Duration
+	}{
+		"default":           {"", defaultAgentCacheTTL},
+		"within retention":  {"10m", 10 * time.Minute},
+		"at the limit":      {maxAgentCacheTTL.String(), maxAgentCacheTTL},
+		"longer is clamped": {"2h", maxAgentCacheTTL},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			b := NewV2(slog.Default())
+			defer b.Close()
+			cfg := map[string]string{
+				"bot_token":    "test-token",
+				"api_base_url": tgSrv.srv.URL,
+				"db_path":      filepath.Join(t.TempDir(), "test.db"),
+			}
+			if tc.value != "" {
+				cfg["agent_cache_ttl"] = tc.value
+			}
+			require.NoError(t, b.Configure(cfg))
+			assert.Equal(t, tc.want, b.agentCacheTTL)
+		})
+	}
+}
+
+func TestAgentCacheTTLsFitWithinRetention(t *testing.T) {
+	for name, ttl := range map[string]time.Duration{
+		"default routing TTL": defaultAgentCacheTTL,
+		"max routing TTL":     maxAgentCacheTTL,
+		"notifications TTL":   notificationAgentCacheTTL,
+	} {
+		assert.LessOrEqual(t, 3*ttl, agentCacheRetention, "%s: a fresh entry must outlive its TTL in the store", name)
+	}
+}
+
 func TestV2_Configure_MissingBotToken(t *testing.T) {
 	b := NewV2(slog.Default())
 	defer b.Close()
