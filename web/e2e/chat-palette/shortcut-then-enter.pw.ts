@@ -15,11 +15,13 @@
 /**
  * Chromium: the palette shortcut pressed while typing, followed by Enter,
  * stays in the conversation being typed in. On macOS, Ctrl+K in the composer
- * keeps its native meaning and never opens the palette.
+ * keeps its native meaning and never opens the palette. With an empty query,
+ * Enter leaves the palette open until the user picks a row, so the
+ * conversation with the newest activity is never opened by accident.
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { setupApiMocks, AGENT_WITHOUT_DM, SELF_USER_ID } from './mock-api.js';
+import { setupApiMocks, AGENT_WITH_DM, AGENT_WITHOUT_DM, SELF_USER_ID } from './mock-api.js';
 
 // A conversation other than the one the empty-query ranking puts first.
 const CURRENT_DM_KEY = `dm:agent:${AGENT_WITHOUT_DM.id}:user:${SELF_USER_ID}`;
@@ -64,6 +66,10 @@ function paletteInput(page: Page) {
   return page.locator('scion-quick-palette #palette-query-input');
 }
 
+function paletteOptions(page: Page) {
+  return page.locator('scion-quick-palette .palette-option');
+}
+
 test('on macOS, Ctrl+K then Enter in the composer never opens the palette or leaves the conversation', async ({
   page,
 }) => {
@@ -101,4 +107,33 @@ test('on macOS, Cmd+K in the composer still opens the palette', async ({ page })
 
   await expect(paletteDialog(page)).toBeVisible();
   await expect(paletteInput(page)).toBeFocused();
+});
+
+test('the shortcut then Enter on an empty query keeps the palette open and the conversation', async ({
+  page,
+}) => {
+  await gotoCurrentConversation(page);
+  await composerTextarea(page).click();
+
+  await page.keyboard.press('Control+k');
+  await expect(paletteInput(page)).toBeFocused();
+  // The newest activity is highlighted, but not chosen.
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  await expect(page).toHaveURL(CURRENT_URL);
+  await expect(paletteDialog(page)).toBeVisible();
+  await expect(paletteInput(page)).toBeFocused();
+
+  // Picking the highlighted row with the arrow keys, then Enter, opens it.
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowUp');
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`)}$`
+    )
+  );
 });

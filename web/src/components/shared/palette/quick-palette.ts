@@ -108,7 +108,10 @@ export class ScionQuickPalette extends LitElement {
   @state() private queryText = '';
   /** The globally-selected candidate ID, or null when nothing matches. */
   @state() private activeId: string | null = null;
-  /** True once Up/Down/click has picked a candidate; a query edit clears it back to "auto". */
+  /**
+   * True once Up/Down/Tab/click has picked a candidate; a query edit clears
+   * it back to "auto". Enter on an empty query commits only once it is set.
+   */
   private manualSelection = false;
   /** True once Enter has committed a selection this open, so a stray repeat can't double-fire. */
   private committed = false;
@@ -719,6 +722,17 @@ export class ScionQuickPalette extends LitElement {
     );
   }
 
+  /**
+   * Whether Enter commits the highlighted row: once the user has typed a
+   * query, or has picked a row. With an empty query the highlight is the
+   * newest activity, which a shortcut pressed while typing elsewhere, then
+   * Enter, would otherwise open by accident. Enter then leaves the palette
+   * open, so the user still sees it and can pick a row.
+   */
+  private enterCommits(): boolean {
+    return this.manualSelection || this.queryText.trim() !== '';
+  }
+
   private dismissPalette(reason: PaletteDismissReason): void {
     this.dispatchEvent(
       new CustomEvent<{ reason: PaletteDismissReason }>('palette-dismiss', {
@@ -767,6 +781,7 @@ export class ScionQuickPalette extends LitElement {
         if (this.composing || e.isComposing) return;
         e.preventDefault();
         if (e.repeat) return;
+        if (!this.enterCommits()) return;
         this.commitActivePaletteCandidate();
         return;
       case 'Escape':

@@ -154,14 +154,21 @@ test('hovering another row does not change the keyboard-selected candidate that 
 }) => {
   await gotoChat(page);
   await page.keyboard.press('Control+k');
-  // Empty query: AGENT_WITH_DM is the keyboard-selected (active) global best.
+  // Empty query: AGENT_WITH_DM is the global best. ArrowDown keyboard-selects
+  // AGENT_WITHOUT_DM, which Enter on an empty query then commits.
   await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
+  await page.keyboard.press('ArrowDown');
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toHaveClass(
+    /active/
+  );
 
-  await paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name }).hover();
+  await paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name }).hover();
   // Hover is purely visual (CSS :hover) — it must not touch the
   // keyboard-selected (active) candidate.
-  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
-  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).not.toHaveClass(
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toHaveClass(
+    /active/
+  );
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).not.toHaveClass(
     /active/
   );
 
@@ -169,7 +176,7 @@ test('hovering another row does not change the keyboard-selected candidate that 
 
   await expect(page).toHaveURL(
     new RegExp(
-      `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`)}$`
+      `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITHOUT_DM.id}:user:${SELF_USER_ID}`)}$`
     )
   );
 });
