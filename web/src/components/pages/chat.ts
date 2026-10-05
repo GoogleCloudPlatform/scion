@@ -1710,11 +1710,14 @@ export class ScionPageChat extends LitElement {
       : null;
   }
 
-  /** Does the current URL still name this readable thread route? */
+  /** Does the current URL still name this readable thread route, on a mounted page? */
   private routeNamesThread(slug: string, threadId: string): boolean {
     const match = window.location.pathname.match(/\/chat\/([^/]+)\/([^/]+)$/);
     return (
-      !!match && decodeURIComponent(match[1]) === slug && decodeURIComponent(match[2]) === threadId
+      this.isConnected &&
+      !!match &&
+      decodeURIComponent(match[1]) === slug &&
+      decodeURIComponent(match[2]) === threadId
     );
   }
 
