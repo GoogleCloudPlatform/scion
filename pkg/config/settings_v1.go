@@ -4042,6 +4042,10 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 // then rewritten from the struct instead, which loses comments and unknown keys and
 // reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
+	// Held from the first read to the rename (see LockSettingsFile).
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
 		return updateVersionedSettingStruct(dir, key, value)
@@ -4856,7 +4860,13 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 // (or through a dangling settings.yml link when settings.yaml is absent; see
 // newSettingsFilePath). The file is replaced atomically, and left untouched when its
 // bytes would not change.
+//
+// It takes the settings-file lock for the write (see LockSettingsFile). A
+// caller that loaded vs from the file and wants the read-modify-write cycle
+// protected must not hold the lock itself; the lock covers the write only.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
+	unlock := LockSettingsFile()
+	defer unlock()
 	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
 }
 
@@ -4868,7 +4878,8 @@ func saveVersionedSettingsInPlace(dir string, vs *VersionedSettings) error {
 	if p := GetSettingsPath(dir); p != "" && filepath.Ext(p) != ".json" {
 		return writeVersionedSettingsFile(dir, p, vs)
 	}
-	return SaveVersionedSettings(dir, vs)
+	// Not SaveVersionedSettings: callers already hold the settings-file lock.
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
 }
 
 // writeVersionedSettingsFile marshals vs to targetPath in dir.
