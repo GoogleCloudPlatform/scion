@@ -311,3 +311,27 @@ func TestShutdown_CancelsAndWaitsForInFlightStarts(t *testing.T) {
 		})
 	}
 }
+
+// A synchronous create stays tracked in flight while its sync-start
+// bookkeeping finishes, so Shutdown and Stop wait for all of it.
+func TestStartsInFlight_CreateTrackedThroughSyncStartFinish(t *testing.T) {
+	srv, mgr, projectPath, _ := newSyncStartTestServer(t)
+	var trackedAtFinish bool
+	testHookSyncStartFinish = func(key launchKey) {
+		for _, k := range srv.startsInFlight.keys() {
+			if k == key {
+				trackedAtFinish = true
+			}
+		}
+	}
+	t.Cleanup(func() { testHookSyncStartFinish = nil })
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		return &api.AgentInfo{ID: "c-1", Name: opts.Name, Phase: "running"}, nil
+	}
+	if w := createSync(srv, "agent-id", projectPath); w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", w.Code, w.Body.String())
+	}
+	if !trackedAtFinish {
+		t.Fatal("the start left the in-flight tracker before its sync-start bookkeeping finished")
+	}
+}

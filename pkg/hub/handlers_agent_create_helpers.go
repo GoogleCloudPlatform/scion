@@ -1126,7 +1126,7 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
-		afterStart := func(ctx context.Context) error {
+		afterStart := func(ctx context.Context, _ startedState) error {
 			if existingAgent.Phase == string(state.PhaseSuspended) {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
@@ -1136,14 +1136,20 @@ func (s *Server) handleExistingAgent(
 			// pod actually stopping, which describes the old pod, not this one.
 			existingAgent.ExitReason = ""
 			existingAgent.ExitCode = nil
+			// The row read starting during the dispatch (beginStartDispatch),
+			// so clear the rest of the prior generation's remnants here, as
+			// ClearTerminalRemnants does for a status write.
+			existingAgent.Message = ""
+			existingAgent.StalledFromActivity = ""
 			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
 			return nil
 		}
 		// The start runs under a start claim, which records run intent running,
-		// reserves the broker capacity (rolled back if the start fails) and
-		// runs afterStart while the claim is held.
+		// reserves the broker capacity and marks the agent starting for the
+		// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
+		// start fails) and runs afterStart while the claim is held.
 		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart}); err != nil {
 			if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
@@ -1220,7 +1226,7 @@ func (s *Server) handleExistingAgent(
 			}
 			// The post-start write runs inside the start claim, before it is
 			// released, so it never overwrites a newer start's status.
-			afterStart := func(ctx context.Context) error {
+			afterStart := func(ctx context.Context, _ startedState) error {
 				existingAgent.Phase = string(state.PhaseRunning)
 				// Clear any exit reason/code left from the prior generation —
 				// including a disruption reason recorded while the agent was
@@ -1229,14 +1235,21 @@ func (s *Server) handleExistingAgent(
 				// pod, not this one.
 				existingAgent.ExitReason = ""
 				existingAgent.ExitCode = nil
+				// The row read starting during the dispatch
+				// (beginStartDispatch), so clear the rest of the prior
+				// generation's remnants here, as ClearTerminalRemnants does
+				// for a status write.
+				existingAgent.Message = ""
+				existingAgent.StalledFromActivity = ""
 				if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 					s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 				}
 				return nil
 			}
 			// The start runs under a start claim, which records run intent running,
-			// reserves the broker capacity (rolled back if the start fails) and
-			// runs afterStart while the claim is held.
+			// reserves the broker capacity and marks the agent starting for the
+			// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
+			// start fails) and runs afterStart while the claim is held.
 			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart}); err != nil {
 				if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 					return existingAgentErrored
@@ -1355,7 +1368,7 @@ func (s *Server) handleExistingAgent(
 		// A created/provisioning agent has no prior session to resume.
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
-		afterStart := func(ctx context.Context) error {
+		afterStart := func(ctx context.Context, _ startedState) error {
 			// If the broker didn't set a running phase, default to running.
 			if existingAgent.Phase == string(state.PhaseCreated) ||
 				existingAgent.Phase == string(state.PhaseProvisioning) {

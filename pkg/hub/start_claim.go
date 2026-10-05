@@ -313,18 +313,18 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 	return held
 }
 
-// startDispatch runs a start under its claim's context. fence reports
+// claimedDispatch runs a start under its claim's context. fence reports
 // errStartClaimLost once the claim is lost or its fence deadline passed; the
 // dispatch calls it immediately before dispatching. handoff reports an async
 // launch that accepted the start (its end settles the claim).
-type startDispatch func(ctx context.Context, fence func() error) (handoff bool, err error)
+type claimedDispatch func(ctx context.Context, fence func() error) (handoff bool, err error)
 
 // withStartClaim runs dispatch under a start claim of kind for agent: claim
 // (or the caller's existing claim), lease renewal, the start deadline, the
 // fence check immediately before dispatch, and the outcome. Credential
 // handling is the dispatch's own and is unchanged. With start claims off,
 // it records run intent running and runs dispatch as before.
-func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, dispatch startDispatch) error {
+func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, dispatch claimedDispatch) error {
 	if !s.startClaimsEnabled() {
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			return err
@@ -371,60 +371,102 @@ type StartOpts struct {
 	// Task and Resume are passed to DispatchAgentStart.
 	Task   string
 	Resume bool
+	// Dispatch is a broker-capacity hold the caller already took with
+	// reserveStartCapacity (a restart, before its stop leg); the start uses
+	// it instead of taking one. startAgentCore settles it on success and
+	// rolls it back on any failure.
+	Dispatch *startDispatch
+	// NewGeneration clears the previous run's message, stalled marker and
+	// exit fields in the post-start write even when the agent was already
+	// in a counted phase (a restart). A start from a resting phase always
+	// clears them.
+	NewGeneration bool
 	// AfterStart, when set, runs after a successful dispatch while the claim
 	// is still held, in place of the default status write (phase from the
 	// broker response, or running; its container status; exit fields
 	// cleared). It writes the caller's post-start state, so a newer start's
 	// status is never overwritten by this one's.
-	AfterStart func(ctx context.Context) error
+	AfterStart func(ctx context.Context, st startedState) error
+}
+
+// startedState is what AfterStart gets from startAgentCore.
+type startedState struct {
+	// ClearRemnants reports whether the post-start write must clear the
+	// previous run's message, stalled marker and exit fields
+	// (AgentStatusUpdate.ClearTerminalRemnants).
+	ClearRemnants bool
+	// EndOp ends the lifecycle op early (idempotent), for a caller that
+	// waits after its dispatch leg and must see heartbeat-reported exits.
+	EndOp func()
 }
 
 // startAgentCore dispatches a start of agent under a start claim. It is the
 // single start path for start triggers, in this order: claim (or the
-// caller's existing claim), lease and self-fence, broker capacity
-// (reserveStartCapacity), fence check, then DispatchAgentStart, whose
-// credential handling is unchanged; then the post-start status write and
-// the outcome, before the claim is released; then the compensating stop.
-// The capacity reserved by this call is rolled back when the start fails.
-// While the dispatch runs, the heartbeat's missing-container reconcile is
-// kept away from the agent (beginLifecycleOp).
+// caller's existing claim), lease and self-fence; the lifecycle op that
+// keeps the heartbeat's missing-container reconcile and uncounted-phase
+// reports away from the agent; broker capacity and the starting phase
+// (reserveStartCapacity, or the caller's hold); fence check; then
+// DispatchAgentStart, whose credential handling is unchanged; then the
+// post-start status write and the outcome, before the claim is released;
+// then the compensating stop. When the start fails, the capacity hold is
+// rolled back (the starting phase restored, a reservation it created
+// released).
 func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts StartOpts) error {
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
+		opts.Dispatch.rollback(ctx)
 		return errors.New("no dispatcher")
 	}
-	return s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
-		rollback, err := s.reserveStartCapacity(ctx, agent)
-		if err != nil {
-			return false, err
+	sd := opts.Dispatch
+	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
+		endOp := s.beginLifecycleOp(agent.ID)
+		defer endOp()
+		if sd == nil {
+			var err error
+			if sd, err = s.reserveStartCapacity(ctx, agent); err != nil {
+				return false, err
+			}
 		}
-		defer s.beginLifecycleOp(agent.ID)()
 		if err := fence(); err != nil {
-			rollback()
+			sd.rollback(ctx)
 			return false, err
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, agent, opts.Task, opts.Resume); err != nil {
-			rollback()
+			sd.rollback(ctx)
 			return false, err
 		}
+		// The container is up: the reservation is kept whatever the
+		// status write below does.
+		sd.settle()
+		st := startedState{ClearRemnants: opts.NewGeneration || sd.wroteStarting(), EndOp: endOp}
 		if opts.AfterStart != nil {
-			return false, opts.AfterStart(ctx)
+			return false, opts.AfterStart(ctx, st)
 		}
-		return false, s.writeStartedStatus(ctx, agent)
+		return false, s.writeStartedStatus(ctx, agent, st.ClearRemnants)
 	})
+	if err != nil && !errors.Is(err, errStartedStatusWrite) {
+		// A start refused before its dispatch ran (a held or lost claim, a
+		// refused intent) leaves a caller's hold to undo; a no-op once the
+		// hold was settled or rolled back.
+		sd.rollback(ctx)
+	}
+	return err
 }
 
 // writeStartedStatus is startAgentCore's default post-start write: the
 // phase the broker reported (running when it reported none or a resting
 // phase), its container status, and the previous run's exit fields cleared
 // (including a disruption reason recorded while the old pod still ran).
-func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent) error {
+// clearRemnants also clears the previous run's message and stalled marker,
+// which the store's stopped/error to running clear no longer does once the
+// row reads starting.
+func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, clearRemnants bool) error {
 	phase := agent.Phase
 	switch state.Phase(phase) {
-	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError:
+	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseStarting:
 		phase = string(state.PhaseRunning)
 	}
-	upd := store.AgentStatusUpdate{Phase: phase, ClearExit: true}
+	upd := store.AgentStatusUpdate{Phase: phase, ClearExit: true, ClearTerminalRemnants: clearRemnants}
 	if agent.ContainerStatus != "" {
 		upd.ContainerStatus = agent.ContainerStatus
 	}
@@ -446,24 +488,22 @@ type startQuotaError struct{ err error }
 func (e *startQuotaError) Error() string { return "start refused by broker capacity: " + e.err.Error() }
 func (e *startQuotaError) Unwrap() error { return e.err }
 
-// reserveStartCapacity reserves the broker capacity a start needs
-// (max_agents_per_broker; idempotent for an agent that already holds it) and
-// returns the rollback for a start that then fails, which releases only a
-// reservation this call made. It is the one place the start path reserves
-// capacity, and the planned switch point to the shared start-dispatch
-// helper.
-func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (rollback func(), err error) {
-	created, err := s.checkAndReserveBrokerQuota(ctx, agent)
+// reserveStartCapacity takes the broker capacity hold a start needs: it
+// reserves max_agents_per_broker (idempotent for an agent that already
+// holds it) and marks an agent in an uncounted phase starting for the
+// dispatch (beginStartDispatch). The caller must hold a lifecycle op. A
+// capacity refusal is a startQuotaError; a failed starting write wraps
+// errStartingWrite (and store.ErrDeleteInProgress when a delete now holds
+// the row). It is the one place the start path takes capacity.
+func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (*startDispatch, error) {
+	sd, err := s.beginStartDispatch(ctx, agent)
 	if err != nil {
+		if errors.Is(err, errStartingWrite) {
+			return nil, err
+		}
 		return nil, &startQuotaError{err: err}
 	}
-	return func() {
-		// The run context may already be done (a lost claim, the start
-		// deadline): release on a detached, bounded context.
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		s.rollbackBrokerQuota(rctx, agent, created)
-	}, nil
+	return sd, nil
 }
 
 // writeStartQuotaError writes the answer for a start refused by broker
@@ -474,14 +514,7 @@ func writeStartQuotaError(w http.ResponseWriter, err error) bool {
 	if !errors.As(err, &qe) {
 		return false
 	}
-	switch {
-	case errors.Is(err, store.ErrQuotaExceeded):
-		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, quotaExceededMessage(store.LimitMaxAgentsPerBroker), nil)
-	case errors.Is(err, ErrQuotaLockContention):
-		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, "quota check temporarily unavailable, please retry", nil)
-	default:
-		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
-	}
+	writeQuotaReserveError(w, store.LimitMaxAgentsPerBroker, err)
 	return true
 }
 
@@ -584,17 +617,24 @@ func (s *Server) writeStartInProgress(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// writeStartClaimError writes the answer for a start refused by its claim:
-// delete_in_progress when a delete holds the row (as for a refused running
-// intent), 409 start_in_progress for a held claim, 409 conflict when the agent is
-// not eligible (being deleted, or a reincarnation in flight), 409 conflict
-// when the claim was lost to a stop. It reports whether it wrote.
+// writeStartClaimError writes the answer for a start refused by its claim
+// or before its dispatch: delete_in_progress when a delete holds the row (as
+// for a refused running intent), the starting write's error (409 when the
+// stored phase moved on), 409 start_in_progress for a held claim, 409
+// conflict when the agent is not eligible (being deleted, or a reincarnation
+// in flight), 409 conflict when the claim was lost to a stop. It reports
+// whether it wrote.
 func (s *Server) writeStartClaimError(w http.ResponseWriter, err error, agentID string) bool {
 	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
 		ref.write(w)
 		return true
 	}
 	switch {
+	case errors.Is(err, errStartingWrite):
+		// The starting write before dispatch failed (409 when the stored
+		// phase moved on), as beginStartDispatchHTTP answers.
+		writeErrorFromErr(w, err, "")
+		return true
 	case s.writeStartInProgress(w, err):
 		return true
 	case errors.Is(err, store.ErrClaimPredicate):

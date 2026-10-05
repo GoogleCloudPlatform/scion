@@ -973,6 +973,7 @@ type RemoteHubAgentDefaults struct {
 	MaxDuration     string            `json:"maxDuration,omitempty"`
 	Resources       *api.ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
+	Experiments     []string          `json:"experiments,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1071,6 +1072,10 @@ type Server struct {
 	agentTokenService  *AgentTokenService   // Agent JWT token service
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
+
+	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
+	// zero value uses the defaults (handlers_chat_v2.go).
+	chatSpacesBatch chatSpacesBatchSizes
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
@@ -3620,6 +3625,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// the accessor reads them under s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
+	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())

@@ -761,6 +761,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A global slug sent with a path marks the hub's global project; the
+	// path resolves the project.
+	var hubGlobalProject bool
+	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -1040,6 +1045,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ProjectPath:        req.ProjectPath,
 		ProjectSlug:        req.ProjectSlug,
 		ProjectID:          req.ProjectID,
+		HubGlobalProject:   hubGlobalProject,
 		Config:             req.Config,
 		InlineConfig:       req.InlineConfig,
 		SharedDirs:         req.SharedDirs,
@@ -1171,12 +1177,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+ssErr.Error())
 			return
 		}
-		defer ss.finish()
-		// Tracked as a start in flight until Manager.Start and Run's
-		// deferred cleanup have returned (deferred after ss.finish, so it
-		// runs first).
+		// Tracked as a start in flight until Manager.Start, Run's deferred
+		// cleanup and ss.finish have all returned: finishTracked is
+		// deferred first, so it runs last.
 		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
 		defer finishTracked()
+		defer ss.finish()
 		ctx = trackCtx
 	}
 
@@ -2172,6 +2178,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// project's .scion directory as the container recorded it, not a
 	// project root, so buildStartContext is told where it came from.
 	startProjectPath := startReq.ProjectPath
+	var startHubGlobalProject bool
+	startReq.ProjectSlug, startHubGlobalProject = splitHubGlobalSlug(startReq.ProjectPath, startReq.ProjectSlug)
 	var startProjectPathFromContainer bool
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
 		m, err := s.lookupAgentMatch(ctx, id, projectID)
@@ -2206,6 +2214,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectPath:              startProjectPath,
 		ProjectPathFromContainer: startProjectPathFromContainer,
 		ProjectSlug:              startReq.ProjectSlug,
+		HubGlobalProject:         startHubGlobalProject,
 		Config:                   cfg,
 		InlineConfig:             startReq.InlineConfig,
 		HubEndpoint:              startReq.HubEndpoint,
