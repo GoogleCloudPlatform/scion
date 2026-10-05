@@ -163,8 +163,10 @@ export const AGENT_READ_BURST_LIMIT = 8;
 export const AGENT_READ_TIMEOUT_MS = 30_000;
 /**
  * A retained hub or project list is probed this often for changes SSE does
- * not carry (renames, labels, capabilities, agents added or removed without
- * an event): one request for the most recently active rows.
+ * not carry: one request for the most recently active rows, which shows
+ * agents added without an event and changes to recently active ones, plus
+ * the server's count, which shows agents removed. Renames and label edits
+ * leave the activity time alone and wait for the periodic full walk.
  */
 export const AGENT_PROBE_INTERVAL_MS = 30_000;
 /** Each probe is scheduled up to this much earlier or later. */
@@ -313,6 +315,9 @@ function updatedAt(agent: Agent | undefined): number | undefined {
  * first by the last activity time when set, else `updated`, with ties on
  * `created`, then id, both descending. A heartbeat moves `updated` but not
  * the activity time, so it does not move an active agent up the order.
+ * Times compare to the millisecond, finer than the server stores them: two
+ * keys within one millisecond fall through to the tie order here, so a
+ * catch-up decision at that boundary can be off by one probe.
  */
 interface ProbeMark {
   at: number;
