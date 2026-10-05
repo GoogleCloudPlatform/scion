@@ -316,3 +316,54 @@ func TestWaitForDispatchDone_TimeoutReread(t *testing.T) {
 	_, _ = waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
 	assert.True(t, unsubCalled, "unsub must be called on return")
 }
+
+// cancelOnReadStore is a dispatch store whose row read ends the caller's ctx
+// and fails with its error, as a store read does when ctx is cancelled
+// while it runs.
+type cancelOnReadStore struct {
+	*fakeDispatchStore
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnReadStore) GetBrokerDispatch(ctx context.Context, _ string) (*store.BrokerDispatch, error) {
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+// A row read that fails because ctx ended returns ctx.Err(), not the
+// timeout or error-phase error, whichever case made the read.
+func TestWaitForLifecycleOutcome_RowReadCtxErrorReturnsCtxErr(t *testing.T) {
+	t.Run("closed channel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+		ch := make(chan Event)
+		close(ch)
+
+		err := waitForLifecycleOutcome(ctx, ch, func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, ErrDispatchFailed)
+	})
+
+	t.Run("error phase", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+		ch := make(chan Event, 1)
+		sendStatus(ch, "error", "", nil)
+
+		err := waitForLifecycleOutcome(ctx, ch, func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("rolling window expiry", func(t *testing.T) {
+		setLifecycleTimings(t, 20*time.Millisecond, time.Hour, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+
+		err := waitForLifecycleOutcome(ctx, make(chan Event), func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, ErrDispatchFailed)
+	})
+}

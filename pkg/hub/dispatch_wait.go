@@ -109,7 +109,8 @@ var (
 //     when the rolling window expires it is read for its failure, in case
 //     the done event was missed. Rolling window
 //     expiry otherwise returns ErrDispatchFailed.
-//   - ctx cancellation returns ctx.Err().
+//   - ctx cancellation returns ctx.Err(), including when a row read in any
+//     of the cases above fails because ctx ended.
 func waitForLifecycleOutcome(
 	ctx context.Context,
 	events <-chan Event,
@@ -125,10 +126,14 @@ func waitForLifecycleOutcome(
 
 	// readRow returns the dispatch row's state and, when it is failed, its
 	// failure. A row that cannot be read reports state "" (a later read
-	// retries).
+	// retries), unless the read failed because ctx ended: then ctx.Err() is
+	// returned as the outcome, as the ctx.Done case would.
 	readRow := func() (string, error) {
 		d, err := st.GetBrokerDispatch(ctx, dispatchID)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
 			return "", nil
 		}
 		if d.State != store.DispatchStateFailed {
