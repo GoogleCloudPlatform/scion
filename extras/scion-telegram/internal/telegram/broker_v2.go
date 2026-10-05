@@ -483,11 +483,12 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		}
 
 		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
-		// Attempt to resolve the project slug from the hub. Falls back to
-		// the project ID if the hub is unavailable during migration.
+		// Attempt to resolve the project slug from the broker's project
+		// list. Falls back to the project ID if the hub is unavailable
+		// during migration.
 		projectSlug := projectID
 		if b.hubClient != nil {
-			if projects, err := b.hubClient.ListProjects(ctx); err == nil {
+			if projects, err := b.hubClient.ListProjectsFresh(ctx); err == nil {
 				for _, p := range projects {
 					if p.ID == projectID {
 						if p.Slug != "" {

@@ -43,7 +43,6 @@ type AgentInfo struct {
 // that principal ("user:<email>", see linkedUserPrincipal). User-initiated
 // reads must pass the requesting user's principal.
 type HubClient interface {
-	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	// ListProjectsFresh lists every project served by this broker. It is
 	// not scoped to a user and must not feed user-facing project pickers.
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
@@ -773,45 +772,6 @@ type hubAgent struct {
 	Phase    string `json:"phase"`
 }
 
-func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects"
-
-	slog.Debug("Listing projects from hub", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("Hub returned non-OK for list projects", "status", resp.StatusCode, "url", url)
-		return nil, newHubError("list projects", resp)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	slog.Debug("Hub returned projects", "count", len(result.Projects))
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
 func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/broker/projects"
 
@@ -937,7 +897,20 @@ func setOnBehalfOf(req *http.Request, onBehalfOf string) {
 		return
 	}
 	req.Header.Set(onBehalfOfHeader, onBehalfOf)
-	req.Header.Set(apiclient.HeaderSignedHeaders, strings.ToLower(onBehalfOfHeader))
+
+	// Add the header name to the semicolon-separated signed-headers list,
+	// keeping any names already listed on the request.
+	name := strings.ToLower(onBehalfOfHeader)
+	listed := req.Header.Get(apiclient.HeaderSignedHeaders)
+	for _, n := range strings.Split(listed, ";") {
+		if strings.EqualFold(strings.TrimSpace(n), name) {
+			return
+		}
+	}
+	if strings.TrimSpace(listed) != "" {
+		name = listed + ";" + name
+	}
+	req.Header.Set(apiclient.HeaderSignedHeaders, name)
 }
 
 // linkedUserPrincipal returns the "user:<email>" principal for a linked

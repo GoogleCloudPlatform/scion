@@ -67,12 +67,6 @@ func newFakeHubClient() *fakeHubClient {
 	}
 }
 
-func (f *fakeHubClient) ListProjects(_ context.Context) ([]ProjectOption, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.projects, nil
-}
-
 func (f *fakeHubClient) ListProjectsForUser(_ context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -3478,4 +3472,21 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
 	}
+}
+
+func TestV2_ImportV1ChatRoutes_ResolvesSlugFromBrokerProjectList(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-789": "scion.project.proj1.agent.coder.messages"}`)
+
+	link, err := b.store.GetGroupLink(ctx, -789)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "alpha", link.ProjectSlug)
+	assert.Equal(t, 1, hub.listFreshCalls)
+	assert.Empty(t, hub.listUserProjectsCalls, "migration does not act as a user")
 }

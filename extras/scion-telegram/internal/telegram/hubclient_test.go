@@ -48,11 +48,11 @@ func TestNewHTTPHubClient_UsesProvidedTransport(t *testing.T) {
 		ctx := context.Background()
 
 		// Verify transport is used when listing projects.
-		projects, err := client.ListProjects(ctx)
+		projects, err := client.ListProjectsFresh(ctx)
 		require.NoError(t, err)
 		assert.Len(t, projects, 1)
 		assert.Equal(t, int64(1), transport.calls.Load(),
-			"ListProjects should use the custom transport (IAP transport)")
+			"ListProjectsFresh should use the custom transport (IAP transport)")
 	})
 
 	t.Run("custom transport is used for ListAgents", func(t *testing.T) {
@@ -98,7 +98,7 @@ func TestNewHTTPHubClient_NilClient_PlainTransport(t *testing.T) {
 
 	// Should work without IAP transport.
 	ctx := context.Background()
-	projects, err := client.ListProjects(ctx)
+	projects, err := client.ListProjectsFresh(ctx)
 	require.NoError(t, err)
 	assert.Len(t, projects, 1)
 	assert.Equal(t, "test", projects[0].Slug)
@@ -183,4 +183,31 @@ func TestHTTPHubClient_SendsLinkedUserWithBrokerCredentials(t *testing.T) {
 	assert.Equal(t, "user:alice@example.com", onBehalfOf)
 	assert.Contains(t, signedHeaders, "x-scion-on-behalf-of")
 	assert.Equal(t, "broker-1", brokerID)
+}
+
+func TestSetOnBehalfOf_KeepsListedSignedHeaders(t *testing.T) {
+	t.Run("adds to an empty list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		setOnBehalfOf(req, "user:alice@example.com")
+		assert.Equal(t, "user:alice@example.com", req.Header.Get("X-Scion-On-Behalf-Of"))
+		assert.Equal(t, "x-scion-on-behalf-of", req.Header.Get("X-Scion-Signed-Headers"))
+	})
+	t.Run("appends to names already listed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("X-Scion-Signed-Headers", "content-type")
+		setOnBehalfOf(req, "user:alice@example.com")
+		assert.Equal(t, "content-type;x-scion-on-behalf-of", req.Header.Get("X-Scion-Signed-Headers"))
+	})
+	t.Run("does not list the header twice", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		setOnBehalfOf(req, "user:alice@example.com")
+		setOnBehalfOf(req, "user:alice@example.com")
+		assert.Equal(t, "x-scion-on-behalf-of", req.Header.Get("X-Scion-Signed-Headers"))
+	})
+	t.Run("empty principal leaves the request unchanged", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		setOnBehalfOf(req, "")
+		assert.Empty(t, req.Header.Get("X-Scion-On-Behalf-Of"))
+		assert.Empty(t, req.Header.Get("X-Scion-Signed-Headers"))
+	})
 }
