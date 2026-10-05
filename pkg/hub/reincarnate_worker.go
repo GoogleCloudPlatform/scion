@@ -574,7 +574,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// The store now holds `fresh` (gen N+1) from the write just above,
 		// but the disk was never successfully re-rendered — restore
 		// `previous` so the store does not claim a generation that was
-		// never actually provisioned.
+		// never actually provisioned. The failed (or timed-out) render
+		// may have left the on-disk config partly gen N+1, so first try a
+		// best-effort re-render of `previous` (ptone/scion#1935). The row
+		// is restored whatever its outcome, as before.
+		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, "reprovision", previous)
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "reprovision failed: "+err.Error(), previous)
 		return
 	}
@@ -589,18 +593,19 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// image exists). fresh.Image keeps buildFreshAppliedConfig's value,
 	// already rewritten to the dispatcher's registry, until the start echo
 	// below supplies the image the runtime actually resolved. If the start
-	// fails, failReincarnation leaves the row as the starting step wrote
-	// it, so the row keeps that qualified image and not the unqualified
-	// echo. If the start succeeds but its response carries no image (the
+	// fails and the re-render of `previous` does not succeed,
+	// failReincarnation leaves the row as the starting step wrote it, so
+	// the row keeps that qualified image and not the unqualified echo. If
+	// the start succeeds but its response carries no image (the
 	// broker's started-but-not-listed fallback, an empty response body, a
 	// deferred start), the qualified image stays too.
 	copyBrokerEcho(fresh, agent.AppliedConfig, false)
 
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)
 	if err != nil {
-		// Reprovision already succeeded, so no restore (same reasoning as the
-		// other post-reprovision-success failure sites below).
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "failed to advance record to starting: "+err.Error(), nil)
+		// Reprovision already succeeded (same handling as the other
+		// post-reprovision-success failure sites below).
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "failed to advance record to starting: "+err.Error(), previous)
 		return
 	}
 	if !ok {
@@ -608,9 +613,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 	// Step: start, without the harness resume flag (design §3.6, decision D3
 	// — always a fresh session). Reprovision already succeeded, so the disk
-	// now holds gen N+1; a failure from here on must NOT restore `previous`,
-	// since that would make the store claim gen N while the disk (and any
-	// container the start call did manage to create) is gen N+1.
+	// now holds gen N+1; a failure from here on restores `previous` on the
+	// row only if failAfterReprovision's re-render of `previous` succeeds.
+	// Otherwise restoring would make the store claim gen N while the disk
+	// (and any container the start call did manage to create) is gen N+1.
 	// appliedConfig: fresh persists the fields taken from the reprovision
 	// echo (see above).
 	//
@@ -630,11 +636,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		now:                startingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, "failed to record starting state: "+err.Error(), nil)
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, "failed to record starting state: "+err.Error(), previous)
 		return
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, "start failed: "+err.Error(), nil)
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, "start failed: "+err.Error(), previous)
 		return
 	}
 	// Take the start echo, image included: this is the runtime-resolved
@@ -726,6 +732,68 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 
 	s.agentLifecycleLog.Info("reincarnation completed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "generation", toGeneration)
+}
+
+// reincarnationRerenderTimeout bounds the best-effort re-render of the
+// previous config after a failed reincarnation (rerenderPreviousConfig). It
+// is well inside reincarnationStaleAfter, so the sweep cannot resolve the
+// record while the re-render is still running. The broker transport's own
+// timeout (the control-channel RequestTimeout, 120s by default) still
+// applies within it.
+const reincarnationRerenderTimeout = 3 * time.Minute
+
+// rerenderPreviousConfig makes one best-effort reprovision dispatch with the
+// outgoing generation's applied config (ptone/scion#1935, option (c)), to put
+// the on-disk agent config back to generation N after a reincarnation that
+// failed once a reprovision dispatch had been attempted. It runs on a
+// context detached from ctx with its own timeout, never retries, and only
+// logs a failure: the caller's original error is what the reincarnation
+// fails with. It reports whether the broker accepted the re-render. Nothing
+// is written to the agent row here: the dispatch uses a re-read of the row
+// with AppliedConfig replaced by a copy of previous, so neither the row nor
+// previous (the record's PreviousAppliedConfig) picks up the broker's echo.
+//
+// The remaining gap: the re-render can itself fail, be refused (for example
+// a container the failed start left running) or be cut off by the transport
+// timeout, leaving the disk partly gen N+1 again. Reprovision also overlays
+// rather than replaces, so a file only gen N+1 rendered stays. An atomic
+// render in Manager.Reprovision is the real fix.
+// Follow-up for the atomic render: ptone/scion#3043.
+func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, step string, previous *store.AgentAppliedConfig) bool {
+	if dispatcher == nil || previous == nil {
+		return false
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reincarnationRerenderTimeout)
+	defer cancel()
+	agent, err := s.store.GetAgent(rctx, agentID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnation failed: could not load the agent to re-render the previous config",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step, "error", err)
+		return false
+	}
+	cfg := *previous
+	agent.AppliedConfig = &cfg
+	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
+		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step, "error", err)
+		return false
+	}
+	s.agentLifecycleLog.Info("reincarnation failed: re-rendered the previous config",
+		"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step)
+	return true
+}
+
+// failAfterReprovision fails a reincarnation after its reprovision dispatch
+// succeeded (so the disk holds gen N+1). It first re-renders previous
+// (rerenderPreviousConfig). Only when that succeeds, so the disk is back at
+// gen N, is the row restored to previous; otherwise the row keeps the
+// gen N+1 config, matching the disk. errMsg is recorded unchanged either way.
+func (s *Server) failAfterReprovision(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig) {
+	var restore *store.AgentAppliedConfig
+	if s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, fromState, previous) {
+		restore = previous
+	}
+	s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg, restore)
 }
 
 // failReincarnation records a reincarnation failure (design §3.7): the
