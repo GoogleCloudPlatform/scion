@@ -1608,6 +1608,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "project_register"))
 
 		// For linked projects (local directory) on the embedded broker,
 		// initialize the .scion directory structure so agents and templates
@@ -1644,8 +1646,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// name was cleared to nil there so it falls through to the create
 		// branch below, leaving the matched broker untouched.
 		existingBroker := embeddedBroker
+		registerOperation := "register"
 
 		if existingBroker != nil {
+			registerOperation = "reregister"
 			// Update existing broker
 			broker = existingBroker
 			broker.Name = req.Broker.Name
@@ -1690,6 +1694,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
 
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
@@ -1718,6 +1724,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "embedded"))
 
 		// Set as default runtime broker if project doesn't have one
 		// (first broker to register becomes the default)

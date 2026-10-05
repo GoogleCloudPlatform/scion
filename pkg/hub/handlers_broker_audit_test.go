@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -242,4 +243,143 @@ func TestMergeBrokerAuditDetails(t *testing.T) {
 	assert.Equal(t, "caller-supplied", base["projectId"], "the input map is not modified")
 	assert.Nil(t, mergeBrokerAuditDetails(nil))
 	assert.Equal(t, map[string]string{"operation": "reregister"}, mergeBrokerAuditDetails(nil, "operation", "reregister"))
+}
+
+// assertSessionLinkEvent checks one link event recorded with an interactive
+// session credential on the given path.
+func assertSessionLinkEvent(t *testing.T, e *BrokerAuthEvent, brokerID, projectID, actorID, path string) {
+	t.Helper()
+	assert.Equal(t, brokerID, e.BrokerID)
+	assert.Equal(t, actorID, e.ActorID)
+	assert.Equal(t, "user", e.ActorType)
+	assert.Equal(t, map[string]string{
+		"credential_kind": string(CredentialKindInteractive),
+		"projectId":       projectID,
+		"path":            path,
+	}, e.Details)
+}
+
+func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
+	f := brokerAssocSetup(t, "audit-reg-link")
+	audit := installBrokerAuditCapture(f.srv)
+
+	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:     "Audit Register Link",
+		BrokerID: f.otherBroker.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	events := brokerAuditEventsOfType(audit, BrokerAuthEventLink)
+	require.Len(t, events, 1)
+	assertSessionLinkEvent(t, events[0], f.otherBroker.ID, resp.Project.ID, f.brokerOwner.ID, "project_register")
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventRegister), "linking an existing broker registers nothing")
+}
+
+func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
+	f := brokerAssocSetup(t, "audit-reg-link-denied")
+	audit := installBrokerAuditCapture(f.srv)
+
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:     "Audit Register Link Denied",
+		BrokerID: f.otherBroker.ID,
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventLink))
+}
+
+func TestBrokerAudit_EmbeddedRegisterRecordsCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		existing  bool
+		operation string
+	}{
+		{"new broker", false, "register"},
+		{"existing broker", true, "reregister"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			audit := installBrokerAuditCapture(srv)
+			owner := newHubMemberUser(t, s, "audit-embedded-owner")
+			info := &RegisterProjectBrokerInfo{Name: "audit-embedded-new-broker", Version: "1.0.0"}
+			if tc.existing {
+				broker := registerBrokerTestExistingBroker(t, s, "audit-embedded-broker", owner.ID)
+				info = &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "2.0.0"}
+			}
+
+			rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:   "Audit Embedded Project",
+				Broker: info,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp RegisterProjectResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			require.NotNil(t, resp.Broker)
+			require.NotEmpty(t, resp.SecretKey)
+
+			registered := brokerAuditEventsOfType(audit, BrokerAuthEventRegister)
+			require.Len(t, registered, 1)
+			e := registered[0]
+			assert.Equal(t, resp.Broker.ID, e.BrokerID)
+			assert.Equal(t, owner.ID, e.ActorID)
+			assert.Equal(t, map[string]string{
+				"credential_kind": string(CredentialKindInteractive),
+				"operation":       tc.operation,
+				"path":            "embedded",
+			}, e.Details)
+			assertNoSecretInDetails(t, e.Details, resp.SecretKey)
+
+			links := brokerAuditEventsOfType(audit, BrokerAuthEventLink)
+			require.Len(t, links, 1)
+			assertSessionLinkEvent(t, links[0], resp.Broker.ID, resp.Project.ID, owner.ID, "embedded")
+			assertNoSecretInDetails(t, links[0].Details, resp.SecretKey)
+		})
+	}
+}
+
+func TestBrokerAudit_AgentCreateLinkRecordsCredential(t *testing.T) {
+	f := brokerLinkAuthzSetup(t)
+	audit := installBrokerAuditCapture(f.srv)
+
+	rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
+		Name:            "audit-agent-link",
+		RuntimeBrokerID: f.unlinked.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	events := brokerAuditEventsOfType(audit, BrokerAuthEventLink)
+	require.Len(t, events, 1)
+	assertSessionLinkEvent(t, events[0], f.unlinked.ID, f.proj.ID, f.owner.ID, "agent_create")
+}
+
+func TestBrokerAudit_BrokerDeleteUnlinkRecordsCredential(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	audit := installBrokerAuditCapture(srv)
+	owner := newHubMemberUser(t, s, "audit-delete-owner")
+	broker := createReregistrationTestBroker(t, s, "audit-delete-broker", owner.ID)
+
+	projectIDs := []string{tid("audit-delete-project-a"), tid("audit-delete-project-b")}
+	for i, projectID := range projectIDs {
+		createRS1Project(t, s, projectID, tid("audit-delete-project-owner-"+string(rune('a'+i))))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		}))
+	}
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/runtime-brokers/"+broker.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	events := brokerAuditEventsOfType(audit, BrokerAuthEventUnlink)
+	require.Len(t, events, 2)
+	var got []string
+	for _, e := range events {
+		assert.Equal(t, broker.ID, e.BrokerID)
+		assert.Equal(t, owner.ID, e.ActorID)
+		assert.Equal(t, string(CredentialKindInteractive), e.Details["credential_kind"])
+		assert.NotContains(t, e.Details, "credential_boundary_kind")
+		got = append(got, e.Details["projectId"])
+	}
+	assert.ElementsMatch(t, projectIDs, got, "one unlink event per provider link, each with its own project")
 }
