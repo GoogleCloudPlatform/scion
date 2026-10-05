@@ -130,6 +130,29 @@ test('typing straight after a reopen becomes the new query', async ({ page }) =>
   await expectTypingRightAfterOpenFilters(page);
 });
 
+test('typing straight after a Ctrl+K pressed during the close animation becomes the reopened query', async ({
+  page,
+}) => {
+  await gotoWithComposer(page);
+  const textarea = composerTextarea(page);
+  await textarea.click();
+  await textarea.fill('draft');
+  await page.keyboard.press('Control+k');
+  await expect(paletteInput(page)).toBeFocused();
+  await page.keyboard.type('review');
+
+  // No wait between the Escape and the reopen: the close is still animating.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('coder');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  await expect(paletteInput(page)).toHaveValue('coder');
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(paletteOptions(page)).toHaveText([/Coder One/]);
+  await expect(textarea).toHaveValue('draft');
+});
+
 test('Escape restores focus and the caret position in the composer', async ({ page }) => {
   await gotoWithComposer(page);
   const textarea = composerTextarea(page);

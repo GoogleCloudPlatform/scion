@@ -567,8 +567,10 @@ describe('keys typed while the palette opens', () => {
     const { el } = composer();
     const opening = page.togglePalette();
     page.remove();
-    await opening;
+    // Before the suspended open resumes: the disconnect itself stops it.
     expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    await opening;
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
   });
 
   it('reach the composer again once the palette closes', async () => {
@@ -578,6 +580,96 @@ describe('keys typed while the palette opens', () => {
     await page.togglePalette();
     expect(page.v2PaletteOpen).toBe(true);
     await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  function previewTarget(): unknown {
+    return {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+  }
+
+  it('are captured from a press queued behind the close animation, and become the reopened query', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette(); // close: animating
+    const { el, onKeydown } = composer();
+
+    await page.togglePalette(); // queued
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(onKeydown).not.toHaveBeenCalled();
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured from a press queued behind a closing document preview', async () => {
+    const page = createEligiblePage();
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+
+    await page.togglePalette({ mode: 'open' });
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('reach the composer again once a second press cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    await page.togglePalette();
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once Escape cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a queued reopen is abandoned after the close animation', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    const { el } = composer();
+    await page.togglePalette(); // queued
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a reopen queued behind the document preview is abandoned', async () => {
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
     expect(page.v2PaletteOpen).toBe(false);
     expect(typeAt(el, 'a').defaultPrevented).toBe(false);
   });
