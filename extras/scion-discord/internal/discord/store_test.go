@@ -647,6 +647,23 @@ func TestProjectAgents(t *testing.T) {
 	t.Run("ExpiredEntryNotServed", func(t *testing.T) { testProjectAgentsExpiredNotServed(t, newTestStore(t)) })
 	t.Run("EmptyUserNotServed", func(t *testing.T) { testProjectAgentsEmptyUserNotServed(t, newTestStore(t)) })
 
+	t.Run("FailedEvictionDoesNotFailSave", func(t *testing.T) {
+		store := newTestStore(t)
+		raw := rawAgentCache(t, store)
+		_, err := raw.db.Exec(`CREATE TRIGGER block_evict BEFORE DELETE ON user_project_agents BEGIN SELECT RAISE(ABORT, 'eviction blocked'); END`)
+		require.NoError(t, err)
+		raw.insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+
+		require.NoError(t, store.SetProjectAgents(context.Background(), &ProjectAgents{
+			User: "user:bob@example.com", ProjectID: "proj-1", AgentSlugs: []string{"reviewer"}, RefreshedAt: time.Now(),
+		}), "the list is saved even when evicting old rows fails")
+
+		got, err := store.GetProjectAgents(context.Background(), "user:bob@example.com", "proj-1")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, []string{"reviewer"}, got.AgentSlugs)
+	})
+
 	t.Run("DropsProjectKeyedCache", func(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "old.db")
 		db, err := sql.Open("sqlite", dbPath)
