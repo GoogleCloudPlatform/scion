@@ -189,130 +189,134 @@ func TestBuildDaemonStartArgsForwardsExplicitHost(t *testing.T) {
 	assert.Contains(t, buildDaemonStartArgs(c), "--host=1.2.3.4")
 }
 
-// TestColocatedBrokerReason guards a shape colocatedBrokerReason must
-// handle: in combined workstation mode (the default and the case this exists
-// for), the web server answers /healthz with a composite body that nests the
-// Hub's checks under "hub" (pkg/hub.CompositeHealthResponse /
-// WebServer.handleHealthz) instead of putting them at the top level like a
-// standalone Hub's direct response does. colocatedBrokerReason must find the
-// reason in both shapes.
-func TestColocatedBrokerReason(t *testing.T) {
-	tests := []struct {
-		name   string
-		health healthProbeResponse
-		want   string
-	}{
-		{
-			name:   "healthy top-level",
-			health: healthProbeResponse{Status: "healthy"},
-			want:   "",
-		},
-		{
-			name: "degraded for another reason, not colocated_broker",
-			health: healthProbeResponse{
-				Status: "degraded",
-				Checks: map[string]string{"database": "unhealthy"},
-			},
-			want: "",
-		},
-		{
-			name: "standalone Hub body: degraded because of colocated_broker",
-			health: healthProbeResponse{
-				Status: "degraded",
-				Checks: map[string]string{"colocated_broker": "unhealthy: registration failed"},
-			},
-			want: "unhealthy: registration failed",
-		},
-		{
-			name: "composite (combined-mode) body: reason nested under hub",
-			health: healthProbeResponse{
-				Status: "degraded",
-				Hub: &struct {
-					Status string            `json:"status"`
-					Checks map[string]string `json:"checks"`
-				}{
-					Status: "degraded",
-					Checks: map[string]string{"colocated_broker": "unhealthy: registration pending"},
-				},
-			},
-			want: "unhealthy: registration pending",
-		},
-		{
-			name: "composite body: top-level degraded but hub healthy -> no colocated_broker reason",
-			health: healthProbeResponse{
-				Status: "degraded",
-				Hub: &struct {
-					Status string            `json:"status"`
-					Checks map[string]string `json:"checks"`
-				}{Status: "healthy"},
-			},
-			want: "",
-		},
-		{
-			name:   "malformed/empty body",
-			health: healthProbeResponse{},
-			want:   "",
-		},
-	}
+// serveHealth starts an httptest.Server that answers every request with the
+// given /healthz body.
+func serveHealth(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
+// fastReadyPoll shortens waitForServerReady's poll interval for a test.
+func fastReadyPoll(t *testing.T) {
+	t.Helper()
+	old := serverReadyPollInterval
+	serverReadyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { serverReadyPollInterval = old })
+}
+
+// TestHealthProblemReason decodes actual JSON shapes (rather than
+// constructing healthProbeResponse by hand) to guard against the struct tags
+// drifting from what pkg/hub.HealthResponse/CompositeHealthResponse emit. In
+// combined workstation mode (the default) the web server nests the Hub's
+// checks under "hub"; a standalone Hub puts them at the top level. Both must
+// yield the non-healthy checks, by name (ptone/scion#1094, #2154).
+func TestHealthProblemReason(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"healthy composite", `{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"colocated_broker":"healthy","database":"healthy"}}}`, ""},
+		{"healthy standalone", `{"status":"healthy","checks":{"database":"healthy"}}`, ""},
+		{"empty body", `{}`, ""},
+		{"standalone degraded on colocated_broker", `{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed","database":"healthy"}}`, "colocated_broker: unhealthy: registration failed"},
+		{"composite degraded, nested under hub", `{"status":"degraded","version":"0.1.0","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`, "colocated_broker: unhealthy: registration pending"},
+		{"standalone unhealthy, database", `{"status":"unhealthy","checks":{"database":"unhealthy"}}`, "database: unhealthy"},
+		{"several checks sorted", `{"status":"unhealthy","checks":{"database":"unhealthy","colocated_broker":"unhealthy: registration failed"}}`, "colocated_broker: unhealthy: registration failed; database: unhealthy"},
+		{"informational key", `{"status":"degraded","checks":{"workspace_storage":"healthy","workspace_storage_mount_verification":"unavailable: could not compare filesystem device IDs"}}`, "workspace_storage_mount_verification: unavailable: could not compare filesystem device IDs"},
+		{"composite degraded by broker only", `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"database":"healthy"}},"broker":{"status":"degraded","checks":{"docker":"available"}}}`, "broker: degraded"},
+		{"degraded with no named check", `{"status":"degraded"}`, "status: degraded"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, colocatedBrokerReason(tt.health))
+			var h healthProbeResponse
+			require.NoError(t, json.Unmarshal([]byte(tt.body), &h))
+			assert.Equal(t, tt.want, healthProblemReason(h))
 		})
 	}
 }
 
-// TestColocatedBrokerReason_FromRealJSON decodes actual JSON shapes (rather
-// than constructing healthProbeResponse by hand) to guard against the struct
-// tags drifting from what pkg/hub.HealthResponse/CompositeHealthResponse
-// actually emit.
-func TestColocatedBrokerReason_FromRealJSON(t *testing.T) {
-	standalone := `{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed","database":"healthy"}}`
-	var h1 healthProbeResponse
-	require.NoError(t, json.Unmarshal([]byte(standalone), &h1))
-	assert.Equal(t, "unhealthy: registration failed", colocatedBrokerReason(h1))
-
-	composite := `{"status":"degraded","version":"0.1.0","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`
-	var h2 healthProbeResponse
-	require.NoError(t, json.Unmarshal([]byte(composite), &h2))
-	assert.Equal(t, "unhealthy: registration pending", colocatedBrokerReason(h2))
-
-	healthyComposite := `{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"colocated_broker":"healthy"}}}`
-	var h3 healthProbeResponse
-	require.NoError(t, json.Unmarshal([]byte(healthyComposite), &h3))
-	assert.Equal(t, "", colocatedBrokerReason(h3))
+func TestHealthProblemHint(t *testing.T) {
+	assert.Equal(t, "see server log; restart after fixing the broker config",
+		healthProblemHint("colocated_broker: unhealthy: registration failed"))
+	assert.Equal(t, "see server log", healthProblemHint("database: unhealthy"))
 }
 
-// TestWaitForServerReady_NamesColocatedBrokerReasonInCombinedMode drives
-// waitForServerReady against an httptest.Server serving a combined-mode
-// (composite) degraded body, and checks that the returned lastHealth lets
-// the caller name the colocated_broker reason — the exact case
-// printWorkstationQuickstart needs (it polls the web port, which is always
-// combined-mode shaped when a hub health provider is registered).
-func TestWaitForServerReady_NamesColocatedBrokerReasonInCombinedMode(t *testing.T) {
+// TestWaitForServerReady_DegradedAtDeadlineIsReady: a server that stays
+// degraded is up and serving, so once the deadline passes waitForServerReady
+// reports ready (not a timeout failure) and the last health response names
+// the checks for the caller's warning (ptone/scion#1094, #2154).
+func TestWaitForServerReady_DegradedAtDeadlineIsReady(t *testing.T) {
+	fastReadyPoll(t)
+	srv := serveHealth(t, `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`)
+
+	host, port := splitTestServerHostPort(t, srv.URL)
+	start := time.Now()
+	ready, lastHealth := waitForServerReady(host, port, 300*time.Millisecond)
+	assert.True(t, ready, "degraded means up")
+	assert.GreaterOrEqual(t, time.Since(start), 300*time.Millisecond,
+		"must keep polling for healthy until the deadline before settling for degraded")
+	assert.Equal(t, "degraded", lastHealth.Status)
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", healthProblemReason(lastHealth))
+}
+
+// TestWaitForServerReady_DegradedThenHealthy covers the startup window: the
+// co-located broker registers just after the listener starts, so a transient
+// degraded must not end the wait early; healthy wins once it arrives.
+func TestWaitForServerReady_DegradedThenHealthy(t *testing.T) {
+	fastReadyPoll(t)
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`))
+		if atomic.AddInt32(&hits, 1) < 3 {
+			_, _ = w.Write([]byte(`{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"}}`))
 	}))
 	defer srv.Close()
 
 	host, port := splitTestServerHostPort(t, srv.URL)
-	ready, lastHealth := waitForServerReady(host, port, 500*time.Millisecond)
+	ready, lastHealth := waitForServerReady(host, port, 5*time.Second)
+	assert.True(t, ready)
+	assert.Equal(t, "healthy", lastHealth.Status)
+	assert.Empty(t, healthProblemReason(lastHealth))
+}
+
+// TestWaitForServerReady_UnhealthyIsNotReady: a failed critical check
+// (database) is not "up", even though the process answers.
+func TestWaitForServerReady_UnhealthyIsNotReady(t *testing.T) {
+	fastReadyPoll(t)
+	srv := serveHealth(t, `{"status":"unhealthy","web":{"status":"ok"},"hub":{"status":"unhealthy","checks":{"database":"unhealthy"}}}`)
+
+	host, port := splitTestServerHostPort(t, srv.URL)
+	ready, lastHealth := waitForServerReady(host, port, 200*time.Millisecond)
 	assert.False(t, ready)
-	assert.Equal(t, "unhealthy: registration failed", colocatedBrokerReason(lastHealth))
+	assert.Equal(t, "database: unhealthy", healthProblemReason(lastHealth))
+}
+
+// TestWaitForServerReady_Unreachable: nothing answering is not ready, with
+// a zero lastHealth.
+func TestWaitForServerReady_Unreachable(t *testing.T) {
+	fastReadyPoll(t)
+	host, port := splitTestServerHostPort(t, unreachableHTTPURL(t))
+	ready, lastHealth := waitForServerReady(host, port, 100*time.Millisecond)
+	assert.False(t, ready)
+	assert.Empty(t, healthProblemReason(lastHealth))
 }
 
 // TestWaitForServerReady_ReturnsReadyOnHealthy is the healthy-path
 // counterpart: once the composite body reports "healthy", waitForServerReady
 // returns immediately rather than waiting out the full timeout.
 func TestWaitForServerReady_ReturnsReadyOnHealthy(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"}}`))
-	}))
-	defer srv.Close()
+	srv := serveHealth(t, `{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"}}`)
 
 	host, port := splitTestServerHostPort(t, srv.URL)
 	start := time.Now()
@@ -321,12 +325,15 @@ func TestWaitForServerReady_ReturnsReadyOnHealthy(t *testing.T) {
 	assert.Less(t, time.Since(start), 5*time.Second, "should return promptly once healthy, not wait out the timeout")
 }
 
-// TestFormatServerStatusComponents guards two things: a standalone Hub
-// without a web server must not have its Web Frontend line mislabeled
-// "degraded" just because the Hub itself is degraded, and both the
-// standalone and combined-mode deployments must name the colocated_broker
-// reason instead of printing a bare "not detected".
+// TestFormatServerStatusComponents guards: a standalone Hub without a web
+// server must not have its Web Frontend line mislabeled "degraded" just
+// because the Hub itself is degraded; a degraded component is "running" and
+// names its checks (with the broker-specific recovery hint for
+// colocated_broker, ptone/scion#2154); an unhealthy one is not running but
+// still names its checks instead of a bare "not detected".
 func TestFormatServerStatusComponents(t *testing.T) {
+	const brokerReason = "colocated_broker: unhealthy: registration failed"
+	const brokerHint = " — see server log; restart after fixing the broker config"
 	tests := []struct {
 		name   string
 		status serverStatusInfo
@@ -344,13 +351,28 @@ func TestFormatServerStatusComponents(t *testing.T) {
 		{
 			name: "combined mode, degraded on colocated_broker",
 			status: serverStatusInfo{
-				HubDegradedReason: "unhealthy: registration failed",
-				WebDegradedReason: "unhealthy: registration failed",
+				HubRunning: true, WebRunning: true,
+				HubStatus: "degraded", WebStatus: "degraded",
+				HubDegradedReason: brokerReason,
+				WebDegradedReason: brokerReason,
 			},
 			want: []string{
-				"  Hub API:         degraded (colocated_broker: unhealthy: registration failed) — see server log; restart after fixing the broker config",
+				"  Hub API:         running, degraded (" + brokerReason + ")" + brokerHint,
 				"  Runtime Broker:  not detected",
-				"  Web Frontend:    degraded (colocated_broker: unhealthy: registration failed) — see server log; restart after fixing the broker config",
+				"  Web Frontend:    running, degraded (" + brokerReason + ")" + brokerHint,
+			},
+		},
+		{
+			name: "combined mode, unhealthy database",
+			status: serverStatusInfo{
+				HubStatus: "unhealthy", WebStatus: "unhealthy",
+				HubDegradedReason: "database: unhealthy",
+				WebDegradedReason: "database: unhealthy",
+			},
+			want: []string{
+				"  Hub API:         unhealthy (database: unhealthy) — see server log",
+				"  Runtime Broker:  not detected",
+				"  Web Frontend:    unhealthy (database: unhealthy) — see server log",
 			},
 		},
 		{
@@ -363,19 +385,15 @@ func TestFormatServerStatusComponents(t *testing.T) {
 			},
 		},
 		{
-			// This is the state probeServerStatus actually produces for a real
-			// standalone degraded Hub: the 9810 branch sets HubRunning=true
-			// whenever the body parses at all, degraded or not. A test input with
-			// HubRunning:false would not match what the probe produces, so it
-			// would not guard the line a standalone operator actually sees.
 			name: "standalone hub, degraded on colocated_broker, no web server: Web Frontend must stay not detected",
 			status: serverStatusInfo{
 				HubRunning:        true,
-				HubDegradedReason: "unhealthy: registration pending",
-				// WebDegradedReason intentionally unset: no web server ran at all.
+				HubStatus:         "degraded",
+				HubDegradedReason: "colocated_broker: unhealthy: registration pending",
+				// Web fields intentionally unset: no web server ran at all.
 			},
 			want: []string{
-				"  Hub API:         running, degraded (colocated_broker: unhealthy: registration pending) — see server log; restart after fixing the broker config",
+				"  Hub API:         running, degraded (colocated_broker: unhealthy: registration pending)" + brokerHint,
 				"  Runtime Broker:  not detected",
 				"  Web Frontend:    not detected",
 			},
@@ -400,53 +418,52 @@ func TestFormatServerStatusComponents(t *testing.T) {
 
 // TestProbeServerStatus_StandaloneHubDegraded guards the realistic
 // standalone-deployment shape (a Hub with no web server running at all,
-// answering degraded because of colocated_broker): it must produce
-// HubRunning=true, HubDegradedReason set, and WebDegradedReason empty — the
-// input formatServerStatusComponents' standalone test case exercises.
-// Without this test, setting WebDegradedReason from the 9810 branch (which
-// would mislabel a standalone Hub's Web Frontend as degraded) would pass
-// silently.
+// answering degraded because of colocated_broker): degraded is up, so
+// HubRunning=true with the checks named, and the Web fields stay empty — a
+// standalone Hub's Web Frontend must not be labeled degraded.
 func TestProbeServerStatus_StandaloneHubDegraded(t *testing.T) {
-	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}`))
-	}))
-	defer hubSrv.Close()
+	hubSrv := serveHealth(t, `{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}`)
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	status := probeServerStatus(client, unreachableHTTPURL(t), hubSrv.URL, unreachableHTTPURL(t))
 
 	assert.True(t, status.HubRunning)
 	assert.False(t, status.WebRunning)
-	assert.Equal(t, "unhealthy: registration failed", status.HubDegradedReason)
+	assert.Equal(t, "degraded", status.HubStatus)
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.HubDegradedReason)
 	assert.Empty(t, status.WebDegradedReason, "no web server ran, so Web Frontend must not be labeled degraded")
+	assert.Empty(t, status.WebStatus)
+}
+
+// TestProbeServerStatus_StandaloneHubUnhealthy: a failed critical check is
+// not "up" — HubRunning stays false — but the checks are still named.
+func TestProbeServerStatus_StandaloneHubUnhealthy(t *testing.T) {
+	hubSrv := serveHealth(t, `{"status":"unhealthy","checks":{"database":"unhealthy"}}`)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status := probeServerStatus(client, unreachableHTTPURL(t), hubSrv.URL, unreachableHTTPURL(t))
+
+	assert.False(t, status.HubRunning)
+	assert.Equal(t, "unhealthy", status.HubStatus)
+	assert.Equal(t, "database: unhealthy", status.HubDegradedReason)
+	assert.Empty(t, status.WebStatus)
 }
 
 // TestProbeServerStatus_CombinedModeDegraded covers the other realistic
 // shape: the web server answers on the combined port with a degraded
-// composite body (colocated_broker nested under "hub"). Both HubRunning and
-// WebRunning stay false (status is not "healthy"), and both degraded-reason
-// fields are set from the single 8080 probe.
+// composite body (colocated_broker nested under "hub"). Degraded is up, so
+// HubRunning and WebRunning are true, and both reason fields are set from
+// the single 8080 probe.
 //
 // The Hub URL is a request-counting server rather than merely an unreachable
 // one: combined mode (--enable-web) never starts the standalone Hub listener
 // (port 9810), so once the web port has answered with the combined composite
-// body (it carries a nested "hub" object) — healthy or degraded — a
-// follow-up probe to the standalone hub port is redundant. If that fallback
-// guard were ever weakened to probe the standalone port whenever the web
-// port merely failed to report "healthy" (rather than whenever it answered
-// with a composite body), this test fails on the hit-count assertion even
-// though the final status fields would still come out looking correct. See
+// body (it carries a nested "hub" object), a follow-up probe to the
+// standalone hub port is redundant. See
 // TestProbeServerStatus_UnrelatedServiceOnWebPort for the case where the web
 // port answers but is not a scion combined server.
 func TestProbeServerStatus_CombinedModeDegraded(t *testing.T) {
-	webSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`))
-	}))
-	defer webSrv.Close()
+	webSrv := serveHealth(t, `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`)
 
 	var hubHits int32
 	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -460,12 +477,38 @@ func TestProbeServerStatus_CombinedModeDegraded(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	status := probeServerStatus(client, webSrv.URL, hubSrv.URL, unreachableHTTPURL(t))
 
-	assert.False(t, status.HubRunning)
-	assert.False(t, status.WebRunning)
-	assert.Equal(t, "unhealthy: registration pending", status.HubDegradedReason)
-	assert.Equal(t, "unhealthy: registration pending", status.WebDegradedReason)
+	assert.True(t, status.HubRunning, "degraded means up")
+	assert.True(t, status.WebRunning, "degraded means up")
+	assert.Equal(t, "degraded", status.HubStatus)
+	assert.Equal(t, "degraded", status.WebStatus)
+	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.HubDegradedReason)
+	assert.Equal(t, "colocated_broker: unhealthy: registration pending", status.WebDegradedReason)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&hubHits),
 		"the 8080 probe already answered (degraded), so the standalone hub port must not be probed at all")
+}
+
+// TestProbeServerStatus_CombinedModeUnhealthy: an unhealthy composite is not
+// up, names its checks, and still suppresses the redundant 9810 probe.
+func TestProbeServerStatus_CombinedModeUnhealthy(t *testing.T) {
+	webSrv := serveHealth(t, `{"status":"unhealthy","web":{"status":"ok"},"hub":{"status":"unhealthy","checks":{"database":"unhealthy"}}}`)
+
+	var hubHits int32
+	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hubHits, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"healthy"}`))
+	}))
+	defer hubSrv.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status := probeServerStatus(client, webSrv.URL, hubSrv.URL, unreachableHTTPURL(t))
+
+	assert.False(t, status.HubRunning)
+	assert.False(t, status.WebRunning)
+	assert.Equal(t, "unhealthy", status.HubStatus)
+	assert.Equal(t, "unhealthy", status.WebStatus)
+	assert.Equal(t, "database: unhealthy", status.HubDegradedReason)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hubHits))
 }
 
 // TestProbeServerStatus_UnrelatedServiceOnWebPort guards against a regression
