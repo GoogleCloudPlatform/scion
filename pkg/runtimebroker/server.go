@@ -1178,7 +1178,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
 	defer cancel()
 	if !s.startsInFlight.cancelAllAndWait(ctx) {
-		slog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
+		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
 	// Stop all hub connections

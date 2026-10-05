@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -117,7 +116,7 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 
 	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
-		slog.Warn("Recovery observations: listing broker agents failed", "broker_id", brokerID, "error", err)
+		s.agentLifecycleLog.Warn("Recovery observations: listing broker agents failed", "broker_id", brokerID, "error", err)
 		return
 	}
 	// A queued create, start or restart dispatch (for a broker reached
@@ -125,7 +124,7 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 	// record it as a start in flight.
 	pending, err := report.pendingStarts(ctx, s, brokerID)
 	if err != nil {
-		slog.Warn("Recovery observations: listing pending dispatches failed", "broker_id", brokerID, "error", err)
+		s.agentLifecycleLog.Warn("Recovery observations: listing pending dispatches failed", "broker_id", brokerID, "error", err)
 		return
 	}
 	inFlight := hb.startsInFlightKeys()
@@ -150,7 +149,7 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 		obs = append(obs, o)
 	}
 	if _, err := s.store.RecordRecoveryObservations(ctx, brokerID, targets, obs); err != nil {
-		slog.Warn("Recovery observations: write failed", "broker_id", brokerID, "error", err)
+		s.agentLifecycleLog.Warn("Recovery observations: write failed", "broker_id", brokerID, "error", err)
 	}
 }
 
