@@ -29,6 +29,7 @@ import {
   effectiveDeletion,
   isDeletionActive,
 } from '../../shared/agent-deletion.js';
+import { hubNow } from '../../shared/hub-clock.js';
 
 /** Injectable clock for {@link DeletionLeaseController} (tests pass a fake). */
 export interface DeletionClock {
@@ -37,8 +38,14 @@ export interface DeletionClock {
   clearTimeout(handle: unknown): void;
 }
 
+/**
+ * The default clock reads the estimated hub time (ptone/scion#2952), so the
+ * lease flip and failed-view expiry happen at the hub's instants even when
+ * the browser clock is skewed. Timer delays are differences of two hub
+ * times, so they are unaffected by the offset.
+ */
 const systemClock: DeletionClock = {
-  now: () => Date.now(),
+  now: () => hubNow(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
@@ -122,6 +129,12 @@ export class DeletionLeaseController implements ReactiveController {
   }
 }
 
+/** Short badge text for {@link ScionDeletionBadge.compact}. */
+export function compactDeletionLabel(d: DeletionInfo): string {
+  if (d.state === 'deleting') return 'Deleting…';
+  return d.code === 'abandoned' ? 'Interrupted' : 'Delete failed';
+}
+
 /**
  * Renders nothing for `null`, "Deleting…" for a live delete, and "Delete
  * failed: …" (or "Delete interrupted" for `abandoned`) for a failed one.
@@ -147,6 +160,14 @@ export class ScionDeletionBadge extends LitElement {
    */
   @property({ type: Boolean })
   live = false;
+
+  /**
+   * Short label for tight spaces (the graph view's fixed-size nodes):
+   * "Deleting…", "Delete failed" or "Interrupted"; the full label stays in
+   * `title` and `aria-label`.
+   */
+  @property({ type: Boolean })
+  compact = false;
 
   static override styles = css`
     :host {
@@ -204,6 +225,13 @@ export class ScionDeletionBadge extends LitElement {
       flex: none;
     }
 
+    .badge.compact {
+      font-size: 0.6875rem;
+      padding: 0 0.375rem;
+      gap: 0.1875rem;
+      max-width: 6.5rem;
+    }
+
     .badge.deleting {
       background: var(--scion-badge-warning-bg, #fef3c7);
       color: var(--scion-badge-warning-text, #92400e);
@@ -232,14 +260,18 @@ export class ScionDeletionBadge extends LitElement {
     if (!d) return nothing;
     const label = deletionBadgeLabel(d);
     const deleting = d.state === 'deleting';
+    const shown = this.compact ? compactDeletionLabel(d) : label;
     return html`
       <span
-        class="badge ${deleting ? 'deleting' : 'failed'} ${this.size}"
+        class="badge ${deleting ? 'deleting' : 'failed'} ${this.size} ${this.compact
+          ? 'compact'
+          : ''}"
         title=${label}
+        aria-label=${this.compact ? label : nothing}
         data-state=${d.state}
       >
         <sl-icon name=${deleting ? 'trash' : 'exclamation-triangle'}></sl-icon>
-        <span class="label">${label}</span>
+        <span class="label">${shown}</span>
       </span>
     `;
   }

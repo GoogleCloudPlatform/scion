@@ -228,6 +228,10 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
+	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
+	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
+	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
+	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
 	b2 := snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
@@ -540,6 +544,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field from the stored config (the same view GET
+	// masked) before any section document is built. This runs after the 422
+	// checks so a Layer-0 request is still rejected as such.
+	//
+	// github_app private_key and webhook_secret are not persisted in DB mode
+	// (the github_app section has no secret fields), so for them this check
+	// only validates the request; their handling is tracked in
+	// ptone/scion#2938.
+	if req.Server != nil {
+		stored, err := storedServerConfigDB(ops)
+		if err != nil {
+			slog.Error("PUT server-config: failed to load stored config for masked values", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {
@@ -564,6 +590,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs["access"] = doc
 		accessBaseRev = rev
+	}
+
+	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
+	// admin form has no fields for them), and validate them.
+	if doc, ok := sectionDocs["lifecycle"]; ok {
+		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		var lc opsettings.LifecycleSettings
+		if err := json.Unmarshal(merged, &lc); err == nil {
+			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
+				return
+			}
+		}
+		sectionDocs["lifecycle"] = merged
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -622,6 +667,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			_ = json.Unmarshal(doc, &profiles)
 		}
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
+		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
@@ -997,6 +1046,18 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
 			}
+			if hub.StartClaimLeaseTTL != "" {
+				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.StartMaxDuration != "" {
+				keys = append(keys, "server.hub.start_max_duration")
+			}
+			if hub.StartUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_unconfirmed_hold")
+			}
+			if hub.StartCreateUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_create_unconfirmed_hold")
+			}
 			if hub.SoftDeleteRetainFiles != nil {
 				keys = append(keys, "server.hub.soft_delete_retain_files")
 			}
@@ -1087,6 +1148,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
+		}
+		if srv.SharedDirStorage != nil && !isZeroStruct(srv.SharedDirStorage) {
+			keys = append(keys, "server.shared_dir_storage")
+		}
+		if srv.HomeStorage != nil && !isZeroStruct(srv.HomeStorage) {
+			keys = append(keys, "server.home_storage")
 		}
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
@@ -1386,6 +1453,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention
 			}
 			d.SoftDeleteRetainFiles = req.Server.Hub.SoftDeleteRetainFiles
+			d.StartClaimLeaseTTL = req.Server.Hub.StartClaimLeaseTTL
+			d.StartMaxDuration = req.Server.Hub.StartMaxDuration
+			d.StartUnconfirmedHold = req.Server.Hub.StartUnconfirmedHold
+			d.StartCreateUnconfirmedHold = req.Server.Hub.StartCreateUnconfirmedHold
 		}
 		doc = d
 

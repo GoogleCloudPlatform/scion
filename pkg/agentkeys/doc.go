@@ -38,7 +38,7 @@
 //   - 2.2 implements the ExecuteAgentKeys Hub operation, consuming Dispatcher,
 //     Request/Response, and the rate-limit and admission-window constants
 //     defined here.
-//   - 2.3 implements the temporary `message --raw` / top-level raw bridge
-//     that normalizes a legacy envelope into Request and calls the same
-//     ExecuteAgentKeys operation.
+//   - Raw keystroke delivery through message requests has been removed;
+//     message ingresses reject the retired raw field with
+//     OutcomeRawInputRemoved.
 package agentkeys

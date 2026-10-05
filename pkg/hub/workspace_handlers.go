@@ -519,6 +519,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}
+			if relaySkillResolutionError(w, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}

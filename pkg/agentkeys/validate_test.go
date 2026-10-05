@@ -495,8 +495,7 @@ func TestValidateBody_ErrorsNeverContainInputData(t *testing.T) {
 
 // TestValidateKeys_ErrorsNeverContainInputData is
 // TestValidateBody_ErrorsNeverContainInputData's counterpart for
-// ValidateKeys — the bridge's validator (§6.1 step 4 of the contract),
-// applied directly to an already-decoded Go string rather than a raw JSON
+// ValidateKeys, applied directly to an already-decoded Go string rather than a raw JSON
 // body. "empty" carries no secret (there is no input to leak from an empty
 // string) and is included only to pin its exact Outcome/message alongside
 // the others, for the same "asserts the intended path, not just an error"
@@ -530,90 +529,6 @@ func TestValidateKeys_ErrorsNeverContainInputData(t *testing.T) {
 			}
 			if strings.Contains(ve.Error(), secret) {
 				t.Fatalf("error %q leaks the input secret", ve.Error())
-			}
-		})
-	}
-}
-
-// TestValidateKeysJSON_ErrorsNeverContainInputData is
-// TestValidateBody_ErrorsNeverContainInputData's counterpart for
-// ValidateKeysJSON — the bridge's re-extraction validator (§6.1 "Keys-content
-// parity"), applied to a json.RawMessage captured by a second Decoder.Decode
-// of an already-buffered legacy request body.
-func TestValidateKeysJSON_ErrorsNeverContainInputData(t *testing.T) {
-	const secret = "SECRET_CANARY_9f3a1b2c"
-
-	cases := []struct {
-		name    string
-		raw     json.RawMessage
-		outcome Outcome
-		message string
-	}{
-		{"non-string value", json.RawMessage(`["` + secret + `"]`), OutcomeInvalidRequest, "field must be a string"},
-		// json.Valid rejects an unrecognized escape character before
-		// decodeJSONString's own `default:` branch would ever see it, so
-		// this produces the same generic message ValidateBody produces for
-		// the equivalent input, not decodeJSONString's more specific one.
-		{"invalid escape", json.RawMessage(`"` + secret + `\x41b"`), OutcomeInvalidRequest, "invalid JSON"},
-		{"NUL (escaped)", json.RawMessage(`"` + secret + `\u0000"`), OutcomeInvalidRequest, "keys must not contain a NUL byte"},
-		{"unpaired surrogate", json.RawMessage(`"` + secret + `\ud800"`), OutcomeInvalidRequest, "invalid JSON: unpaired UTF-16 surrogate escape"},
-		{"over-size", json.RawMessage(`"` + secret + strings.Repeat("a", MaxBytes) + `"`), OutcomePayloadTooLarge, "keys exceeds the byte limit"},
-		{"invalid UTF-8", append(append(json.RawMessage(`"`+secret), 0xff), []byte(`"`)...), OutcomeInvalidRequest, "invalid JSON: body is not valid UTF-8"},
-		// Not valid JSON at all (an unescaped control byte, an unescaped
-		// interior quote) — json.Valid must catch both before
-		// decodeJSONString, which checks only quotes and escapes, would
-		// otherwise silently accept them.
-		{"unescaped control byte", append(append(json.RawMessage(`"`+secret), '\n'), []byte(`b"`)...), OutcomeInvalidRequest, "invalid JSON"},
-		{"unescaped interior quote", json.RawMessage(`"` + secret + `"b"`), OutcomeInvalidRequest, "invalid JSON"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ValidateKeysJSON(tc.raw)
-			ve, ok := AsValidationError(err)
-			if !ok {
-				t.Fatalf("expected a *ValidationError, got %T: %v", err, err)
-			}
-			if ve.Outcome != tc.outcome {
-				t.Fatalf("Outcome = %v, want %v", ve.Outcome, tc.outcome)
-			}
-			if ve.Error() != tc.message {
-				t.Fatalf("message = %q, want %q", ve.Error(), tc.message)
-			}
-			if strings.Contains(ve.Error(), secret) {
-				t.Fatalf("error %q leaks the input secret", ve.Error())
-			}
-		})
-	}
-}
-
-// TestValidateKeysJSON_Valid pins the accept path: a well-formed JSON string
-// decodes to exactly the same value ValidateBody produces for the
-// equivalent `{"keys":...}` body — compared directly against ValidateBody's
-// own output for each case, not just against a hand-picked `want` string —
-// including a real, escaped (non-literal-UTF-8) surrogate pair, so
-// ValidateKeysJSON is provably not a looser sibling of ValidateBody.
-func TestValidateKeysJSON_Valid(t *testing.T) {
-	cases := []struct {
-		name string
-		raw  json.RawMessage
-	}{
-		{"plain ASCII", json.RawMessage(`"C-c"`)},
-		{"escaped surrogate pair", json.RawMessage("\"\\uD83D\\uDE00\"")},
-		{"literal UTF-8", json.RawMessage(`"héllo"`)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ValidateKeysJSON(tc.raw)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			wantBody := append(append([]byte(`{"keys":`), tc.raw...), '}')
-			want, wantErr := ValidateBody(wantBody)
-			if wantErr != nil {
-				t.Fatalf("ValidateBody(%s) unexpected error: %v", wantBody, wantErr)
-			}
-			if got != want {
-				t.Fatalf("got %q, want %q (ValidateBody's value for the equivalent body)", got, want)
 			}
 		})
 	}

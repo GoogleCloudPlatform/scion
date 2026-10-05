@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,17 @@ const (
 	// unresponsive.
 	githubFlightTimeout = 5 * time.Minute
 
+	// failureCacheTTL is how long a non-retryable resolution failure (see
+	// cacheableFailure) is remembered for its cacheKey (see FailureMemo).
+	// Within this window a resolution of the same ref with the same
+	// credential returns the remembered error without calling GitHub.
+	//
+	// The key carries a fingerprint of the credential value, so a credential
+	// minted fresh for each create (a GitHub App installation token) gets a
+	// new key every time: a not_found remembered for one create is not used
+	// by the next one, only by other resolutions within the same create.
+	failureCacheTTL = FailureMemoTTL
+
 	// refreshFailureBackoff bounds how often a background stale-refresh is
 	// retried for the same flight key after it fails. Without this, a
 	// persistently failing ref (rate limit, outage) would start a brand new
@@ -89,12 +101,27 @@ const (
 	ttlJitterFraction = 0.10
 )
 
-// resolutionCacheSaveDelay is how long a Put waits before the cache file is
-// rewritten. Puts that arrive during this window share one write, so a burst
-// of resolutions rewrites the file once instead of once per Put. A variable
-// only so this package's tests can make the delayed write never fire on its
-// own and call Flush explicitly instead.
-var resolutionCacheSaveDelay = 2 * time.Second
+// DefaultResolutionCacheSaveDelay is how long a Put waits before the cache
+// file is rewritten, unless WithResolutionCacheSaveDelay sets another value.
+// Puts that arrive during this window share one write, so a burst of
+// resolutions rewrites the file once instead of once per Put.
+const DefaultResolutionCacheSaveDelay = 2 * time.Second
+
+// ResolutionCacheOption configures a GitHubResolutionCache at construction
+// (see NewGitHubResolutionCache).
+type ResolutionCacheOption func(*GitHubResolutionCache)
+
+// WithResolutionCacheSaveDelay sets how long a Put waits before the cache
+// file is rewritten (default DefaultResolutionCacheSaveDelay). A
+// non-positive d leaves the default in place. Tests use a long delay so the
+// delayed write never fires on its own and they call Flush explicitly.
+func WithResolutionCacheSaveDelay(d time.Duration) ResolutionCacheOption {
+	return func(c *GitHubResolutionCache) {
+		if d > 0 {
+			c.saveDelay = d
+		}
+	}
+}
 
 // JitteredTTL returns ttl adjusted by a uniformly random amount within
 // +/-ttlJitterFraction of ttl, so cache entries written together — the
@@ -150,8 +177,35 @@ type GitHubResolutionCache struct {
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
 
+	// failures holds recent non-retryable resolution failures by cacheKey
+	// (see failureCacheTTL). They are kept in memory only and are never
+	// written to the cache file.
+	failures FailureMemo
+
+	// causeMu guards flightCauses, which holds, per flight key, the record
+	// of the flight currently running for it (see flightCause).
+	causeMu      sync.Mutex
+	flightCauses map[string]*flightCause
+
+	// lifecycleMu guards closing and the Add side of refreshWG, so Close
+	// never waits on refreshWG while a new refresh is being added to it.
+	// refreshWG counts background stale-refresh goroutines (see
+	// resolveWithFetchAccept); closing, once set by Close, stops new ones
+	// from starting. running is the number of those goroutines that have
+	// not finished yet, so Close can tell, without waiting, whether any are
+	// left once ctx is done.
+	lifecycleMu sync.Mutex
+	closing     bool
+	running     int
+	refreshWG   sync.WaitGroup
+
+	// drainOnce starts the single goroutine that closes drained once
+	// refreshWG reaches zero (see refreshesDone).
+	drainOnce sync.Once
+	drained   chan struct{}
+
 	// saveDelay is how long a Put waits before the file is rewritten (see
-	// resolutionCacheSaveDelay and scheduleSave).
+	// WithResolutionCacheSaveDelay and scheduleSave).
 	saveDelay time.Duration
 
 	// pendingMu guards savePending and saveTimer: whether a rewrite of the
@@ -209,8 +263,9 @@ type resolutionCacheFile struct {
 // NewGitHubResolutionCache creates or loads a resolution cache at the
 // given directory with the specified TTL. The directory is created with
 // mode 0700, and an existing directory or cache file with looser
-// permissions is tightened (see resolutionCacheDirMode).
-func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionCache, error) {
+// permissions is tightened (see resolutionCacheDirMode). opts adjust the
+// defaults (see ResolutionCacheOption).
+func NewGitHubResolutionCache(dir string, ttl time.Duration, opts ...ResolutionCacheOption) (*GitHubResolutionCache, error) {
 	if err := os.MkdirAll(dir, resolutionCacheDirMode); err != nil {
 		return nil, err
 	}
@@ -226,7 +281,10 @@ func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionC
 		ttl:       ttl,
 		entries:   make(map[string]*resolutionCacheEntry),
 		filePath:  filepath.Join(dir, resolutionCacheFileName),
-		saveDelay: resolutionCacheSaveDelay,
+		saveDelay: DefaultResolutionCacheSaveDelay,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	c.load()
 	return c, nil
@@ -301,7 +359,67 @@ func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBran
 	c.evictExpired()
 	c.mu.Unlock()
 
+	c.clearFailure(uri)
 	c.scheduleSave()
+}
+
+// cacheableFailure reports whether a fetch error is worth remembering for
+// failureCacheTTL: only a not_found for the ref or the skill directory,
+// which does not change between attempts made close together. A file
+// download that 404s after the listing named it, retryable causes (5xx, no
+// response), timeouts, rate limits and unclassified errors are never
+// remembered.
+func cacheableFailure(err error) bool {
+	var rerr *githubResolveError
+	return errors.As(err, &rerr) && rerr.code == SkillErrCodeNotFound && !rerr.fileMissingAfterListing
+}
+
+// rememberedFailure is what the failure cache holds for a not_found. One
+// cacheKey (ref plus credential value) can be shared by callers in other
+// projects that spell the ref differently, for example with ?token= naming
+// their own secret, so it keeps only the stage and the cause, never the
+// spelling of the ref whose fetch failed. Its message is safe for every
+// caller as is; the resolver puts the caller's own ref back in (see
+// withCallerRef).
+type rememberedFailure struct {
+	stage string
+	err   error
+}
+
+func (e *rememberedFailure) Error() string {
+	if e.stage == "" {
+		return e.err.Error()
+	}
+	return e.stage + ": " + e.err.Error()
+}
+
+func (e *rememberedFailure) Unwrap() error { return e.err }
+
+// newRememberedFailure returns the part of a fetch error that the failure
+// cache may hand to other callers: without the failing caller's ref when
+// err carries one (see refStageError).
+func newRememberedFailure(err error) error {
+	var se *refStageError
+	if errors.As(err, &se) {
+		return &rememberedFailure{stage: se.stage, err: se.err}
+	}
+	return &rememberedFailure{err: err}
+}
+
+// recordFailure remembers err for cacheKey for failureCacheTTL (see
+// FailureMemo.Record).
+func (c *GitHubResolutionCache) recordFailure(cacheKey string, err error) {
+	c.failures.Record(cacheKey, err)
+}
+
+// recentFailure returns the failure remembered for cacheKey, or nil if there
+// is none or it has expired.
+func (c *GitHubResolutionCache) recentFailure(cacheKey string) error {
+	return c.failures.Recent(cacheKey)
+}
+
+func (c *GitHubResolutionCache) clearFailure(cacheKey string) {
+	c.failures.Clear(cacheKey)
 }
 
 // scheduleSave requests a rewrite of the cache file after saveDelay. If a
@@ -344,6 +462,85 @@ func (c *GitHubResolutionCache) Flush() {
 	if c.onFlush != nil {
 		c.onFlush()
 	}
+}
+
+// Close prepares the cache for process exit. It stops new background
+// refreshes of stale entries, waits for the ones already running to finish
+// or for ctx to be done, whichever comes first, and then writes any pending
+// entries to disk (see Flush), so a refresh that completed during the wait
+// is persisted. The write happens even when ctx is done first; Close then
+// returns ctx.Err() if a refresh is still running (nil if none is), and that
+// refresh may finish after the write without being persisted.
+//
+// The cache stays usable after Close: lookups and synchronous resolutions
+// work as before, a stale entry is served without starting a refresh, and a
+// later Put schedules a delayed write as usual. Safe for concurrent use and
+// for calling more than once. All calls share one goroutine waiting for the
+// refreshes (see refreshesDone); when Close returns on ctx, that goroutine
+// keeps waiting until the refreshes finish, bounded by githubFlightTimeout.
+func (c *GitHubResolutionCache) Close(ctx context.Context) error {
+	c.lifecycleMu.Lock()
+	c.closing = true
+	c.lifecycleMu.Unlock()
+
+	var err error
+	select {
+	case <-c.refreshesDone():
+	case <-ctx.Done():
+		// select picks at random when both are ready, and the goroutine
+		// behind refreshesDone may not have run yet: report ctx only when a
+		// refresh is still running.
+		if c.refreshesRunning() {
+			err = ctx.Err()
+		}
+	}
+	c.Flush()
+	return err
+}
+
+// refreshesRunning reports whether any background refresh has not finished.
+func (c *GitHubResolutionCache) refreshesRunning() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.running > 0
+}
+
+// refreshesDone returns a channel closed once every background refresh has
+// finished. It must only be called after closing is set, so no refresh is
+// added once the wait has started. The first call starts the one goroutine
+// that waits; later calls return the same channel.
+func (c *GitHubResolutionCache) refreshesDone() <-chan struct{} {
+	c.drainOnce.Do(func() {
+		c.drained = make(chan struct{})
+		go func() {
+			c.refreshWG.Wait()
+			close(c.drained)
+		}()
+	})
+	return c.drained
+}
+
+// startRefresh runs refresh in a background goroutine tracked by refreshWG
+// and reports true, or reports false without running it once Close has been
+// called.
+func (c *GitHubResolutionCache) startRefresh(refresh func()) bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		return false
+	}
+	c.refreshWG.Add(1)
+	c.running++
+	go func() {
+		defer c.refreshWG.Done()
+		defer func() {
+			c.lifecycleMu.Lock()
+			c.running--
+			c.lifecycleMu.Unlock()
+		}()
+		refresh()
+	}()
+	return true
 }
 
 // snapshot returns a copy of the live entries map for writing to disk.
@@ -645,6 +842,93 @@ func injectStaleServe(flightKey string, refreshStarted bool) {
 	}
 }
 
+// flightCause records the classified failure of the latest attempt a
+// shared fetch made and is retrying past (see recordAttemptCause). A caller
+// that stops waiting for the flight on its own deadline reports this cause
+// instead of a bare timeout (see coalesceFetchAccept). Safe for concurrent
+// use.
+type flightCause struct {
+	mu    sync.Mutex
+	cause *githubResolveError
+}
+
+func (f *flightCause) set(cause *githubResolveError) {
+	f.mu.Lock()
+	f.cause = cause
+	f.mu.Unlock()
+}
+
+func (f *flightCause) get() *githubResolveError {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cause
+}
+
+type flightCauseKey struct{}
+
+// contextWithFlightCause returns ctx carrying f, so the fetch running under
+// ctx can record attempt failures in it (see recordAttemptCause).
+func contextWithFlightCause(ctx context.Context, f *flightCause) context.Context {
+	return context.WithValue(ctx, flightCauseKey{}, f)
+}
+
+// recordAttemptCause records cause as the latest attempt failure of the
+// shared fetch running under ctx, if any; a nil cause clears it. cause.msg
+// may reach a caller, so it must not carry credential material.
+func recordAttemptCause(ctx context.Context, cause *githubResolveError) {
+	if f, ok := ctx.Value(flightCauseKey{}).(*flightCause); ok {
+		f.set(cause)
+	}
+}
+
+// beginFlightCause registers a fresh flightCause for the flight now running
+// for flightKey and returns it with a func that removes it again. Flights
+// for one key never overlap (singleflight), so the registered record is
+// always that of the current flight; a later flight replaces it.
+func (c *GitHubResolutionCache) beginFlightCause(flightKey string) (*flightCause, func()) {
+	f := &flightCause{}
+	c.causeMu.Lock()
+	if c.flightCauses == nil {
+		c.flightCauses = make(map[string]*flightCause)
+	}
+	c.flightCauses[flightKey] = f
+	c.causeMu.Unlock()
+	return f, func() {
+		c.causeMu.Lock()
+		if c.flightCauses[flightKey] == f {
+			delete(c.flightCauses, flightKey)
+		}
+		c.causeMu.Unlock()
+	}
+}
+
+// usableRetryAfter reports whether v is worth passing on to a caller as a
+// Retry-After: a positive number of seconds or an HTTP date. A "0" (or an
+// unparseable value) tells the caller nothing.
+func usableRetryAfter(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	if secs, ok := parseRetryAfterSeconds(v); ok {
+		return secs > 0
+	}
+	_, err := http.ParseTime(v)
+	return err == nil
+}
+
+// lastFlightCause returns the latest attempt failure recorded by the flight
+// running for flightKey, or nil if there is none.
+func (c *GitHubResolutionCache) lastFlightCause(flightKey string) *githubResolveError {
+	c.causeMu.Lock()
+	f := c.flightCauses[flightKey]
+	c.causeMu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f.get()
+}
+
 // coalesceFetch runs fetch for cacheKey, using flightKey to coalesce
 // concurrent calls for the same ref into a single upstream fetch, and
 // credentialID to bound how many such fetches may run concurrently for a
@@ -711,9 +995,16 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		if skill, ok := c.Get(cacheKey); ok && (accept == nil || accept(skill)) {
 			return skill, nil
 		}
+		if ferr := c.recentFailure(cacheKey); ferr != nil {
+			util.Debugf("github: returning remembered not_found for %s", logRef)
+			return ResolvedSkill{}, ferr
+		}
 
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubFlightTimeout)
 		defer cancel()
+		cause, endCause := c.beginFlightCause(flightKey)
+		defer endCause()
+		flightCtx = contextWithFlightCause(flightCtx, cause)
 
 		release, aerr := c.acquireCredentialSlot(flightCtx, credentialID)
 		if aerr != nil {
@@ -723,6 +1014,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 
 		skill, ferr := fetch(flightCtx)
 		if ferr != nil {
+			if cacheableFailure(ferr) {
+				c.recordFailure(cacheKey, newRememberedFailure(ferr))
+			}
 			return ResolvedSkill{}, ferr
 		}
 		c.putEntry(cacheKey, skill, isBranchRef)
@@ -738,14 +1032,25 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 	case <-ctx.Done():
 		// A waiter whose own deadline (e.g. the resolve budget) expires
 		// before the shared flight finishes is a timeout, so classify it as
-		// one; plain cancellation stays unclassified. Both errors are wrapped
-		// so errors.As finds the code and errors.Is still matches the
-		// context error. logRef only: no credential-derived material.
+		// one; plain cancellation stays unclassified. When the flight is
+		// retrying past a classified failure (a 5xx, or no response), the
+		// waiter reports that cause and its Retry-After instead, so the
+		// caller sees why the flight has not finished. Both errors are
+		// wrapped so errors.As finds the code and errors.Is still matches
+		// the context error. logRef only: no credential-derived material.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return ResolvedSkill{}, fmt.Errorf("%w: %w", &githubResolveError{
+			werr := &githubResolveError{
 				code: SkillErrCodeTimeout,
 				msg:  fmt.Sprintf("timed out waiting for GitHub skill resolution of %s", logRef),
-			}, ctx.Err())
+			}
+			if last := c.lastFlightCause(flightKey); last != nil {
+				werr.code = last.code
+				if usableRetryAfter(last.retryAfter) {
+					werr.retryAfter = last.retryAfter
+				}
+				werr.msg = fmt.Sprintf("timed out waiting for GitHub skill resolution of %s, still retrying after: %s", logRef, last.msg)
+			}
+			return ResolvedSkill{}, fmt.Errorf("%w: %w", werr, ctx.Err())
 		}
 		return ResolvedSkill{}, ctx.Err()
 	}
@@ -763,7 +1068,11 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 //     value is served without starting another one. The same applies when
 //     refreshAllowed is non-nil and returns false (the credential is in a
 //     GitHub rate-limit cooldown, see GitHubCooldown): the stale value is
-//     served and no refresh is started.
+//     served and no refresh is started, and likewise once Close has been
+//     called.
+//   - A not_found from a fetch for cacheKey within the last failureCacheTTL
+//     is returned again without fetching (see cacheableFailure). A
+//     successful fetch for cacheKey clears it.
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
@@ -822,22 +1131,29 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 			} else if c.recentRefreshFailure(flightKey) {
 				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", logRef)
 			} else {
-				refreshStarted = true
 				// A panic in fetch is recovered inside coalesceFetch's DoChan
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
-				go func() {
+				refreshStarted = c.startRefresh(func() {
 					_, ferr := c.coalesceFetchAccept(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 					if ferr != nil {
 						c.recordRefreshFailure(flightKey)
 					} else {
 						c.clearRefreshFailure(flightKey)
 					}
-				}()
+				})
+				if !refreshStarted {
+					util.Debugf("github: serving stale entry for %s; not refreshing after Close", logRef)
+				}
 			}
 			injectStaleServe(flightKey, refreshStarted)
 			return skill, nil
 		}
+	}
+
+	if ferr := c.recentFailure(cacheKey); ferr != nil {
+		util.Debugf("github: returning remembered not_found for %s", logRef)
+		return ResolvedSkill{}, ferr
 	}
 
 	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)

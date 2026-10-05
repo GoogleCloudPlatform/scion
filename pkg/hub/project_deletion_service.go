@@ -399,10 +399,7 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 		return
 	}
 
-	subPathRoot := sdCfg.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	res, err := runtime.NewNFSBackend(sdCfg.NFS).Resolve(runtime.ResolveInput{ProjectID: projectID})
 	if err != nil {
 		svc.logger.ErrorContext(ctx, "failed to resolve NFS shared-dir host base for cleanup on project delete",

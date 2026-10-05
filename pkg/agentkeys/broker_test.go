@@ -151,7 +151,6 @@ func TestValidBrokerOutcome(t *testing.T) {
 		OutcomeKeysDenied,
 		OutcomeCrossProjectKeysUnsupported,
 		OutcomeRawInputRemoved,
-		OutcomeRawCombinationUnsupported,
 		OutcomeKeysRateLimited,
 		OutcomeKeysOutcomeUnknown,
 		Outcome("something_made_up"),

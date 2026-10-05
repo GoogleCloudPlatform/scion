@@ -86,6 +86,10 @@ async function stubMainClientModule(page: Page): Promise<void> {
           history.pushState({}, '', url.pathname + url.search + url.hash);
           window.dispatchEvent(new PopStateEvent('popstate'));
         }
+        export function replaceRoute(path) {
+          history.replaceState(history.state, '', path + location.search + location.hash);
+          return Promise.resolve();
+        }
       `,
     })
   );

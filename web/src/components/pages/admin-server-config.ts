@@ -36,6 +36,21 @@ import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import './admin-experiments.js';
 
+/** GET /api/v1/admin/server-config returns this in place of each secret. */
+const MASKED_VALUE = '********';
+
+/**
+ * True when a value (or anything nested in it) is the masked placeholder.
+ * The save payload omits raw config blocks that still contain it: they are
+ * the unedited GET value, and an omitted block keeps its stored value.
+ */
+export function containsMaskedValue(v: unknown): boolean {
+  if (v === MASKED_VALUE) return true;
+  if (Array.isArray(v)) return v.some(containsMaskedValue);
+  if (v && typeof v === 'object') return Object.values(v).some(containsMaskedValue);
+  return false;
+}
+
 // ── Type definitions matching the Go API response ──
 
 interface V1CORSConfig {
@@ -207,6 +222,8 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
+  home_storage_backend?: string;
+  home_storage_leaf?: string;
 }
 
 interface V1ProfileConfig {
@@ -218,6 +235,8 @@ interface V1ProfileConfig {
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
+  home_storage_backend?: string;
+  home_storage_leaf?: string;
   [key: string]: unknown;
 }
 
@@ -1958,12 +1977,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     // all Layer-0, omitted
 
     // Preserve notification channels and GitHub App from raw config
-    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload)
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload).
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored.
+    const ncDb = this.rawConfig?.server?.notification_channels;
+    if (ncDb && !containsMaskedValue(ncDb)) {
+      server.notification_channels = ncDb;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    const ghDb = this.rawConfig?.server?.github_app;
+    if (ghDb && !containsMaskedValue(ghDb)) {
+      server.github_app = ghDb;
     }
 
     if (Object.keys(server).length > 0) payload.server = server;
@@ -2229,15 +2252,21 @@ export class ScionPageAdminServerConfig extends LitElement {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
 
-    // Preserve notification channels, OAuth, and GitHub App from raw config
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // Preserve notification channels, OAuth, and GitHub App from raw config.
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored (file mode merges the server
+    // section key by key).
+    const ncFile = this.rawConfig?.server?.notification_channels;
+    if (ncFile && !containsMaskedValue(ncFile)) {
+      server.notification_channels = ncFile;
     }
-    if (this.rawConfig?.server?.oauth) {
-      server.oauth = this.rawConfig.server.oauth;
+    const oauthFile = this.rawConfig?.server?.oauth;
+    if (oauthFile && !containsMaskedValue(oauthFile)) {
+      server.oauth = oauthFile;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    const ghFile = this.rawConfig?.server?.github_app;
+    if (ghFile && !containsMaskedValue(ghFile)) {
+      server.github_app = ghFile;
     }
 
     payload.server = server;
@@ -4174,6 +4203,54 @@ export class ScionPageAdminServerConfig extends LitElement {
               <sl-option value="nfs">nfs</sl-option>
             </sl-select>
           </div>
+          <div class="form-field">
+            <label>Home Storage</label>
+            <span class="hint"
+              >Kubernetes only. Where the agent home lives for agents on this runtime. Empty uses
+              the server setting; a profile's own value wins.</span
+            >
+            <sl-select
+              class="home-storage-backend"
+              placeholder="Server setting"
+              clearable
+              value=${rt.home_storage_backend || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(
+                  name,
+                  'home_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Directory Creation</label>
+            <span class="hint"
+              >How an NFS home directory is created: pod (init container) or broker (broker's mount
+              of the export). Empty uses the server setting.</span
+            >
+            <sl-select
+              class="home-storage-leaf"
+              placeholder="Server setting"
+              clearable
+              value=${rt.home_storage_leaf || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(
+                  name,
+                  'home_storage_leaf',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="pod">pod</sl-option>
+              <sl-option value="broker">broker</sl-option>
+            </sl-select>
+          </div>
           ${!isCloudRun
             ? html`
                 <div class="form-field">
@@ -4529,6 +4606,54 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
               <sl-option value="local">local</sl-option>
               <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Storage</label>
+            <span class="hint"
+              >Kubernetes only. Where the agent home lives for this profile. Empty uses the
+              runtime's value, else the server setting.</span
+            >
+            <sl-select
+              class="home-storage-backend"
+              placeholder="Runtime or server setting"
+              clearable
+              value=${(profile.home_storage_backend as string) || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'home_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Directory Creation</label>
+            <span class="hint"
+              >How an NFS home directory is created for this profile: pod or broker. Empty uses the
+              runtime's value, else the server setting.</span
+            >
+            <sl-select
+              class="home-storage-leaf"
+              placeholder="Runtime or server setting"
+              clearable
+              value=${(profile.home_storage_leaf as string) || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'home_storage_leaf',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="pod">pod</sl-option>
+              <sl-option value="broker">broker</sl-option>
             </sl-select>
           </div>
           <div class="form-field">

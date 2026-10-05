@@ -44,6 +44,10 @@ type DeletionInfo struct {
 	StartedAt      time.Time  `json:"startedAt"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"`
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	// Stage is "finalizing" when the hub row is finalizing (teardown done;
+	// the row never expires from view and blocks start until a retry or
+	// force); omitted otherwise. Mirrors store.DeletionInfo.Stage.
+	Stage string `json:"stage,omitempty"`
 }
 
 // DeleteResult is the outcome of a DELETE that the hub answered with 2xx.

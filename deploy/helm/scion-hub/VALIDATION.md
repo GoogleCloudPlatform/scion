@@ -43,7 +43,17 @@ Numbering follows the design document's whole-chart acceptance list (§18, items
 Run the two-step install from `NOTES.txt` (that runbook arrives with the ingress
 change; it is not in `NOTES.txt` yet): `helm install` with
 `bootstrap.deferHub=true`, wait for the Ingress to get an address, read the
-backend-service ID, then `helm upgrade` with `iap.audience` set.
+backend-service ID, then `helm upgrade` with `auth.proxy.iap.audience` set to
+`/projects/<number>/global/backendServices/<id>`.
+
+The chart refuses any `auth.mode: proxy` render with no audience, because the hub
+refuses one at startup, so the first `helm install` needs a placeholder audience
+(an all-zero backend-service ID, which the hub accepts with a warning). An HA
+shape (postgres, gcs, or `K_SERVICE`) also needs `auth.transport.mode: iap`,
+`auth.transport.oidcAudience` and `auth.transport.platformAuthSa`. The chart
+checks the audience's shape and the transport values against the hub's preflight
+at render time. It cannot check that they name a real backend service, OAuth
+client or service account; this step is where that gets checked.
 
 Pass: the upgrade completes; `curl https://<host>/readyz` returns 200;
 `gcloud compute backend-services get-health <name> --global` reports `HEALTHY`

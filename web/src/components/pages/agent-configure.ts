@@ -27,6 +27,7 @@ import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
+import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type {
   Agent,
@@ -1294,7 +1295,7 @@ export class ScionPageAgentConfigure extends LitElement {
       });
 
       if (!startRes.ok) {
-        throw new Error(await extractApiError(startRes, 'Failed to start agent'));
+        throw new Error(await lifecycleActionErrorMessage(startRes, 'Failed to start agent'));
       }
 
       // Navigate to agent detail
@@ -1310,18 +1311,19 @@ export class ScionPageAgentConfigure extends LitElement {
     this.showDeleteDialog = false;
     this.error = null;
 
-    try {
-      const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
-        method: 'DELETE',
-      });
-
-      if (!res.ok) {
-        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
-      }
-
+    // The shared helper (ptone/scion#2483 phase 2) sends the DELETE; this
+    // page's own dialog is the confirm, and it keeps its behaviour of no
+    // force fallback. On 204 or 202 go to /agents, which shows "Deleting…"
+    // until the SSE `deleted` arrives.
+    const outcome = await runAgentDelete({
+      agentId: this.agentId,
+      confirm: false,
+      forceFallback: false,
+    });
+    if (outcome.kind === 'deleted' || outcome.kind === 'accepted') {
       navigateTo('/agents');
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to delete agent';
+    } else if (outcome.kind === 'failed') {
+      this.error = outcome.message;
     }
   }
 
