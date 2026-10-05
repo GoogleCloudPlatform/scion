@@ -312,13 +312,13 @@ func (f *flipStatusStore) GetUser(ctx context.Context, id string) (*store.User, 
 	if err == nil && id == f.targetID && !f.flipped {
 		f.flipped = true
 		if f.delete {
-			if dErr := f.Store.DeleteUser(ctx, id); dErr != nil {
+			if dErr := f.DeleteUser(ctx, id); dErr != nil {
 				return nil, dErr
 			}
 		} else {
 			cp := *u
 			cp.Status = store.UserStatusSuspended
-			if uErr := f.Store.UpdateUser(ctx, &cp); uErr != nil {
+			if uErr := f.UpdateUser(ctx, &cp); uErr != nil {
 				return nil, uErr
 			}
 		}
@@ -436,7 +436,6 @@ type faultingGetUserStore struct {
 	store.Store
 	failID string
 	inTx   bool
-	hit    bool
 }
 
 func (f *faultingGetUserStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
