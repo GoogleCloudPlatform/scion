@@ -26,6 +26,13 @@
  * It refreshes, debounced, on every chat message and read-state event, and
  * whenever the chat page reports that its own lists changed (the user read
  * or muted something in this tab, which the server does not echo back).
+ *
+ * Known staleness: off the chat page only DM events arrive (thread messages
+ * come on project subjects a page may not subscribe to), and a read or mute
+ * in another tab publishes nothing, so the count can lag until the next
+ * event. Both are fixed on the hub side: fanning thread messages out to
+ * member participants on `user.<id>.chat.message`, and publishing the
+ * reader's own read and mute changes on `user.<id>.chat.read-state`.
  */
 
 import { apiFetch } from './api.js';

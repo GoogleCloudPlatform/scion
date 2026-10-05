@@ -128,6 +128,35 @@ for (const width of [320, 375, 390, 1440]) {
   });
 }
 
+for (const [count, text] of [
+  [3, '3'],
+  [250, '99+'],
+] as const) {
+  test(`at 900px (icon-only segments) a count of ${count} shows ${text} inside the chat button`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 900, height: 800 });
+    await gotoShell(page, count);
+
+    await expect
+      .poll(async () => (await readGeometry(page)).badge?.text ?? null, { timeout: 5000 })
+      .toBe(text);
+    const g = await readGeometry(page);
+
+    expect(g.headerHeight).toBe(61);
+    expect(g.envelopes).toBe(0);
+    // The medium tier hides the label; the badge stays inside the button
+    // and the header.
+    expect(g.label).toBeNull();
+    const badge = g.badge!.box;
+    expect(badge.left).toBeGreaterThanOrEqual(g.control!.left);
+    expect(badge.right).toBeLessThanOrEqual(g.control!.right);
+    expect(badge.top).toBeGreaterThanOrEqual(g.control!.top);
+    expect(badge.top).toBeGreaterThanOrEqual(g.headerTop);
+    expect(badge.bottom).toBeLessThanOrEqual(g.headerTop + g.headerHeight);
+  });
+}
+
 test('at 1440px a three-digit count caps at 99+ and still clears the label', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 800 });
   await gotoShell(page, 250);

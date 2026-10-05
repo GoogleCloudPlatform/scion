@@ -167,7 +167,7 @@ describe('ChatUnreadCounter', () => {
     expect(c.count).toBe(1);
   });
 
-  it('refreshes, debounced, on chat message and read-state events', async () => {
+  it('refreshes, debounced, on a burst of chat message events', async () => {
     serveCount(0);
     const c = counter();
     c.start({ immediate: true });
@@ -177,13 +177,48 @@ describe('ChatUnreadCounter', () => {
     serveCount(3);
     stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
     stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
-    stateManager.dispatchEvent(new CustomEvent('chat-read-state-updated', { detail: {} }));
     await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS - 1);
     expect(apiFetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     await settle();
     expect(apiFetch).toHaveBeenCalledTimes(1);
     expect(c.count).toBe(3);
+  });
+
+  it('refreshes on a read-state event alone', async () => {
+    serveCount(2);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    apiFetch.mockClear();
+
+    serveCount(1);
+    stateManager.dispatchEvent(new CustomEvent('chat-read-state-updated', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(c.count).toBe(1);
+  });
+
+  it('does nothing on scheduleRefresh when not started', async () => {
+    serveCount(5);
+    const c = counter();
+    c.scheduleRefresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS * 2);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(c.count).toBe(0);
+  });
+
+  it('does nothing on scheduleRefresh after stop()', async () => {
+    serveCount(0);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    c.stop();
+    apiFetch.mockClear();
+    c.scheduleRefresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS * 2);
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 
   it('ignores agent notifications', async () => {

@@ -44,7 +44,7 @@ import {
   isMacPlatform,
   type ScionHeader,
 } from './header.js';
-import { CHAT_UNREAD_COUNT_EVENT } from '../../client/chat-unread.js';
+import { CHAT_UNREAD_COUNT_EVENT, chatUnread } from '../../client/chat-unread.js';
 import { resetServerFlagStateForTests, setServerFlags } from '../../utils/feature-flags.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
@@ -918,10 +918,32 @@ describe('chat unread badge', () => {
     const el = await mountHeader({ currentPath: '/' });
     el.remove();
     setChatUnread(6);
-    document.body.appendChild(el);
-    await el.updateComplete;
-    // Reconnecting reads the counter, which is still at zero.
-    expect(segmentBadges(el)).toEqual([]);
+    // Read the private state directly: reconnecting would re-seed it from
+    // the counter and hide whether the listener was removed.
+    expect((el as unknown as { chatUnreadCount: number }).chatUnreadCount).toBe(0);
+  });
+
+  it('shows a count the counter already holds when it mounts late', async () => {
+    const count = vi.spyOn(chatUnread, 'count', 'get').mockReturnValue(7);
+    try {
+      const el = await mountHeader({ currentPath: '/' });
+      expect(segmentBadges(el)).toEqual(['7', '7']);
+    } finally {
+      count.mockRestore();
+    }
+  });
+
+  it('re-reads the counter when it reconnects', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    el.remove();
+    const count = vi.spyOn(chatUnread, 'count', 'get').mockReturnValue(2);
+    try {
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(segmentBadges(el)).toEqual(['2', '2']);
+    } finally {
+      count.mockRestore();
+    }
   });
 });
 

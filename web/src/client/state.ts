@@ -773,6 +773,8 @@ export class StateManager extends EventTarget {
     // subject, which the server authorizes against the session user. It is
     // added in every scope, not just chat: a DM must still raise a popup and
     // move the unread badge while the user is looking at the agent list.
+    // The same subject also carries DM typing, edit and delete events; pages
+    // without a chat view have no listener for those and ignore them.
     const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
     if (userId) {
       const own = `user.${userId}.chat.>`;

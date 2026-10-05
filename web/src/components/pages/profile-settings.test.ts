@@ -418,4 +418,36 @@ describe('scion-page-profile-settings — alert toggles', () => {
     expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(false);
     expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(true);
   });
+
+  it('turns agent alerts off without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'true');
+    localStorage.setItem('scion-push-agent-events', 'true');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = false;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('false');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('true');
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(false);
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns agent alerts on without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'false');
+    localStorage.setItem('scion-push-agent-events', 'false');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = true;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('true');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('false');
+  });
 });
