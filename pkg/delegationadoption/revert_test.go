@@ -137,6 +137,45 @@ func TestBuildRevertDedupesRecordsByAdoptedEdge(t *testing.T) {
 	assert.NotEqual(t, p3.Fingerprint(), p4.Fingerprint(), "the covered records are fingerprinted")
 }
 
+// A covered record whose original edge is empty or equals the hop's is
+// reverted with the hop. A covered record that names a different original
+// edge refuses the hop.
+func TestBuildRevertRefusesCoveredRecordWithOtherOriginal(t *testing.T) {
+	ctx := context.Background()
+	w := newRevertWorld()
+	orig, adopted := w.adoptedPair(t)
+	w.record("r1", store.DelegationAdoptionAdopted, orig.ID, adopted.ID)
+	w.record("r2", store.DelegationAdoptionRecognized, orig.ID, adopted.ID)
+	w.record("r3", store.DelegationAdoptionRecognized, "", adopted.ID)
+
+	// Equal and empty covered originals: the hop is admitted.
+	p, err := BuildRevert(ctx, w, []string{"r1"}, nil)
+	require.NoError(t, err)
+	require.Len(t, p.Hops, 1)
+	h := p.Hops[0]
+	assert.Equal(t, RevertOutcomeRevert, h.Outcome)
+	assert.Empty(t, h.Reason)
+	assert.Equal(t, orig.ID, h.OriginalEdgeID)
+	assert.Equal(t, []string{"r2", "r3"}, h.CoveredRecordIDs)
+	assert.Zero(t, p.Refused())
+
+	// A covered record names a different original edge: the hop is
+	// refused, whichever record is requested first.
+	w.record("r4", store.DelegationAdoptionRecognized, "e-other", adopted.ID)
+	for _, req := range [][]string{{"r1"}, {"r1", "r4"}, {"r4", "r1"}} {
+		p2, err := BuildRevert(ctx, w, req, nil)
+		require.NoError(t, err)
+		require.Len(t, p2.Hops, 1, "request %v", req)
+		h2 := p2.Hops[0]
+		assert.Equal(t, "r1", h2.RecordID, "request %v", req)
+		assert.Equal(t, RevertOutcomeRefused, h2.Outcome, "request %v", req)
+		assert.Equal(t, ReasonCoveredOriginalDiffers, h2.Reason, "request %v", req)
+		assert.Equal(t, []string{"r2", "r3", "r4"}, h2.CoveredRecordIDs, "request %v", req)
+		assert.Equal(t, 1, p2.Refused(), "request %v", req)
+		assert.NotEqual(t, p.Fingerprint(), p2.Fingerprint(), "request %v", req)
+	}
+}
+
 // MatchesOriginal requires every identifying field, including the role, to
 // equal the adopted edge's.
 func TestMatchesOriginalComparesEveryField(t *testing.T) {
