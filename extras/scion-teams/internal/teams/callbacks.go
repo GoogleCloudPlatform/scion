@@ -266,16 +266,18 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
 	}
 
 	// Setup requires a linked user, and the project must be one of theirs.
+	// Retryable failures show a message and keep the card; final outcomes
+	// replace it.
 	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
 	if problem := linkProblem(mapping, err, registerHint); problem != "" {
 		if err != nil {
 			h.log.Warn("Error looking up user mapping", "error", err)
 		}
-		return h.respondWithUpdatedCard(activity, problem), nil
+		return h.respondWithMessage(problem), nil
 	}
 
 	// Normalize conversation ID — strip thread suffix for consistent lookups.
@@ -285,7 +287,7 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	existing, err := store.GetChannelLink(ctx, convID)
 	if err != nil {
 		h.log.Error("Failed to check existing channel link", "error", err)
-		return h.respondWithUpdatedCard(activity, "An error occurred while checking existing link."), nil
+		return h.respondWithMessage("An error occurred while checking the existing link. Please try again."), nil
 	}
 	if existing != nil {
 		return h.respondWithUpdatedCard(activity,
@@ -294,7 +296,7 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
-		return h.respondWithUpdatedCard(activity, "Hub client not configured."), nil
+		return h.respondWithMessage("Hub client not configured."), nil
 	}
 	lookup := projectSlug
 	if lookup == "" {
@@ -303,8 +305,8 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	project, err := findUserProject(ctx, hubClient, mapping, lookup)
 	if err != nil {
 		h.log.Warn("Failed to resolve project for setup", "error", err, "project", lookup)
-		return h.respondWithUpdatedCard(activity,
-			hubErrorText(err, mapping, lookup, "Failed to look up the project. Please try again.")), nil
+		return h.respondWithMessage(
+			hubErrorText(err, mapping, projectSlug, "Failed to look up the project. Please try again.")), nil
 	}
 	if project == nil || (projectID != "" && project.ID != projectID) {
 		return h.respondWithUpdatedCard(activity,
@@ -341,7 +343,7 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 	if err := store.CreateChannelLink(ctx, link); err != nil {
 		h.log.Error("Failed to create channel link from card", "error", err)
-		return h.respondWithUpdatedCard(activity, "Failed to link conversation. Please try again."), nil
+		return h.respondWithMessage("Failed to link conversation. Please try again."), nil
 	}
 
 	return h.respondWithUpdatedCard(activity,

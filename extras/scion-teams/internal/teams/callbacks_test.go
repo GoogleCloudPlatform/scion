@@ -600,3 +600,117 @@ func TestCallbackHandler_AskResponse_SuccessReplacesCard(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "application/vnd.microsoft.card.adaptive", body["type"])
 }
+
+// assertKeepsCard checks that resp shows want as a message and leaves the
+// card in place.
+func assertKeepsCard(t *testing.T, resp *InvokeResponse, want string) {
+	t.Helper()
+	require.NotNil(t, resp)
+	body, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok, "unexpected body %T", resp.Body)
+	assert.Equal(t, "application/vnd.microsoft.activity.message", body["type"], "card must not be replaced")
+	assert.Equal(t, want, body["value"])
+}
+
+// assertReplacesCard checks that resp replaces the card.
+func assertReplacesCard(t *testing.T, resp *InvokeResponse) {
+	t.Helper()
+	require.NotNil(t, resp)
+	body, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok, "unexpected body %T", resp.Body)
+	assert.Equal(t, "application/vnd.microsoft.card.adaptive", body["type"])
+}
+
+func TestCallbackHandler_SetupConfirm_RetryableFailuresKeepCard(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, broker *TeamsBroker)
+		hub   http.HandlerFunc
+		data  map[string]string
+		want  string
+	}{
+		{
+			name: "unlinked user",
+			hub:  userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}),
+			want: registerHint,
+		},
+		{
+			name: "link lookup error",
+			setup: func(t *testing.T, broker *TeamsBroker) {
+				broker.store = mappingErrorStore{Store: broker.store}
+			},
+			hub:  userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}),
+			want: linkCheckFailedText,
+		},
+		{
+			name:  "project lookup failure",
+			setup: linkTestUser,
+			hub: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":{"code":"internal_error","message":"boom"}}`))
+			},
+			want: "Failed to look up the project. Please try again.",
+		},
+		{
+			name:  "project lookup denied without slug names the hub, not the ID",
+			setup: linkTestUser,
+			hub: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":{"code":"forbidden","message":"x","details":{"denied_action":"list","resource_type":"project"}}}`))
+			},
+			data: map[string]string{"action": "setup_confirm", "project_id": "0b6f9c1e-uuid"},
+			want: "Your Scion account (user@example.com) doesn't have permission to list projects in this hub. Ask a project owner.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			broker, _ := testBrokerWithStore(t, tt.hub)
+			if tt.setup != nil {
+				tt.setup(t, broker)
+			}
+			data := tt.data
+			if data == nil {
+				data = map[string]string{"action": "setup_confirm", "project_slug": "my-project", "project_id": "proj-1"}
+			}
+
+			resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(data))
+			require.NoError(t, err)
+			assertKeepsCard(t, resp, tt.want)
+
+			link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+			require.NoError(t, err)
+			assert.Nil(t, link)
+		})
+	}
+}
+
+func TestCallbackHandler_SetupConfirm_FinalOutcomesReplaceCard(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}))
+		linkTestUser(t, broker)
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+			"action": "setup_confirm", "project_slug": "my-project", "project_id": "proj-1",
+		}))
+		require.NoError(t, err)
+		assertReplacesCard(t, resp)
+	})
+	t.Run("not among the user's projects", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}))
+		linkTestUser(t, broker)
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+			"action": "setup_confirm", "project_slug": "other", "project_id": "proj-other",
+		}))
+		require.NoError(t, err)
+		assertReplacesCard(t, resp)
+	})
+	t.Run("already linked", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, nil)
+		linkTestUser(t, broker)
+		linkTestChannel(t, broker)
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+			"action": "setup_confirm", "project_slug": "my-project", "project_id": "proj-1",
+		}))
+		require.NoError(t, err)
+		assertReplacesCard(t, resp)
+	})
+}
