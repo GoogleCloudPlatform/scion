@@ -62,6 +62,14 @@ func (ms *MaintenanceState) Message() string {
 	return ms.message
 }
 
+// State returns the enabled flag and the raw message (no default fallback)
+// under one lock, so a caller sees a consistent pair.
+func (ms *MaintenanceState) State() (enabled bool, message string) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.enabled, ms.message
+}
+
 // SetEnabled enables or disables maintenance mode.
 func (ms *MaintenanceState) SetEnabled(v bool) {
 	ms.mu.Lock()

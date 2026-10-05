@@ -326,3 +326,53 @@ func TestSQLite_ServerConfigSectionReset(t *testing.T) {
 		t.Errorf("snapshot EnforceBrokerQuotas = %v, want bootstrap true", snap.EnforceBrokerQuotas)
 	}
 }
+
+// Review r1 finding 2: on SQLite the maintenance section is never seeded, so
+// with no row the live state (set at startup from SCION_SERVER_ADMIN_MODE or
+// settings.yaml) is authoritative. GET must report it, and a message-only PUT
+// must build on it rather than on the empty snapshot, which would write
+// admin_mode=false and take the hub out of maintenance.
+func TestSQLite_Maintenance_NoRowUsesLiveState(t *testing.T) {
+	tempSettingsHome(t)
+	srv, st, _ := newSQLiteOpsServer(t, nil, nil)
+	if _, err := st.GetHubSetting(context.Background(), "maintenance"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("precondition: want no maintenance row, got err=%v", err)
+	}
+	// As set at startup from SCION_SERVER_ADMIN_MODE=true.
+	srv.maintenance = NewMaintenanceState(true, "env maint")
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenance(rr, adminRequest(http.MethodGet, "/api/v1/admin/maintenance", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Enabled bool   `json:"enabled"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || got.Message != "env maint" {
+		t.Errorf("GET with no row = %+v, want the live state {enabled:true message:env maint}", got)
+	}
+
+	rr = httptest.NewRecorder()
+	srv.handleAdminMaintenance(rr, adminRequest(http.MethodPut, "/api/v1/admin/maintenance", `{"message":"new msg"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.maintenance.IsEnabled() {
+		t.Error("a message-only PUT took the hub out of maintenance")
+	}
+	if got := srv.maintenance.Message(); got != "new msg" {
+		t.Errorf("live message = %q, want %q", got, "new msg")
+	}
+	_, doc := hubSettingDocMap(t, st, "maintenance")
+	if v, _ := doc["admin_mode"].(bool); !v {
+		t.Errorf("DB maintenance.admin_mode = %v, want true (kept from live state)", doc["admin_mode"])
+	}
+	if doc["maintenance_message"] != "new msg" {
+		t.Errorf("DB maintenance doc = %v, want maintenance_message=new msg", doc)
+	}
+}

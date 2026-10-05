@@ -1787,13 +1787,28 @@ func mapKeys(m map[string]int64) []string {
 
 // handleGetMaintenanceDB handles GET /api/v1/admin/maintenance
 // whenever OperationalSettings is wired (any DB driver).
-// Reads maintenance state from the operational settings snapshot.
+// Reports the maintenance row when one exists, else the live state.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
-	snap := ops.Snapshot()
+	enabled, message := s.maintenanceBaseline(ops)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"enabled": snap.AdminMode,
-		"message": maintenanceMessageOrDefault(snap.MaintenanceMessage),
+		"enabled": enabled,
+		"message": maintenanceMessageOrDefault(message),
 	})
+}
+
+// maintenanceBaseline returns the maintenance state the DB-backed handlers
+// report and build a partial PUT on. With a maintenance row that is the row
+// (ApplyMaintenanceFromSnapshot has made it the live state too). With no row
+// (the section is never seeded) the live MaintenanceState is authoritative:
+// it was set at startup from SCION_SERVER_ADMIN_MODE or settings.yaml, and
+// the empty snapshot would wrongly report, and a message-only PUT would
+// wrongly write, admin_mode=false.
+func (s *Server) maintenanceBaseline(ops *OperationalSettings) (enabled bool, message string) {
+	snap := ops.Snapshot()
+	if snap.HasMaintenanceRow || s.maintenance == nil {
+		return snap.AdminMode, snap.MaintenanceMessage
+	}
+	return s.maintenance.State()
 }
 
 // handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance
@@ -1822,12 +1837,13 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 		updatedBy = caller.Email()
 	}
 
-	// Build the maintenance section doc. Start from the current snapshot values
-	// to preserve fields not being updated (partial update semantics).
-	snap := ops.Snapshot()
+	// Build the maintenance section doc. Start from the current state (the
+	// row, else the live state) to preserve fields not being updated
+	// (partial update semantics).
+	baseEnabled, baseMessage := s.maintenanceBaseline(ops)
 	ms := opsettings.MaintenanceSettings{
-		AdminMode:          snap.AdminMode,
-		MaintenanceMessage: snap.MaintenanceMessage,
+		AdminMode:          baseEnabled,
+		MaintenanceMessage: baseMessage,
 	}
 	if body.Enabled != nil {
 		ms.AdminMode = *body.Enabled
