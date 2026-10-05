@@ -29,9 +29,9 @@ A context is Hub-connected when `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` or `SCION_
 in the environment, as in an agent container. Enabling the Hub in a workstation's settings does not
 make it a Hub-connected context: there, `--global` uses the local global directory.
 
-An explicit flag wins over `SCION_PROJECT_ID` and `SCION_PROJECT`. This applies to commands that go
-through the Hub pre-flight check, and to the `conversation`, `notifications` and `messages`
-commands.
+An explicit flag wins over `SCION_PROJECT_ID`. This applies to commands that go through the Hub
+pre-flight check, and to the `conversation`, `notifications` and `messages` commands.
+`SCION_PROJECT` does not select a project; it is used only to detect a send within the same project.
 
 In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
 `global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
