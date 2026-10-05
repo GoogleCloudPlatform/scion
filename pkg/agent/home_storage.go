@@ -344,7 +344,10 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 	if err := sd.Validate(); err != nil {
 		return nil, homeStorageUnavailable("home_storage nfs needs a complete shared_dir_storage nfs block for profile %q: %v", in.Profile, err)
 	}
-	share := sd.NFS.Shares[0]
+	share, err := firstNFSShare(sd)
+	if err != nil {
+		return nil, homeStorageUnavailable("home_storage nfs for profile %q: %v", in.Profile, err)
+	}
 	if share.PVName == "" {
 		return nil, homeStorageUnavailable("home_storage nfs needs a claim (shares[0].pv_name) in shared_dir_storage for profile %q", in.Profile)
 	}
@@ -444,4 +447,14 @@ func nfsSubPathRoot(nfs *config.V1NFSConfig) string {
 		return config.SubPathRootOrDefault("")
 	}
 	return config.SubPathRootOrDefault(nfs.SubPathRoot)
+}
+
+// firstNFSShare returns the first share of a shared-dir storage nfs block.
+// Validate already requires one, but the block is checked again here so
+// the share is never read from a missing or empty block.
+func firstNFSShare(sd *config.V1SharedDirStorageConfig) (config.V1NFSShare, error) {
+	if sd == nil || sd.NFS == nil || len(sd.NFS.Shares) == 0 {
+		return config.V1NFSShare{}, fmt.Errorf("shared_dir_storage nfs has no shares configured")
+	}
+	return sd.NFS.Shares[0], nil
 }
