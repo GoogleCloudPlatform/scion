@@ -355,3 +355,85 @@ func TestProvisionShared_SharedPlain_InterruptedMoveRefusedNotCleared(t *testing
 	assert.FileExists(t, filepath.Join(hostPath, "README.md"))
 	assert.NoFileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
 }
+
+// sharedPlainStateDirInput is the input a current sciontool builds in the Kubernetes
+// init container when the provision state directory is mounted: the marker
+// and the lock live in the state directory, and the legacy lock (and any
+// legacy marker) in the workspace.
+func sharedPlainStateDirInput(t *testing.T, cloneURL string) (ProvisionInput, string) {
+	t.Helper()
+	projectDir := t.TempDir()
+	workspace := filepath.Join(projectDir, "workspace")
+	stateDir := filepath.Join(projectDir, ProvisionStateDirName)
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+	in := sharedPlainInput(workspace, cloneURL)
+	in.SentinelDir = stateDir
+	in.LegacyDir = workspace
+	return in, stateDir
+}
+
+func TestProvisionShared_SharedPlain_StateDir_ConcurrentStartsCloneOnce(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bareRepo := initBareGitRepo(t)
+	clones := countGitClones(t)
+	in, stateDir := sharedPlainStateDirInput(t, bareRepo)
+
+	const n = 3
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = ProvisionShared(in)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		require.NoError(t, err, "start %d", i)
+	}
+	ws := in.Resolved.HostPath
+	assert.Equal(t, 1, clones())
+	assert.FileExists(t, filepath.Join(ws, "README.md"))
+	assert.FileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+	assert.NoFileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+	assertNoCloneScratch(t, ws)
+	out, err := exec.Command("git", "-C", ws, "status", "--porcelain").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)), "provisioning files must stay out of git status")
+}
+
+func TestProvisionShared_SharedPlain_StateDir_MarkedEmptyIsCloned(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bareRepo := initBareGitRepo(t)
+	clones := countGitClones(t)
+
+	// Marker in the state directory.
+	in, stateDir := sharedPlainStateDirInput(t, bareRepo)
+	writeMarker(t, stateDir)
+	require.NoError(t, ProvisionShared(in))
+	assert.Equal(t, 1, clones())
+	assert.FileExists(t, filepath.Join(in.Resolved.HostPath, "README.md"))
+
+	// Legacy marker in the workspace root: cloned, and the marker is kept
+	// out of git status.
+	legacy, _ := sharedPlainStateDirInput(t, bareRepo)
+	writeMarker(t, legacy.Resolved.HostPath)
+	require.NoError(t, ProvisionShared(legacy))
+	assert.Equal(t, 2, clones())
+	ws := legacy.Resolved.HostPath
+	assert.FileExists(t, filepath.Join(ws, "README.md"))
+	assert.FileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+	out, err := exec.Command("git", "-C", ws, "status", "--porcelain").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)))
+
+	// Legacy marker plus content: untouched.
+	withContent, _ := sharedPlainStateDirInput(t, bareRepo)
+	writeMarker(t, withContent.Resolved.HostPath)
+	require.NoError(t, os.WriteFile(filepath.Join(withContent.Resolved.HostPath, "notes.txt"), []byte("x"), 0o644))
+	require.NoError(t, ProvisionShared(withContent))
+	assert.Equal(t, 2, clones())
+	assert.NoDirExists(t, filepath.Join(withContent.Resolved.HostPath, ".git"))
+}

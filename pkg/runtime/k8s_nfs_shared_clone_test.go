@@ -68,7 +68,7 @@ func TestBuildPod_NFSSharedPlainGit_InitContainerClonesSharedWorkspace(t *testin
 
 	var wsSubPath string
 	for _, m := range ic.VolumeMounts {
-		if m.Name == "workspace" {
+		if m.MountPath == "/workspace" {
 			wsSubPath = m.SubPath
 		}
 	}

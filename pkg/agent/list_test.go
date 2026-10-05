@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -872,5 +874,93 @@ func TestPersistAgentInfoState_AtomicallyRewritesAndPreservesMode(t *testing.T) 
 	}
 	if len(tempFiles) != 0 {
 		t.Fatalf("temp files should not remain: %v", tempFiles)
+	}
+}
+
+// writeCreatedAgentDir lays out an on-disk agent directory (no container)
+// under projectPath, the shape List's created-agent scan recognises.
+func writeCreatedAgentDir(t *testing.T, projectPath, name string) {
+	t.Helper()
+	agentHome := filepath.Join(projectPath, "agents", name, "home")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	infoData, _ := json.Marshal(api.AgentInfo{Name: name, Phase: "created"})
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", name, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func listedNames(agents []api.AgentInfo) []string {
+	names := make([]string, 0, len(agents))
+	for _, a := range agents {
+		names = append(names, a.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestListCreatedAgentScanHonoursNameFilter covers the created-agent
+// (no container) on-disk scan: a "scion.name" filter must select only the
+// matching agent directory, exactly as the runtime label filter does for
+// containers, and must never fall back to other agents in the project.
+func TestListCreatedAgentScanHonoursNameFilter(t *testing.T) {
+	tests := []struct {
+		name   string
+		agents []string
+		filter string
+		want   []string
+	}{
+		{name: "valid name among two agents", agents: []string{"alpha", "beta"}, filter: "beta", want: []string{"beta"}},
+		{name: "unknown name among two agents", agents: []string{"alpha", "beta"}, filter: "gamma", want: []string{}},
+		{name: "unknown name with a single agent", agents: []string{"alpha"}, filter: "gamma", want: []string{}},
+		{name: "empty name does not match", agents: []string{"alpha"}, filter: "", want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectPath := filepath.Join(t.TempDir(), ".scion")
+			for _, n := range tt.agents {
+				writeCreatedAgentDir(t, projectPath, n)
+			}
+
+			mgr := NewManager(&runtime.MockRuntime{})
+			agents, err := mgr.List(context.Background(), map[string]string{
+				"scion.name":         tt.filter,
+				"scion.project_path": projectPath,
+			})
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			got := listedNames(agents)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("List() names = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestListCreatedAgentScanWithoutNameFilterUnchanged pins the behaviour
+// existing callers rely on: with no "scion.name" filter, every created
+// agent in the project is returned.
+func TestListCreatedAgentScanWithoutNameFilterUnchanged(t *testing.T) {
+	projectPath := filepath.Join(t.TempDir(), ".scion")
+	for _, n := range []string{"alpha", "beta", "gamma"} {
+		writeCreatedAgentDir(t, projectPath, n)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	agents, err := mgr.List(context.Background(), map[string]string{
+		"scion.agent":        "true",
+		"scion.project_path": projectPath,
+	})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	want := []string{"alpha", "beta", "gamma"}
+	if got := listedNames(agents); !reflect.DeepEqual(got, want) {
+		t.Errorf("List() names = %v, want %v", got, want)
 	}
 }

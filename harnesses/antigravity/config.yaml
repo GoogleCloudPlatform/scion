@@ -36,6 +36,16 @@ model_aliases:
   large: "Gemini 3.1 Pro (Low)"
   extra-large: "Gemini 3.1 Pro (Low)"
 
+# SCION_THINKING_LEVEL (0-100) -> `agy --effort <value>` in agy-wrapper.sh.
+# Applied by scion_harness.resolve_thinking in provision.py. Each level maps
+# to the value of the first entry whose max (inclusive) is >= the level.
+# No default: when the level is unset, no --effort is passed and AGY's default applies.
+thinking:
+  levels:
+    - {max: 25,  value: low}
+    - {max: 50,  value: medium}
+    - {max: 100, value: high}
+
 mcp:
   global_config_file: .gemini/config/mcp_config.json
   global_config_path: mcpServers

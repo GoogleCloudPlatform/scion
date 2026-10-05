@@ -396,7 +396,10 @@ func TestDeprecatedFlag_Channel(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --channel is deprecated")
-	assert.Contains(t, stderr, "@<agent-name>")
+	// #2026: --channel is used for user: recipients too, so the guidance
+	// must name conversation addressing, not only @<agent>.
+	assert.Contains(t, stderr, "conv:<uuid>")
+	assert.Contains(t, stderr, "@<name>")
 }
 
 // TestDeprecatedFlag_ThreadID tests that --thread-id emits a deprecation
@@ -414,7 +417,12 @@ func TestDeprecatedFlag_ThreadID(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --thread-id is deprecated")
-	assert.Contains(t, stderr, "@<agent-name>")
+	assert.Contains(t, stderr, "conv:<uuid>")
+	assert.Contains(t, stderr, "for user: recipients on the web channel",
+		"#2026: the rejection applies only to native (web) user: sends")
+	assert.NotContains(t, stderr, "project", "#2026: no scope claim")
+	assert.NotContains(t, stderr, "@<agent-name>",
+		"#2026: --thread-id guidance must not point user: senders at @<agent-name>")
 }
 
 // TestDeprecatedFlag_CC tests that --cc emits a deprecation warning
