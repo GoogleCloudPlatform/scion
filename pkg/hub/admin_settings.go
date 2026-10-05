@@ -536,6 +536,22 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		raw = make(map[string]interface{})
 	}
 
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field before anything is written. The stored view
+	// is decoded from the same read that is merged and written below, so the
+	// restore and the write see the same file contents.
+	if req.Server != nil {
+		stored, err := serverConfigFromRaw(raw)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// Apply updates by marshaling the request fields and merging
 	applySettingsUpdates(raw, &req)
 
@@ -851,79 +867,6 @@ func marshalToMap(v interface{}) interface{} {
 		return v
 	}
 	return m
-}
-
-// maskSensitiveFields redacts secrets from the response before sending to the client.
-func maskSensitiveFields(resp *ServerConfigResponse) {
-	if resp.Server == nil {
-		return
-	}
-
-	// Mask OAuth client secrets
-	if resp.Server.OAuth != nil {
-		maskOAuthClient(resp.Server.OAuth.Web)
-		maskOAuthClient(resp.Server.OAuth.CLI)
-		maskOAuthClient(resp.Server.OAuth.Device)
-	}
-
-	// Mask auth tokens
-	if resp.Server.Auth != nil {
-		if resp.Server.Auth.DevToken != "" {
-			resp.Server.Auth.DevToken = "********"
-		}
-	}
-
-	// Mask broker token
-	if resp.Server.Broker != nil {
-		if resp.Server.Broker.BrokerToken != "" {
-			resp.Server.Broker.BrokerToken = "********"
-		}
-	}
-
-	// Mask database URL (may contain credentials)
-	if resp.Server.Database != nil {
-		if resp.Server.Database.URL != "" {
-			resp.Server.Database.URL = "********"
-		}
-	}
-
-	// Mask secrets backend credentials
-	if resp.Server.Secrets != nil {
-		if resp.Server.Secrets.GCPCredentials != "" {
-			resp.Server.Secrets.GCPCredentials = "********"
-		}
-	}
-
-	// N1: Mask GitHubApp private key and webhook secret (pre-existing gap,
-	// applies to both DB-mode and file-mode GET paths).
-	if resp.Server.GitHubApp != nil {
-		if resp.Server.GitHubApp.PrivateKey != "" {
-			resp.Server.GitHubApp.PrivateKey = "********"
-		}
-		if resp.Server.GitHubApp.WebhookSecret != "" {
-			resp.Server.GitHubApp.WebhookSecret = "********"
-		}
-	}
-
-	// Mask notification channel params (may contain webhook URLs/tokens)
-	for i := range resp.Server.NotificationChannels {
-		for k := range resp.Server.NotificationChannels[i].Params {
-			resp.Server.NotificationChannels[i].Params[k] = "********"
-		}
-	}
-}
-
-// maskOAuthClient masks OAuth client secrets in the response.
-func maskOAuthClient(c *config.V1OAuthClientConfig) {
-	if c == nil {
-		return
-	}
-	if c.Google != nil && c.Google.ClientSecret != "" {
-		c.Google.ClientSecret = "********"
-	}
-	if c.GitHub != nil && c.GitHub.ClientSecret != "" {
-		c.GitHub.ClientSecret = "********"
-	}
 }
 
 // user returns the email or ID string for logging purposes.

@@ -47,8 +47,9 @@ import (
 // verifier. It records, per route, the recorded runtime parameter of every
 // request that passed signature verification.
 type rrRecordingBroker struct {
-	mu   sync.Mutex
-	seen map[string][]string // route suffix -> runtime param values ("<absent>" if missing)
+	mu        sync.Mutex
+	seen      map[string][]string // route suffix -> runtime param values ("<absent>" if missing)
+	deleteRun []string            // runId param of every verified DELETE
 }
 
 func (b *rrRecordingBroker) record(route string, q url.Values) {
@@ -65,6 +66,9 @@ func (b *rrRecordingBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := r.URL.Path[strings.LastIndex(r.URL.Path, "/"):]
 	if r.Method == http.MethodDelete {
 		route = "DELETE"
+		b.mu.Lock()
+		b.deleteRun = append(b.deleteRun, r.URL.Query().Get("runId"))
+		b.mu.Unlock()
 	}
 	b.record(route, r.URL.Query())
 	w.Header().Set("Content-Type", "application/json")
@@ -121,6 +125,7 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 			require.NoError(t, d.DispatchAgentStop(ctx, agent))
 			require.NoError(t, d.DispatchAgentRestart(ctx, agent))
 			require.NoError(t, d.DispatchAgentResetAuth(ctx, agent))
+			agent.RunID = "run-1" // the restart above minted its own run
 			require.NoError(t, d.DispatchAgentDelete(ctx, agent, true, false, false, time.Time{}))
 			require.NoError(t, d.DispatchAgentMessage(ctx, agent, "hi", false, nil))
 			_, err := d.DispatchAgentLogs(ctx, agent, 10)
@@ -139,6 +144,10 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 				if len(got) != 1 || got[0] != tc.want {
 					t.Errorf("%s: recorded runtime params %v, want [%s] (a request missing here failed signature verification or was not sent)", route, got, tc.want)
 				}
+			}
+			// The run ID rides inside the same signed DELETE (ptone/scion#2550).
+			if len(rb.deleteRun) != 1 || rb.deleteRun[0] != "run-1" {
+				t.Errorf("DELETE runId params %v, want [run-1]", rb.deleteRun)
 			}
 		})
 	}
@@ -161,13 +170,13 @@ func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 			_ = c.StopAgent(ctx, "b", "", "w", "p")
 		},
 		"restart": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
+			_, _ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
 		},
 		"reset-auth": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_ = c.ResetAuthAgent(ctx, "b", "", "w", "p", "tok", "")
 		},
 		"delete": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.DeleteAgent(ctx, "b", "", "w", "p", true, false, false, time.Time{})
+			_ = c.DeleteAgent(ctx, "b", "", "w", "p", DeleteAgentOptions{DeleteFiles: true, RunID: "run-1"})
 		},
 		"message": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_ = c.MessageAgent(ctx, "b", "", "w", "p", "hi", false, nil)
@@ -208,6 +217,11 @@ func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 					}
 				} else if got := q.Get(api.RecordedRuntimeQueryParam); got != rt {
 					t.Errorf("runtime param = %q, want %q (query %q)", got, rt, tunnel.lastRequest.Query)
+				}
+				// A delete carries its run (ptone/scion#2550) beside the
+				// recorded runtime.
+				if name == "delete" && q.Get("runId") != "run-1" {
+					t.Errorf("delete runId = %q, want run-1 (query %q)", q.Get("runId"), tunnel.lastRequest.Query)
 				}
 				// The query the broker replays is the query that was signed.
 				require.Len(t, signer.queries, 1)

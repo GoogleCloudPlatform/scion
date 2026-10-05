@@ -969,3 +969,50 @@ func TestProvisionShared_NonGit(t *testing.T) {
 		t.Errorf("ProvisionShared for non-git project should succeed, got error: %v", err)
 	}
 }
+
+// TestWorkspaceBackends_RejectInvalidSubPathRoot checks that every backend
+// that builds paths from subpath_root validates it first (shared validator
+// config.ResolveSubPathRoot), and that an empty value keeps the default.
+func TestWorkspaceBackends_RejectInvalidSubPathRoot(t *testing.T) {
+	backends := map[string]func(root string) WorkspaceBackend{
+		"nfs": func(root string) WorkspaceBackend {
+			return NewNFSBackend(&config.V1NFSConfig{
+				MountRoot:   "/mnt/nfs",
+				Shares:      []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
+				SubPathRoot: root,
+			})
+		},
+		"cloudrun-volume": func(root string) WorkspaceBackend {
+			return NewCloudRunVolumeBackend(&config.V1CloudRunVolumeConfig{VolumeName: "vol", SubPathRoot: root})
+		},
+		"gke-shared-volume": func(root string) WorkspaceBackend {
+			return NewGKESharedVolumeBackend(&config.V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: root})
+		},
+	}
+
+	for name, newBackend := range backends {
+		t.Run(name, func(t *testing.T) {
+			res, err := newBackend("").Resolve(ResolveInput{ProjectID: "proj-1"})
+			if err != nil {
+				t.Fatalf("default subpath_root: %v", err)
+			}
+			if want := filepath.Join(config.DefaultWorkspaceSubPathRoot, "proj-1", "workspace"); res.ServerRelativePath != want {
+				t.Errorf("ServerRelativePath = %q, want %q", res.ServerRelativePath, want)
+			}
+
+			for _, root := range []string{"/projects", "../projects", "projects/../x", "projects/", "./projects"} {
+				if _, err := newBackend(root).Resolve(ResolveInput{ProjectID: "proj-1"}); err == nil {
+					t.Errorf("subpath_root %q: expected an error", root)
+				}
+			}
+		})
+	}
+
+	if err := CleanupNFSProject(&config.V1NFSConfig{
+		MountRoot:   "/mnt/nfs",
+		Shares:      []config.V1NFSShare{{ID: "share1"}},
+		SubPathRoot: "../escape",
+	}, "proj-1"); err == nil {
+		t.Error("CleanupNFSProject: expected an error for an invalid subpath_root")
+	}
+}

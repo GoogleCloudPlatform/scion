@@ -131,8 +131,11 @@ func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *DockerRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here; run targeting is
+// enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -249,6 +252,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			}
 			info := api.AgentInfo{
 				ContainerID:     d.ID,
+				RunID:           labels[api.LabelRunID],
 				Name:            agentName,
 				ContainerStatus: d.Status,
 				Phase:           phaseFromContainerStatus(d.Status),
