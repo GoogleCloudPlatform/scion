@@ -599,6 +599,97 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
   });
 });
 
+describe('hub members: guards', () => {
+  it('a scope change after leaving the hub for a project, before its members land, seeds no hub row', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      const members = deferred<Response>();
+      vi.mocked(apiFetch).mockImplementation(() => members.promise);
+      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      void page.loadV2Members('p1');
+      await settle();
+
+      globalMap.stateManager.dispatchEvent(new Event('scope-changed'));
+      expect(globalMap.agents.size).toBe(0);
+
+      members.resolve(
+        new Response(
+          JSON.stringify({
+            humans: [],
+            agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1' }],
+          }),
+          { status: 200 }
+        )
+      );
+      await settle();
+      expect(Array.from(globalMap.agents.keys())).toEqual(['sp1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('agents-updated during a first walk does not show its partial rows', async () => {
+    harness = createHarness(
+      Array.from({ length: 5 }, (_, i) => agent(`a${i}`)),
+      { pageSize: 2 }
+    );
+    const realFetch = harness.server.fetch.getMockImplementation()!;
+    const page2 = deferred<void>();
+    harness.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await page2.promise;
+      return realFetch(path, options);
+    });
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('loading');
+      expect(harness.store.peek({ scope: 'hub' })?.agents.length).toBe(2);
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      expect(page.v2AgentMembers).toEqual([]);
+
+      page2.resolve();
+      await settle();
+      expect(page.v2AgentMembers.length).toBe(5);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the poll starts no store walk while the feed is down and the shown list is ready', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(storeWalks()).toBe(1);
+      harness.stream().drop();
+      await settle();
+
+      // The poll, then past the store's wait for the feed to reconnect.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+
+      expect(storeWalks()).toBe(1);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a disconnect ends the hub list being live: a DM afterwards takes the global-map path', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    document.body.removeChild(page);
+
+    page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
+    page.v2AgentMembers = [{ id: 'kept', kind: 'agent', displayName: 'kept' }];
+    page._handleAgentsUpdated();
+
+    expect(ids(page.v2AgentMembers)).toEqual(['kept']);
+  });
+});
+
 describe('hub members: compact rows never reach the global agent map', () => {
   it('no hub-list row is seeded on mount, live updates, the poll, a scope change or agents-updated', async () => {
     serveUsers(() => usersPage(['u1']));
