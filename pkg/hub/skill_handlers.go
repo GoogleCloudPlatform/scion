@@ -952,7 +952,9 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	if err := validateUploadFilePaths(req.Files); err != nil {
-		writeInvalidFilePathError(w, err)
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
 		return
 	}
 
@@ -1349,7 +1351,9 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 	if err := validateManifestFilePaths(req.Manifest.Files); err != nil {
-		writeInvalidFilePathError(w, err)
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "manifest files are invalid", nil)
+		}
 		return
 	}
 

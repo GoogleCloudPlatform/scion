@@ -60,12 +60,14 @@ var nonCanonicalUploadPaths = []string{
 	"/" + pathMarker + ".txt",
 	`dir\` + pathMarker + ".txt",
 	pathMarker + "\x00.txt",
+	"",
 }
 
 // nonCanonicalManifests are finalize manifests that must be rejected. Each
-// starts with the canonical file "SKILL.md" and every listed path names an
-// object that exists in local storage (see seedFinalizeObjects), so only the
-// path rules, not the storage existence check, can reject them.
+// starts with the canonical file "SKILL.md". Every other listed path names an
+// object that exists in local storage (see seedFinalizeObjects), except the
+// NUL and empty cases, which local storage cannot hold; so only the path
+// rules, not the storage existence check, can reject them.
 var nonCanonicalManifests = map[string][]string{
 	"dot prefix":       {"SKILL.md", "./SKILL.md"},
 	"empty segment":    {"SKILL.md", "dir//f.txt"},
@@ -75,6 +77,8 @@ var nonCanonicalManifests = map[string][]string{
 	"backslash":        {"SKILL.md", `dir\f.txt`},
 	"trailing slash":   {"SKILL.md", "dir/"},
 	"repeated path":    {"SKILL.md", "SKILL.md"},
+	"nul byte":         {"SKILL.md", "dir/f\x00.txt"},
+	"empty":            {"SKILL.md", ""},
 }
 
 // seedFinalizeObjects writes the objects named by nonCanonicalManifests

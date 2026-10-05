@@ -283,7 +283,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := validateUploadFilePaths(req.Files); err != nil {
-		writeInvalidFilePathError(w, err)
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
 		return
 	}
 
