@@ -3126,7 +3126,7 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	message := ""
 	switch {
 	case outcome == agentkeys.OutcomeKeysUnavailable && err != nil:
-		message = "admission deadline expired before dispatch"
+		message = "keys did not start before the admission deadline or cancellation"
 	case outcome == agentkeys.OutcomeKeysUnsupported:
 		message = "this backend does not support keys delivery"
 	}
