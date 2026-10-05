@@ -60,8 +60,7 @@
       "properties": {
         "env": {
           "type": "string",
-          "description": "Deployment environment label (e.g., dev, staging, prod).",
-          "x-env-var": "SCION_SERVER_ENV",
+          "description": "Deployment environment label (e.g., dev, staging, prod). Informational only: no hub or broker code reads it, so there is no environment-variable override.",
           "x-since": "1"
         },
         "hub": { "$ref": "#/$defs/serverHub" },
@@ -77,14 +76,14 @@
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
           "default": "info",
-          "x-env-var": "SCION_SERVER_LOG_LEVEL",
+          "description": "Hub log level, applied when the admin server-config is saved or reloaded. The boot-time log level is set by --debug or SCION_LOG_LEVEL, not by this key or a SCION_SERVER_* variable, so there is no environment-variable override.",
           "x-since": "1"
         },
         "log_format": {
           "type": "string",
           "enum": ["text", "json"],
           "default": "text",
-          "x-env-var": "SCION_SERVER_LOG_FORMAT",
+          "description": "Reserved: the hub does not read this key today; the log output format is chosen by the logging setup at startup. There is no environment-variable override.",
           "x-since": "1"
         },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
@@ -1118,8 +1117,7 @@
           "type": "string",
           "format": "uri",
           "description": "Public-facing URL for this Hub server. Passed to agents for status callbacks.",
-          "x-env-var": "SCION_SERVER_HUB_ENDPOINT",
-          "x-env-var-alias": "SCION_SERVER_HUB_PUBLIC_URL"
+          "x-env-var": "SCION_SERVER_HUB_ENDPOINT"
         },
         "agent_endpoint": {
           "type": "string",
@@ -1135,30 +1133,30 @@
           "type": "array",
           "items": { "type": "string", "format": "email" },
           "description": "Email addresses to auto-promote to admin role.",
-          "x-env-var": "SCION_SERVER_HUB_ADMINEMAIL"
+          "x-env-var": "SCION_SERVER_HUB_ADMINEMAILS"
         },
         "soft_delete_retention": {
           "type": "string",
           "description": "How long soft-deleted agents are retained before permanent cleanup (e.g., '72h').",
-          "x-env-var": "SCION_SERVER_HUB_SOFT_DELETE_RETENTION",
+          "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETENTION",
           "x-since": "1"
         },
         "soft_delete_retain_files": {
           "type": "boolean",
           "description": "Preserve workspace files during soft-delete period.",
-          "x-env-var": "SCION_SERVER_HUB_SOFT_DELETE_RETAIN_FILES",
+          "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
           "x-since": "1"
         },
         "auto_suspend_stalled": {
           "type": "boolean",
           "description": "Automatically suspend stalled agents.",
-          "x-env-var": "SCION_SERVER_HUB_AUTO_SUSPEND_STALLED",
+          "x-env-var": "SCION_SERVER_HUB_AUTOSUSPENDSTALLED",
           "x-since": "1"
         },
         "stalled_threshold": {
           "type": "string",
           "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
-          "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
+          "x-env-var": "SCION_SERVER_HUB_STALLEDTHRESHOLD",
           "x-since": "1"
         },
         "async_agent_launch": {
@@ -1191,54 +1189,54 @@
       "type": "object",
       "description": "Broker API server and identity settings.",
       "properties": {
-        "enabled": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_BROKER_ENABLED" },
-        "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_BROKER_PORT" },
-        "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_BROKER_HOST" },
-        "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_BROKER_READTIMEOUT" },
-        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
+        "enabled": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ENABLED" },
+        "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_RUNTIMEBROKER_PORT" },
+        "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_HOST" },
+        "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_READTIMEOUT" },
+        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_WRITETIMEOUT" },
         "hub_endpoint": {
           "type": "string",
           "format": "uri",
           "description": "Hub API endpoint for this broker to report status to.",
-          "x-env-var": "SCION_SERVER_BROKER_HUBENDPOINT"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT"
         },
         "container_hub_endpoint": {
           "type": "string",
           "format": "uri",
           "description": "Overrides hub_endpoint when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. http://host.containers.internal:8080 for local development).",
-          "x-env-var": "SCION_SERVER_BROKER_CONTAINERHUBENDPOINT"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT"
         },
         "broker_id": {
           "type": "string",
           "description": "Unique broker identifier (UUID). Auto-generated if empty.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERID"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_ID"
         },
         "auto_provide": {
           "type": "boolean",
           "description": "Automatically add as provider for new projects.",
-          "x-env-var": "SCION_SERVER_BROKER_AUTOPROVIDE"
+          "x-env-var": "SCION_SERVER_BROKER_AUTO_PROVIDE"
         },
         "broker_name": {
           "type": "string",
           "description": "Human-readable broker name.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERNAME"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_NAME"
         },
         "broker_nickname": {
           "type": "string",
           "description": "Human-readable display name for the broker. Defaults to hostname.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERNICKNAME"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_NICKNAME"
         },
         "broker_token": {
           "type": "string",
           "description": "Token received when registering this broker with the Hub.",
           "x-sensitive": true,
-          "x-env-var": "SCION_SERVER_BROKER_BROKERTOKEN"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_TOKEN"
         },
         "allow_container_script_harnesses": {
           "type": "boolean",
           "default": true,
           "description": "Allow agents whose harness-config declares a provisioner block. Provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block provisioner-based dispatches on this broker.",
-          "x-env-var": "SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
         "cors": { "$ref": "#/$defs/corsConfig" }
       }
@@ -1290,7 +1288,7 @@
         "user_access_mode": {
           "type": "string",
           "description": "Controls user access: 'open' (anyone can sign in), 'invite' (admin must invite), 'closed' (no new users).",
-          "x-env-var": "SCION_SERVER_AUTH_USER_ACCESS_MODE",
+          "x-env-var": "SCION_SERVER_AUTH_USERACCESSMODE",
           "x-since": "1"
         },
         "default_user_role": {
@@ -1453,7 +1451,7 @@
           "minimum": 10,
           "default": 60,
           "description": "Root ticker interval in seconds. All recurring handlers fire at multiples of this interval. Increasing this value reduces DB connection pressure on small deployments.",
-          "x-env-var": "SCION_SERVER_SCHEDULER_INTERVAL_SECONDS",
+          "x-env-var": "SCION_SERVER_SCHEDULER_INTERVALSECONDS",
           "x-since": "1"
         },
         "max_concurrency": {
@@ -1461,7 +1459,7 @@
           "minimum": 0,
           "default": 2,
           "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. Default 2 to prevent DB connection pool saturation on small deployments. Set to 0 for unlimited (pre-fix behavior).",
-          "x-env-var": "SCION_SERVER_SCHEDULER_MAX_CONCURRENCY",
+          "x-env-var": "SCION_SERVER_SCHEDULER_MAXCONCURRENCY",
           "x-since": "1"
         }
       },
