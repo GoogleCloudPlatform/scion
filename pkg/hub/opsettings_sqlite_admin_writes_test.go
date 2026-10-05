@@ -27,6 +27,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -289,5 +290,39 @@ func TestSQLite_PutMaintenance_PersistsToDBAndSurvivesUnrelatedUpdate(t *testing
 	}
 	if rec.Origin != "managed" {
 		t.Errorf("DB maintenance origin = %q, want managed", rec.Origin)
+	}
+}
+
+// DELETE /api/v1/admin/server-config/sections/{name} works on SQLite: the row
+// is removed and the section falls back to bootstrap material immediately.
+func TestSQLite_ServerConfigSectionReset(t *testing.T) {
+	tempSettingsHome(t)
+	bootstrap := newFileKoanf(t, map[string]interface{}{
+		"quotas.enforce_broker_quotas": true,
+	})
+	srv, st, ops := newSQLiteOpsServer(t, bootstrap, nil)
+	if _, err := ops.Update(context.Background(), "quotas",
+		json.RawMessage(`{"enforce_broker_quotas":false}`), "admin@example.com", -1, "managed"); err != nil {
+		t.Fatal(err)
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("precondition: managed row should disable broker quotas")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete,
+		"/api/v1/admin/server-config/sections/quotas", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if _, err := st.GetHubSetting(context.Background(), "quotas"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("quotas row should be gone after reset, got err=%v", err)
+	}
+	if !srv.brokerQuotasEnforced() {
+		t.Error("after reset, broker quotas should fall back to the bootstrap value (true)")
+	}
+	if snap := ops.Snapshot(); snap.EnforceBrokerQuotas == nil || !*snap.EnforceBrokerQuotas {
+		t.Errorf("snapshot EnforceBrokerQuotas = %v, want bootstrap true", snap.EnforceBrokerQuotas)
 	}
 }

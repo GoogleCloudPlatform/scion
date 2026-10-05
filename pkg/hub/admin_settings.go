@@ -235,7 +235,8 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 // handleAdminServerConfigSectionReset handles
 // DELETE /api/v1/admin/server-config/sections/{name}
 // Resets a managed section back to bootstrap material by deleting the DB row.
-// Postgres mode only; admin-gated. Design §3.2.4.
+// Available whenever OperationalSettings is wired (any DB driver); admin-gated.
+// Design §3.2.4.
 func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -245,9 +246,9 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	}
 
 	ops := s.GetOperationalSettings()
-	if ops == nil || !s.IsPostgres() {
+	if ops == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"Section reset is only available in postgres mode", nil)
+			"Section reset requires DB-backed operational settings", nil)
 		return
 	}
 
