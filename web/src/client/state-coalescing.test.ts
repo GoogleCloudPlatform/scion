@@ -768,6 +768,65 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(sm.getAgent('a1')).toBeUndefined();
     expect(sm.getAgent('a2')?.name).toBe('worker');
   });
+});
+
+describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', () => {
+  it('a status delta after a delete is dropped: no buffer, no dirty.unknown, no flush', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    emit(sm, 'agent.a1.deleted', {});
+    vi.advanceTimersByTime(100); // flush the delete itself before observing the dropped delta
+    rafCallbacks.length = 0; // drop the delete flush's own stale rAF handle
+
+    const updatedSpy = vi.fn();
+    sm.addEventListener('agents-updated', updatedSpy);
+    emit(sm, 'agent.a1.status', { phase: 'error' });
+
+    // No flush was scheduled at all for the dropped delta.
+    expect(rafCallbacks.length).toBe(0);
+    vi.advanceTimersByTime(1000);
+    expect(updatedSpy).not.toHaveBeenCalled();
+    expect(sm.getAgent('a1')).toBeUndefined();
+  });
+
+  it('a status delta and a replayed created after a delete both stay dropped (ptone/scion#2886)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.status', { phase: 'error' }); // dropped, not buffered
+    const pending = (sm as unknown as { pendingAgentDeltas: Map<string, unknown> })
+      .pendingAgentDeltas;
+    expect(pending.has('a1')).toBe(false);
+
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // dropped: tombstoned
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')).toBeUndefined();
+  });
+
+  it('a status delta after a delete never reports the ID as both deleted and unknown in one flush', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    const changedSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agents-changed', changedSpy as EventListener);
+
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.status', { phase: 'stopped' });
+    vi.advanceTimersByTime(100);
+
+    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
+      .detail.data;
+    expect(detail.deleted).toContain('a1');
+    expect(detail.unknown.has('a1')).toBe(false);
+  });
 
   it('a restore created (restoredAt) after a delete clears the tombstone and re-adds the agent (ptone/scion#2951)', () => {
     const sm = new StateManager();
@@ -841,65 +900,6 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     vi.advanceTimersByTime(100);
     expect(sm.getAgent('a1')).toBeUndefined();
     expect(sm.getDeletedAgentIds().has('a1')).toBe(true);
-  });
-});
-
-describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', () => {
-  it('a status delta after a delete is dropped: no buffer, no dirty.unknown, no flush', () => {
-    const sm = new StateManager();
-    sm.setScope({ type: 'dashboard' });
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
-    vi.advanceTimersByTime(100);
-
-    emit(sm, 'agent.a1.deleted', {});
-    vi.advanceTimersByTime(100); // flush the delete itself before observing the dropped delta
-    rafCallbacks.length = 0; // drop the delete flush's own stale rAF handle
-
-    const updatedSpy = vi.fn();
-    sm.addEventListener('agents-updated', updatedSpy);
-    emit(sm, 'agent.a1.status', { phase: 'error' });
-
-    // No flush was scheduled at all for the dropped delta.
-    expect(rafCallbacks.length).toBe(0);
-    vi.advanceTimersByTime(1000);
-    expect(updatedSpy).not.toHaveBeenCalled();
-    expect(sm.getAgent('a1')).toBeUndefined();
-  });
-
-  it('a status delta and a replayed created after a delete both stay dropped (ptone/scion#2886)', () => {
-    const sm = new StateManager();
-    sm.setScope({ type: 'dashboard' });
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
-    vi.advanceTimersByTime(100);
-    emit(sm, 'agent.a1.deleted', {});
-    emit(sm, 'agent.a1.status', { phase: 'error' }); // dropped, not buffered
-    const pending = (sm as unknown as { pendingAgentDeltas: Map<string, unknown> })
-      .pendingAgentDeltas;
-    expect(pending.has('a1')).toBe(false);
-
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // dropped: tombstoned
-    vi.advanceTimersByTime(100);
-
-    expect(sm.getAgent('a1')).toBeUndefined();
-  });
-
-  it('a status delta after a delete never reports the ID as both deleted and unknown in one flush', () => {
-    const sm = new StateManager();
-    sm.setScope({ type: 'dashboard' });
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
-    vi.advanceTimersByTime(100);
-
-    const changedSpy = vi.fn<(e: Event) => void>();
-    sm.addEventListener('agents-changed', changedSpy as EventListener);
-
-    emit(sm, 'agent.a1.deleted', {});
-    emit(sm, 'agent.a1.status', { phase: 'stopped' });
-    vi.advanceTimersByTime(100);
-
-    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
-      .detail.data;
-    expect(detail.deleted).toContain('a1');
-    expect(detail.unknown.has('a1')).toBe(false);
   });
 });
 

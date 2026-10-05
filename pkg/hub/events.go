@@ -33,6 +33,8 @@ type EventPublisher interface {
 	PublishAgentCreated(ctx context.Context, agent *store.Agent)
 	// PublishAgentRestored publishes agent.created for a restored
 	// (un-soft-deleted) agent, marked with RestoredAt (ptone/scion#2951).
+	// It is a second created publisher: a wrapper or recorder that
+	// intercepts PublishAgentCreated must wrap this method too.
 	PublishAgentRestored(ctx context.Context, agent *store.Agent, restoredAt time.Time)
 	PublishAgentDeleted(ctx context.Context, agentID, projectID string)
 	PublishProjectCreated(ctx context.Context, project *store.Project)
@@ -536,7 +538,7 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 // RestoredAt set, on the same subjects as PublishAgentCreated.
 func (p *eventBuilder) PublishAgentRestored(_ context.Context, agent *store.Agent, restoredAt time.Time) {
 	evt := newAgentCreatedEvent(agent)
-	evt.RestoredAt = restoredAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+	evt.RestoredAt = restoredAt.UTC().Format(time.RFC3339)
 	p.publishAgentCreated(evt)
 }
 
