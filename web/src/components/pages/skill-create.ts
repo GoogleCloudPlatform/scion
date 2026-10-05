@@ -101,6 +101,10 @@ export class ScionPageSkillCreate extends LitElement {
   @state() private name = '';
   @state() private description = '';
   @state() private scope: 'global' | 'project' | 'user' = 'global';
+  /** Whether the caller may create global skills (from the global list capabilities). */
+  @state() private canCreateGlobal = false;
+  /** Set once the user picks a scope, so the capability check never overrides it. */
+  private scopeChosen = false;
   @state() private scopeId = '';
   @state() private tagsInput = '';
 
@@ -466,14 +470,30 @@ export class ScionPageSkillCreate extends LitElement {
 
   private async checkCapabilities(): Promise<void> {
     this.loading = true;
-    try {
-      const res = await apiFetch('/api/v1/skills');
-      if (res.ok) {
+    // The unscoped list reports create when the caller can create in any
+    // scope; the global list reports whether global creation is allowed.
+    const listCreate = async (query: string): Promise<boolean> => {
+      try {
+        const res = await apiFetch(`/api/v1/skills?${query}`);
+        if (!res.ok) return false;
         const data = (await res.json()) as { _capabilities?: Capabilities };
-        this.canCreate = can(data._capabilities, 'create');
+        return can(data._capabilities, 'create');
+      } catch {
+        return false; // fail-closed
       }
-    } catch {
-      // fail-closed
+    };
+    try {
+      const [anyScope, globalScope] = await Promise.all([
+        listCreate('limit=1'),
+        listCreate('scope=global&limit=1'),
+      ]);
+      this.canCreate = anyScope;
+      this.canCreateGlobal = globalScope;
+      // Default to a scope the caller can create in: every signed-in user
+      // can create in their own user scope.
+      if (!globalScope && !this.scopeChosen && this.scope === 'global') {
+        this.scope = 'user';
+      }
     } finally {
       this.loading = false;
     }
@@ -1063,10 +1083,11 @@ export class ScionPageSkillCreate extends LitElement {
                 | 'global'
                 | 'project'
                 | 'user';
+              this.scopeChosen = true;
             }}
             ?disabled=${isSubmitting}
           >
-            <sl-option value="global">Global</sl-option>
+            <sl-option value="global" ?disabled=${!this.canCreateGlobal}>Global</sl-option>
             <sl-option value="project">Project</sl-option>
             <sl-option value="user">User</sl-option>
           </sl-select>

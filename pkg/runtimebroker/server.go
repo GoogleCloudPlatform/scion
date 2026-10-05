@@ -173,6 +173,12 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// WorkspaceStorageBackend is the configured server.workspace_storage
+	// backend name ("" means "local"). It is reported to the hub, with
+	// NFSConfig's first share, as the broker's workspace storage descriptor
+	// (see BuildWorkspaceStorageDescriptor).
+	WorkspaceStorageBackend string
+
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
@@ -1114,14 +1120,31 @@ func (s *Server) logNFSStartupResult() {
 		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
 }
 
+// ghResolutionCacheCloseTimeout bounds how long Shutdown waits for
+// background refreshes of the GitHub resolution cache before writing it to
+// disk (see GitHubResolutionCache.Close).
+const ghResolutionCacheCloseTimeout = 10 * time.Second
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Write any resolution cache entries still waiting for their delayed
-	// write. Deferred so it runs on every return path, and after the HTTP
-	// server has drained, when in-flight requests have finished adding to it.
+	// Close the resolution cache: wait, within a bound, for background
+	// refreshes still running, then write any entries still waiting for
+	// their delayed write. Deferred so it runs on every return path, and
+	// after the HTTP server has drained, when in-flight requests have
+	// finished adding to it.
+	//
+	// parentCtx keeps the caller's ctx: ctx is reassigned below to the
+	// drain timeout, whose cancel runs before this deferred func, so a
+	// bound derived from it would already be cancelled here.
+	parentCtx := ctx
 	defer func() {
-		if s.ghResolutionCache != nil {
-			s.ghResolutionCache.Flush()
+		if s.ghResolutionCache == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(parentCtx, ghResolutionCacheCloseTimeout)
+		defer cancel()
+		if err := s.ghResolutionCache.Close(closeCtx); err != nil {
+			slog.Warn("GitHub resolution cache closed before background refreshes finished", "error", err)
 		}
 	}()
 

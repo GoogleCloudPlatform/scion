@@ -63,6 +63,11 @@ import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
+import {
+  horizontalScrollRoom,
+  scrollerTakesDrag,
+  type HorizontalScrollRoom,
+} from '../../utils/horizontal-scroll.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
@@ -713,6 +718,13 @@ export class ScionPageChat extends LitElement {
   private _touchStartY = 0;
   private _touchStartTime = 0;
   private _isSwiping = false;
+  /** Which way the sideways scrollers under the current touch could still scroll. */
+  private _touchScrollRoom: HorizontalScrollRoom = { rightward: false, leftward: false };
+  /**
+   * More than one finger has been down during the current gesture: it is a
+   * pinch, not a swipe, until every finger lifts.
+   */
+  private _touchMulti = false;
 
   /**
    * Whether the viewport is under the mobile breakpoint. Driven by a
@@ -781,6 +793,15 @@ export class ScionPageChat extends LitElement {
       flex-direction: column;
       min-width: 0;
       overflow: hidden;
+    }
+
+    /* The thread fills what the header leaves and may shrink to nothing
+       but its composer: its own 300px floor (kept for other hosts) would
+       push the composer out of a short frame — a landscape phone, or a
+       small one with the keyboard open. */
+    .v2-content scion-chat-thread {
+      flex: 1 1 0;
+      min-height: 0;
     }
 
     .empty-state {
@@ -1013,6 +1034,40 @@ export class ScionPageChat extends LitElement {
         display: none;
       }
 
+      /* An agent DM header carries the most actions (terminal, promote,
+         mute, export, search, members) and, at 320px, more than fit beside
+         the back button and the peer name. Rather than run off the screen,
+         taking the members button with it, the actions row shrinks and
+         scrolls sideways. The name gives way first, wrapping down to its
+         longest word, so the row scrolls only once that is not enough.
+         The block padding keeps the buttons' enlarged hit areas (above)
+         inside the scroller's clip, and the negative margin gives that
+         space back. */
+      .v2-thread-header > span {
+        flex-shrink: 1000;
+      }
+
+      .v2-thread-header .header-actions {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        padding: 6px 2px;
+        margin-block: -6px;
+      }
+
+      /* Fit the promote dialog to the frame, which the open keyboard
+         shrinks below the layout viewport the dialog is positioned in. */
+      .promote-dialog::part(base) {
+        bottom: auto;
+        height: var(--scion-app-height, 100dvh);
+      }
+
+      .promote-dialog::part(panel) {
+        max-height: calc(100% - 1rem);
+      }
+
       .empty-state .subtitle.desktop-only {
         display: none;
       }
@@ -1059,6 +1114,18 @@ export class ScionPageChat extends LitElement {
            width and push content off the left edge on iOS Safari. */
         box-sizing: border-box;
         border: 0;
+        /* A horizontal drag here belongs to the swipe handler above, never
+           to the browser: Chromium turns a horizontal touch overscroll that
+           nothing consumed into history-back navigation, which rebuilds the
+           whole page. overscroll-behavior on the root does not stop it, so
+           horizontal panning is taken away from the browser instead. Touch
+           events still fire, so the swipe handler is unaffected, and
+           pinch-zoom is kept. touch-action does not carry into a scroll
+           container (each one starts over), so the panels' own scrollers
+           restate it through --chat-touch-action; scrollers that really
+           scroll sideways (code blocks, tables) do not, and keep panning. */
+        --chat-touch-action: pan-y pinch-zoom;
+        touch-action: var(--chat-touch-action);
       }
 
       /* Landscape: keep each full-width panel's content clear of the notch
@@ -3219,21 +3286,54 @@ export class ScionPageChat extends LitElement {
   // ---- Mobile swipe navigation ----
 
   private handleTouchStart(e: TouchEvent): void {
+    if (e.touches.length > 1) {
+      this.abandonTouchForPinch();
+      return;
+    }
     const touch = e.touches[0];
     if (!touch) return;
+    this._touchMulti = false;
     this._touchStartX = touch.clientX;
     this._touchStartY = touch.clientY;
     this._touchStartTime = Date.now();
     this._isSwiping = false;
+    // Measured before the drag moves anything: a code block or wide table
+    // under the finger that can still scroll in the drag direction keeps the
+    // gesture, and only once it is at that end does the panel swipe apply.
+    // Without the mobile panels there is no swipe, so nothing to measure.
+    this._touchScrollRoom = this.isMobileViewport()
+      ? horizontalScrollRoom(e.composedPath())
+      : { rightward: false, leftward: false };
   }
 
   private handleTouchMove(e: TouchEvent): void {
-    if (!this._touchStartTime) return;
+    if (!this._touchStartTime || this._touchMulti) return;
+    if (e.touches.length > 1) {
+      this.abandonTouchForPinch();
+      return;
+    }
     const touch = e.touches[0];
     if (!touch) return;
 
     const dx = touch.clientX - this._touchStartX;
     const dy = touch.clientY - this._touchStartY;
+
+    // The panels' touch-action keeps sideways drags from the browser, but a
+    // sideways scroller (code block, table) starts its own touch-action
+    // chain. Dragged past its end, the browser hands the unused pan to its
+    // history swipe. When the scroller under the touch has no room in this
+    // direction, cancel the move before the browser claims the pan; the
+    // panel swipe still reads these events.
+    const room = this._touchScrollRoom;
+    if (
+      this.isMobileViewport() &&
+      (room.rightward || room.leftward) &&
+      e.cancelable &&
+      Math.abs(dx) > Math.abs(dy) &&
+      !scrollerTakesDrag(room, dx)
+    ) {
+      e.preventDefault();
+    }
 
     // Horizontal only — a vertical drag is the message list scrolling.
     if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_AXIS_LOCK_PX) {
@@ -3242,6 +3342,14 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleTouchEnd(e: TouchEvent): void {
+    if (this._touchMulti) {
+      // A pinch ends only when its last finger lifts; until then a finger
+      // left on the screen must not turn into a swipe.
+      if (e.touches.length === 0) this._touchMulti = false;
+      this._touchStartTime = 0;
+      this._isSwiping = false;
+      return;
+    }
     const wasSwiping = this._isSwiping;
     const startX = this._touchStartX;
     const elapsed = Date.now() - this._touchStartTime;
@@ -3254,6 +3362,7 @@ export class ScionPageChat extends LitElement {
     if (!touch) return;
 
     const dx = touch.clientX - startX;
+    if (scrollerTakesDrag(this._touchScrollRoom, dx)) return;
     const isSwipe =
       (Math.abs(dx) > SWIPE_FLICK_PX && elapsed < SWIPE_FLICK_MS) || Math.abs(dx) > SWIPE_DRAG_PX;
     if (!isSwipe) return;
@@ -3263,6 +3372,18 @@ export class ScionPageChat extends LitElement {
     } else {
       this.handleSwipeLeft();
     }
+  }
+
+  /**
+   * A second finger turned the gesture into a pinch. Leave it to the browser
+   * for the rest of the gesture: no swipe, and no cancelled moves (cancelling
+   * a touchmove would cancel the pinch zoom).
+   */
+  private abandonTouchForPinch(): void {
+    this._touchMulti = true;
+    this._touchStartTime = 0;
+    this._isSwiping = false;
+    this._touchScrollRoom = { rightward: false, leftward: false };
   }
 
   /**
@@ -5148,6 +5269,7 @@ export class ScionPageChat extends LitElement {
       conv.projectSlug || this._projectIdToSlug.get(conv.projectId) || 'this project';
     return html`
       <sl-dialog
+        class="promote-dialog"
         label="Promote DM to Thread"
         ?open=${this.promoteDialogOpen}
         @sl-after-hide=${() => {
