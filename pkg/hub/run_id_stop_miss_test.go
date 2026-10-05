@@ -252,7 +252,7 @@ type failSuspendWriteStore struct {
 func (f *failSuspendWriteStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
 	if upd.Phase == string(state.PhaseSuspended) {
 		if f.swapRun {
-			if _, err := f.Store.SetAgentRunID(ctx, id, "run-new"); err != nil {
+			if _, err := f.SetAgentRunID(ctx, id, "run-new"); err != nil {
 				return err
 			}
 		}
