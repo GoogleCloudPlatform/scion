@@ -209,27 +209,46 @@ func TestGeminiCLIUsageRuleZeroUsage(t *testing.T) {
 }
 
 func TestNewUsageDeriverBuildsGeminiCLIRule(t *testing.T) {
-	for _, harness := range []string{"gemini-cli", "gemini"} {
-		t.Run(harness, func(t *testing.T) {
-			t.Setenv("SCION_HARNESS", harness)
-			t.Setenv("SCION_USAGE_SOURCE", "native")
-			d, err := NewUsageDeriver(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(d.rules) != 1 {
-				t.Fatalf("rules = %d, want 1", len(d.rules))
-			}
-			if _, ok := d.rules[0].(geminiCLIUsageRule); !ok {
-				t.Fatalf("rule = %T, want geminiCLIUsageRule", d.rules[0])
-			}
-		})
+	t.Setenv("SCION_HARNESS", "gemini-cli")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	d, err := NewUsageDeriver(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { shutdownTestDeriver(d) })
+	if len(d.rules) != 1 {
+		t.Fatalf("rules = %d, want 1", len(d.rules))
+	}
+	if _, ok := d.rules[0].(geminiCLIUsageRule); !ok {
+		t.Fatalf("rule = %T, want geminiCLIUsageRule", d.rules[0])
+	}
+}
+
+// TestNewUsageDeriverIgnoresLegacyGeminiHarnessName pins that the legacy
+// SCION_HARNESS=gemini value selects no rule. Only harnesses/gemini-cli's
+// provision.py declares SCION_USAGE_SOURCE=native, and that harness-config
+// sets harness: gemini-cli; a legacy "gemini" harness-config (the pre-#600
+// builtin seed, or a template-bundled config with no provisioner) never
+// runs it. So no production agent pairs "gemini" with native usage, and
+// the rule deliberately adds no alias surface (which would also have split
+// the harness label into a separate "gemini" series).
+func TestNewUsageDeriverIgnoresLegacyGeminiHarnessName(t *testing.T) {
+	t.Setenv("SCION_HARNESS", "gemini")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	d, err := NewUsageDeriver(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { shutdownTestDeriver(d) })
+	if len(d.rules) != 0 {
+		t.Fatalf("rules = %d, want 0 for the legacy gemini harness name", len(d.rules))
 	}
 }
 
 // TestNewUsageDeriverGeminiCLIStaysOffWithoutNativeSource pins the D10
 // gate from the deriver side: with SCION_USAGE_SOURCE unset (what
-// provision.py writes until it declares native), no rule is built.
+// provision.py writes when telemetry is disabled, and the D10 default), no
+// rule is built.
 func TestNewUsageDeriverGeminiCLIStaysOffWithoutNativeSource(t *testing.T) {
 	t.Setenv("SCION_HARNESS", "gemini-cli")
 	t.Setenv("SCION_USAGE_SOURCE", "")

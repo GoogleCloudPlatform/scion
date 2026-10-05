@@ -579,20 +579,9 @@ var usageRuleFactories = []func() usageRule{
 	func() usageRule { return newCopilotUsageRule() },
 }
 
-// usageHarnessAliases maps a legacy SCION_HARNESS value to the name a rule
-// registers under. "gemini" is the pre-rename name of the gemini-cli
-// harness, still accepted elsewhere (pkg/hub canonicalHarnessName); an
-// agent created from an older template may still carry it.
-var usageHarnessAliases = map[string]string{
-	"gemini": "gemini-cli",
-}
-
 func rulesForHarness(harness string) []usageRule {
 	if harness == "" {
 		return nil
-	}
-	if canonical, ok := usageHarnessAliases[harness]; ok {
-		harness = canonical
 	}
 	var out []usageRule
 	for _, factory := range usageRuleFactories {

@@ -395,6 +395,7 @@ func TestNewUsageDeriverBuildsCodexRuleForCodexHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { shutdownTestDeriver(d) })
 	if len(d.rules) != 1 {
 		t.Fatalf("codex deriver rules = %d, want 1", len(d.rules))
 	}
@@ -825,4 +826,14 @@ func TestPipelineDerivesCodex160UsageEndToEnd(t *testing.T) {
 		telemetrycontract.TokenTypeCacheWrite: 600,
 		telemetrycontract.TokenTypeReasoning:  40,
 	})
+}
+
+// shutdownTestDeriver releases a test deriver's loopback providers. The
+// bounded context keeps a test whose Config points at no listening OTLP
+// endpoint from waiting out the exporter's own shutdown timeout; the
+// providers are released either way.
+func shutdownTestDeriver(d *UsageDeriver) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = d.Shutdown(ctx)
 }
