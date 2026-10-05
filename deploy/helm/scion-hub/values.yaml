@@ -91,6 +91,8 @@ image:
   # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
   # KUBECONFIG. image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
   # <registry>/scion-hub-gke:<git short sha> (see image-build/README.md).
+  # That image is linux/amd64 only; on a cluster with arm64 nodes, set
+  # hub.nodeSelector to {kubernetes.io/arch: amd64}.
   # The chart has no canonical registry to point at, so every possible default
   # would point either at an empty registry path or at somebody else's
   # artifact - and a default that cannot be correct turns an install-time error
@@ -216,7 +218,8 @@ hub:
     # runAsUser and runAsGroup remain configurable because a later part of this
     # chart requires them to match the uid and gid of the workspace share it
     # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
-    # overriding it.
+    # overriding it. The hub-gke image assumes 1000:1000; any other uid needs
+    # a writable HOME and a passwd entry for that uid, which ssh requires.
     runAsUser: 1000
     runAsGroup: 1000
 
