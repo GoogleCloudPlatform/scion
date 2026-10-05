@@ -3152,6 +3152,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
 		WorkspaceStorageBackend:       workspaceStorageBackend,
+		DefaultProfile:                brokerSettings.ActiveProfile,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

@@ -1605,6 +1605,13 @@ authDone:
 		}
 	}
 
+	// The agent's workspace placement, reported to the hub on every start
+	// that gets here (so a re-provision refreshes it): on the shared NFS
+	// export exactly when the nfs workspace backend served the workspace
+	// above (the project's shared checkout, a worktree, or the agent's own
+	// directory for clone-per-agent and empty-per-agent); otherwise not.
+	workspacePlacement := workspacePlacementFor(workspaceBackendName)
+
 	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
 	// else its runtime entry's (applied below under the template/agent
 	// kubernetes block). The profile is the one named for this start, else
@@ -1916,6 +1923,7 @@ authDone:
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
+				a.WorkspacePlacement = workspacePlacement
 				return &a, nil
 			}
 		}
@@ -1935,7 +1943,17 @@ authDone:
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
+		WorkspacePlacement:    workspacePlacement,
 	}, nil
+}
+
+// workspacePlacementFor maps the workspace backend a start resolved ("" for
+// the local backend) to the placement reported to the hub.
+func workspacePlacementFor(workspaceBackendName string) string {
+	if workspaceBackendName == "nfs" {
+		return api.WorkspacePlacementExport
+	}
+	return api.WorkspacePlacementLocal
 }
 
 // writeAgentTokenFile writes the agent's hub credential to the canonical token

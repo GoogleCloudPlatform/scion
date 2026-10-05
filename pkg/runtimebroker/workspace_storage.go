@@ -59,9 +59,24 @@ func BuildWorkspaceStorageDescriptor(backend string, nfs *config.V1NFSConfig, sh
 
 // workspaceStorageDescriptor returns this broker's current workspace storage
 // descriptor, with share health taken from the NFS mount reconciler's last
-// check (false before the first check, or when no reconciler runs).
+// check (false before the first check, or when no reconciler runs). When the
+// share is healthy, the export identity marker is read through the broker's
+// mount (and created when absent) and reported as ExportID; an unhealthy
+// share, or a marker that cannot be read in time, reports no ExportID.
 func (s *Server) workspaceStorageDescriptor() *api.BrokerWorkspaceStorage {
-	return BuildWorkspaceStorageDescriptor(s.config.WorkspaceStorageBackend, s.config.NFSConfig, s.nfsShareHealthy)
+	desc := BuildWorkspaceStorageDescriptor(s.config.WorkspaceStorageBackend, s.config.NFSConfig, s.nfsShareHealthy)
+	if desc.NFS != nil && desc.NFS.Healthy {
+		if dir, err := exportIDMarkerDir(s.config.NFSConfig); err == nil {
+			desc.NFS.ExportID = s.exportIDs.get(dir, exportIDReadTimeout)
+		}
+	}
+	return desc
+}
+
+// defaultProfile returns the broker's default (active) profile name, as
+// reported on every heartbeat.
+func (s *Server) defaultProfile() string {
+	return s.config.DefaultProfile
 }
 
 // nfsShareHealthy reports whether the NFS mount reconciler's last check of

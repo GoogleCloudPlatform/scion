@@ -571,6 +571,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			Capabilities:     brokerRegistrationCapabilities(),
 			Profiles:         profiles,
 			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+			DefaultProfile:   brokerRegistrationDefaultProfile(settings),
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
@@ -1970,6 +1971,17 @@ func brokerRegistrationCapabilities() []string {
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
 // It converts the user-defined profiles in settings.yaml to the format expected by the Hub.
+// brokerRegistrationDefaultProfile returns the broker's default (active)
+// profile name to report at join, or nil when settings could not be loaded
+// (the hub then keeps what it has).
+func brokerRegistrationDefaultProfile(settings *config.Settings) *string {
+	if settings == nil {
+		return nil
+	}
+	name := settings.ActiveProfile
+	return &name
+}
+
 func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 	if settings == nil || len(settings.Profiles) == 0 {
 		return nil

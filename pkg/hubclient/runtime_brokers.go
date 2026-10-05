@@ -120,6 +120,9 @@ type AgentLaunchReportInfo struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
+	// WorkspacePlacement is where the launch's start placed the agent's
+	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
@@ -236,6 +239,10 @@ type BrokerHeartbeat struct {
 	// its container is in Projects. Meaningful only when
 	// Capabilities.StartsInFlight is true; an older broker omits both.
 	StartsInFlight []StartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's default (active) profile name
+	// on every heartbeat. Nil (an older broker) keeps the stored value; a
+	// non-nil empty string reports that the broker has no active profile.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.
@@ -319,6 +326,9 @@ type JoinBrokerRequest struct {
 	// WorkspaceStorage is the broker's workspace storage descriptor at
 	// registration time. Share health is refreshed by heartbeats.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// DefaultProfile is the broker's default (active) profile name. Nil
+	// (an older broker) keeps the stored value.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.
