@@ -792,7 +792,9 @@ export class ScionQuickPalette extends LitElement {
     const input = this.paletteInputEl;
     if (!this.open || !input) return;
     input.focus();
-    // Already focused: no focus event, so apply it here.
+    // No focus event fires for an input that already has focus, or in a
+    // window without focus, so apply it here. After a focus event this finds
+    // nothing left to apply.
     this.applyTypeahead();
   }
 
