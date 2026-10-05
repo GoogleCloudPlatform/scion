@@ -633,3 +633,19 @@ func TestK8sRun_PreClean_FinishedOtherRun_StartsNewRun(t *testing.T) {
 	}
 	enf.assertAllConditional(t)
 }
+
+// A very old pod with neither a run nor a start label: its unlabelled
+// objects are removed, but never one labelled with a run.
+func TestK8sDeleteRun_LegacyPodWithoutStartID_LeavesRunLabelledSecrets(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	rsSeedPod(t, rt, "pod-old", rsLabels("", ""), corev1.PodRunning)
+	rsSeedSecret(t, rt, rsAgentSecret, "sec-b", rsLabels(rsRunB, ""))
+	rsSeedSecret(t, rt, rsAuthSecret, "auth-old", rsLabels("", ""))
+	rsSeedSPC(t, rt, "spc-old", rsLabels("", ""))
+
+	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: rsRunA}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	rsExpect(t, rt, rsState{agentSecret: true})
+	enf.assertAllConditional(t)
+}
