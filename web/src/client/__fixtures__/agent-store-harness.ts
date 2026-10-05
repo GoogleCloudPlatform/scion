@@ -176,11 +176,6 @@ function ms(value: string | undefined): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-/**
- * The hub's `sort=updated` order, newest first: the last activity time when
- * set, else `updated`; ties on `created`, then id, both descending. A Go zero
- * time (`0001-01-01T00:00:00Z`) is how the hub writes an unset activity time.
- */
 /** The keys of a `view=compact` list item, as the hub's compact view emits them. */
 const COMPACT_KEYS = [
   'id',
@@ -213,6 +208,11 @@ function compactRow(a: Agent): Agent {
   return row as unknown as Agent;
 }
 
+/**
+ * The hub's `sort=updated` order, newest first: the last activity time when
+ * set, else `updated`; ties on `created`, then id, both descending. A Go zero
+ * time (`0001-01-01T00:00:00Z`) is how the hub writes an unset activity time.
+ */
 function compareUpdatedKey(a: Agent, b: Agent): number {
   const activity = (x: Agent): number =>
     x.lastActivityEvent?.startsWith('0001') ? 0 : ms(x.lastActivityEvent);
