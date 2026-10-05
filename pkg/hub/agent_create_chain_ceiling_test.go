@@ -772,7 +772,7 @@ func TestLegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
 // created from a replacement pass as well.
 func TestLegacyAgentRecreatedByUserClearsUnrecordedDenial(t *testing.T) {
 	f := newLegacyFixture(t, "legacy-fix")
-	ctx := context.Background()
+	ctx := t.Context()
 
 	legacyChild, _ := f.childOf(t, f.legacy, "legacy-fix-lc")
 	denied := []*store.Agent{f.legacy, legacyChild}

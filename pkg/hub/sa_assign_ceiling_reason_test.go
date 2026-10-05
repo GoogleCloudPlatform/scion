@@ -600,7 +600,7 @@ func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
 // and the structured SA-assign details.
 func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
 	f := newLegacyFixture(t, "sca-unrec")
-	edges, err := f.store.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, f.legacy.ID)
+	edges, err := f.store.GetDelegationEdgesForDelegate(t.Context(), store.DelegationPrincipalAgent, f.legacy.ID)
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	require.Equal(t, store.EffectCeilingUnrecorded, edges[0].Kind)
