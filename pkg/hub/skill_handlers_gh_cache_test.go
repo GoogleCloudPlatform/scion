@@ -594,7 +594,7 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	// resolveGitHubSkill call returns, any flight it started has already been
 	// recorded here, with no timing window to race: unlike asserting on
 	// commitCalls (whose increment happens inside a different goroutine's
-	// HTTP handler, arbitrarily later), this needs no join or wait at all.
+	// HTTP handler, at some later point), this needs no join or wait at all.
 	var touchedMu sync.Mutex
 	touched := make(map[string]bool)
 	hook := func(key string) {
@@ -1323,4 +1323,66 @@ func TestSkillsResolve_GHCacheHitForCredentialedBranchRef(t *testing.T) {
 	assert.Equal(t, int64(2), apiCalls.Load(),
 		"second resolve of a credentialed branch ref must hit the cache: no new commit or contents calls")
 	assert.Equal(t, resp.Resolved[0], resp2.Resolved[0], "a cache hit must reproduce the miss response byte for byte")
+}
+
+// TestSkillsResolve_GHCacheEntryExpiryIsJittered reads back the ExpiresAt of
+// entries the resolve handler stored and checks the TTL was jittered on
+// write: every entry expires within the jitter band around the nominal TTL,
+// and at least one is visibly off the nominal TTL. Entries written together
+// then do not all expire at the same instant.
+func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "private-repo"
+		commitSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	client := enttest.NewClient(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(client)
+
+	gh := newFakeGitHub(t, owner, repo, "skills/any", commitSHA)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	// The refs name a branch, so entries use the branch TTL.
+	ttl := agent.DefaultResolutionCacheTTL
+	band := time.Duration(float64(ttl) * 0.10)
+	// The store may round times; allow a little slack on the band edges.
+	const slack = time.Second
+
+	type window struct{ before, after time.Time }
+	windows := map[string]window{}
+	for _, name := range []string{"one", "two", "three", "four", "five"} {
+		uri := "gh://" + owner + "/" + repo + "/" + name + "@main"
+		before := time.Now()
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+			ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID})
+		after := time.Now()
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		require.Empty(t, resp.Errors)
+		windows[uri] = window{before, after}
+	}
+
+	rows, err := client.GitHubResolutionCache.Query().All(context.Background())
+	require.NoError(t, err)
+	require.Len(t, rows, len(windows))
+
+	jittered := 0
+	for _, row := range rows {
+		w, ok := windows[row.OriginalURI]
+		require.True(t, ok, "unexpected cache row for %s", row.OriginalURI)
+		lo := w.before.Add(ttl - band - slack)
+		hi := w.after.Add(ttl + band + slack)
+		assert.False(t, row.ExpiresAt.Before(lo) || row.ExpiresAt.After(hi),
+			"%s: expires_at %v outside the jitter band [%v, %v]", row.OriginalURI, row.ExpiresAt, lo, hi)
+		// Outside the window an unjittered TTL would land in.
+		if row.ExpiresAt.Before(w.before.Add(ttl-slack)) || row.ExpiresAt.After(w.after.Add(ttl+slack)) {
+			jittered++
+		}
+	}
+	assert.Positive(t, jittered,
+		"no stored entry is off the nominal TTL; the TTL does not look jittered on write")
 }

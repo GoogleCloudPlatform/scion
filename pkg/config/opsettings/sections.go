@@ -35,10 +35,14 @@ type AccessSettings struct {
 
 // LifecycleSettings holds Layer-1 agent lifecycle settings.
 type LifecycleSettings struct {
-	AutoSuspendStalled    *bool  `json:"auto_suspend_stalled,omitempty"`
-	StalledThreshold      string `json:"stalled_threshold,omitempty"`
-	SoftDeleteRetention   string `json:"soft_delete_retention,omitempty"`
-	SoftDeleteRetainFiles *bool  `json:"soft_delete_retain_files,omitempty"`
+	AutoSuspendStalled         *bool  `json:"auto_suspend_stalled,omitempty"`
+	StalledThreshold           string `json:"stalled_threshold,omitempty"`
+	SoftDeleteRetention        string `json:"soft_delete_retention,omitempty"`
+	SoftDeleteRetainFiles      *bool  `json:"soft_delete_retain_files,omitempty"`
+	StartClaimLeaseTTL         string `json:"start_claim_lease_ttl,omitempty"`
+	StartMaxDuration           string `json:"start_max_duration,omitempty"`
+	StartUnconfirmedHold       string `json:"start_unconfirmed_hold,omitempty"`
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty"`
 }
 
 // MaintenanceSettings holds Layer-1 maintenance/admin-mode settings.
