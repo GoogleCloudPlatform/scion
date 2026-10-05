@@ -17,6 +17,8 @@ package opsettings
 import (
 	"bytes"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,6 +46,13 @@ func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 		"SCION_SERVER_BROKER_BROKERID":       "SCION_SERVER_BROKER_BROKER_ID",
 		"SCION_SERVER_HUB_ADMINEMAIL":        "SCION_SERVER_HUB_ADMINEMAILS",
 		"SCION_SERVER_AUTH_USER_ACCESS_MODE": "SCION_SERVER_AUTH_USERACCESSMODE",
+		// VersionedSettings spellings of CORS keys the hub reads from the
+		// flattened GlobalConfig fields.
+		"SCION_SERVER_HUB_CORS_ENABLED":         "SCION_SERVER_HUB_CORSENABLED",
+		"SCION_SERVER_HUB_CORS_MAX_AGE":         "SCION_SERVER_HUB_CORSMAXAGE",
+		"SCION_SERVER_HUB_CORS_ALLOWED_ORIGINS": "SCION_SERVER_HUB_CORSALLOWEDORIGINS",
+		"SCION_SERVER_BROKER_CORS_ENABLED":      "SCION_SERVER_RUNTIMEBROKER_CORSENABLED",
+		"SCION_SERVER_BROKER_CORS_MAX_AGE":      "SCION_SERVER_RUNTIMEBROKER_CORSMAXAGE",
 	}
 	var environ []string
 	for name := range cases {
@@ -75,6 +84,8 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		"SCION_SERVER_DATABASE_MAX_OPEN_CONNS",
 		"SCION_SERVER_NO_SUCH_SETTING",
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
+		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
+		"SCION_SERVER_LOG_FORMAT",
 	}
 	var environ []string
 	for _, n := range names {
@@ -97,7 +108,7 @@ func TestFindUnmatchedSettingsEnv_AcceptsValidNames(t *testing.T) {
 		}
 	}
 	// Names read directly with os.Getenv.
-	for name := range config.DirectServerEnvNames {
+	for _, name := range config.DirectServerEnvNameList() {
 		environ = append(environ, name+"=x")
 	}
 	environ = append(environ,
@@ -131,5 +142,35 @@ func TestWarnUnmatchedSettingsEnv_LogsNamesNotValues(t *testing.T) {
 	}
 	if strings.Contains(out, "secret") {
 		t.Errorf("warning leaks an env value:\n%s", out)
+	}
+}
+
+// TestFindUnmatchedSettingsEnv_CORSHintsBind checks that the CORS hints are
+// not just accepted by the detector but set the GlobalConfig fields the hub
+// reads.
+func TestFindUnmatchedSettingsEnv_CORSHintsBind(t *testing.T) {
+	for _, mode := range []string{"legacy", "settings"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if mode == "settings" {
+				if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+					[]byte("schema_version: \"1\"\nserver:\n  mode: workstation\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("SCION_SERVER_HUB_CORSMAXAGE", "4243")
+			t.Setenv("SCION_SERVER_RUNTIMEBROKER_CORSMAXAGE", "4244")
+			gc, err := config.LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.Hub.CORSMaxAge != 4243 || gc.RuntimeBroker.CORSMaxAge != 4244 {
+				t.Errorf("CORSMaxAge hub=%d broker=%d, want 4243/4244", gc.Hub.CORSMaxAge, gc.RuntimeBroker.CORSMaxAge)
+			}
+		})
 	}
 }

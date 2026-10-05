@@ -26,11 +26,12 @@ const (
 	seedEnvPrefix   = "SCION_SEED_"
 )
 
-// DirectServerEnvNames lists SCION_SERVER_* names that are read directly with
+// directServerEnvNames lists SCION_SERVER_* names that are read directly with
 // os.Getenv rather than through a settings loader, so no settings struct or
 // registry key matches them. FindUnmatchedSettingsEnv never flags these.
-// Keep this list in step with the os.Getenv call sites it names.
-var DirectServerEnvNames = map[string]bool{
+// Keep this list in step with the os.Getenv call sites it names;
+// TestDirectServerEnvNames_MatchGetenvCallSites guards the drift.
+var directServerEnvNames = map[string]bool{
 	"SCION_SERVER_ADMIN_MODE":          true, // cmd/server_foreground.go (break-glass admin mode)
 	"SCION_SERVER_MAINTENANCE_MESSAGE": true, // cmd/server_foreground.go
 	"SCION_SERVER_BASE_URL":            true, // cmd/server_foreground.go (hub endpoint, OAuth redirects)
@@ -40,12 +41,24 @@ var DirectServerEnvNames = map[string]bool{
 	"SCION_SERVER_REQUEST_LOG_PATH":    true, // pkg/util/logging/request_log.go
 }
 
-// renamedServerEnvNames maps SCION_SERVER_* names that the settings schema
-// used to advertise, but which reach no config the hub reads, to the
-// spelling that does (ptone/scion#1081). Some of these still bind to a
-// LoadVersionedSettings field the hub ignores, so the generic match would
-// not flag them; they are flagged explicitly.
-var renamedServerEnvNames = map[string]string{
+// DirectServerEnvNameList returns the directly-read SCION_SERVER_* names,
+// sorted.
+func DirectServerEnvNameList() []string {
+	out := make([]string, 0, len(directServerEnvNames))
+	for n := range directServerEnvNames {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// knownInertServerEnvNames maps SCION_SERVER_* names known to reach no
+// config the hub reads to the spelling that does, or "" if none does.
+// Most are names the settings schema used to advertise (ptone/scion#1081).
+// Some bind to a LoadVersionedSettings field the hub ignores, which the
+// generic match would accept (see serverEnvMatches), so they are flagged
+// explicitly.
+var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_HUB_ADMINEMAIL":                       "SCION_SERVER_HUB_ADMINEMAILS",
 	"SCION_SERVER_HUB_SOFT_DELETE_RETENTION":            "SCION_SERVER_HUB_SOFTDELETERETENTION",
 	"SCION_SERVER_HUB_SOFT_DELETE_RETAIN_FILES":         "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
@@ -75,6 +88,8 @@ var renamedServerEnvNames = map[string]string{
 	// No SCION_SERVER_* spelling sets the boot log level or format.
 	"SCION_SERVER_LOG_LEVEL":  "SCION_LOG_LEVEL",
 	"SCION_SERVER_LOG_FORMAT": "",
+	// server.env binds in VersionedSettings, but nothing reads it.
+	"SCION_SERVER_ENV": "",
 }
 
 // UnmatchedEnvName is a SCION_SERVER_* or SCION_SEED_* environment variable
@@ -89,11 +104,27 @@ type UnmatchedEnvName struct {
 // in environ (KEY=VALUE pairs, as from os.Environ; values are ignored) that
 // match nothing the hub reads.
 //
-// A SCION_SERVER_* name matches when it is in DirectServerEnvNames, or its
-// mapped key resolves to a Layer-1 registry key (isLayer1), a GlobalConfig
-// field, or a VersionedSettings field the hub reads from
-// LoadVersionedSettings. A name in renamedServerEnvNames is always reported. A SCION_SEED_* name matches only when its mapped key is a
-// Layer-1 registry key, since seed values only seed Layer-1 settings.
+// The policy is accept-by-default: a warning is only issued when the name
+// provably matches nothing, because a false warning on a working override
+// is worse than a missing one.
+//
+// A SCION_SERVER_* name matches when it is read directly with os.Getenv
+// (directServerEnvNames), or its mapped key resolves to a Layer-1 registry
+// key (isLayer1), a GlobalConfig field, or a VersionedSettings field that the
+// hub does not take from GlobalConfig or the opsettings snapshot instead. A
+// name in knownInertServerEnvNames is always reported. A SCION_SEED_* name
+// matches only when its mapped key is a Layer-1 registry key, since seed
+// values only seed Layer-1 settings.
+//
+// Known gaps (accepted but still without effect at the hub):
+//   - SCION_SERVER_HUB_PUBLICURL maps to the Layer-1 server.hub.public_url,
+//     which only feeds the admin server-config view; the hub's endpoint is
+//     GlobalConfig Hub.Endpoint (SCION_SERVER_HUB_ENDPOINT).
+//   - SCION_SERVER_OIDCLOGIN_* binds GlobalConfig only on the settings.yaml
+//     path; on the legacy server.yaml path the oidcLogin.* defaults shadow
+//     it (ptone/scion#3038).
+//   - Other VersionedSettings-only matches whose server reader is unknown
+//     to this helper are accepted (see serverEnvMatches).
 //
 // isLayer1 reports whether an opsettings koanf key is owned by a registry
 // section (opsettings.IsLayer1Key); it is a parameter because pkg/config
@@ -116,7 +147,7 @@ func FindUnmatchedSettingsEnv(environ []string, isLayer1 func(string) bool) []Un
 
 		switch {
 		case strings.HasPrefix(name, serverEnvPrefix):
-			if s, ok := renamedServerEnvNames[name]; ok {
+			if s, ok := knownInertServerEnvNames[name]; ok {
 				out = append(out, UnmatchedEnvName{Name: name, Suggestion: s})
 				continue
 			}
@@ -157,10 +188,10 @@ func WarnUnmatchedSettingsEnv(logger *slog.Logger, environ []string, isLayer1 fu
 }
 
 func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
-	if DirectServerEnvNames[name] {
+	if directServerEnvNames[name] {
 		return true
 	}
-	if _, renamed := renamedServerEnvNames[name]; renamed {
+	if _, renamed := knownInertServerEnvNames[name]; renamed {
 		return false
 	}
 	rest := strings.TrimPrefix(name, serverEnvPrefix)
@@ -173,10 +204,11 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if structPathExists(reflect.TypeOf(GlobalConfig{}), strings.Split(envKeyToConfigKey(rest), "."), matchFoldCase) {
 		return true
 	}
-	// A VersionedSettings match only counts for a key the hub reads from
-	// LoadVersionedSettings. Underscored spellings such as
-	// SCION_SERVER_HUB_ADMIN_EMAILS bind there, but the hub takes that key
-	// from GlobalConfig or the opsettings snapshot, so they do nothing.
+	// A VersionedSettings match is accepted unless the hub is known to read
+	// that key from GlobalConfig or the opsettings snapshot instead (accept
+	// by default). Underscored spellings such as
+	// SCION_SERVER_HUB_ADMIN_EMAILS bind in VersionedSettings, but the hub
+	// takes that key from the snapshot, so they do nothing and are flagged.
 	if vsKey := versionedEnvKeyMapper(name); vsKey != "" {
 		if structPathExists(reflect.TypeOf(VersionedSettings{}), strings.Split(vsKey, "."), matchExact) {
 			return VersionedSettingsReadServerKeys[vsKey] || !hubReadsKeyElsewhere(vsKey, isLayer1)
@@ -186,10 +218,13 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 }
 
 // VersionedSettingsReadServerKeys lists the server.* keys whose effective
-// value the hub takes from LoadVersionedSettings even though GlobalConfig
-// has a field for them: broker identity, resolved in
+// value is taken from LoadVersionedSettings even though GlobalConfig has a
+// field for them: broker identity, resolved at hub/broker startup in
 // cmd/server_foreground.go (resolveBrokerID, resolveBrokerName, the
-// auto_provide lookup), and broker_token via convertVersionedToLegacy.
+// auto_provide lookup). broker_token is read only by CLI paths
+// (Settings.Hub.BrokerToken via convertVersionedToLegacy, e.g. cmd/root.go
+// and cmd/hub.go), not hub startup; its VersionedSettings spelling is still
+// the only one that reaches any reader.
 var VersionedSettingsReadServerKeys = map[string]bool{
 	"server.broker.broker_id":       true,
 	"server.broker.broker_name":     true,
@@ -213,6 +248,10 @@ func hubReadsKeyElsewhere(key string, isLayer1 func(string) bool) bool {
 	segs := strings.Split(rest, ".")
 	if segs[0] == "broker" {
 		segs[0] = "runtimeBroker"
+	}
+	// GlobalConfig flattens cors.* into corsEnabled, corsMaxAge, ...
+	if n := len(segs); n >= 2 && segs[n-2] == "cors" {
+		segs = append(segs[:n-2], "cors"+segs[n-1])
 	}
 	return structPathExists(reflect.TypeOf(GlobalConfig{}), segs, matchIgnoringUnderscores)
 }
