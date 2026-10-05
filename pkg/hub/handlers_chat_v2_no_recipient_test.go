@@ -22,6 +22,10 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -239,4 +243,150 @@ func TestMatchHumanMentionIDs(t *testing.T) {
 	if got := matchHumanMentionIDs(nil, []string{"alice"}); got != nil {
 		t.Errorf("no members: got %v, want nil", got)
 	}
+}
+
+// requireDispatchedNotNoRecipient asserts the row kept dispatched and the
+// response carries no no_recipient state.
+func requireDispatchedNotNoRecipient(t *testing.T, label string, resp map[string]any, m *store.Message) {
+	t.Helper()
+	if m == nil || m.DispatchState != store.MessageDispatchDispatched {
+		t.Fatalf("%s: expected row dispatched, got %+v", label, m)
+	}
+	if v, ok := resp["dispatchState"]; ok && v != store.MessageDispatchDispatched {
+		t.Fatalf("%s: expected no no_recipient in response, got %v", label, v)
+	}
+}
+
+// DMs are never no_recipient: a user-to-user DM is addressed to its peer.
+func TestNoRecipient_UserDMStaysDispatched(t *testing.T) {
+	srv, s, _, _, _ := setupSendTest(t)
+	peer := &store.User{ID: api.NewUUID(), Email: "peer@example.com", DisplayName: "Peer",
+		Role: "member", Status: "active", Created: time.Now()}
+	if err := s.CreateUser(t.Context(), peer); err != nil {
+		t.Fatal(err)
+	}
+	key := "dm:user:" + peer.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, key, "")
+
+	code, resp, m := unreachableSend(t, srv, s, key, "hello there")
+	if code != 201 {
+		t.Fatalf("expected 201, got %d (body=%v)", code, resp)
+	}
+	requireDispatchedNotNoRecipient(t, "user DM", resp, m)
+}
+
+// An agent DM whose agent no longer exists falls through to the
+// human-to-human path as a DM; the DM guard keeps it out of no_recipient.
+func TestNoRecipient_AgentDMFallthroughNotNoRecipient(t *testing.T) {
+	srv, s, _, _, _ := setupSendTest(t)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	key := "dm:agent:" + api.NewUUID() + ":user:" + DevUserID
+	setDMConversationID(t, s, key, "")
+
+	code, resp, m := unreachableSend(t, srv, s, key, "hello")
+	if code != 201 {
+		t.Fatalf("expected 201, got %d (body=%v)", code, resp)
+	}
+	if m == nil || m.DispatchState == store.MessageDispatchNoRecipient {
+		t.Fatalf("expected a persisted row that is not no_recipient, got %+v", m)
+	}
+	if resp["dispatchState"] == store.MessageDispatchNoRecipient {
+		t.Fatalf("expected no no_recipient in response, got %v", resp)
+	}
+}
+
+// A transient routing-plan error means the message cannot be proven
+// agentless: keep the previous state instead of a permanent no_recipient.
+func TestNoRecipient_RoutingPlanErrorKeepsPreviousState(t *testing.T) {
+	srv, s, topicID, _, d := noRecipientSetup(t)
+	srv.store = &errListAgentsStore{Store: s, err: errors.New("list agents: connection reset by peer")}
+
+	_, resp, m := unreachableSend(t, srv, s, topicID, "thanks")
+	requireDispatchedNotNoRecipient(t, "plan error", resp, m)
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+}
+
+// A transient error looking up the topic default agent likewise keeps the
+// previous state.
+func TestNoRecipient_TransientDefaultLookupKeepsPreviousState(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	topicID := tid("norcpt-transient")
+	if err := wcs.CreateTopic(t.Context(), WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "transient",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: "ghost-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+	srv.store = &transientAgentLookupStore{Store: s, failSlug: "ghost-agent", err: errors.New("connection reset by peer")}
+
+	_, resp, m := unreachableSend(t, srv, s, topicID, "hello")
+	requireDispatchedNotNoRecipient(t, "transient default lookup", resp, m)
+}
+
+// replySend posts a quote-reply to replyToID in topicID.
+func replySend(t *testing.T, srv *Server, s store.Store, topicID, content, replyToID string) (map[string]any, *store.Message) {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": content, "reply_to_id": replyToID})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	id, _ := resp["id"].(string)
+	m, _ := s.GetMessage(t.Context(), id)
+	return resp, m
+}
+
+// A quote-reply to another person's message in the thread is addressed to
+// that person: it keeps dispatched. A quote-reply to your own message does
+// not count and is no_recipient.
+func TestNoRecipient_QuoteReplyToHuman(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	d := &brokerMockDispatcher{}
+	srv.SetDispatcher(d)
+	topicID := tid("norcpt-quote")
+	if err := wcs.CreateTopic(t.Context(), WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "quote",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	otherMsg := seedHumanMessage(t, s, proj, topicID, api.NewUUID(), "from someone else")
+	resp, m := replySend(t, srv, s, topicID, "agreed", otherMsg)
+	requireDispatchedNotNoRecipient(t, "reply to other human", resp, m)
+
+	ownMsg := seedHumanMessage(t, s, proj, topicID, DevUserID, "my earlier note")
+	resp, m = replySend(t, srv, s, topicID, "following up", ownMsg)
+	if m == nil || m.DispatchState != store.MessageDispatchNoRecipient {
+		t.Fatalf("reply to own message: expected row no_recipient, got %+v", m)
+	}
+	if resp["dispatchState"] != store.MessageDispatchNoRecipient {
+		t.Fatalf("reply to own message: expected response no_recipient, got %v", resp["dispatchState"])
+	}
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+}
+
+// errReplyLookupStore fails message lookups by ID.
+type errReplyLookupStore struct {
+	store.Store
+}
+
+func (e *errReplyLookupStore) GetMessagesByIDs(ctx context.Context, ids []string) (map[string]*store.Message, error) {
+	return nil, errors.New("connection reset by peer")
+}
+
+// A failed lookup of the quoted message keeps the previous state.
+func TestNoRecipient_ReplyLookupErrorKeepsPreviousState(t *testing.T) {
+	srv, s, topicID, _, _ := noRecipientSetup(t)
+	srv.store = &errReplyLookupStore{Store: s}
+
+	resp, m := replySend(t, srv, s, topicID, "re", api.NewUUID())
+	requireDispatchedNotNoRecipient(t, "reply lookup error", resp, m)
 }

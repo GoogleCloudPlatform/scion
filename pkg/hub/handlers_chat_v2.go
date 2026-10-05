@@ -1048,6 +1048,10 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// instead of silently falling through to a human-to-human message
 	// (nc-delivery-unreachable) when no leading @mention overrides it.
 	var unresolvedDefaultAgent *store.Agent
+	// routingLookupFailed records a transient store error while resolving
+	// recipients. The message then cannot be proven agentless, so it is
+	// never marked no_recipient.
+	routingLookupFailed := false
 	if isDM {
 		if agentID := parseAgentDMKey(key); agentID != "" {
 			if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
@@ -1056,6 +1060,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	} else if projectID != "" {
 		topic, err := wcs.GetTopic(ctx, key)
+		if err != nil {
+			routingLookupFailed = true
+		}
 		if err == nil && topic != nil && topic.DefaultAgent != "" {
 			da, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
 			// foreignProjectDefault stays out of scope here (DEF-31): a
@@ -1096,6 +1103,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 					da = nil
 				}
 			}
+			routingLookupFailed = routingLookupFailed || transientLookupErr
 			if !transientLookupErr {
 				if daErr == nil && da != nil {
 					defaultAgent = da
@@ -1133,6 +1141,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	if projectID != "" {
 		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
 		if planErr != nil {
+			routingLookupFailed = true
 			slog.Error("agent routing resolution failed", "error", planErr)
 			// Fall through: plan.Agents will be empty, triggering human-to-human.
 		}
@@ -1173,7 +1182,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// plan reflects a routing-plan failure, not the deleted default, so keep
 	// the pre-existing human-to-human error handling below instead.
 	if unresolvedDefaultAgent != nil && planErr == nil {
-		msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, false, plan.MentionNames, attachmentRefs, now, body.ReplyToID,
+		msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, false, false, plan.MentionNames, attachmentRefs, now, body.ReplyToID,
 			&unreachableAgentOverride{
 				AgentSlug: unresolvedDefaultAgent.Slug,
 				AgentID:   unresolvedDefaultAgent.ID,
@@ -1188,7 +1197,11 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// --- Human-to-human message ---
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
+	// No agent recipient was resolved. A thread message is no_recipient
+	// unless a lookup failed or it is addressed to a person.
+	noRecipient := !isDM && !routingLookupFailed &&
+		s.threadMessageUnaddressed(ctx, key, projectID, plan.MentionNames, body.ReplyToID, user.ID())
+	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman
 	}
@@ -1979,7 +1992,7 @@ type unreachableAgentOverride struct {
 // path. unreachable is only ever used for the topic case (isDM is always
 // false alongside it). Returns the persisted message ID (empty on error).
 func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
+	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
 	unreachable *unreachableAgentOverride) string {
 
 	ctx := r.Context()
@@ -2047,10 +2060,9 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		reason := unreachable.Reason
 		storeMsg.DispatchFailureReason = &reason
-	} else if !isDM && !s.mentionsProjectHuman(ctx, projectID, mentionNames, user.ID()) {
-		// A thread message that reaches this point resolved no agent
-		// recipient. Unless it is addressed to a mentioned project member,
-		// nobody was given it, so it must not read "dispatched".
+	} else if noRecipient {
+		// No agent and no person was given this thread message, so it
+		// must not read "dispatched".
 		storeMsg.DispatchState = store.MessageDispatchNoRecipient
 	}
 
