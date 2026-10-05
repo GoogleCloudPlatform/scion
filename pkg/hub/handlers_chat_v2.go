@@ -3058,7 +3058,8 @@ func (s *Server) writeConversationReadState(
 // recent messages, newest first — the (created_at, id) DESC order
 // ListMessages uses by default, the same order handleConversationRead's
 // monotonic guard reasons in. It resolves the same filter
-// handleConversationHistory and nativeDMLastMessage use, honouring the
+// handleConversationHistory and the DM list (nativeDMLastMessages) use,
+// honouring the
 // ConversationEnvelopeSwitch when it is on so mark-unread sees the same
 // message set the history view and the DM list's "last message" do.
 //
@@ -3073,10 +3074,11 @@ func (s *Server) conversationRecentMessages(
 ) ([]store.Message, error) {
 	var filter store.MessageFilter
 	if isDM {
-		// Mention fan-out copies are excluded, matching nativeDMLastMessage —
+		// Mention fan-out copies are excluded, matching nativeDMLastMessages —
 		// chat-thread does not display them, so they must not count as the
 		// "latest message" mark-unread reasons about.
-		filter = store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
+		filter = store.MessageFilter{Channel: nativeDMMessageScope.Channel, ThreadID: key,
+			ExcludeType: nativeDMMessageScope.ExcludeType}
 		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 			parts := strings.Split(key, ":")
 			if len(parts) != 5 {
@@ -3087,7 +3089,7 @@ func (s *Server) conversationRecentMessages(
 				return nil, err
 			}
 			if conv == nil {
-				// Never-used DM: matches nativeDMLastMessage's prior
+				// Never-used DM: matches nativeDMLastMessages' prior
 				// behaviour exactly (nil, nil) rather than falling back to
 				// a ThreadID filter, which would show unrelated legacy rows
 				// once envelope mode is the source of truth.
@@ -3649,27 +3651,105 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // DM Endpoints
 // ---------------------------------------------------------------------------
 
-// nativeDMLastMessage uses the same scope as the history endpoint, not the
-// cross-channel activity watermark. That watermark can point to an external
-// message, a deleted message, or one moved into a promoted thread, none of
-// which can be acknowledged by viewing this DM. Mention fan-out copies are
-// also excluded because chat-thread does not display them.
+// nativeDMMessageScope is the message scope shared by every native DM
+// "latest message" read: web channel only, mention fan-out copies excluded.
+// It matches the history endpoint's scope, not the cross-channel activity
+// watermark, which can point to an external message, a deleted message, or
+// one moved into a promoted thread — none of which viewing the DM can
+// acknowledge. Mention copies are excluded because chat-thread does not
+// display them.
 //
-// Delegates to conversationRecentMessages (limit 1) rather than keeping a
-// second copy of this filter: the two are used together — this to know
-// "unread compared to what", mark-unread's predecessor lookup to know
-// "unread from what" — and a mention-exclusion (or envelope-switch) fix
-// applied to only one would silently reintroduce a mention row masking
-// mark-unread's effect.
-func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
+// conversationRecentMessages (mark-unread's "unread from what") and
+// nativeDMLastMessages (the DM list's "unread compared to what") both build
+// their filters from it, so a mention-exclusion fix cannot reach only one
+// of them and let a mention row mask mark-unread's effect.
+var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeType: messages.TypeMention}
+
+// nativeDMLastMessages returns the last visible message of each DM for the
+// DM list — for every key, the message conversationRecentMessages(key,
+// isDM, limit 1) would return — with a constant number of store queries:
+// one latest-message lookup, plus one conversation lookup when the
+// conversation envelope switch is on. The result maps a conversation key to
+// its last visible message; keys with no visible message are absent.
+//
+// A failed batched read is logged and degrades rather than failing the
+// list: every DM it covered is listed without last-message enrichment.
+func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[string]*store.Message {
+	result := make(map[string]*store.Message, len(keys))
+	if len(keys) == 0 {
+		return result
+	}
+
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.ConversationEnvelopeSwitch() {
+		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
+		if err != nil {
+			slog.Warn("chat dms: batched last-message read failed",
+				"dms", len(keys), "error", err)
+			return result
+		}
+		for _, key := range keys {
+			if msg := latest[key]; msg != nil {
+				result[key] = msg
+			}
+		}
+		return result
+	}
+
+	// Envelope mode: resolve each key to its DM conversation exactly as
+	// conversationRecentMessages does, then read by conversation ID. A key
+	// that does not resolve (malformed, or a never-used DM) has no last
+	// message.
+	refByKey := make(map[string]string, len(keys))
+	refs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.Split(key, ":")
+		if len(parts) != 5 {
+			slog.Warn("chat dms: invalid DM key, listed without last message",
+				"key", key, "error", fmt.Errorf("invalid DM key: %q", key))
+			continue
+		}
+		ref, ok := messaging.DMReadExternalRef(s.messageLog, parts[1], parts[2], parts[3], parts[4])
+		if !ok {
+			continue
+		}
+		refByKey[key] = ref
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return result
+	}
+	convs, err := s.store.GetConversationsByExternalRefs(ctx, "native", refs)
 	if err != nil {
-		return nil, err
+		slog.Warn("chat dms: batched conversation read failed",
+			"dms", len(refs), "error", err)
+		return result
 	}
-	if len(recent) == 0 {
-		return nil, nil
+	convIDs := make([]string, 0, len(convs))
+	for _, conv := range convs {
+		if conv != nil {
+			convIDs = append(convIDs, conv.ID)
+		}
 	}
-	return &recent[0], nil
+	if len(convIDs) == 0 {
+		return result
+	}
+	latest, err := s.store.LatestMessagesByConversationIDs(ctx, convIDs, nativeDMMessageScope)
+	if err != nil {
+		slog.Warn("chat dms: batched last-message read failed",
+			"dms", len(convIDs), "error", err)
+		return result
+	}
+	for key, ref := range refByKey {
+		conv := convs[ref]
+		if conv == nil {
+			continue
+		}
+		if msg := latest[conv.ID]; msg != nil {
+			result[key] = msg
+		}
+	}
+	return result
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.
@@ -3702,6 +3782,58 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every per-DM lookup below is batched across the whole list, so the
+	// request costs a constant number of store queries however many DMs the
+	// caller has: one each for last messages (two in envelope mode), user
+	// peers, agent peers, and read states.
+	keys := make([]string, 0, len(dms))
+	var userPeerIDs, agentPeerIDs []string
+	for _, dm := range dms {
+		keys = append(keys, dm.ConversationKey)
+		switch dm.PeerKind {
+		case "user":
+			userPeerIDs = append(userPeerIDs, dm.PeerID)
+		case "agent":
+			agentPeerIDs = append(agentPeerIDs, dm.PeerID)
+		}
+	}
+
+	lastMessages := s.nativeDMLastMessages(ctx, keys)
+
+	// Peer enrichment is best effort, as it was per DM: a failed lookup
+	// leaves the peer fields empty rather than failing the list.
+	var peerUsers map[string]*store.User
+	if len(userPeerIDs) > 0 {
+		var err error
+		if peerUsers, err = s.store.GetUsersByIDs(ctx, userPeerIDs); err != nil {
+			slog.Warn("chat dms: batched peer-user read failed",
+				"users", len(userPeerIDs), "error", err)
+		}
+	}
+	var peerAgents map[string]*store.Agent
+	if len(agentPeerIDs) > 0 {
+		var err error
+		// Including soft-deleted agents, as GetAgent does: a DM with a
+		// deleted agent keeps showing that agent's name.
+		if peerAgents, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, agentPeerIDs); err != nil {
+			slog.Warn("chat dms: batched peer-agent read failed",
+				"agents", len(agentPeerIDs), "error", err)
+		}
+	}
+
+	// Read state for the unread indicator and muted flag.
+	readStates := make(map[string]WebChatReadState, len(keys))
+	if len(keys) > 0 {
+		states, err := wcs.GetReadStates(ctx, user.ID(), keys)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM read state", nil)
+			return
+		}
+		for _, rs := range states {
+			readStates[rs.ConversationKey] = rs
+		}
+	}
+
 	entries := make([]chatDMEntry, 0, len(dms))
 	for _, dm := range dms {
 		entry := chatDMEntry{
@@ -3710,38 +3842,27 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 			PeerKind:        dm.PeerKind,
 			LastActivityAt:  dm.LastActivityAt,
 		}
-		lastMessage, err := s.nativeDMLastMessage(ctx, dm.ConversationKey)
-		if err != nil {
-			slog.Warn("failed to fetch DM last message", "key", dm.ConversationKey, "error", err)
-			// Continue without last message enrichment for this DM
-		} else if lastMessage != nil {
+		if lastMessage := lastMessages[dm.ConversationKey]; lastMessage != nil {
 			entry.LastMessageID = lastMessage.ID
 			entry.LastMessagePreview = truncatePreview(lastMessage.Msg, 120)
 			entry.LastMessageSender = lastMessage.Sender
 		}
 
-		// Enrich with peer info.
 		switch dm.PeerKind {
 		case "user":
-			if peerUser, err := s.store.GetUser(ctx, dm.PeerID); err == nil {
+			if peerUser := peerUsers[dm.PeerID]; peerUser != nil {
 				entry.PeerName = peerUser.DisplayName
 				entry.PeerEmail = peerUser.Email
 				entry.PeerAvatar = peerUser.AvatarURL
 			}
 		case "agent":
-			if peerAgent, err := s.store.GetAgent(ctx, dm.PeerID); err == nil {
+			if peerAgent := peerAgents[dm.PeerID]; peerAgent != nil {
 				entry.PeerName = peerAgent.Name
 				entry.PeerSlug = peerAgent.Slug
 			}
 		}
 
-		// Get read state for unread indicator.
-		rs, err := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM read state", nil)
-			return
-		}
-		if rs != nil {
+		if rs, ok := readStates[dm.ConversationKey]; ok {
 			entry.LastReadMessageID = rs.LastReadMessageID
 			entry.Muted = rs.Muted
 		}

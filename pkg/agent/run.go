@@ -145,6 +145,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
+	// mints one per create/start dispatch; local/CLI mode and older hubs
+	// send none, so mint it here instead. It is fixed this early so
+	// provisioning can record it as the run that owns the agent's files
+	// (ptone/scion#2675), before the container exists.
+	if opts.RunID == "" {
+		opts.RunID = uuid.NewString()
+	}
+	ctx = api.ContextWithRunID(ctx, opts.RunID)
+
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
@@ -180,6 +190,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
+	}
+
+	// Record this run as the owner of an already provisioned agent's files
+	// (provision-only, a restart, a resume) as soon as the previous run's
+	// container is gone (ptone/scion#2675). From here on the hub keeps this
+	// run even if the start fails, so the files must name it too, or a
+	// delete for this run would leave them behind. A fresh provision below
+	// records it as it writes agent-info.json; without agent-info.json this
+	// is a no-op.
+	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+			"agent", opts.Name, "run_id", opts.RunID, "error", err)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
@@ -1405,7 +1427,7 @@ authDone:
 	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
 		homeStorageProfile = finalScionCfg.Info.Profile
 	}
-	if _, err := resolveHomeStorage(homeStorageInput{
+	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
 		Slug:         slug,
@@ -1420,8 +1442,17 @@ authDone:
 			}
 			return loadHomeStorageSettings()
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
+	}
+	homeStorage, err := prepareHomeStorage(homePlan, hubDispatchedProjectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	homeStorageBackend := ""
+	if homeStorage != nil {
+		homeStorageBackend = runtime.HomeStorageNFS
 	}
 
 	if len(sharedDirVolumes) > 0 {
@@ -1624,13 +1655,8 @@ authDone:
 		}
 	}
 
-	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
-	// mints one per create/start dispatch; local/CLI mode and older hubs
-	// send none, so mint it here instead.
+	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
-	if runID == "" {
-		runID = uuid.NewString()
-	}
 	// SCION_LAUNCH_ID carries the same value as the run label, so the
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
@@ -1798,6 +1824,8 @@ authDone:
 		TrustedHubEndpoint: trustedHubEndpoint,
 		SharedDirs:         effectiveSharedDirs,
 		SharedDirStorage:   sharedDirStorage,
+		HomeStorageBackend: homeStorageBackend,
+		HomeStorage:        homeStorage,
 		BrokerMode:         opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),

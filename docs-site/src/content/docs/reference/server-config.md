@@ -435,14 +435,14 @@ server:
 
 Selects where the home directory of Kubernetes agents lives. With the default `local` backend the home is inside the pod and is filled from the broker's copy at every start. With `nfs`, each agent's home is a directory on the NFS export of its profile's [shared-dir storage](#shared-directory-storage-servershared_dir_storage), kept across stops, restarts and pod replacements.
 
-The `nfs` backend is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set; in this version a start that resolves to `nfs` fails with an error that says the feature is not yet available.
+The `nfs` backend is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set. The export's group must be the pod group (gid 1000). See [Persistent Agent Home](/scion/hosted/ha/kubernetes/#persistent-agent-home-nfs) for how the home is created and used.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `backend` | string | `local` | `local` or `nfs`. A runtime entry or profile can override it with `home_storage_backend`. |
 | `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at the shared-dir storage `mount_root`). A runtime entry or profile can override it with `home_storage_leaf`. |
 | `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
-| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. |
+| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. Keep `stop_grace_seconds` plus this below 90 (the hub's start window; the broker request timeout is 120); the server warns at startup and `scion config validate` warns when it is not. |
 | `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
 | `allow_incomplete_phases` | bool | `false` | Development only. Allows the `nfs` backend while the feature is incomplete. |
 
