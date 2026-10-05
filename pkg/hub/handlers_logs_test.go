@@ -257,11 +257,6 @@ func TestAgentCloudLogOptions_QueryAndStreamAgree(t *testing.T) {
 			query: url.Values{},
 		},
 		{
-			name:  "agent without project",
-			agent: &store.Agent{ID: "8f0c2a4e-agent"},
-			query: url.Values{},
-		},
-		{
 			name:  "with severity and broker filters",
 			agent: &store.Agent{ID: "8f0c2a4e-agent", ProjectID: "proj-123"},
 			query: url.Values{"severity": {"ERROR"}, "broker_id": {"broker-1"}},
@@ -310,5 +305,81 @@ func TestAgentCloudLogListOptions_ParsesRange(t *testing.T) {
 	}
 	if opts.HubName != "hub-a" || opts.AgentID != "a1" {
 		t.Errorf("unexpected base options: %+v", opts)
+	}
+}
+
+// fakeLogQuerier records the options the handlers pass to the log
+// query service.
+type fakeLogQuerier struct {
+	queryOpts []LogQueryOptions
+	tailOpts  []LogQueryOptions
+}
+
+func (f *fakeLogQuerier) Query(_ context.Context, opts LogQueryOptions) (*LogQueryResult, error) {
+	f.queryOpts = append(f.queryOpts, opts)
+	return &LogQueryResult{}, nil
+}
+
+func (f *fakeLogQuerier) Tail(_ context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error) {
+	f.tailOpts = append(f.tailOpts, opts)
+	ch := make(chan CloudLogEntry)
+	close(ch) // end the stream at once
+	return ch, func() {}, nil
+}
+
+func (f *fakeLogQuerier) GCPProjectID() string { return "gcp-proj" }
+
+func (f *fakeLogQuerier) Close() error { return nil }
+
+// TestHandleAgentCloudLogs_HandlersBuildSameFilter checks, through the
+// HTTP handlers, that the list and stream endpoints pass the same filter
+// to the log query service, with no project_id clause, and that the list
+// endpoint keeps its paging and time-range options.
+func TestHandleAgentCloudLogs_HandlersBuildSameFilter(t *testing.T) {
+	srv, s := testServer(t)
+	fake := &fakeLogQuerier{}
+	srv.logQueryService = fake
+	agent := createTestAgent(t, s)
+
+	params := url.Values{
+		"severity":  {"ERROR"},
+		"broker_id": {"broker-1"},
+		"tail":      {"25"},
+		"since":     {"2026-01-02T03:04:05Z"},
+		"until":     {"2026-01-03T03:04:05Z"},
+	}.Encode()
+	for _, path := range []string{
+		"/api/v1/agents/" + agent.ID + "/cloud-logs?" + params,
+		"/api/v1/agents/" + agent.ID + "/cloud-logs/stream?" + params,
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, body = %s", path, w.Code, w.Body.String())
+		}
+	}
+
+	if len(fake.queryOpts) != 1 || len(fake.tailOpts) != 1 {
+		t.Fatalf("calls: Query = %d, Tail = %d, want 1 each", len(fake.queryOpts), len(fake.tailOpts))
+	}
+	list, stream := fake.queryOpts[0], fake.tailOpts[0]
+
+	listFilter := BuildLogFilter(list, "gcp-proj")
+	streamFilter := BuildLogFilter(stream, "gcp-proj")
+	if listFilter != streamFilter {
+		t.Errorf("list and stream filters differ:\n list:   %s\n stream: %s", listFilter, streamFilter)
+	}
+	for name, f := range map[string]string{"list": listFilter, "stream": streamFilter} {
+		if strings.Contains(f, "labels.project_id") {
+			t.Errorf("%s filter must not narrow on project_id: %s", name, f)
+		}
+		if !strings.Contains(f, `labels.agent_id = "`+agent.ID+`"`) {
+			t.Errorf("%s filter missing agent_id clause: %s", name, f)
+		}
+	}
+	if list.Tail != 25 || list.Since.IsZero() || list.Until.IsZero() {
+		t.Errorf("list options lost paging or time range: %+v", list)
 	}
 }
