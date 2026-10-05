@@ -676,7 +676,7 @@ func TestQuickstartReadyMessage(t *testing.T) {
 		{"degraded at deadline", true, parse(`{"status":"degraded","hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`),
 			"  Warning: server is up but degraded: colocated_broker: unhealthy: registration failed — see server log; restart after fixing the broker config", true},
 		{"unhealthy", false, parse(`{"status":"unhealthy","hub":{"status":"unhealthy","checks":{"database":"unhealthy"}}}`),
-			"  (server is up but unhealthy: database: unhealthy — open the URL manually; see server log)", false},
+			"  (server is unhealthy: database: unhealthy — see server log)", false},
 		{"stale degraded (answered, then stopped)", false, parse(`{"status":"degraded","hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`),
 			"  (server stopped answering /healthz; last status degraded: colocated_broker: unhealthy: registration failed — see server log)", false},
 		{"never answered", false, healthProbeResponse{}, "  (server not yet ready — open the URL manually once it starts)", false},
@@ -715,11 +715,83 @@ func TestServerStatusInfoJSON(t *testing.T) {
 	assert.Equal(t, "colocated_broker: unhealthy: registration failed", got["webHealthReason"])
 	assert.NotContains(t, got, "hubDegradedReason")
 
+	data, err = json.Marshal(serverStatusInfo{BrokerRunning: true, BrokerStatus: "degraded", BrokerHealthReason: "nfs_mounts: unhealthy: x"})
+	require.NoError(t, err)
+	got = nil
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "degraded", got["brokerStatus"])
+	assert.Equal(t, "nfs_mounts: unhealthy: x", got["brokerHealthReason"])
+
 	data, err = json.Marshal(serverStatusInfo{DaemonRunning: true, HubRunning: true, WebRunning: true})
 	require.NoError(t, err)
 	got = nil
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"hubStatus", "webStatus", "hubHealthReason", "webHealthReason"} {
+	for _, k := range []string{"hubStatus", "webStatus", "brokerStatus", "hubHealthReason", "webHealthReason", "brokerHealthReason"} {
 		assert.NotContains(t, got, k, "a healthy server omits %s", k)
 	}
+}
+
+// TestProbeServerStatus_CombinedModeBrokerOnlyDegraded (review a3 R2): a
+// composite degraded only by the co-located broker, with a healthy nested
+// hub, must not pin the broker's problem on the Hub line. The Hub is
+// running with no reason, the Web line carries the composite, and the
+// Runtime Broker line names the broker's problem from its own /healthz.
+func TestProbeServerStatus_CombinedModeBrokerOnlyDegraded(t *testing.T) {
+	webSrv := serveHealth(t, `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"database":"healthy","colocated_broker":"healthy"}},"broker":{"status":"degraded","checks":{"docker":"available","nfs_mounts":"unhealthy: share1 not mounted"}}}`)
+	brokerSrv := serveHealth(t, `{"status":"degraded","version":"0.1.0","uptime":"1m0s","checks":{"docker":"available","nfs_mounts":"unhealthy: share1 not mounted"}}`)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status := probeServerStatus(client, webSrv.URL, unreachableHTTPURL(t), brokerSrv.URL)
+
+	assert.True(t, status.HubRunning)
+	assert.Empty(t, status.HubStatus, "the hub itself is healthy")
+	assert.Empty(t, status.HubHealthReason, "a broker-only problem must not be reported against the Hub")
+	assert.True(t, status.WebRunning)
+	assert.Equal(t, "degraded", status.WebStatus)
+	assert.Equal(t, "broker.nfs_mounts: unhealthy: share1 not mounted", status.WebHealthReason)
+	assert.True(t, status.BrokerRunning)
+	assert.Equal(t, "degraded", status.BrokerStatus)
+	assert.Equal(t, "nfs_mounts: unhealthy: share1 not mounted", status.BrokerHealthReason)
+
+	assert.Equal(t, []string{
+		"  Hub API:         running",
+		"  Runtime Broker:  running, degraded (nfs_mounts: unhealthy: share1 not mounted) — see server log",
+		"  Web Frontend:    running, degraded (broker.nfs_mounts: unhealthy: share1 not mounted) — see server log",
+	}, formatServerStatusComponents(status))
+}
+
+// TestProbeServerStatus_BrokerProbe: the broker's own /healthz answer gives
+// its line — healthy is plain running; degraded with no qualifying check
+// falls back to the bare status.
+func TestProbeServerStatus_BrokerProbe(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	healthy := serveHealth(t, `{"status":"healthy","checks":{"docker":"available"}}`)
+	st := probeServerStatus(client, unreachableHTTPURL(t), unreachableHTTPURL(t), healthy.URL)
+	assert.True(t, st.BrokerRunning)
+	assert.Empty(t, st.BrokerStatus)
+	assert.Empty(t, st.BrokerHealthReason)
+
+	bare := serveHealth(t, `{"status":"degraded","checks":{"docker":"available"}}`)
+	st = probeServerStatus(client, unreachableHTTPURL(t), unreachableHTTPURL(t), bare.URL)
+	assert.True(t, st.BrokerRunning)
+	assert.Equal(t, "degraded", st.BrokerStatus)
+	assert.Equal(t, "status: degraded", st.BrokerHealthReason)
+}
+
+// TestProbeServerStatus_CombinedModeHubDegradedBrokerHealthy: the converse —
+// a hub-side problem stays on the Hub line (from the nested hub) and the Web
+// line, not the broker's.
+func TestProbeServerStatus_CombinedModeHubDegradedBrokerHealthy(t *testing.T) {
+	webSrv := serveHealth(t, `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"database":"healthy","colocated_broker":"unhealthy: registration failed"}},"broker":{"status":"healthy","checks":{"docker":"available"}}}`)
+	brokerSrv := serveHealth(t, `{"status":"healthy","checks":{"docker":"available"}}`)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status := probeServerStatus(client, webSrv.URL, unreachableHTTPURL(t), brokerSrv.URL)
+
+	assert.True(t, status.HubRunning)
+	assert.Equal(t, "degraded", status.HubStatus)
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.HubHealthReason)
+	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.WebHealthReason)
+	assert.Empty(t, status.BrokerHealthReason)
 }

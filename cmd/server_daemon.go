@@ -524,23 +524,45 @@ func nonHealthyChecks(health healthProbeResponse) []string {
 		add(health.Hub.Checks)
 	}
 	if b := health.Broker; b != nil && b.Status != "" && b.Status != probeStatusHealthy {
-		// Same rule the broker uses to degrade itself
-		// (pkg/runtimebroker/handlers.go): a check value other than
-		// "available" or "healthy" is a problem. Name those; fall back to
-		// the bare broker status only when none qualifies.
-		named := false
-		for k, v := range b.Checks {
-			if v != "available" && v != probeStatusHealthy {
-				out = append(out, "broker."+k+": "+v)
-				named = true
-			}
-		}
-		if !named {
+		problems := brokerProblemChecks(b.Checks)
+		if len(problems) == 0 {
 			out = append(out, "broker: "+b.Status)
+		}
+		for _, p := range problems {
+			out = append(out, "broker."+p)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// brokerProblemChecks returns a broker's problem checks as sorted
+// "key: value" strings, using the rule the broker itself degrades on
+// (pkg/runtimebroker/handlers.go): a value other than "available" or
+// "healthy" is a problem. Broker check values are not "healthy"-valued
+// (e.g. docker: "available"), so nonHealthyChecks' hub rule does not apply.
+func brokerProblemChecks(checks map[string]string) []string {
+	var out []string
+	for k, v := range checks {
+		if v != "available" && v != probeStatusHealthy {
+			out = append(out, k+": "+v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// brokerProblemReason renders a non-healthy broker's own /healthz answer for
+// its status line: its problem checks, or "status: <status>" when none
+// qualifies. "" when healthy.
+func brokerProblemReason(health healthProbeComponent) string {
+	if health.Status == "" || health.Status == probeStatusHealthy {
+		return ""
+	}
+	if problems := brokerProblemChecks(health.Checks); len(problems) > 0 {
+		return strings.Join(problems, "; ")
+	}
+	return "status: " + health.Status
 }
 
 // healthProblemReason renders nonHealthyChecks as a single human-readable
@@ -580,11 +602,13 @@ type serverStatusInfo struct {
 	HubRunning    bool `json:"hubRunning,omitempty"`
 	BrokerRunning bool `json:"brokerRunning,omitempty"`
 	WebRunning    bool `json:"webRunning,omitempty"`
-	// HubStatus/WebStatus carry the composite /healthz status string when
-	// the component answered but was not healthy ("degraded" or
-	// "unhealthy"); empty when healthy or not detected.
-	HubStatus string `json:"hubStatus,omitempty"`
-	WebStatus string `json:"webStatus,omitempty"`
+	// HubStatus/WebStatus carry the component's /healthz status string when
+	// it answered but was not healthy ("degraded" or "unhealthy"); empty
+	// when healthy or not detected. In combined mode WebStatus is the
+	// composite status and HubStatus the nested hub's own.
+	HubStatus    string `json:"hubStatus,omitempty"`
+	WebStatus    string `json:"webStatus,omitempty"`
+	BrokerStatus string `json:"brokerStatus,omitempty"`
 	// HubHealthReason names the non-healthy checks (see
 	// healthProblemReason, e.g. "colocated_broker: unhealthy: registration
 	// failed") when either probe (the combined web+hub probe on 8080, or the
@@ -598,6 +622,11 @@ type serverStatusInfo struct {
 	// web server running at all) does not get an incorrect "Web Frontend:
 	// degraded" line just because the Hub is degraded.
 	WebHealthReason string `json:"webHealthReason,omitempty"`
+	// BrokerHealthReason names a degraded broker's problem checks from its
+	// own /healthz (see brokerProblemReason); BrokerStatus holds its
+	// non-healthy status. Both empty when the broker is healthy or not
+	// detected.
+	BrokerHealthReason string `json:"brokerHealthReason,omitempty"`
 }
 
 // probeServerStatus probes the web, hub, and broker health endpoints at the
@@ -651,14 +680,21 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 					// degraded therefore stays "not detected" here, as
 					// before this change; only bodies with a nested hub are
 					// treated as the scion composite.
-					up := probeStatusIsUp(health.Status)
-					status.WebRunning = up
-					status.HubRunning = up
+					// The Web fields carry the composite (web server's own
+					// answer, which folds in hub and broker). The Hub fields
+					// come from the nested hub only, so a broker-only
+					// degradation is not pinned on the Hub line; it shows on
+					// the Web line here and on the Runtime Broker line from
+					// the broker's own probe below.
+					status.WebRunning = probeStatusIsUp(health.Status)
 					status.WebStatus = health.Status
-					status.HubStatus = health.Status
-					reason := healthProblemReason(health)
-					status.HubHealthReason = reason
-					status.WebHealthReason = reason
+					status.WebHealthReason = healthProblemReason(health)
+					hub := healthProbeResponse{Status: health.Hub.Status, Checks: health.Hub.Checks}
+					status.HubRunning = probeStatusIsUp(hub.Status)
+					if hub.Status != probeStatusHealthy {
+						status.HubStatus = hub.Status
+						status.HubHealthReason = healthProblemReason(hub)
+					}
 				}
 			}
 		}
@@ -700,11 +736,16 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 		body, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
+			var health healthProbeComponent
 			if json.Unmarshal(body, &health) == nil {
+				// Any parseable answer means the broker is running (it only
+				// ever reports healthy or degraded). A degraded broker
+				// names its problem checks on its own line.
 				status.BrokerRunning = true
+				if health.Status != "" && health.Status != probeStatusHealthy {
+					status.BrokerStatus = health.Status
+					status.BrokerHealthReason = brokerProblemReason(health)
+				}
 			}
 		}
 	}
@@ -736,6 +777,8 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	status.WebRunning = probed.WebRunning
 	status.HubStatus = probed.HubStatus
 	status.WebStatus = probed.WebStatus
+	status.BrokerStatus = probed.BrokerStatus
+	status.BrokerHealthReason = probed.BrokerHealthReason
 	status.HubHealthReason = probed.HubHealthReason
 	status.WebHealthReason = probed.WebHealthReason
 
@@ -773,11 +816,7 @@ func formatServerStatusComponents(status serverStatusInfo) []string {
 
 	lines = append(lines, "  Hub API:         "+formatComponentState(status.HubRunning, status.HubStatus, status.HubHealthReason))
 
-	if status.BrokerRunning {
-		lines = append(lines, "  Runtime Broker:  running")
-	} else {
-		lines = append(lines, "  Runtime Broker:  not detected")
-	}
+	lines = append(lines, "  Runtime Broker:  "+formatComponentState(status.BrokerRunning, status.BrokerStatus, status.BrokerHealthReason))
 
 	// WebStatus/WebHealthReason (not the Hub fields): a standalone Hub-only
 	// deployment with no web server at all must not print "Web Frontend:
@@ -893,7 +932,8 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 		// Do not claim it is up.
 		return fmt.Sprintf("  (server stopped answering /healthz; last status %s: %s — see server log)", lastHealth.Status, reason), false
 	case reason != "":
-		return fmt.Sprintf("  (server is up but %s: %s — open the URL manually; %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
+		// Unhealthy (a critical check failed) is not up; say what it is.
+		return fmt.Sprintf("  (server is %s: %s — %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
 	default:
 		return "  (server not yet ready — open the URL manually once it starts)", false
 	}
