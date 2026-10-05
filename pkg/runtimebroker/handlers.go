@@ -2179,7 +2179,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	// Record the run on the tracked start, so a run-scoped stop for another
 	// run leaves this start alone (ptone/scion#2550).
-	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, queryRunID, startReq.RunID))
+	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, startReq.RunID))
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent (#1960). ProjectID comes from the URL-scoped function
 	// argument since start doesn't repeat it in the body.
@@ -2669,34 +2669,36 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		}
 		// Then the same protection as above, limited to this run: wake its
 		// launch, cancel and wait for its own in-flight starts (and
-		// unlabelled ones), and resolve again if any was cancelled, since
-		// its cleanup may have changed what the runtime lists.
-		s.cancelLocalLaunchForRun(key, runID)
+		// unlabelled ones), and always resolve again: a cancelled start's
+		// cleanup may have changed what the runtime lists, and a start of
+		// this run may have finished (creating its container) between the
+		// lookup above and the cancel, which a stale miss would report as
+		// "not found" while that container runs.
 		cancelledOwn := s.cancelInFlightStartRun(ctx, key, runID)
-		if cancelledOwn > 0 {
-			match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
+		if s.cancelLocalLaunchForRun(key, runID) {
+			cancelledOwn++
 		}
+		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
 		// Whatever the cancel did, a runtime entry of another run is never
 		// stopped. In-flight starts of other runs no longer count here: this
 		// run's own starts are already cancelled, so refusing for another
 		// run's start now would report a stop that did act as not done.
 		if current, mismatch := s.stopRunMismatch(key, runID, match, lookupErr, stopCheckEntryOnly); mismatch {
 			if cancelledOwn > 0 {
-				// This stop cancelled the requested run's own start, and
-				// only another run's entry holds the name (for example the
-				// previous run's container during a restart): the requested
-				// run is gone, so the stop is accepted, as for a run with
-				// nothing left. A 404 here would make the hub keep showing
-				// the run as running. The other run's entry is left alone.
+				// This stop cancelled the requested run's own start or
+				// launch, and only another run's entry holds the name (for
+				// example the previous run's container during a restart):
+				// the requested run is gone, so the stop is accepted, as for
+				// a run with nothing left. A 404 here would make the hub keep
+				// showing the run as running. The other run's entry is left
+				// alone.
 				s.agentLifecycleLog.Warn("Agent stop: cancelled the requested run's start; another run holds the name and is left untouched",
 					"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current)
-				s.forceHeartbeatAll("stop", id)
-				writeJSON(w, http.StatusAccepted, map[string]string{
-					"status":  "accepted",
-					"message": "Stop operation accepted",
-				})
+				s.writeStopAccepted(w, id)
 				return
 			}
+			// Nothing of the requested run was cancelled, and another run's
+			// entry now holds the name (it appeared after the first lookup).
 			s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckEntryOnly)
 			return
 		}
@@ -2773,11 +2775,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
 			"phase", string(state.PhaseStopped))
-		s.forceHeartbeatAll("stop", id)
-		writeJSON(w, http.StatusAccepted, map[string]string{
-			"status":  "accepted",
-			"message": "Stop operation accepted",
-		})
+		s.writeStopAccepted(w, id)
 		return
 	}
 	// Stop exactly the resolved entry: StopTarget does not re-resolve by
@@ -2799,8 +2797,13 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			"phase", string(state.PhaseStopped))
 	}
 
-	s.forceHeartbeatAll("stop", id)
+	s.writeStopAccepted(w, id)
+}
 
+// writeStopAccepted forces a heartbeat and answers a stop with 202
+// "Stop operation accepted".
+func (s *Server) writeStopAccepted(w http.ResponseWriter, id string) {
+	s.forceHeartbeatAll("stop", id)
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "accepted",
 		"message": "Stop operation accepted",
@@ -2881,13 +2884,13 @@ func (s *Server) refuseStopRunMismatch(w http.ResponseWriter, span trace.Span, k
 // with the same value, so a difference means a malformed request: it is
 // logged, and the body's run is recorded. With no body runId, the query
 // run stays as recorded.
-func (s *Server) trackedStartRunID(id, queryRunID, bodyRunID string) string {
+func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) string {
 	if bodyRunID == "" {
 		return queryRunID
 	}
 	if queryRunID != "" && queryRunID != bodyRunID {
 		s.agentLifecycleLog.Warn("Agent start: runId query parameter and body differ; using the body's",
-			"agent_id", id, "query_run_id", queryRunID, "body_run_id", bodyRunID)
+			"agent_id", id, "project_id", projectID, "query_run_id", queryRunID, "body_run_id", bodyRunID)
 	}
 	return bodyRunID
 }
@@ -2937,7 +2940,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 	// Record the run this restart starts on the tracked start, so a
 	// run-scoped stop for another run leaves it alone (ptone/scion#2550).
-	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, queryRunID, restartReq.RunID))
+	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, restartReq.RunID))
 
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent/startAgent (#1960).

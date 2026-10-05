@@ -185,20 +185,23 @@ func (r *launchRegistry) CancelLocal(key launchKey) {
 // stale delete for an earlier run cannot cancel the start of the agent
 // recreated under the same name. A launch or a delete without a run ID
 // matches as before.
-func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
+//
+// It reports whether it woke a launch.
+func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) bool {
 	if r == nil {
-		return
+		return false
 	}
 	r.mu.Lock()
 	rec := r.records[key]
 	r.mu.Unlock()
 	if rec == nil {
-		return
+		return false
 	}
 	if runID != "" && rec.RunID != "" && rec.RunID != runID {
-		return
+		return false
 	}
 	rec.CancelLocal()
+	return true
 }
 
 // OtherRunInFlight reports whether a launch of a run other than runID is

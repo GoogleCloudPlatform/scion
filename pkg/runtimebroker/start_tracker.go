@@ -143,10 +143,11 @@ func (t *startTracker) cancelAndWait(ctx context.Context, key launchKey) bool {
 // An empty runID selects every tracked start for key: the legacy stop, with
 // no run ID, keeps cancelAndWait exactly. A non-empty runID (a run-scoped
 // stop, ptone/scion#2550) selects the starts of that run and every start
-// with no run recorded: a start from a hub that sends no run ID (an older
-// hub during an upgrade), or one whose handler has not read its run yet, is
-// treated as a match and cancelled, so a stop is never lost to it. A start
-// of a different run is never cancelled or waited on.
+// with no run recorded is treated as a match and cancelled, so a stop is
+// never lost to it: a start from a hub that sends no runId query parameter
+// (an older hub during an upgrade), before its body is read, or one whose
+// body carries no run. A start of a different run is never cancelled or
+// waited on.
 func (t *startTracker) cancelAndWaitRun(ctx context.Context, key launchKey, runID string) (bool, int) {
 	if t == nil {
 		return true, 0

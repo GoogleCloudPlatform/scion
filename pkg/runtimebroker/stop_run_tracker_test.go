@@ -21,10 +21,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Run-scoped stop against starts in flight on the start tracker
@@ -325,23 +327,118 @@ func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
 	}
 }
 
-// With nothing of the requested run cancelled, a matched entry of another
-// run is still the run-mismatch 404, after the own-run checks: a stop for
-// run-b with only run-b's async launch registered (no tracked start to
-// cancel) and run-a's container holding the name.
-func TestStopAgent_OtherRunEntryWithoutOwnCancelStill404(t *testing.T) {
+// Review round 3, B2: a stop for run-b whose only in-flight work is its
+// registered async launch, with run-a's container holding the name, wakes
+// that launch; waking it counts as cancelling its own run, so the stop is
+// accepted (202), and run-a's container is not stopped.
+func TestStopAgent_OwnLaunchWokenWhileOtherRunHoldsName(t *testing.T) {
 	srv, mgr, _, _ := newSyncStartTestServer(t)
 	setAgents(mgr, trackedRunEntry("c-a", "run-a"))
-	rec := newLaunchRecord("async-1", "same-name", "create", "", time.Time{}, func() {})
+	launchCancels := 0
+	rec := newLaunchRecord("async-1", "same-name", "create", "", time.Time{}, func() { launchCancels++ })
 	rec.RunID = "run-b"
 	srv.launchRegistry.Begin(launchKey{Slug: "same-name"}, rec)
 
 	sw := actionWithRun(srv, "stop", "runId=run-b", "")
-	if sw.Code != http.StatusNotFound {
-		t.Fatalf("stop run-b: status %d, want 404 (nothing of run-b cancelled): %s", sw.Code, sw.Body.String())
+	if sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202 (run-b's launch was woken): %s", sw.Code, sw.Body.String())
+	}
+	if launchCancels == 0 {
+		t.Error("the stop did not wake run-b's launch")
 	}
 	if mgr.StopCalls() != 0 {
 		t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", mgr.StopCalls())
+	}
+}
+
+// N2: a launch with no run recorded never suppresses the refusal of a stale
+// stop: with run-b's container holding the name, a stop for run-a gets the
+// 404 before any cancel, the run-less launch is not woken, and nothing is
+// stopped.
+func TestStopAgent_RunlessLaunchDoesNotSuppressStaleRefusal(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	setAgents(mgr, trackedRunEntry("c-b", "run-b"))
+	launchCancels := 0
+	rec := newLaunchRecord("async-1", "same-name", "create", "", time.Time{}, func() { launchCancels++ })
+	srv.launchRegistry.Begin(launchKey{Slug: "same-name"}, rec)
+
+	sw := actionWithRun(srv, "stop", "runId=run-a", "")
+	if sw.Code != http.StatusNotFound {
+		t.Fatalf("stale stop: status %d, want 404: %s", sw.Code, sw.Body.String())
+	}
+	if launchCancels != 0 {
+		t.Errorf("the stale stop woke the run-less launch (%d)", launchCancels)
+	}
+	if mgr.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0", mgr.StopCalls())
+	}
+}
+
+// hookListManager runs hook once, after the first List call, to change what
+// the runtime lists between a stop's two lookups.
+type hookListManager struct {
+	*startFuncManager
+	once sync.Once
+	hook func()
+}
+
+func (m *hookListManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	out, err := m.startFuncManager.List(ctx, filter)
+	if h := m.hook; h != nil {
+		m.once.Do(h)
+	}
+	return out, err
+}
+
+func newHookListServer(t *testing.T) (*Server, *hookListManager) {
+	t.Helper()
+	inner := &startFuncManager{mockManager: &mockManager{}, starts: make(chan func(context.Context, api.StartOptions) (*api.AgentInfo, error), 4)}
+	m := &hookListManager{startFuncManager: inner}
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	return New(cfg, m, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}), m
+}
+
+// N1: run-b's start finishes, creating c-b, between the stop's first lookup
+// and its cancel. The run-scoped stop always resolves again after the
+// cancel step, so it stops c-b instead of answering "not found".
+func TestStopAgent_OwnStartFinishesBetweenLookupAndCancel(t *testing.T) {
+	srv, m := newHookListServer(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	blockedStart(m.startFuncManager, started, release, nil)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- actionWithRun(srv, "start", "runId=run-b", `{"runId":"run-b"}`) }()
+	waitSignal(t, started, "the start")
+	m.hook = func() {
+		setAgents(m.startFuncManager, trackedRunEntry("c-b", "run-b"))
+		close(release)
+		<-done
+	}
+
+	sw := actionWithRun(srv, "stop", "runId=run-b", "")
+	if sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if m.StopCalls() != 1 || m.lastStopAgentID != "c-b" {
+		t.Errorf("stop calls = %d, last %q; want one stop of c-b", m.StopCalls(), m.lastStopAgentID)
+	}
+}
+
+// The post-cancel refusal: nothing of run-b is in flight or listed at the
+// first lookup, and run-a's container appears before the second. Nothing of
+// run-b was cancelled, so this is the run-mismatch 404, and run-a's
+// container is not stopped.
+func TestStopAgent_OtherRunAppearsAfterFirstLookupWithoutOwnCancel(t *testing.T) {
+	srv, m := newHookListServer(t)
+	m.hook = func() { setAgents(m.startFuncManager, trackedRunEntry("c-a", "run-a")) }
+
+	sw := actionWithRun(srv, "stop", "runId=run-b", "")
+	if sw.Code != http.StatusNotFound {
+		t.Fatalf("stop run-b: status %d, want 404: %s", sw.Code, sw.Body.String())
+	}
+	if m.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", m.StopCalls())
 	}
 }
 
