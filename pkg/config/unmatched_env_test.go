@@ -15,28 +15,29 @@
 package config
 
 import (
+	"go/scanner"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-var (
-	// os.Getenv("SCION_SERVER_X") / os.LookupEnv("SCION_SERVER_X")
-	getenvLiteralRE = regexp.MustCompile(`(?:Getenv|LookupEnv)\("(SCION_SERVER_[A-Z0-9_]+)"\)`)
-	// const EnvX = "SCION_SERVER_X", read elsewhere via os.Getenv(EnvX)
-	envConstRE = regexp.MustCompile(`(?m)^\s*(?:const\s+)?\w+\s*=\s*"(SCION_SERVER_[A-Z0-9_]+)"\s*$`)
-	anyLiteral = regexp.MustCompile(`"(SCION_SERVER_[A-Z0-9_]+)"`)
-)
+// completeServerEnvName matches a string literal that is exactly one
+// SCION_SERVER_* variable name (not the bare prefix, not prose).
+var completeServerEnvName = regexp.MustCompile(`^SCION_SERVER_[A-Z0-9_]+$`)
 
-// TestDirectServerEnvNames_MatchGetenvCallSites is the drift guard for
-// directServerEnvNames: every SCION_SERVER_* name read with os.Getenv /
-// os.LookupEnv (or declared as an env-name constant) in non-test Go code of
-// this module must be on the list or otherwise matched by the detector, and
-// every listed name must still appear in non-test code.
-func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
+// serverEnvLiterals returns every string literal in non-test Go code under
+// cmd/ and pkg/ that is exactly a SCION_SERVER_* name, mapped to the first
+// file using it. It tokenizes the source, so comments are ignored and every
+// declaration or call form counts: os.Getenv("X"), parseBoolEnv("X"),
+// const/var/typed/:= assignments with or without trailing comments. The
+// detector's own tables (unmatched_env.go) are skipped.
+func serverEnvLiterals(t *testing.T) map[string]string {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -44,9 +45,9 @@ func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root not found at %s: %v", root, err)
 	}
+	self := filepath.Join(root, "pkg", "config", "unmatched_env.go")
 
-	read := map[string]string{}  // name -> first file reading it
-	literal := map[string]bool{} // every SCION_SERVER_ literal in non-test code
+	out := map[string]string{}
 	walk := func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -57,34 +58,54 @@ func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || path == self {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
-		for _, re := range []*regexp.Regexp{getenvLiteralRE, envConstRE} {
-			for _, m := range re.FindAllSubmatch(data, -1) {
-				if _, ok := read[string(m[1])]; !ok {
-					read[string(m[1])] = rel
-				}
+		fset := token.NewFileSet()
+		var s scanner.Scanner
+		s.Init(fset.AddFile(path, -1, len(src)), src, nil, 0)
+		for {
+			_, tok, lit := s.Scan()
+			if tok == token.EOF {
+				break
 			}
-		}
-		for _, m := range anyLiteral.FindAllSubmatch(data, -1) {
-			literal[string(m[1])] = true
+			if tok != token.STRING {
+				continue
+			}
+			v, err := strconv.Unquote(lit)
+			if err != nil || !completeServerEnvName.MatchString(v) {
+				continue
+			}
+			if _, ok := out[v]; !ok {
+				out[v] = rel
+			}
 		}
 		return nil
 	}
-	// The hub and broker are built from cmd/ and pkg/ (plus root files).
+	// The hub and broker are built from cmd/ and pkg/.
 	for _, dir := range []string{"cmd", "pkg"} {
 		if err := filepath.WalkDir(filepath.Join(root, dir), walk); err != nil {
 			t.Fatal(err)
 		}
 	}
+	return out
+}
+
+// TestDirectServerEnvNames_MatchGetenvCallSites is the drift guard for
+// directServerEnvNames. Every complete SCION_SERVER_* string literal in
+// non-test code (an os.Getenv argument, an env-name constant, a helper-call
+// argument, ...) must be on the list or otherwise accepted by the detector,
+// so the startup warning never flags a name the code reads directly. Every
+// listed name must still appear as such a literal outside the detector.
+func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
+	read := serverEnvLiterals(t)
 	if len(read) == 0 {
-		t.Fatal("found no os.Getenv(\"SCION_SERVER_...\") call sites; the scan is broken")
+		t.Fatal(`found no "SCION_SERVER_..." literals in cmd/ or pkg/; the scan is broken`)
 	}
 
 	noLayer1 := func(string) bool { return false }
@@ -92,10 +113,10 @@ func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
 		if directServerEnvNames[name] || serverEnvMatches(name, noLayer1) {
 			continue
 		}
-		t.Errorf("%s is read directly in %s but is not in directServerEnvNames, so the startup warning flags it", name, file)
+		t.Errorf("%s appears in %s but is not in directServerEnvNames, so the startup warning flags it", name, file)
 	}
 	for name := range directServerEnvNames {
-		if !literal[name] {
+		if _, ok := read[name]; !ok {
 			t.Errorf("directServerEnvNames entry %s no longer appears in non-test code; remove it", name)
 		}
 	}
