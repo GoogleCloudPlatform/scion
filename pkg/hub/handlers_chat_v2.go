@@ -2049,8 +2049,8 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		storeMsg.DispatchFailureReason = &reason
 	} else if !isDM && !s.mentionsProjectHuman(ctx, projectID, mentionNames, user.ID()) {
 		// A thread message that reaches this point resolved no agent
-		// recipient. Unless it @mentions a person (who is notified, so
-		// "dispatched" stays true), nobody was given it.
+		// recipient. Unless it is addressed to a mentioned project member,
+		// nobody was given it, so it must not read "dispatched".
 		storeMsg.DispatchState = store.MessageDispatchNoRecipient
 	}
 
@@ -4725,62 +4725,19 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 	}
 
 	// Resolve human members for the project.
-	recipients := matchHumanMentions(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, senderUserID)
-	if len(recipients) == 0 {
+	humanMembers := s.resolveProjectHumanMembers(ctx, projectID)
+	if len(humanMembers) == 0 {
 		return
 	}
 
-	// Resolve the conversation name for the notification message.
-	conversationName := ""
-	if !strings.HasPrefix(conversationKey, "dm:") {
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			if topic, err := wcs.GetTopic(ctx, conversationKey); err == nil && topic != nil {
-				conversationName = topic.Name
-			}
-		}
+	// Build a lookup by lowercase display name and email.
+	type memberInfo struct {
+		ID          string
+		DisplayName string
 	}
-
-	for _, member := range recipients {
-		cn.NotifyMention(ctx, member.ID, ChatMessageContext{
-			SenderID:         senderUserID,
-			SenderName:       senderName,
-			ConversationKey:  conversationKey,
-			ConversationName: conversationName,
-			Preview:          messageContent,
-			ProjectID:        projectID,
-		})
-	}
-}
-
-// mentionsProjectHuman reports whether mentionNames names at least one
-// project human member other than the sender, using the same matching as
-// fireHumanMentionNotifications.
-func (s *Server) mentionsProjectHuman(ctx context.Context, projectID string, mentionNames []string, senderUserID string) bool {
-	if projectID == "" || len(mentionNames) == 0 {
-		return false
-	}
-	return len(matchHumanMentions(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, senderUserID)) > 0
-}
-
-// humanMentionRecipient is a project member matched by an @mention.
-type humanMentionRecipient struct {
-	ID          string
-	DisplayName string
-}
-
-// matchHumanMentions resolves @mention names against project human members
-// by display name, hyphenated display name, email, or email local part. The
-// sender is excluded and matches are deduplicated, in mention order.
-func matchHumanMentions(humanMembers []chatMemberEntry, mentionNames []string, senderUserID string) []humanMentionRecipient {
-	if len(humanMembers) == 0 || len(mentionNames) == 0 {
-		return nil
-	}
-	lookup := make(map[string]humanMentionRecipient)
+	lookup := make(map[string]memberInfo)
 	for _, m := range humanMembers {
-		info := humanMentionRecipient{ID: m.ID, DisplayName: m.DisplayName}
+		info := memberInfo{ID: m.ID, DisplayName: m.DisplayName}
 		if m.DisplayName != "" {
 			lookup[strings.ToLower(m.DisplayName)] = info
 			// Also match the hyphenated slug that the frontend autocomplete
@@ -4798,17 +4755,46 @@ func matchHumanMentions(humanMembers []chatMemberEntry, mentionNames []string, s
 			}
 		}
 	}
-	var out []humanMentionRecipient
+
+	// Resolve the conversation name for the notification message.
+	conversationName := ""
+	if !strings.HasPrefix(conversationKey, "dm:") {
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			if topic, err := wcs.GetTopic(ctx, conversationKey); err == nil && topic != nil {
+				conversationName = topic.Name
+			}
+		}
+	}
+
 	seen := make(map[string]bool)
 	for _, name := range mentionNames {
-		member, ok := lookup[strings.ToLower(name)]
-		if !ok || member.ID == senderUserID || seen[member.ID] {
+		lower := strings.ToLower(name)
+		member, ok := lookup[lower]
+		if !ok {
+			continue
+		}
+		// Skip the sender — don't notify yourself.
+		if member.ID == senderUserID {
+			continue
+		}
+		// Deduplicate.
+		if seen[member.ID] {
 			continue
 		}
 		seen[member.ID] = true
-		out = append(out, member)
+
+		cn.NotifyMention(ctx, member.ID, ChatMessageContext{
+			SenderID:         senderUserID,
+			SenderName:       senderName,
+			ConversationKey:  conversationKey,
+			ConversationName: conversationName,
+			Preview:          messageContent,
+			ProjectID:        projectID,
+		})
 	}
-	return out
 }
 
 // resolveProjectHumanMembers returns the human members of a project by

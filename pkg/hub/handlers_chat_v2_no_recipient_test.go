@@ -165,9 +165,9 @@ func TestNoRecipient_DefaultAgentStillDispatched(t *testing.T) {
 	}
 }
 
-// A thread message that @mentions a project human and no agent was meant
-// for that person, who is notified: no "not delivered to any agent"
-// warning. It keeps the dispatched state main records today.
+// A thread message that @mentions a project human and no agent is addressed
+// to that project member: no "not delivered to any agent" warning. It keeps
+// the dispatched state main records today.
 func TestNoRecipient_HumanOnlyMentionKeepsDispatched(t *testing.T) {
 	srv, s, topicID, _, d, projectID := noRecipientSetupProject(t)
 	addHumanMember(t, s, projectID, "alice@example.com", "Alice Smith")
@@ -212,5 +212,31 @@ func TestNoRecipient_UnresolvedOrSelfMentionIsNoRecipient(t *testing.T) {
 		if resp["dispatchState"] != store.MessageDispatchNoRecipient {
 			t.Fatalf("%q: expected response no_recipient, got %v", content, resp["dispatchState"])
 		}
+	}
+}
+
+func TestMatchHumanMentionIDs(t *testing.T) {
+	members := []chatMemberEntry{
+		{ID: "u1", Kind: "user", DisplayName: "Alice Smith", Email: "alice@example.com"},
+		{ID: "u2", Kind: "user", DisplayName: "Bob", Email: "bob@example.com"},
+	}
+	cases := []struct {
+		names []string
+		want  []string
+	}{
+		{nil, nil},
+		{[]string{"nobody"}, nil},
+		{[]string{"Alice-Smith"}, []string{"u1"}},
+		{[]string{"alice smith"}, []string{"u1"}},
+		{[]string{"bob@example.com", "alice", "bob"}, []string{"u2", "u1"}},
+	}
+	for _, c := range cases {
+		got := matchHumanMentionIDs(members, c.names)
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("matchHumanMentionIDs(%v) = %v, want %v", c.names, got, c.want)
+		}
+	}
+	if got := matchHumanMentionIDs(nil, []string{"alice"}); got != nil {
+		t.Errorf("no members: got %v, want nil", got)
 	}
 }
