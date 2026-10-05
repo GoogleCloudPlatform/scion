@@ -102,6 +102,25 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el).split('\n')[0]).toBe('Waiting for user decision on c34');
   });
 
+  it('renders a detail message holding markup as text, not HTML', async () => {
+    // The detail message is free text the agent reports; the hub list now
+    // carries it to the members of every readable project.
+    await import('@shoelace-style/shoelace/dist/components/tooltip/tooltip.js');
+    const message = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+    const el = await mount([agent({ detailMessage: message })]);
+    expect(tooltipContent(el)).toBe(message);
+
+    const tip = el.shadowRoot?.querySelector('sl-tooltip') as
+      | (HTMLElement & { updateComplete: Promise<unknown> })
+      | null;
+    await tip?.updateComplete;
+    const body = tip?.shadowRoot?.querySelector('[part~="body"]');
+    expect(body?.textContent).toContain(message);
+    expect(body?.querySelector('img, b')).toBeNull();
+    expect(el.shadowRoot?.querySelector('img, b')).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
   it('falls back to the activity when no detail message was reported', async () => {
     const el = await mount([agent({ activity: 'thinking' })]);
     expect(tooltipContent(el)).toBe('thinking');
