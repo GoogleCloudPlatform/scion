@@ -94,9 +94,10 @@ class SilentEventSource extends EventTarget {
   }
 }
 
+/** A fake whose rows carry `deletion: null`, as the hub's compact rows do when no delete is open. */
 function newFake(count: number): Fake {
   return {
-    agents: Array.from({ length: count }, (_, i) => makeAgent(i)),
+    agents: Array.from({ length: count }, (_, i) => makeAgent(i, { deletion: null })),
     requests: [],
     otherRequests: [],
     projects: [{ id: 'p-1', name: 'P1' }],
@@ -1738,6 +1739,11 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
     });
   });
 
+  /** Sets the deletion view the fake server lists on the row for `id`. */
+  function setServerDeletion(fake: Fake, id: string, deletion: DeletionInfo | null): void {
+    fake.agents = fake.agents.map((a) => (a.id === id ? { ...a, deletion } : a));
+  }
+
   describe('an agent whose delete the hub accepted', () => {
     const deletingView = (): DeletionInfo => ({
       state: 'deleting',
@@ -1752,9 +1758,8 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
     }
 
     it('stays in the graph with its deletion view through a re-drain of compact rows; the live delete removes it and a later drain keeps it out', async () => {
-      // These fake rows carry no deletion field, so the re-drain checks that
-      // the compact merge keeps the store's deletion view; the hub keeps
-      // listing an agent whose delete it accepted until the delete finishes.
+      // The hub keeps listing an agent whose delete it accepted, with the
+      // deleting view, until the delete finishes; every other row is null.
       const fake = newFake(25);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph();
@@ -1762,6 +1767,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       const id = fake.agents[4].id;
 
       expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      setServerDeletion(fake, id, deletingView());
       (stateManager as unknown as { flush(): void }).flush();
       await el.updateComplete;
       expect(member(el, id)?.deletion?.state).toBe('deleting');
@@ -1774,8 +1780,9 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(graphRequests(fake, 1)).toEqual([ALL_PAGE()]);
       expect(g(el).agents).toHaveLength(25);
       expect(member(el, id)?.deletion?.state).toBe('deleting');
-      // The compact merge keeps the store's deletion view for every page.
+      // The re-drained row carries the deleting view; every other row stays clear.
       expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(fake.agents[5].id)?.deletion).toBeNull();
 
       liveUpdate(`agent.${id}.deleted`, { agentId: id });
       await el.updateComplete;
@@ -1862,13 +1869,32 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         false
       );
       expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      // After the 202 the server lists the row with the deleting view.
+      setServerDeletion(fake, id, deletingView());
       (stateManager as unknown as { flush(): void }).flush();
       const el = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE]);
       expect(member(el, id)?.deletion?.state).toBe('deleting');
       expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(fullId)?.deletion).toBeNull();
       expect(member(el, fullId)?.appliedConfig?.image).toBe('img:full');
       expect(stateManager.getAgent(fullId)?.appliedConfig?.image).toBe('img:full');
+    });
+
+    it("an older hub's compact row without the deletion key keeps the store's view through the fit probe", async () => {
+      const fake = newFake(25);
+      for (const a of fake.agents) delete (a as { deletion?: unknown }).deletion;
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const [id, otherId] = projectIds(fake, 'p-1');
+      holdInState(fake.agents, false);
+      expect(stateManager.applyDeleteAccepted(id, deletingView())).toBe(true);
+      (stateManager as unknown as { flush(): void }).flush();
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect('deletion' in fake.agents[0]).toBe(false);
+      expect(member(el, id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(otherId)?.deletion).toBeUndefined();
     });
 
     it('a held complete set shows the row with its deletion view, with no request', async () => {
@@ -1960,6 +1986,59 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(graphRequests(fake)).toEqual([PROBE]);
       expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
       await expectBadges(el, failedId, deletingId, plainId);
+    });
+
+    it("the server's deletion value replaces the store's on the fit probe and on a re-drain, null included", async () => {
+      const fake = newFake(25);
+      const [clearedId, retriedId, plainId] = projectIds(fake, 'p-1');
+      // The store holds a failed view and an older deleting view; the server
+      // has since cleared the first and lists a retried delete (claim 2) for
+      // the second.
+      holdInState(
+        fake.agents.map((a) =>
+          a.id === clearedId
+            ? { ...a, deletion: failedView() }
+            : a.id === retriedId
+              ? { ...a, deletion: { ...deletingView(), claim: 1 } }
+              : a
+        ),
+        false
+      );
+      setServerDeletion(fake, retriedId, deletingView());
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      const expectServerViews = async (): Promise<void> => {
+        expect(stateManager.getAgent(clearedId)?.deletion).toBeNull();
+        expect(stateManager.getAgent(retriedId)?.deletion).toMatchObject({
+          state: 'deleting',
+          claim: 2,
+        });
+        expect(await nodeBadge(el, clearedId)).toBeNull();
+        expect(await nodeBadge(el, retriedId)).toEqual({ text: 'Deleting…', title: 'Deleting…' });
+        expect(await nodeBadge(el, plainId)).toBeNull();
+      };
+      await expectServerViews();
+
+      // Live views that the server later cleared or replaced, whose clearing
+      // events the dropped connection missed; the re-drain restores the
+      // server's values.
+      liveUpdate(`agent.${clearedId}.status`, { agentId: clearedId, deletion: failedView() });
+      liveUpdate(`agent.${retriedId}.status`, {
+        agentId: retriedId,
+        deletion: { ...deletingView(), claim: 1 },
+      });
+      await el.updateComplete;
+      expect(await nodeBadge(el, clearedId)).toEqual({
+        text: 'Delete failed',
+        title: 'Delete failed: broker unreachable',
+      });
+      expect(stateManager.getAgent(retriedId)?.deletion?.claim).toBe(1);
+      reconnect();
+      await el.updateComplete;
+      await clickBanner(el, 'stale');
+      expect(graphRequests(fake, 1)).toEqual([ALL_PAGE()]);
+      await expectServerViews();
     });
 
     it('the project drain renders a failed and a deleting row with the compact badge at once', async () => {
