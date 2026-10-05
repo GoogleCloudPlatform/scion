@@ -196,12 +196,14 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", err
 	}
 	var intentAt *time.Time
+	var supersedes string
 	if d.Args != "" {
 		args, err := UnmarshalStopArgs(d.Args)
 		if err != nil {
 			return "", fmt.Errorf("unmarshal stop args: %w", err)
 		}
 		intentAt = args.IntentAt
+		supersedes = args.SupersedesClaim
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
@@ -230,6 +232,8 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		// reservation as a direct stop does, and replace the stop_queued
 		// container status and the queued-stop notice the offline stop set.
 		s.releaseBrokerQuota(ctx, agent)
+		// The start claim held when the stop was recorded is superseded.
+		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 		if agent.ContainerStatus == containerStatusStopQueued {
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 				ContainerStatus: "stopped",

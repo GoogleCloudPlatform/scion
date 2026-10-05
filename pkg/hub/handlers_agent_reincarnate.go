@@ -425,6 +425,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	agent.StateVersion = newVersion
+	// A reincarnation starts the agent (also one that was stopped): record
+	// that the agent is meant to run, now, before the worker's start, so a
+	// stop the user records during the reincarnation is newer and wins.
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
+	}
 
 	requestedBy := ""
 	requesterIdentity := GetIdentityFromContext(ctx)

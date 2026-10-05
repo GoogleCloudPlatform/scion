@@ -1121,25 +1121,33 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
-		// A suspended agent's reservation was released when it was suspended;
-		// re-reserve (with the cap check) before dispatch, same as create
-		// (ptone/scion#1963). Idempotent, and rejects with the same
-		// quota-exceeded response create uses if the broker is at capacity.
-		ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
-		if !ok {
-			return existingAgentErrored
-		}
-
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
-		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			writeRunIntentError(w, err, existingAgent.ID)
-			return existingAgentErrored
+		// The post-start write runs inside the start claim, before it is
+		// released, so it never overwrites a newer start's status.
+		afterStart := func(ctx context.Context) error {
+			if existingAgent.Phase == string(state.PhaseSuspended) {
+				existingAgent.Phase = string(state.PhaseRunning)
+			}
+			// Clear any exit reason/code left from the prior generation —
+			// including a disruption reason recorded while the agent was still
+			// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
+			// pod actually stopping, which describes the old pod, not this one.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
+			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+			}
+			return nil
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+		// The start runs under a start claim, which records run intent running,
+		// reserves the broker capacity (rolled back if the start fails) and
+		// runs afterStart while the claim is held.
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart}); err != nil {
+			if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+				return existingAgentErrored
+			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1158,19 +1166,6 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
-		}
-
-		if existingAgent.Phase == string(state.PhaseSuspended) {
-			existingAgent.Phase = string(state.PhaseRunning)
-		}
-		// Clear any exit reason/code left from the prior generation —
-		// including a disruption reason recorded while the agent was still
-		// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
-		// pod actually stopping, which describes the old pod, not this one.
-		existingAgent.ExitReason = ""
-		existingAgent.ExitCode = nil
-		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
 
 		if req.Notify {
@@ -1223,20 +1218,29 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
 					"container_status", existingAgent.ContainerStatus)
 			}
-			// A stopped or errored agent's reservation was released when it
-			// stopped/crashed; re-reserve (with the cap check) before
-			// dispatch, same as create (ptone/scion#1963).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
-			if !ok {
-				return existingAgentErrored
+			// The post-start write runs inside the start claim, before it is
+			// released, so it never overwrites a newer start's status.
+			afterStart := func(ctx context.Context) error {
+				existingAgent.Phase = string(state.PhaseRunning)
+				// Clear any exit reason/code left from the prior generation —
+				// including a disruption reason recorded while the agent was
+				// still running (state.ExitReasonPreempted/ExitReasonEvicted)
+				// ahead of its pod actually stopping, which describes the old
+				// pod, not this one.
+				existingAgent.ExitReason = ""
+				existingAgent.ExitCode = nil
+				if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
+					s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+				}
+				return nil
 			}
-			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				writeRunIntentError(w, err, existingAgent.ID)
-				return existingAgentErrored
-			}
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			// The start runs under a start claim, which records run intent running,
+			// reserves the broker capacity (rolled back if the start fails) and
+			// runs afterStart while the claim is held.
+			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart}); err != nil {
+				if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+					return existingAgentErrored
+				}
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
@@ -1255,18 +1259,6 @@ func (s *Server) handleExistingAgent(
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
-			}
-
-			existingAgent.Phase = string(state.PhaseRunning)
-			// Clear any exit reason/code left from the prior generation —
-			// including a disruption reason recorded while the agent was
-			// still running (state.ExitReasonPreempted/ExitReasonEvicted)
-			// ahead of its pod actually stopping, which describes the old
-			// pod, not this one.
-			existingAgent.ExitReason = ""
-			existingAgent.ExitCode = nil
-			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
-				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
 
 			if req.Notify {
@@ -1361,11 +1353,31 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
-		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, existingAgent.ID)
-			return existingAgentErrored
+		// The post-start write runs inside the start claim, before it is
+		// released, so it never overwrites a newer start's status.
+		afterStart := func(ctx context.Context) error {
+			// If the broker didn't set a running phase, default to running.
+			if existingAgent.Phase == string(state.PhaseCreated) ||
+				existingAgent.Phase == string(state.PhaseProvisioning) {
+				existingAgent.Phase = string(state.PhaseRunning)
+			}
+			// Clear any exit reason/code left from the prior generation — see
+			// the equivalent clear in the resume branches above.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
+			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+				// Log but continue — agent was started.
+				s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
+			}
+			return nil
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+		// The start runs under a start claim, which records run intent running,
+		// reserves the broker capacity (rolled back if the start fails) and
+		// runs afterStart while the claim is held.
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart}); err != nil {
+			if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+				return existingAgentErrored
+			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1384,20 +1396,6 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
-		}
-
-		// If the broker didn't set a running phase, default to running.
-		if existingAgent.Phase == string(state.PhaseCreated) ||
-			existingAgent.Phase == string(state.PhaseProvisioning) {
-			existingAgent.Phase = string(state.PhaseRunning)
-		}
-		// Clear any exit reason/code left from the prior generation — see
-		// the equivalent clear in the resume branches above.
-		existingAgent.ExitReason = ""
-		existingAgent.ExitCode = nil
-		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
-			// Log but continue — agent was started.
-			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
 		}
 
 		// Create notification subscription if requested.

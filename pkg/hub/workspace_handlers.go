@@ -499,13 +499,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, agent.ID)
-			return
-		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		// The create-and-start runs under a start claim, which records run
+		// intent running.
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+			return dispatcher.DispatchAgentCreate(ctx, agent)
+		})
 		if errors.Is(err, ErrLaunchInvalidPhase) {
 			writeLaunchInvalidPhase(w, err, agent.ID)
+			return
+		}
+		if s.writeStartClaimError(w, err, agent.ID) {
 			return
 		}
 		if err != nil {

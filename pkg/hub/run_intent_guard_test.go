@@ -65,13 +65,12 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.suspendAgent":                  {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
 	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
-	"Server.dispatchAgentEventHandler":     {kind: intentRecorded},
-	"Server.wakeAgentForDM":                {kind: intentRecorded},
+	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"Server.handleExistingAgent":           {kind: intentRecorded},
 	"Server.createAgentInProject":          {kind: intentRecorded},
 	"deletionEngine.dispatch":              {kind: intentRecorded},
 	"Server.dispatchAgentDeletions":        {kind: intentRecorded},
-	"Server.handleWorkspaceSyncToFinalize": {kind: intentRecorded},
+	"Server.handleWorkspaceSyncToFinalize": {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"dispatchDeleteFailedCreate":           {kind: intentRecorded, recordedBy: "Server.cleanupFailedCreate"},
 
 	"Server.execDispatchStart":   {kind: intentExecutor},
@@ -91,6 +90,8 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// The start-claim reaper stops a container an unconfirmed start left
 	// running past its hold; the agent's intent is left as it is.
 	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
+	// The backstop stops an agent whose intent is already stopped.
+	"Server.stopForStoppedIntent": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a

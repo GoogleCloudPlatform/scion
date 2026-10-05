@@ -162,6 +162,10 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 		{"reincarnation failed", func(a *store.Agent) { a.ReincarnationState = store.ReincarnationStateFailed }, true},
 		{"soft deleted", func(a *store.Agent) { a.DeletedAt = time.Now() }, false},
 	}
+	wantErr := map[string]error{
+		"reincarnation pending": store.ErrClaimPredicate,
+		"soft deleted":          store.ErrDeleteInProgress,
+	}
 	// CreateAgent may not persist every field above; write them back whole.
 	persist := func(t *testing.T, a *store.Agent) {
 		t.Helper()
@@ -182,7 +186,7 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 				require.NoError(t, err)
 				return
 			}
-			require.ErrorIs(t, err, store.ErrClaimPredicate)
+			require.ErrorIs(t, err, wantErr[tc.name])
 			got, err := s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
 			assert.Empty(t, got.StartClaimID)
@@ -193,11 +197,12 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 	t.Run("being deleted", func(t *testing.T) {
 		a := newClaimAgent(t, ctx, s, projectID, "sc-pred-del")
 		deleting := store.DeletionStateDeleting
-		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting})
+		lease := time.Now().Add(time.Hour)
+		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease})
 		require.NoError(t, err)
 		require.Equal(t, 1, n)
 		_, err = s.ClaimAgentStart(ctx, a.ID, "hub", store.StartClaimUser, "", testClaimTTL)
-		require.ErrorIs(t, err, store.ErrClaimPredicate)
+		require.ErrorIs(t, err, store.ErrDeleteInProgress, "refused as the running-intent write is")
 	})
 
 	t.Run("missing agent", func(t *testing.T) {
@@ -846,4 +851,17 @@ func TestStartClaim_WritesKeepUpdatedAndListSkipsDeleted(t *testing.T) {
 	now, err := s.StoreClock(ctx)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), now, time.Minute)
+}
+
+func TestStartClaim_AbandonedDeleteDoesNotRefuse(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-abandoned")
+	deleting := store.DeletionStateDeleting
+	expired := time.Now().Add(-time.Minute)
+	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &expired})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	_, err = s.ClaimAgentStart(ctx, a.ID, "hub", store.StartClaimUser, "", testClaimTTL)
+	require.NoError(t, err, "a delete whose lease expired does not hold the row")
 }

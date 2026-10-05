@@ -107,14 +107,11 @@ func heldClaimError(row *ent.Agent) *store.ClaimHeldError {
 }
 
 // claimEligible reports whether row may take a claim apart from the
-// no-claim-held condition: not deleted, not being deleted, and no
-// reincarnation in flight.
+// no-claim-held condition and a delete holding the row (checked first, see
+// ClaimAgentStart): not deleted and no reincarnation in flight. A delete
+// whose lease expired (abandoned) does not hold the row.
 func claimEligible(row *ent.Agent) bool {
 	if row.DeletedAt != nil {
-		return false
-	}
-	switch row.DeletionState {
-	case store.DeletionStateDeleting, store.DeletionStateFinalizing:
 		return false
 	}
 	switch row.ReincarnationState {
@@ -178,8 +175,10 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 	}
 	var claim store.StartClaim
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if row.DeletedAt != nil {
-			return false, store.ErrClaimPredicate
+		// A start on a row a delete holds, or a soft-deleted row, is
+		// refused exactly as the running-intent write refuses it.
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, time.Now()) {
+			return false, store.ErrDeleteInProgress
 		}
 		if held := heldClaimError(row); held != nil {
 			return false, held

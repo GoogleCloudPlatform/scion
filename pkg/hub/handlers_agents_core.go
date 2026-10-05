@@ -2116,15 +2116,15 @@ func (s *Server) createAgentInProject(
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
-		// A create is a start, unless it only provisions.
-		intent := store.RunIntentRunning
+		// A create is a start, unless it only provisions. A create-and-start
+		// runs under a start claim (createUnderClaim), which records run
+		// intent running; a provision-only create records stopped.
 		if req.ProvisionOnly {
-			intent = store.RunIntentStopped
-		}
-		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-			writeRunIntentError(w, err, agent.ID)
-			return
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
+				writeErrorFromErr(w, err, "")
+				return
+			}
 		}
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
@@ -2132,13 +2132,18 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Debug("Hub: env-gather requested, using DispatchAgentCreateWithGather",
 					"agent_id", agent.ID,
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+					return dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
+					return
+				} else if s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim: nothing was dispatched.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2181,13 +2186,18 @@ func (s *Server) createAgentInProject(
 					}
 				}
 			} else {
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+					return dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
+					return
+				} else if s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim: nothing was dispatched.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2632,9 +2642,15 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
-	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
+	// The finalize starts the agent: it runs under a start claim.
+	finalized, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+		return dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
+	})
 	if errors.Is(err, ErrLaunchInvalidPhase) {
 		writeLaunchInvalidPhase(w, err, agent.ID)
+		return
+	}
+	if s.writeStartClaimError(w, err, agent.ID) {
 		return
 	}
 	if err != nil {

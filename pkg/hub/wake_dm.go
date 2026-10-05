@@ -52,6 +52,10 @@ const (
 	// WakeResumed indicates the target agent was suspended and has been
 	// successfully resumed and is now ready for message delivery.
 	WakeResumed WakeOutcome = "resumed"
+	// WakeDeferred indicates another start of the target agent was already
+	// in progress (it holds the agent's start claim): the message is kept,
+	// deferred, and the sender gets no error.
+	WakeDeferred WakeOutcome = "deferred"
 )
 
 // WakeResult is the typed result of a wake attempt.
@@ -122,42 +126,62 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
-		// A suspended agent's reservation was released when it was suspended;
-		// re-reserve (with the cap check) before dispatch, same as create and
-		// the HTTP start/resume paths (ptone/scion#1963).
-		reserved, err := s.checkAndReserveBrokerQuota(ctx, agent)
+		// Resume the suspended agent (continue=true restores its prior
+		// session) under a start claim of kind wake, which records run
+		// intent running, re-reserves the broker capacity released at
+		// suspend (ptone/scion#1963; rolled back if the start fails) and is
+		// held until the readiness wait ends. A readiness timeout releases
+		// the claim like a success: the start itself was accepted.
+		var statusErr *AgentDMError
+		var readyErr error
+		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, AfterStart: func(ctx context.Context) error {
+			// Transition to 'starting' while waiting for readiness.
+			statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
+				s.messageLog.Error("wake: failed to update agent phase to starting",
+					"agent_id", agent.ID, "error", err)
+				statusErr = &AgentDMError{
+					Code:       ErrCodeInternalError,
+					Message:    "failed to update agent status after resume",
+					HTTPStatus: http.StatusInternalServerError,
+				}
+				return nil
+			}
+			agent.Phase = string(state.PhaseStarting)
+			// Publish from a re-read: a delete that claimed the row meanwhile
+			// must not be painted over (design ptone/scion#2483 note F).
+			s.publishAgentStatusFresh(ctx, agent)
+			// Wait for the agent to report its first activity (readiness signal).
+			readyErr = s.waitForAgentReady(ctx, agent.ID, 30*time.Second)
+			return nil
+		}})
 		if err != nil {
-			if errors.Is(err, store.ErrQuotaExceeded) {
+			var quotaErr *startQuotaError
+			if errors.As(err, &quotaErr) {
+				if errors.Is(err, store.ErrQuotaExceeded) {
+					return nil, &AgentDMError{
+						Code:       ErrCodeQuotaExceeded,
+						Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
+						HTTPStatus: http.StatusTooManyRequests,
+					}
+				}
 				return nil, &AgentDMError{
-					Code:       ErrCodeQuotaExceeded,
-					Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
-					HTTPStatus: http.StatusTooManyRequests,
+					Code:       ErrCodeRuntimeError,
+					Message:    "quota check failed: " + err.Error(),
+					HTTPStatus: http.StatusInternalServerError,
 				}
 			}
-			return nil, &AgentDMError{
-				Code:       ErrCodeRuntimeError,
-				Message:    "quota check failed: " + err.Error(),
-				HTTPStatus: http.StatusInternalServerError,
+			var held *store.ClaimHeldError
+			if errors.As(err, &held) {
+				// Another start holds the agent's claim: it is already
+				// starting. The message is kept (deferred) and the sender
+				// gets no error.
+				s.messageLog.Info("wake: agent already starting; message deferred",
+					"agent_id", agent.ID, "holder", string(held.Kind))
+				return &WakeResult{Outcome: WakeDeferred}, nil
 			}
-		}
-
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
 			// A delete claimed the row after the start gate passed: the
-			// running intent was refused (ptone/scion#2550).
-			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
-				return nil, ref.dmError()
-			}
-			return nil, &AgentDMError{
-				Code:       ErrCodeRuntimeError,
-				Message:    "Failed to wake agent: " + err.Error(),
-				HTTPStatus: http.StatusInternalServerError,
-			}
-		}
-		// Resume the suspended agent. continue=true tells the harness to
-		// restore its prior session rather than starting fresh.
-		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
+			// start was refused (ptone/scion#2550).
 			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 				return nil, ref.dmError()
 			}
@@ -180,25 +204,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				HTTPStatus: http.StatusBadGateway,
 			}
 		}
-
-		// Transition to 'starting' while waiting for readiness.
-		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
-		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
-			s.messageLog.Error("wake: failed to update agent phase to starting",
-				"agent_id", agent.ID, "error", err)
-			return nil, &AgentDMError{
-				Code:       ErrCodeInternalError,
-				Message:    "failed to update agent status after resume",
-				HTTPStatus: http.StatusInternalServerError,
-			}
+		if statusErr != nil {
+			return nil, statusErr
 		}
-		agent.Phase = string(state.PhaseStarting)
-		// Publish from a re-read: a delete that claimed the row meanwhile
-		// must not be painted over (design ptone/scion#2483 note F).
-		s.publishAgentStatusFresh(ctx, agent)
 
-		// Wait for the agent to report its first activity (readiness signal).
-		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
+		if err := readyErr; err != nil {
 			// A readiness timeout does not mean the container has exited —
 			// the harness may just be slow, or hung, while still occupying
 			// the broker slot. Leave Phase unset (a no-op field on
@@ -229,7 +239,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		}
 
 		// Agent is ready — transition to 'running'.
-		statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
+		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to running",
 				"agent_id", agent.ID, "error", err)
@@ -319,4 +329,13 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 			HTTPStatus: http.StatusConflict,
 		}
 	}
+}
+
+// deferredReason is the note a deferred delivery reports: a migrating
+// recipient, or another start of the recipient already in progress.
+func deferredReason(agent *store.Agent) string {
+	if reincarnationInFlight(agent) {
+		return "agent is reincarnating"
+	}
+	return "agent is already starting"
 }

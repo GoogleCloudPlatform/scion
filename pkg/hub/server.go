@@ -1313,8 +1313,7 @@ type Server struct {
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.
 	startClaimCfg atomic.Pointer[StartClaimSettings]
-	// startClaimsOn turns start claims on (start_claim.go). Off until every
-	// start trigger runs under a claim.
+	// startClaimsOn turns start claims on (start_claim.go); New sets it.
 	startClaimsOn bool
 	// startClaimTestHook, when set, adjusts a claim run before its renewal
 	// starts (tests only).
@@ -1322,6 +1321,9 @@ type Server struct {
 	// claimStops records when the start-claim reaper last stopped an
 	// agent's container (agent ID -> time.Time), to rate-limit it.
 	claimStops sync.Map
+	// intentStops records when the hub last stopped an agent that ran with
+	// run intent stopped (agent ID -> time.Time), to rate-limit it.
+	intentStops sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -1538,6 +1540,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	srv.setStartClaimSettings(cfg.StartClaim)
+	// Every start trigger runs under a start claim.
+	srv.startClaimsOn = true
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale
@@ -3780,6 +3784,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
+		supersedes := agent.StartClaimID
 		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend intent write failed",
@@ -3805,6 +3810,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				endLifecycleOp()
 				continue
 			}
+			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
 		}
 
 		statusUpdate := store.AgentStatusUpdate{
@@ -4627,10 +4633,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		// The create-and-start runs under a start claim, which records run
+		// intent running.
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+			return dispatcher.DispatchAgentCreate(ctx, agent)
+		})
+		var held *store.ClaimHeldError
+		if errors.As(err, &held) {
+			// The agent is already being started by the claim holder: the
+			// event is deferred, not failed.
+			slog.Info("Scheduler: agent already starting; event deferred",
+				"eventID", evt.ID, "agent_id", agent.ID, "holder", string(held.Kind))
+			return nil
 		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,

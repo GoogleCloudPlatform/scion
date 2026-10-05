@@ -288,7 +288,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// beginLifecycleOp.
 	defer s.beginLifecycleOp(agent.ID)()
 
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+	supersedes := agent.StartClaimID
+	intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+	if err != nil {
 		return err
 	}
 
@@ -298,6 +300,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 			return err
 		}
+		s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
 	}
 
 	// Revoke all credentials for the suspended agent (best-effort, Phase 1H)
@@ -418,6 +421,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// The start claim a stop supersedes: the one held when the stop is
+	// recorded. It is released once the stop's dispatch succeeds.
+	stopSupersedes := agent.StartClaimID
+	var stopIntentAt time.Time
 	if action == api.AgentActionStop {
 		// A stop is recorded before the broker check, so it holds even when
 		// the broker is offline: the stop is then queued for the broker's
@@ -427,6 +434,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		stopIntentAt = intentAt
 		if !s.brokerReachable(ctx, agent) {
 			s.queueOfflineStop(w, r, agent, intentAt)
 			return
@@ -443,6 +451,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	var newPhase string
 	var dispatchErr error
+	// startStatusWritten: startAgentCore wrote the started status.
+	var startStatusWritten bool
 
 	// Collect warnings the start leg raises (hub-side TZ drops and the
 	// broker's hub-only env warnings) so the start and restart responses
@@ -477,37 +487,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
-			// Re-reserve the per-broker ceiling before dispatch, exactly as
-			// create does, so a start that would exceed the cap is rejected
-			// up front rather than after the container is already running
-			// (ptone/scion#1963). Idempotent: a no-op when the agent already
-			// holds an active reservation (e.g. start called again on an
-			// already-running agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
-			if !ok {
-				return
-			}
-			// Intent stays running if the dispatch below fails: a failed
-			// start is still a start the user asked for (pod recovery
-			// design, run intent semantics).
-			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, agent, reserved)
-				writeRunIntentError(w, err, agent.ID)
-				return
-			}
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
-			// DispatchAgentStart applies the broker response in-place;
-			// use the broker-reported phase if it was set.
-			if dispatchErr == nil && agent.Phase != "" {
+			// The start runs under a start claim, which records run intent
+			// running (it stays running if the dispatch fails: a failed
+			// start is still a start the user asked for). startAgentCore
+			// re-reserves the per-broker ceiling before dispatch, exactly
+			// as create does (ptone/scion#1963), rolls back only a
+			// reservation it made when the start fails (ptone/scion#1978),
+			// and writes the started status while the claim is held.
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume})
+			if dispatchErr == nil {
+				startStatusWritten = true
 				newPhase = agent.Phase
-			}
-			if dispatchErr != nil {
-				// Roll back a reservation this call took speculatively, so a
-				// failed start doesn't strand one with no container behind
-				// it. A reservation that already existed (start on a
-				// running agent) is kept: that agent is still counted
-				// (ptone/scion#1978).
-				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
@@ -527,6 +517,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// A stopped agent has no running container: release its
 			// max_agents_per_broker reservation (ptone/scion#1963).
 			s.releaseBrokerQuota(ctx, agent)
+			s.releaseSupersededClaim(ctx, agent.ID, stopSupersedes, stopIntentAt)
 		}
 	case api.AgentActionSuspend:
 		// Only running agents can be suspended via the HTTP lifecycle handler.
@@ -559,8 +550,26 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
-		// A restart leaves the agent running: record that before the stop leg.
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		// A restart leaves the agent running. Its start claim (which
+		// records that intent) is taken before the stop leg, so no other
+		// start runs between the stop and the start.
+		var restartClaim *startClaimRun
+		if dispatcher != nil && agent.RuntimeBrokerID != "" && s.startClaimsEnabled() {
+			run, err := s.acquireStartClaim(ctx, agent, store.StartClaimRestart)
+			if err != nil {
+				if !s.writeStartClaimError(w, err, agent.ID) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
+			restartClaim = run
+			// Released on every return that does not reach the start leg.
+			defer func() {
+				if restartClaim != nil {
+					restartClaim.finish(startReleased)
+				}
+			}()
+		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
 			return
 		}
@@ -591,20 +600,18 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", id, "error", stopErr)
 			}
 			// The broker reservation is held across the restart
-			// (ptone/scion#1978). Releasing it after the stop leg and
-			// re-reserving before the start leg would let another start
-			// take the slot in between. This reserve is a no-op for an
-			// agent that already holds one, and applies the cap to an
-			// agent that does not (for example, a stopped agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
-			if !ok {
-				return
-			}
+			// (ptone/scion#1978): the start leg's reserve in
+			// startAgentCore is a no-op for an agent that already holds
+			// one, and applies the cap to an agent that does not (for
+			// example, a stopped agent); a reservation it made is rolled
+			// back if the start leg fails.
 			// Restart is stop + start: a fresh harness session, not a resume.
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
-			// DispatchAgentStart applies the broker response in-place;
-			// use the broker-reported phase if it was set.
-			if dispatchErr == nil && agent.Phase != "" {
+			// The start leg runs under the claim taken before the stop leg.
+			existing := restartClaim
+			restartClaim = nil
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing})
+			if dispatchErr == nil {
+				startStatusWritten = true
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
@@ -612,9 +619,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
 					// owns the row now: leave its phase and the
-					// reservation it held to the engine, and undo only a
-					// reservation this call created.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
+					// reservation it held to the engine.
 				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
 					// release the slot and record the stopped state as an
@@ -623,11 +628,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// heartbeat.
 					s.releaseBrokerQuota(ctx, agent)
 					s.recordRestartStopped(ctx, agent.ID)
-				} else {
-					// The container may still be running: keep a
-					// reservation this call did not create.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
 				}
+				// Otherwise the container may still be running: the
+				// reservation it held is kept.
 			}
 		}
 	}
@@ -635,6 +638,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if s.writeStartClaimError(w, dispatchErr, agent.ID) || writeStartQuotaError(w, dispatchErr) {
+			return
+		}
 		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
 			ref.write(w)
 			return
@@ -693,9 +699,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 		statusUpdate.ClearExit = true
 	}
-	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+	// A start or restart run by startAgentCore wrote its status while its
+	// claim was held.
+	if !startStatusWritten {
+		if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	// A successful start/stop/restart clears a failed delete marker
@@ -726,7 +736,7 @@ const (
 func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
 	ctx := r.Context()
 	at := intentAt
-	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at})
+	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, SupersedesClaim: agent.StartClaimID})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1036,7 +1046,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				Name: agent.Name,
 			}
 
-			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+			supersedes := agent.StartClaimID
+			intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+			if err != nil {
 				res.Status = "error"
 				res.Error = err.Error()
 				mu.Lock()
@@ -1068,6 +1080,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				defer cancel()
 				s.syncWorkspaceOnStop(opCtx, agent)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)
+				if dispatchErr == nil {
+					s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+				}
 			}
 
 			if dispatchErr != nil {

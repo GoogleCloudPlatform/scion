@@ -570,9 +570,10 @@ type AgentStore interface {
 	// records run intent running in the same write (run_intent_at strictly
 	// increasing, as SetRunIntent). It requires that no claim is held, the
 	// agent is not deleted or being deleted, and no reincarnation is in
-	// flight. Returns *ClaimHeldError when a claim is held, ErrClaimPredicate
-	// when the agent is otherwise not eligible, and ErrNotFound when it does
-	// not exist.
+	// flight. Returns ErrDeleteInProgress when a delete holds the row or the
+	// agent is soft-deleted (as SwapRunIntent does for a running intent),
+	// *ClaimHeldError when a claim is held, ErrClaimPredicate when the agent
+	// is otherwise not eligible, and ErrNotFound when it does not exist.
 	ClaimAgentStart(ctx context.Context, agentID, owner string, kind StartClaimKind, target string, ttl time.Duration) (StartClaim, error)
 
 	// ClaimAgentStop takes a live claim of kind StartClaimStop, used while a
