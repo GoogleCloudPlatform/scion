@@ -1832,15 +1832,21 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	// Get project agents (with cache refresh as the sender).
-	senderPrincipal := ""
+	senderPrincipal, senderEmail := "", ""
 	if tgMsg.From != nil {
 		mapping, mErr := b.store.GetUserMapping(ctx, strconv.FormatInt(tgMsg.From.ID, 10))
 		if mErr != nil {
 			b.log.Warn("Failed to look up sender mapping", "error", mErr)
 		}
 		senderPrincipal = linkedUserPrincipal(mapping)
+		if mapping != nil {
+			senderEmail = mapping.ScionEmail
+		}
 	}
 	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderPrincipal)
+	listUnavailable := func(replyTo string) {
+		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderEmail, link.ProjectSlug)
+	}
 
 	b.mu.RLock()
 	botUsername := ""
@@ -1935,7 +1941,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
 					}
 					if agentsErr != nil {
-						b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr)
+						listUnavailable(replyTo)
 					} else {
 						errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
 						b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
@@ -1954,7 +1960,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
 			if len(unresolved) > 0 {
 				if agentsErr != nil {
-					b.replyAgentListUnavailable(ctx, chatID, "", agentsErr)
+					listUnavailable("")
 					return
 				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
@@ -1974,7 +1980,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 					}
 				}
 				if len(typos) > 0 && agentsErr != nil {
-					b.replyAgentListUnavailable(ctx, chatID, "", agentsErr)
+					listUnavailable("")
 				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
 					b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
@@ -2673,8 +2679,8 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBe
 // replyAgentListUnavailable tells the sender why their message could not be
 // routed when no agent list is available, instead of reporting the
 // addressed agent as missing.
-func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error) {
-	text := "Couldn't fetch the agent list for this project. Please try again later."
+func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error, email, project string) {
+	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
 	if errors.Is(listErr, errSenderNotLinked) {
 		text = registerHint
 	}

@@ -103,9 +103,14 @@ func (h *CommandHandler) requireLinkedSender(ctx context.Context, msg *TGMessage
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return nil, "", false
 	}
+	if mapping == nil {
+		h.reply(chatID, registerHint)
+		return nil, "", false
+	}
 	principal = linkedUserPrincipal(mapping)
 	if principal == "" {
-		h.reply(chatID, registerHint)
+		// Linked without a Scion email: the link cannot be used.
+		h.reply(chatID, staleLinkText)
 		return nil, "", false
 	}
 	return mapping, principal, true
@@ -254,7 +259,7 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
-	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
 	if !ok {
 		return
 	}
@@ -263,7 +268,7 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -318,7 +323,7 @@ func (h *CommandHandler) handleTerminal(msg *TGMessage) {
 		return
 	}
 
-	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
 	if !ok {
 		return
 	}
@@ -326,7 +331,7 @@ func (h *CommandHandler) handleTerminal(msg *TGMessage) {
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -367,7 +372,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		return
 	}
 
-	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
 	if !ok {
 		return
 	}
@@ -376,7 +381,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -591,9 +596,13 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
 	}
+	if mapping == nil {
+		h.reply(chatID, "Please /register first to manage notifications.")
+		return
+	}
 	principal := linkedUserPrincipal(mapping)
 	if principal == "" {
-		h.reply(chatID, "Please /register first to manage notifications.")
+		h.reply(chatID, staleLinkText)
 		return
 	}
 
@@ -633,6 +642,11 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 
 		agents, agentErr := h.getAgents(ctx, link.ProjectID, principal)
 		if agentErr != nil {
+			if isStaleLinkError(agentErr) {
+				h.reply(chatID, staleLinkText)
+				return
+			}
+			// Projects the user may not read are left out of the list.
 			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
 			continue
 		}
@@ -662,7 +676,8 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 
 // getAgents returns agents for a project, using the store cache with a
 // fallback to the hub API, which is called as the linked user identified by
-// onBehalfOf.
+// onBehalfOf. A stale cache is used when the hub is unavailable, but not
+// when the hub denies the request.
 func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
@@ -674,7 +689,7 @@ func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf st
 
 	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
-		if cached != nil {
+		if cached != nil && !isForbiddenHubError(err) {
 			return cached.Agents, nil
 		}
 		return nil, err
@@ -798,7 +813,7 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -837,7 +852,7 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list fresh projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list fresh projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -876,7 +891,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -910,7 +925,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, newHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse

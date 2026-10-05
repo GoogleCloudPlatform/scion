@@ -161,32 +161,42 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 	}
 }
 
-// callbackPrincipal returns the principal of the linked user who pressed the
-// button, or "" when that user is not linked.
-func (h *CallbackHandler) callbackPrincipal(ctx context.Context, cb *CallbackQuery) string {
-	if cb.From == nil {
-		return ""
+// requireLinkedPresser returns the link mapping and principal of the user
+// who pressed the button. When that user cannot act as a linked Scion user
+// it answers the callback with a hint and returns ok=false.
+func (h *CallbackHandler) requireLinkedPresser(ctx context.Context, cb *CallbackQuery) (mapping *TelegramUserMapping, principal string, ok bool) {
+	if cb.From != nil {
+		senderID := strconv.FormatInt(cb.From.ID, 10)
+		var err error
+		mapping, err = h.store.GetUserMapping(ctx, senderID)
+		if err != nil {
+			h.log.Warn("Failed to look up user mapping", "sender_id", senderID, "error", err)
+			h.answerCallback(ctx, cb.ID, "Something went wrong. Please try again.", false)
+			return nil, "", false
+		}
 	}
-	senderID := strconv.FormatInt(cb.From.ID, 10)
-	mapping, err := h.store.GetUserMapping(ctx, senderID)
-	if err != nil {
-		h.log.Warn("Failed to look up user mapping", "sender_id", senderID, "error", err)
-		return ""
+	if mapping == nil {
+		h.answerCallback(ctx, cb.ID, registerHint, true)
+		return nil, "", false
 	}
-	return linkedUserPrincipal(mapping)
+	principal = linkedUserPrincipal(mapping)
+	if principal == "" {
+		h.answerCallback(ctx, cb.ID, staleLinkText, true)
+		return nil, "", false
+	}
+	return mapping, principal, true
 }
 
 func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, projectID string) error {
-	principal := h.callbackPrincipal(ctx, cb)
-	if principal == "" {
-		h.answerCallback(ctx, cb.ID, registerHint, true)
+	mapping, principal, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
 		return nil
 	}
 
 	agentInfos, err := h.hubClient.ListAgents(ctx, projectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
-		h.answerCallback(ctx, cb.ID, "Failed to fetch agents. Try again.", false)
+		h.answerCallback(ctx, cb.ID, hubErrorText(err, mapping.ScionEmail, h.projectDisplayName(projectID), "Failed to fetch agents. Try again."), isForbiddenHubError(err))
 		return err
 	}
 	agents := agentSlugs(agentInfos)
@@ -232,6 +242,19 @@ func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQu
 		fmt.Sprintf("Project *%s* selected.\nChoose a default agent:\nAny plain message (without a / command or @mention) will be sent to the default agent. Mention a specific agent by name to route there instead.", projectSlug), kb)
 	h.answerCallback(ctx, cb.ID, "", false)
 	return nil
+}
+
+// projectDisplayName returns the cached display name of a project, or the
+// project ID when it is not cached.
+func (h *CallbackHandler) projectDisplayName(projectID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, p := range h.cachedProjects {
+		if p.ID == projectID {
+			return p.DisplayName()
+		}
+	}
+	return projectID
 }
 
 func (h *CallbackHandler) handleSetupDefaultAgent(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, agentSlug string) error {
