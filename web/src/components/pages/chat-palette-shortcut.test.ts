@@ -34,6 +34,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+import { PALETTE_TYPEAHEAD_MAX_MS } from '../shared/palette/palette-typeahead.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -620,6 +621,29 @@ describe('keys typed while the palette opens', () => {
     await page.togglePalette({ mode: 'open' });
     expect(typeAt(el, 'c').defaultPrevented).toBe(true);
     expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured for a full time limit from a reopen that runs late behind the document preview', async () => {
+    vi.useFakeTimers();
+    try {
+      const page = createEligiblePage();
+      page.v2SwitcherLoaded = true;
+      page._paletteFilePreviewTarget = previewTarget();
+      document.body.appendChild(page);
+      const { el, onKeydown } = composer();
+
+      await page.togglePalette({ mode: 'open' }); // queued
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS - 1000);
+      page._closePaletteFilePreview();
+      expect(page.v2PaletteOpen).toBe(true);
+      vi.advanceTimersByTime(2000);
+
+      expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+      expect(onKeydown).not.toHaveBeenCalled();
+      expect(page._paletteTypeahead.pending).toBe('c');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reach the composer again once a second press cancels a queued reopen', async () => {

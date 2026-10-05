@@ -383,6 +383,21 @@ describe('PaletteTypeahead', () => {
     expect(typeahead.take()).toBe('a');
   });
 
+  it('start() while capturing restarts the time limit', () => {
+    vi.useFakeTimers();
+    typeahead.start();
+    press('a');
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS - 1);
+    typeahead.start();
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS - 1);
+    expect(typeahead.isCapturing).toBe(true);
+    expectCaptured(press('b'));
+    vi.advanceTimersByTime(1);
+    expect(typeahead.isCapturing).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(typeahead.take()).toBe('ab');
+  });
+
   it('a start() after a capture reached its time limit begins with no text', () => {
     vi.useFakeTimers();
     typeahead.start();

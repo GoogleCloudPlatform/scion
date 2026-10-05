@@ -36,7 +36,8 @@
 import { isMacPlatform } from '../../../utils/platform.js';
 
 /**
- * How long a capture lasts at most. A capture that no close or focus ever
+ * How long a capture lasts at most after its latest
+ * {@link PaletteTypeahead.start}. A capture that no close or focus ever
  * ends (an open path that forgot to stop it) must not swallow keys for
  * good; the text typed so far is kept for a late {@link PaletteTypeahead.take}.
  */
@@ -87,15 +88,17 @@ export class PaletteTypeahead {
   }
 
   /**
-   * Starts capturing keys, unless already capturing. A fresh capture starts
-   * with no text.
+   * Starts capturing keys, and restarts the time limit. A fresh capture
+   * starts with no text; a start while capturing keeps the text captured so
+   * far, so an open that runs a queued open request carries its keys.
    */
   start(): void {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.release(), PALETTE_TYPEAHEAD_MAX_MS);
     if (this.capturing) return;
     this.text = '';
     this.capturing = true;
     window.addEventListener('keydown', this.handleKeydown, true);
-    this.timer = setTimeout(() => this.release(), PALETTE_TYPEAHEAD_MAX_MS);
   }
 
   /** Stops capturing and returns the captured text, clearing it. */
