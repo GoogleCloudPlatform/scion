@@ -7296,3 +7296,245 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
     expect(internals.sendError).toBe('offline');
   });
 });
+
+/**
+ * A jump into the conversation already open (a search result) re-mounts the
+ * thread and starts while its initial load is still running. The load must
+ * not then fall back to the unread divider or the bottom over the jump, and
+ * an earlier, slower jump must not land over a newer one.
+ */
+describe('scion-chat-thread jump during the initial load', () => {
+  type Internals = {
+    scrollToUnreadDivider(): void;
+    scrollToBottomAfterRender(): void;
+  };
+
+  function msg(id: string, minute: number): Message {
+    return {
+      id,
+      sender: 'them@example.com',
+      msg: id,
+      createdAt: `2026-01-01T00:${String(minute).padStart(2, '0')}:00Z`,
+    } as unknown as Message;
+  }
+
+  const LATEST = [msg('latest-1', 50), msg('latest-2', 51), msg('latest-3', 52)];
+
+  function page(items: Message[], extra: Record<string, unknown> = {}): Response {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items, ...extra }),
+    } as unknown as Response;
+  }
+
+  function around(id: string, minute: number): Response {
+    return page(
+      [msg(`${id}-before`, minute - 1), msg(id, minute), msg(`${id}-after`, minute + 1)],
+      {
+        nextCursor: `${id}-cursor`,
+      }
+    );
+  }
+
+  /** A response promise and the function that settles it. */
+  function deferred(): { promise: Promise<Response>; resolve: (r: Response) => void } {
+    let resolve: (r: Response) => void = () => {};
+    const promise = new Promise<Response>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  let scrolledTo: string[];
+  let lastReadMessageId: string;
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+
+  /** Route requests: held ones by key, the rest answered at once. */
+  let held: Map<string, Promise<Response>>;
+  function routeKey(url: string): string {
+    if (url.includes('around=')) return `around:${url.split('around=')[1].split('&')[0]}`;
+    if (url.includes('/messages?')) return 'history';
+    return url.endsWith('/read') ? 'read' : 'other';
+  }
+
+  function hold(key: string): (r: Response) => void {
+    const d = deferred();
+    held.set(key, d.promise);
+    return d.resolve;
+  }
+
+  /** Create the thread with spies on its fallback scrolls, then mount it. */
+  function create(): {
+    el: ScionChatThread;
+    unread: ReturnType<typeof vi.fn>;
+    bottom: ReturnType<typeof vi.fn>;
+  } {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    const internals = el as unknown as Internals;
+    const unread = vi.spyOn(internals, 'scrollToUnreadDivider') as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    const bottom = vi.spyOn(internals, 'scrollToBottomAfterRender') as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    return { el, unread, bottom };
+  }
+
+  beforeEach(() => {
+    held = new Map();
+    scrolledTo = [];
+    lastReadMessageId = 'latest-1';
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: string) => {
+      const key = routeKey(String(url));
+      const pending = held.get(key);
+      if (pending) {
+        held.delete(key);
+        return pending;
+      }
+      if (key === 'history') return Promise.resolve(page(LATEST));
+      if (key === 'read') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ lastReadMessageId }),
+        } as unknown as Response);
+      }
+      if (key.startsWith('around:')) return Promise.resolve(around(key.slice(7), 10));
+      return Promise.resolve(emptyHistory());
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value(this: HTMLElement) {
+        scrolledTo.push(this.id);
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: originalScrollIntoView,
+    });
+    document.body.innerHTML = '';
+  });
+
+  function rendered(el: ScionChatThread, id: string): boolean {
+    return el.shadowRoot?.querySelector(`#msg-${id}`) != null;
+  }
+
+  it.each([
+    ['the jump page arrives first', true],
+    ['the latest page arrives first', false],
+  ])(
+    'a jump made while the initial load is pending lands on its target (%s)',
+    async (_name, jumpFirst) => {
+      const releaseHistory = hold('history');
+      const releaseAround = hold('around:target');
+      const { el, unread, bottom } = create();
+      await el.updateComplete;
+
+      const jump = el.scrollToMessageById('target');
+      await flush();
+      if (jumpFirst) {
+        releaseAround(around('target', 10));
+        await flush();
+        releaseHistory(page(LATEST));
+      } else {
+        releaseHistory(page(LATEST));
+        await flush();
+        releaseAround(around('target', 10));
+      }
+      await jump;
+      await flush();
+      await el.updateComplete;
+
+      expect(rendered(el, 'target')).toBe(true);
+      // The latest page is not spliced in after the jump window.
+      expect(rendered(el, 'latest-3')).toBe(false);
+      expect(scrolledTo.at(-1)).toBe('msg-target');
+      expect(unread).not.toHaveBeenCalled();
+      expect(bottom).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['before the load finishes', true],
+    ['after the load finishes', false],
+  ])('a jump whose target is gone, answered %s, gives the view back', async (_name, jumpFirst) => {
+    lastReadMessageId = '';
+    const releaseHistory = hold('history');
+    const releaseAround = hold('around:gone');
+    const { el, unread, bottom } = create();
+    await el.updateComplete;
+
+    const jump = el.scrollToMessageById('gone');
+    await flush();
+    const missing = {
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({}),
+    } as unknown as Response;
+    if (jumpFirst) {
+      releaseAround(missing);
+      await jump;
+      releaseHistory(page(LATEST));
+    } else {
+      releaseHistory(page(LATEST));
+      await flush();
+      expect(bottom).not.toHaveBeenCalled();
+      releaseAround(missing);
+      await jump;
+    }
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'latest-3')).toBe(true);
+    expect(unread).not.toHaveBeenCalled();
+    expect(bottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('two overlapping jumps resolve to the newer one', async () => {
+    const { el } = create();
+    await flush();
+    await el.updateComplete;
+
+    const releaseFirst = hold('around:first');
+    const first = el.scrollToMessageById('first');
+    await flush();
+    await el.scrollToMessageById('second');
+    await el.updateComplete;
+    expect(rendered(el, 'second')).toBe(true);
+
+    releaseFirst(around('first', 30));
+    await first;
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'second')).toBe(true);
+    expect(rendered(el, 'first')).toBe(false);
+    expect(scrolledTo).not.toContain('msg-first');
+    expect(scrolledTo.at(-1)).toBe('msg-second');
+  });
+
+  it.each([
+    ['the unread divider', 'latest-1', 'unread'],
+    ['the bottom', '', 'bottom'],
+  ])('a load with no jump still opens at %s', async (_name, lastRead, expected) => {
+    lastReadMessageId = lastRead;
+    const { el, unread, bottom } = create();
+    await flush();
+    await el.updateComplete;
+
+    expect(rendered(el, 'latest-3')).toBe(true);
+    expect(unread).toHaveBeenCalledTimes(expected === 'unread' ? 1 : 0);
+    expect(bottom).toHaveBeenCalledTimes(expected === 'bottom' ? 1 : 0);
+  });
+});
