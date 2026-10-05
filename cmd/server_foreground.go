@@ -303,12 +303,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load settings early so both Hub and Broker can use project-level hub.endpoint.
-	brokerSettings, err := config.LoadSettings("")
-	brokerSettingsLoaded := err == nil
-	if err != nil {
-		log.Printf("Warning: failed to load settings: %v", err)
-		brokerSettings = &config.Settings{}
-	}
+	brokerSettings, brokerDefaultProfile := loadServerSettings("")
 	if brokerSettings.Hub == nil {
 		brokerSettings.Hub = &config.HubClientConfig{}
 	}
@@ -513,7 +508,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := requireImageRegistryForBroker(); err != nil {
 			return err
 		}
-		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, brokerSettingsLoaded, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
+		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
 		}
 	}
@@ -1541,6 +1536,21 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 }
 
 // resolveHubEndpoint determines the Hub's public endpoint URL.
+// loadServerSettings loads the settings the server's hub and broker use,
+// falling back to empty settings (with a warning) when they fail to load. It
+// also returns the default profile the broker reports on every heartbeat:
+// the settings' active profile, or nil when they failed to load, so the
+// heartbeat omits it and the hub keeps its value.
+func loadServerSettings(path string) (*config.Settings, *string) {
+	settings, err := config.LoadSettings(path)
+	loaded := err == nil
+	if err != nil {
+		log.Printf("Warning: failed to load settings: %v", err)
+		settings = &config.Settings{}
+	}
+	return settings, brokerHeartbeatDefaultProfile(settings, loaded)
+}
+
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
 	if cfg.Hub.Endpoint != "" {
 		return cfg.Hub.Endpoint
@@ -2935,7 +2945,7 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 	return rt, nil
 }
 
-func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, brokerSettingsLoaded bool, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
+func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
 	if err != nil {
 		return err
@@ -3153,7 +3163,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
 		WorkspaceStorageBackend:       workspaceStorageBackend,
-		DefaultProfile:                brokerHeartbeatDefaultProfile(brokerSettings, brokerSettingsLoaded),
+		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

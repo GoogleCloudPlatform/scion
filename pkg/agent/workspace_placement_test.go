@@ -80,6 +80,13 @@ func TestStart_ReportsWorkspacePlacement(t *testing.T) {
 			env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: testGitClone, want: api.WorkspacePlacementLocal},
 		{name: "docker shared-plain on nfs", runtime: "docker", nfs: true,
 			env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: testGitClone, want: api.WorkspacePlacementExport},
+		// Fail closed: runtimes not known to mount the export report local.
+		{name: "cloudrun-sandbox shared-plain on nfs", runtime: "cloudrun-sandbox", nfs: true,
+			env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: testGitClone, want: api.WorkspacePlacementLocal},
+		{name: "substrate shared-plain on nfs", runtime: "substrate", nfs: true,
+			env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: testGitClone, want: api.WorkspacePlacementLocal},
+		{name: "unknown runtime shared-plain on nfs", runtime: "future-runtime", nfs: true,
+			env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: testGitClone, want: api.WorkspacePlacementLocal},
 		{name: "k8s clone-per-agent without workspace storage", runtime: "kubernetes",
 			env: map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, gitClone: testGitClone, want: api.WorkspacePlacementLocal},
 		{name: "docker without workspace storage", runtime: "docker", want: api.WorkspacePlacementLocal},
@@ -109,14 +116,21 @@ func TestWorkspacePlacementFor(t *testing.T) {
 		want string
 	}{
 		{"local backend", workspacePlacementInput{}, api.WorkspacePlacementLocal},
-		{"cloudrun-volume", workspacePlacementInput{Backend: "cloudrun-volume", Kubernetes: true, PVClaimName: "pv"}, api.WorkspacePlacementLocal},
-		{"docker nfs bind mount", workspacePlacementInput{Backend: "nfs"}, api.WorkspacePlacementExport},
-		{"docker nfs clone-per-agent", workspacePlacementInput{Backend: "nfs", ClonePerAgent: true}, api.WorkspacePlacementExport},
-		{"k8s nfs shared with claim", workspacePlacementInput{Backend: "nfs", Kubernetes: true, PVClaimName: "pv"}, api.WorkspacePlacementExport},
-		{"k8s nfs without claim (EmptyDir)", workspacePlacementInput{Backend: "nfs", Kubernetes: true}, api.WorkspacePlacementLocal},
-		{"k8s nfs clone-per-agent with claim and agent dir", workspacePlacementInput{Backend: "nfs", Kubernetes: true, PVClaimName: "pv", ClonePerAgent: true, AgentDirName: "a"}, api.WorkspacePlacementExport},
-		{"k8s nfs clone-per-agent without agent dir", workspacePlacementInput{Backend: "nfs", Kubernetes: true, PVClaimName: "pv", ClonePerAgent: true}, api.WorkspacePlacementLocal},
-		{"k8s nfs clone-per-agent without claim", workspacePlacementInput{Backend: "nfs", Kubernetes: true, ClonePerAgent: true, AgentDirName: "a"}, api.WorkspacePlacementLocal},
+		{"cloudrun-volume", workspacePlacementInput{Backend: "cloudrun-volume", Runtime: "kubernetes", PVClaimName: "pv"}, api.WorkspacePlacementLocal},
+		{"docker nfs bind mount", workspacePlacementInput{Backend: "nfs", Runtime: "docker"}, api.WorkspacePlacementExport},
+		{"docker nfs clone-per-agent", workspacePlacementInput{Backend: "nfs", Runtime: "docker", ClonePerAgent: true}, api.WorkspacePlacementExport},
+		{"podman nfs", workspacePlacementInput{Backend: "nfs", Runtime: "podman"}, api.WorkspacePlacementExport},
+		{"apple container nfs", workspacePlacementInput{Backend: "nfs", Runtime: "container"}, api.WorkspacePlacementExport},
+		{"cloudrun nfs", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun"}, api.WorkspacePlacementExport},
+		{"cloudrun-sandbox nfs (copies to local disk)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun-sandbox"}, api.WorkspacePlacementLocal},
+		{"substrate nfs (never mounts)", workspacePlacementInput{Backend: "nfs", Runtime: "substrate"}, api.WorkspacePlacementLocal},
+		{"unknown runtime nfs", workspacePlacementInput{Backend: "nfs", Runtime: "future-runtime"}, api.WorkspacePlacementLocal},
+		{"no runtime name nfs", workspacePlacementInput{Backend: "nfs"}, api.WorkspacePlacementLocal},
+		{"k8s nfs shared with claim", workspacePlacementInput{Backend: "nfs", Runtime: "kubernetes", PVClaimName: "pv"}, api.WorkspacePlacementExport},
+		{"k8s nfs without claim (EmptyDir)", workspacePlacementInput{Backend: "nfs", Runtime: "kubernetes"}, api.WorkspacePlacementLocal},
+		{"k8s nfs clone-per-agent with claim and agent dir", workspacePlacementInput{Backend: "nfs", Runtime: "kubernetes", PVClaimName: "pv", ClonePerAgent: true, AgentDirName: "a"}, api.WorkspacePlacementExport},
+		{"k8s nfs clone-per-agent without agent dir", workspacePlacementInput{Backend: "nfs", Runtime: "kubernetes", PVClaimName: "pv", ClonePerAgent: true}, api.WorkspacePlacementLocal},
+		{"k8s nfs clone-per-agent without claim", workspacePlacementInput{Backend: "nfs", Runtime: "kubernetes", ClonePerAgent: true, AgentDirName: "a"}, api.WorkspacePlacementLocal},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, workspacePlacementFor(tc.in), tc.name)

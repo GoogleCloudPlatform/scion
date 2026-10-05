@@ -134,6 +134,20 @@ func TestExportIDProbe_CachesLastGoodWhileInflight(t *testing.T) {
 	close(release)
 	waitIdle()
 
+	// Each good read refreshes the cache's age: a read just before the TTL
+	// keeps the ID reportable for a further TTL.
+	release = nil
+	require.Equal(t, good, p.get("d", time.Second))
+	waitIdle()
+	now = now.Add(exportIDCacheTTL - time.Second)
+	require.Equal(t, good, p.get("d", time.Second))
+	waitIdle()
+	now = now.Add(2 * time.Second)
+	release = make(chan struct{})
+	require.Equal(t, good, p.get("d", 20*time.Millisecond), "the refreshed ID is still reported past the first read's TTL")
+	close(release)
+	waitIdle()
+
 	release = nil
 	require.Equal(t, good, p.get("d", time.Second))
 	fail.Store(true)
