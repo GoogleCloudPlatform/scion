@@ -1990,8 +1990,11 @@ export class ScionPageChat extends LitElement {
       return;
     }
     // Only adopt agents belonging to the current view: the open conversation's
-    // project, or every space the user can see in the base view.
-    const scopeProjectId = this.v2Conversation?.projectId || '';
+    // project, the space holding the sidebar (on mobile, expanded with no
+    // conversation), or every space the user can see in the base view.
+    const scopeProjectId =
+      this.v2Conversation?.projectId ||
+      (this._sidebarOwner === 'space' ? this._sidebarSpaceId : '');
     const inScope = (projectId: string): boolean =>
       scopeProjectId ? projectId === scopeProjectId : true;
 

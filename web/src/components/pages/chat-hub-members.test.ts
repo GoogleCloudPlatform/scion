@@ -562,6 +562,9 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
       expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
 
       await harness.emitAgent('status', { agentId: 'a2', projectId: 'p9', activity: 'thinking' });
+      // The chat scope's map holds another rail project's agent: it is not
+      // this space's.
+      globalMap.agents.set('other', agent('other', { projectId: 'p2' }));
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
       await settle();
 
