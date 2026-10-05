@@ -2745,6 +2745,48 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
 	}
 	logSharedDirStorageOverridesStartup(globalSettings, logf)
+	logHomeStorageStartup(globalSettings, logf)
+}
+
+// logHomeStorageStartup logs a warning for each invalid home storage value
+// and each home_storage_backend "nfs" on a non-Kubernetes entry, and one
+// line per profile whose resolved home storage is nfs. It checks
+// configuration only; it never fails startup and never touches the export.
+// A broker host mount needed by the broker leaf mode is checked when an
+// agent using it starts, so a missing mount never affects startup or
+// agents on other runtimes. The hub.k8s_nfs_home experiment is decided by
+// the hub at each dispatch and is not shown here.
+func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil {
+		return
+	}
+	if gs.Server != nil {
+		if err := gs.Server.HomeStorage.Validate(); err != nil {
+			logf("Warning: %v", err)
+		}
+	}
+	for _, e := range config.ValidateHomeStorageOverrides(gs.Runtimes, gs.Profiles) {
+		logf("Warning: %s", e.Error())
+	}
+	for _, w := range config.HomeStorageIgnoredWarnings(gs.Runtimes, gs.Profiles) {
+		logf("Warning: %s", w)
+	}
+	names := make([]string, 0, len(gs.Profiles))
+	for name := range gs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		r := gs.ResolveHomeStorage(name)
+		if r.Backend != config.HomeStorageBackendNFS {
+			continue
+		}
+		rt := gs.Profiles[name].Runtime
+		if entry, ok := gs.Runtimes[rt]; ok && !config.IsKubernetesRuntimeEntry(rt, entry) {
+			continue
+		}
+		logf("home_storage for profile %s: backend=nfs (from %s), leaf=%s", name, r.BackendSource, r.Leaf)
+	}
 }
 
 // logSharedDirStorageOverridesStartup logs one line per profile whose

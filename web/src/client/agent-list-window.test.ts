@@ -15,7 +15,7 @@
  */
 
 /**
- * Covers the small and paged window states (design §9, §11).
+ * Covers the small and paged window states.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -48,6 +48,7 @@ function makeViewState(partial: Partial<AgentListViewState> = {}): AgentListView
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 2,
+    view: 'list',
     ...partial,
   };
 }
@@ -79,7 +80,7 @@ function createWindow(
 }
 
 describe('AgentListWindow — small state', () => {
-  it('display/items match agent-sort over the held set for every filter (A5 parity surface)', () => {
+  it('display/items match agent-sort over the held set for every filter', () => {
     const agents = [
       agent('a', { name: 'Charlie', phase: 'running', updated: '2026-01-03T00:00:00Z' }),
       agent('b', { name: 'Alpha', phase: 'stopped', updated: '2026-01-02T00:00:00Z' }),
@@ -111,7 +112,7 @@ describe('AgentListWindow — small state', () => {
     // SSE flush) with no call back into the window at all.
     agents = [agent('a', { phase: 'stopped' })];
     expect(win.items[0].phase).toBe('stopped');
-    expect(win.stats).toEqual({ total: 1, running: 0 });
+    expect(win.stats).toEqual({ total: 1, running: 0, incomplete: false });
   });
 
   it('setSmall() does not reset pageIndex when already small (only setViewState does)', () => {
@@ -177,7 +178,7 @@ describe('AgentListWindow — small state', () => {
   it('stats come from the held set (isAgentRunning)', () => {
     const { setHeld, win } = createWindow({ viewState: makeViewState() });
     setHeld([agent('a', { phase: 'running' }), agent('b', { phase: 'stopped' })]);
-    expect(win.stats).toEqual({ total: 2, running: 1 });
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
   });
 
   it('a label/phase/sort change never calls fetchPage while small', () => {
@@ -220,13 +221,23 @@ describe('AgentListWindow — paged state', () => {
     expect(win.hasNext).toBe(true);
 
     await win.next();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'cursor-1', limit: 2, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'cursor-1',
+      limit: 2,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
     expect(win.pageIndex).toBe(1);
     expect(win.hasNext).toBe(false);
 
     await win.prev();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: undefined, limit: 2, wantStats: true });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: undefined,
+      limit: 2,
+      wantStats: true,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
   });
 
@@ -277,16 +288,15 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false);
 
     // Off-page member 'c' changes phase. Its (default, tied) key is >= the
-    // page's first key, so on page 0 it counts as "entering range" (design
-    // §6.2) and the chip shows regardless of the phase change itself.
+    // page's first key, so on page 0 it counts as "entering range" and the chip shows regardless of the phase change itself.
     known.set('c', agent('c', { phase: 'stopped' }));
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
     expect(win.updatesAvailable).toBe(true);
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']); // on-page rows unchanged
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
-    expect(win.stats).toEqual({ total: 3, running: 2 });
-    expect(fetchPage).not.toHaveBeenCalled(); // no request (design §6.2)
+    expect(win.stats).toEqual({ total: 3, running: 2, incomplete: false });
+    expect(fetchPage).not.toHaveBeenCalled(); // no request
   });
 
   it('an off-page member change affecting counts only (no filter, key stays outside the page range) raises no chip', () => {
@@ -324,8 +334,8 @@ describe('AgentListWindow — paged state', () => {
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
-    expect(win.stats).toEqual({ total: 2, running: 1 });
-    expect(win.updatesAvailable).toBe(false); // counts-only: no chip (design §6.2)
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(win.updatesAvailable).toBe(false); // counts-only: no chip
   });
 
   it('an off-page member that newly passes the active phase filter raises the chip', () => {
@@ -357,7 +367,7 @@ describe('AgentListWindow — paged state', () => {
     known.set('c', agent('c', { phase: 'running', updated: '2026-01-01T00:00:00Z' }));
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
-    expect(win.updatesAvailable).toBe(true); // newly passes the filter (design §6.2)
+    expect(win.updatesAvailable).toBe(true); // newly passes the filter
   });
 
   it('an off-page upsert for a non-member is added only if it passes the project + committed-label add rule', () => {
@@ -469,7 +479,7 @@ describe('AgentListWindow — paged state', () => {
       ''
     );
 
-    // No active phase filter: a phase-only change is counts-only (design §6.2).
+    // No active phase filter: a phase-only change is counts-only.
     win.applyChanges({
       upserted: [],
       deleted: [],
@@ -515,7 +525,7 @@ describe('AgentListWindow — paged state', () => {
     expect(freshWin.updatesAvailable).toBe(false); // neither on-page nor a member: ignored
   });
 
-  it('markResync raises the chip and issues no request (reconnect, design §6.2/§7)', () => {
+  it('markResync raises the chip and issues no request (reconnect)', () => {
     const fetchPage = vi.fn();
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
@@ -546,7 +556,7 @@ describe('AgentListWindow — paged state', () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 
-  it('applyChanges is a no-op in the small state (design §11: small uses onAgentsUpdated instead)', () => {
+  it('applyChanges is a no-op in the small state', () => {
     const { win, setHeld } = createWindow({
       viewState: makeViewState(),
       getAgent: () => agent('a', { phase: 'stopped' }),
@@ -592,7 +602,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     expect(win.pageIndex).toBe(1); // unchanged — no re-adoption, no reset
     expect(win.hasPrev).toBe(true); // unchanged
     // The live preview filter IS applied to the
-    // loaded page's rows, same as the small state (design §6.3) — only 'c'
+    // loaded page's rows, same as the small state — only 'c'
     // (which carries the `env` label) remains.
     expect(win.items.map((a) => a.id)).toEqual(['c']);
     expect(fetchPage.mock.calls.length).toBe(callsBefore); // no request
@@ -754,7 +764,12 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     await win.next();
     expect(win.rangeStart).toBe(3); // rows before page 1: exactly page0's 3 rows
     await win.next(); // page 2 starts after page1's actual (short) 2 rows, not an assumed 3
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c2', limit: 3, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'c2',
+      limit: 3,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.rangeStart).toBe(5); // 3 + 2, not 3 + 3
   });
 
@@ -922,6 +937,7 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
       cursor: undefined,
       limit: 2,
       wantStats: true,
+      signal: expect.any(AbortSignal),
     });
     expect(win.pageIndex).toBe(0);
     expect(win.items.map((a) => a.id)).toEqual(['e', 'f']);
@@ -936,7 +952,12 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
     // Prove it's actually the *fresh* cursor, minted under the new params,
     // not the stale one from before the invalidation.
     await win.next();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c1-new', limit: 2, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'c1-new',
+      limit: 2,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['g', 'h']);
   });
 });
@@ -994,5 +1015,48 @@ describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch'
     // fetch started under now-obsolete params is exactly what the
     // generation bump in invalidateCursors() is for.
     expect(win.hasNext).toBe(false);
+  });
+});
+
+// ptone/scion#2483 phase 2: the pages' new "Stopping" filter option goes
+// through the same generic phaseFilter as the others.
+describe('AgentListWindow — stopping phase filter', () => {
+  it('small state: stopping agents only, and phase changes move them in and out', () => {
+    let agents = [agent('a', { phase: 'stopping' }), agent('b'), agent('c', { phase: 'stopped' })];
+    const { win } = createWindow({
+      viewState: makeViewState({ phaseFilter: 'stopping', pageSize: 10 }),
+      getHeldAgents: () => agents,
+    });
+    win.setSmall();
+    expect(win.items.map((a) => a.id)).toEqual(['a']);
+    agents = [agent('a', { phase: 'stopped' }), agent('b', { phase: 'stopping' }), agents[2]];
+    expect(win.items.map((a) => a.id)).toEqual(['b']);
+  });
+
+  it('paged state: an off-page member entering stopping shows the updates chip', () => {
+    const live = new Map<string, Agent>();
+    const { win } = createWindow({
+      viewState: makeViewState({ phaseFilter: 'stopping' }),
+      getAgent: (id) => live.get(id),
+    });
+    win.setPaged(
+      {
+        agents: [agent('a', { phase: 'stopping' })],
+        totalCount: 1,
+        stats: {
+          total: 2,
+          running: 1,
+          agents: [
+            ['a', 'stopping'],
+            ['z', 'running'],
+          ],
+        },
+      },
+      ''
+    );
+    expect(win.items.map((a) => a.id)).toEqual(['a']);
+    live.set('z', agent('z', { phase: 'stopping' }));
+    win.applyChanges({ upserted: ['z'], deleted: [], unknown: new Map(), generation: 1 });
+    expect(win.updatesAvailable).toBe(true);
   });
 });

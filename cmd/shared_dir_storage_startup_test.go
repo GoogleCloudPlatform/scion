@@ -224,3 +224,27 @@ func TestLogSharedDirStorageOverridesStartup_InvalidOverrideWarns(t *testing.T) 
 		assert.Contains(t, lines[1], "profile gke: backend=nfs (from runtimes.k8s.shared_dir_storage_backend)")
 	}
 }
+
+func TestLogHomeStorageStartup(t *testing.T) {
+	gs := &config.VersionedSettings{
+		Server: &config.V1ServerConfig{HomeStorage: &config.V1HomeStorageConfig{Leaf: "node"}},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"k8s":    {Type: "kubernetes", HomeStorageLeaf: "broker"},
+			"docker": {Type: "docker"},
+		},
+		Profiles: map[string]config.V1ProfileConfig{
+			"gke":   {Runtime: "k8s", HomeStorageBackend: "nfs"},
+			"local": {Runtime: "docker", HomeStorageBackend: "nfs"},
+			"plain": {Runtime: "k8s"},
+		},
+	}
+	var lines []string
+	logHomeStorageStartup(gs, func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if assert.Len(t, lines, 3, "%v", lines) {
+		assert.Contains(t, lines[0], "server.home_storage.leaf")
+		assert.Contains(t, lines[1], "profiles.local.home_storage_backend")
+		assert.Equal(t, "home_storage for profile gke: backend=nfs (from profiles.gke.home_storage_backend), leaf=broker", lines[2])
+	}
+}

@@ -294,16 +294,16 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 	return held
 }
 
-// startDispatch runs a start under its claim's context. handoff reports an
+// claimedDispatch runs a start under its claim's context. handoff reports an
 // async launch that accepted the start (its end settles the claim).
-type startDispatch func(ctx context.Context) (handoff bool, err error)
+type claimedDispatch func(ctx context.Context) (handoff bool, err error)
 
 // withStartClaim runs dispatch under a start claim of kind for agent: claim
 // (or the caller's existing claim), lease renewal, the start deadline, the
 // fence check immediately before dispatch, and the outcome. Credential
 // handling is the dispatch's own and is unchanged. With start claims off,
 // it records run intent running and runs dispatch as before.
-func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, dispatch startDispatch) error {
+func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, dispatch claimedDispatch) error {
 	if !s.startClaimsEnabled() {
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			return err
