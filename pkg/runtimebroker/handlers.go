@@ -5504,10 +5504,10 @@ func trustedEntryProjectPath(path, projectID string) bool {
 //
 // When projectID is set, only a project directory whose recorded project ID
 // (the project-id file, or the .scion marker file of a project without git)
-// equals projectID is considered, so a same-named
-// agent in another project is never returned (ptone/scion#1819). When
-// projectID is empty, the name must be found in exactly one project; more
-// than one is reported as an ambiguity error rather than a guess.
+// equals projectID is considered, so a same-named agent in another project
+// is never returned (ptone/scion#1819). When projectID is empty, the name
+// must be found in exactly one project; more than one is reported as an
+// ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion/project-configs/ (shared-workspace agents,

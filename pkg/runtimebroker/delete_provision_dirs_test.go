@@ -158,13 +158,14 @@ func newProvisionDirsServer(t *testing.T, entries *[]api.AgentInfo, deleted *[]s
 	return New(cfg, agent.NewManager(rt), rt), home
 }
 
-// Shape 2: a started agent of a hub-native project with git, provisioned
-// where the broker resolves the project by slug
-// (~/.scion/projects/<slug>/.scion, a directory with a project-id file):
-// the delete removes its directory. (The agent used to land under the
-// broker's global ~/.scion when the provider recorded that path; the
-// provide fix keeps it out of there, and the trust check still refuses a
-// global path for a non-global project.)
+// A started agent of a hub-native project with git, provisioned where the
+// broker resolves the project by slug (~/.scion/projects/<slug>/.scion, a
+// directory with a project-id file): the delete removes its directory.
+// This is a guard for the layout shape 2's fix produces, not the shape 2
+// regression test: it passes with or without either fix. Shape 2's root
+// cause (the provider path registered by `scion broker provide`) is
+// covered by the cmd tests TestRunBrokerProvide_RegisteredPath,
+// TestProviderRegisterPath and TestLocalPathForProvidedProject.
 func TestDeleteAgent_GitHubNativeProject_StartedAgent_RemovesDir(t *testing.T) {
 	var entries []api.AgentInfo
 	var deleted []string
@@ -219,8 +220,12 @@ func TestDeleteAgent_GlobalDirPathForProject_FilesUntouched(t *testing.T) {
 	}}
 
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
-	if rec.Code != http.StatusNoContent && rec.Code != http.StatusNotFound {
-		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// The container is still deleted; only the file cleanup is skipped.
+	if len(deleted) != 1 || deleted[0] != "cid-b" {
+		t.Errorf("runtime deletes = %v, want cid-b", deleted)
 	}
 	if _, err := os.Stat(globalAgentDir); err != nil {
 		t.Fatalf("a non-global project's delete removed files in the global dir: %v", err)
