@@ -381,3 +381,46 @@ func TestRedactCloneURL_UserWithAt(t *testing.T) {
 	assert.Equal(t, "host:org/repo@v1", redactCloneURL("git@host:org/repo@v1"))
 	assert.Equal(t, "host:path", redactCloneURL("a@b@c@host:path"))
 }
+
+// Symlinks are never treated as directories: a symlink named like a scratch
+// directory is not removed, and symlinks at .scion-volumes, worktrees or a
+// .scion-volumes child count as workspace content.
+func TestCloneScratchAndIgnorableEntries_SymlinksNotFollowed(t *testing.T) {
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, cloneManifestFile), nil, 0o644))
+
+	ws := t.TempDir()
+	link := filepath.Join(ws, cloneTempDirPrefix+"link")
+	require.NoError(t, os.Symlink(target, link))
+	require.NoError(t, removeCloneTempDirs(ws))
+	_, err := os.Lstat(link)
+	assert.NoError(t, err, "a symlink named like a scratch dir is not removed")
+	assert.FileExists(t, filepath.Join(target, cloneManifestFile))
+	scratch, err := completedCloneScratch(ws)
+	require.NoError(t, err)
+	assert.Empty(t, scratch)
+	removed, err := removeFinishedCloneScratch(ws)
+	require.NoError(t, err)
+	assert.False(t, removed)
+	assert.False(t, hasFinishedCloneScratch(ws))
+
+	in := sharedPlainInput(ws, "file:///repo.git")
+	other, err := nonIgnorableWorkspaceEntries(in, ws)
+	require.NoError(t, err)
+	assert.Equal(t, []string{cloneTempDirPrefix + "link"}, other)
+
+	for _, name := range []string{".scion-volumes", "worktrees"} {
+		ws := t.TempDir()
+		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(ws, name)))
+		other, err := nonIgnorableWorkspaceEntries(sharedPlainInput(ws, "file:///repo.git"), ws)
+		require.NoError(t, err)
+		assert.Equal(t, []string{name}, other)
+	}
+
+	ws2 := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws2, ".scion-volumes"), 0o755))
+	require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(ws2, ".scion-volumes", "x")))
+	other, err = nonIgnorableWorkspaceEntries(sharedPlainInput(ws2, "file:///repo.git"), ws2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{".scion-volumes"}, other)
+}

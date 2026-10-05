@@ -2309,7 +2309,7 @@ const sharedVolumesDirName = ".scion-volumes"
 // Anything else is workspace content. Symlinks are never ignorable.
 func ignorableWorkspaceEntry(in ProvisionInput, dir string, e os.DirEntry) (bool, error) {
 	name := e.Name()
-	isDir := e.Type()&os.ModeType == os.ModeDir
+	isDir := e.IsDir()
 	switch {
 	case name == ProvisionSentinelFile:
 		return e.Type().IsRegular(), nil
@@ -2344,7 +2344,7 @@ func onlySharedDirMounts(in ProvisionInput, volumesDir string) (bool, error) {
 		}
 	}
 	for _, e := range entries {
-		if e.Type()&os.ModeType != os.ModeDir {
+		if !e.IsDir() {
 			return false, nil
 		}
 		p := filepath.Join(volumesDir, e.Name())
@@ -2628,7 +2628,7 @@ func removeFinishedCloneScratch(dir string) (bool, error) {
 	}
 	removed := false
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -2651,7 +2651,7 @@ func hasFinishedCloneScratch(dir string) bool {
 		return false
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), cloneTempDirPrefix) && e.Type()&os.ModeType == os.ModeDir &&
+		if strings.HasPrefix(e.Name(), cloneTempDirPrefix) && e.IsDir() &&
 			finishedCloneScratch(filepath.Join(dir, e.Name())) {
 			return true
 		}
@@ -2670,7 +2670,7 @@ func completedCloneScratch(dir string) (string, error) {
 	}
 	var found []string
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -2764,7 +2764,7 @@ func removeCloneTempDirs(dir string) error {
 		return fmt.Errorf("read dir %s: %w", dir, err)
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
