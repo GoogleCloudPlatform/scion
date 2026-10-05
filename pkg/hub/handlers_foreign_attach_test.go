@@ -977,11 +977,17 @@ func TestInteragentView_LegacyViewParticipantGate(t *testing.T) {
 	agentB := newAgent("pg-agent-b", projectB.ID)
 	agentB2 := newAgent("pg-agent-b2", projectB.ID)
 
+	// A direct conversation names exactly its two agents, so the case
+	// with the viewer as a member uses a group conversation instead.
 	newConv := func(peer *store.Agent, extraUser string) string {
+		kind := "direct"
 		key, err := messages.DMConversationKey("agent", agentA.ID, "agent", peer.ID)
 		require.NoError(t, err)
+		if extraUser != "" {
+			kind, key = "group", "test-group:"+tid("pg-group-"+peer.Slug)
+		}
 		conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-			Kind: "direct", Surface: "native", ExternalRef: key, DriftState: "active",
+			Kind: kind, Surface: "native", ExternalRef: key, DriftState: "active",
 		})
 		require.NoError(t, err)
 		for _, id := range []string{agentA.ID, peer.ID} {
