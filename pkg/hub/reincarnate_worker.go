@@ -574,12 +574,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// The store now holds `fresh` (gen N+1) from the write just above,
 		// but the disk was never successfully re-rendered — restore
 		// `previous` so the store does not claim a generation that was
-		// never actually provisioned. The failed (or timed-out) render
-		// may have left the on-disk config partly gen N+1, so first try a
+		// never actually provisioned. The failed render may have left the
+		// on-disk config partly gen N+1 (and after a hub-side timeout the
+		// broker's render may still be running), so first try a
 		// best-effort re-render of `previous` (ptone/scion#1935). The row
-		// is restored whatever its outcome, as before.
-		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, "reprovision", previous)
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "reprovision failed: "+err.Error(), previous)
+		// is restored whatever its outcome, as before. The failed
+		// reprovision has already revoked the agent's credentials if it
+		// minted one, so a refused re-render changes nothing there.
+		errMsg := "reprovision failed: " + err.Error()
+		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
 		return
 	}
 
@@ -617,6 +621,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// row only if failAfterReprovision's re-render of `previous` succeeds.
 	// Otherwise restoring would make the store claim gen N while the disk
 	// (and any container the start call did manage to create) is gen N+1.
+	// A start failure re-renders only when its outcome is definitive (see
+	// the DispatchAgentStart error handling below).
 	// appliedConfig: fresh persists the fields taken from the reprovision
 	// echo (see above).
 	//
@@ -629,6 +635,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// oversight: it fails toward not revoking, the same direction every
 	// other guard in DispatchAgentStart takes, rather than threading this
 	// worker's own confirmation through the dispatcher as a special case.
+	// The re-render after a start failure keeps that direction: it is a
+	// reprovision dispatch, and a reprovision that fails revokes the
+	// agent's credentials by agent (dispatchProvision), so it runs only
+	// when reincarnationStartLeftNoContainer says no container can be
+	// using them.
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStarting,
 		phase:              string(state.PhaseStarting),
@@ -640,7 +651,21 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
-		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, "start failed: "+err.Error(), previous)
+		errMsg := "start failed: " + err.Error()
+		if !reincarnationStartLeftNoContainer(err) {
+			// Ambiguous outcome (a timeout, a transport error, a lost or
+			// unreadable response, a proxy error, a deferred start, or a
+			// broker failure from inside Manager.Start): a gen N+1
+			// container may exist and use the agent's credentials. Keep
+			// the pre-ptone/scion#1935 behaviour: no re-render (a refused
+			// re-render would revoke those credentials), and the row stays
+			// at gen N+1, so row, disk and any container agree.
+			s.agentLifecycleLog.Info("reincarnation failed: start outcome ambiguous, a container may exist; not re-rendering the previous config",
+				"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", store.AgentReincarnationStateStarting, "cause", errMsg)
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
+			return
+		}
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, previous)
 		return
 	}
 	// Take the start echo, image included: this is the runtime-resolved
@@ -735,31 +760,62 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 }
 
 // reincarnationRerenderTimeout bounds the best-effort re-render of the
-// previous config after a failed reincarnation (rerenderPreviousConfig). It
-// is well inside reincarnationStaleAfter, so the sweep cannot resolve the
-// record while the re-render is still running. The broker transport's own
-// timeout (the control-channel RequestTimeout, 120s by default) still
-// applies within it.
-const reincarnationRerenderTimeout = 3 * time.Minute
+// previous config after a failed reincarnation (rerenderPreviousConfig). A
+// reprovision dispatch can make two broker round trips (the env-gather first
+// pass, then the replay with the gathered env), each bounded by the broker
+// transport's own timeout (the control-channel RequestTimeout, 120s by
+// default), so this allows both plus margin. It is well inside
+// reincarnationStaleAfter, so the sweep cannot resolve the record while the
+// re-render is still running.
+const reincarnationRerenderTimeout = 5 * time.Minute
+
+// reincarnationStartLeftNoContainer reports whether a DispatchAgentStart
+// error is a definitive outcome that leaves no gen N+1 container: the broker
+// never acted on the request or explicitly refused it
+// (isConfirmedStartNotActedOnError, the classification DispatchAgentStart's
+// own start-failure revoke uses), and did not report a failure from inside
+// Manager.Start (brokerStartAttempted, by which point a container may have
+// been created). This is the pair shouldRevertRun uses. The worker's stop
+// step already confirmed the previous container is gone, so no container
+// is running for the agent. Every other error is ambiguous.
+func reincarnationStartLeftNoContainer(err error) bool {
+	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
+}
 
 // rerenderPreviousConfig makes one best-effort reprovision dispatch with the
 // outgoing generation's applied config (ptone/scion#1935, option (c)), to put
 // the on-disk agent config back to generation N after a reincarnation that
 // failed once a reprovision dispatch had been attempted. It runs on a
 // context detached from ctx with its own timeout, never retries, and only
-// logs a failure: the caller's original error is what the reincarnation
-// fails with. It reports whether the broker accepted the re-render. Nothing
-// is written to the agent row here: the dispatch uses a re-read of the row
-// with AppliedConfig replaced by a copy of previous, so neither the row nor
-// previous (the record's PreviousAppliedConfig) picks up the broker's echo.
+// logs a failure: cause, the caller's original error, is what the
+// reincarnation fails with. It reports whether the broker accepted the
+// re-render.
 //
-// The remaining gap: the re-render can itself fail, be refused (for example
-// a container the failed start left running) or be cut off by the transport
-// timeout, leaving the disk partly gen N+1 again. Reprovision also overlays
-// rather than replaces, so a file only gen N+1 rendered stays. An atomic
-// render in Manager.Reprovision is the real fix.
-// Follow-up for the atomic render: ptone/scion#3043.
-func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, step string, previous *store.AgentAppliedConfig) bool {
+// The agent row's AppliedConfig is not written here (the dispatch's
+// runtime-target clear still writes the row; failReincarnation's retry
+// absorbs the version bump). The dispatch uses a re-read of the row with
+// AppliedConfig replaced by a shallow copy of previous, so neither the row
+// nor previous (the record's PreviousAppliedConfig) picks up the broker's
+// echo. The copy shares Env and InlineConfig with previous, and the
+// dispatch's adoptLegacyTZ can delete TZ from those maps; that is a no-op,
+// because buildFreshAppliedConfig already ran adoptLegacyTZ on previous in
+// place.
+//
+// Credentials: like any reprovision dispatch, a failed re-render revokes
+// the agent's credentials by agent (dispatchProvision's create-failed
+// revoke). Callers therefore re-render only when no container can be using
+// them: after a failed reprovision (which already revoked) or a definitive
+// start failure (reincarnationStartLeftNoContainer).
+//
+// The remaining gap, tracked in ptone/scion#3043 (atomic render in
+// Manager.Reprovision is the real fix): the re-render can itself fail, be
+// refused or be cut off, leaving the disk partly gen N+1 again, and
+// Reprovision overlays rather than replaces, so a file only gen N+1
+// rendered stays. After a hub-side timeout the broker's original render
+// may still be running when the re-render arrives. Nothing on the broker
+// serialises the two, so a successful re-render can still leave mixed
+// N/N+1 files.
+func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, fromState, cause string, previous *store.AgentAppliedConfig) bool {
 	if dispatcher == nil || previous == nil {
 		return false
 	}
@@ -768,29 +824,30 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 	agent, err := s.store.GetAgent(rctx, agentID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: could not load the agent to re-render the previous config",
-			"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step, "error", err)
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", cause, "error", err)
 		return false
 	}
 	cfg := *previous
 	agent.AppliedConfig = &cfg
 	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",
-			"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step, "error", err)
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", cause, "error", err)
 		return false
 	}
 	s.agentLifecycleLog.Info("reincarnation failed: re-rendered the previous config",
-		"agent_id", agentID, "reincarnation_id", reincarnationID, "step", step)
+		"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", cause)
 	return true
 }
 
 // failAfterReprovision fails a reincarnation after its reprovision dispatch
-// succeeded (so the disk holds gen N+1). It first re-renders previous
-// (rerenderPreviousConfig). Only when that succeeds, so the disk is back at
-// gen N, is the row restored to previous; otherwise the row keeps the
-// gen N+1 config, matching the disk. errMsg is recorded unchanged either way.
+// succeeded (so the disk holds gen N+1) and no gen N+1 container can be
+// running. It first re-renders previous (rerenderPreviousConfig). Only when
+// that succeeds, so the disk is back at gen N, is the row restored to
+// previous; otherwise the row keeps the gen N+1 config, matching the disk.
+// errMsg is recorded unchanged either way.
 func (s *Server) failAfterReprovision(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig) {
 	var restore *store.AgentAppliedConfig
-	if s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, fromState, previous) {
+	if s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous) {
 		restore = previous
 	}
 	s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg, restore)

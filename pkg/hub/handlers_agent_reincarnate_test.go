@@ -84,6 +84,9 @@ type reincarnateTestDispatcher struct {
 	// the worker's best-effort re-render of the previous config
 	// (ptone/scion#1935). reprovisionErr applies to the first call only.
 	rerenderErr error
+	// rerenderEcho, when set, runs on a successful re-render against the
+	// dispatched AppliedConfig, simulating the broker's echo.
+	rerenderEcho func(cfg *store.AgentAppliedConfig)
 	// reprovisionConfigs snapshots the AppliedConfig of every reprovision
 	// dispatch, in call order, as the worker sent it.
 	reprovisionConfigs []store.AgentAppliedConfig
@@ -123,7 +126,7 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	image := d.reprovisionImage
 	echo := d.reprovisionEcho
 	if d.reprovisionCalls > 1 {
-		err, image, echo = d.rerenderErr, "", nil
+		err, image, echo = d.rerenderErr, "", d.rerenderEcho
 	}
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
@@ -1736,7 +1739,6 @@ func TestReincarnateAgent_StartFailureKeepsQualifiedImage(t *testing.T) {
 	disp.reprovisionImage = "explicit-image:v1"
 	disp.reprovisionEcho = func(cfg *store.AgentAppliedConfig) { cfg.HarnessAuth = "reprovision-echoed-auth" }
 	disp.startErr = fmt.Errorf("broker refused start")
-	disp.rerenderErr = fmt.Errorf("re-render refused") // keep the post-reprovision row (ptone/scion#1935)
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
@@ -2904,11 +2906,10 @@ func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
-	// The best-effort re-render of `previous` (ptone/scion#1935) fails too,
-	// so the disk stays gen N+1 and the row must keep the fresh config.
-	// TestReincarnateAgent_StartFailure_RerendersPreviousConfig covers the
-	// re-render succeeding.
-	disp.rerenderErr = fmt.Errorf("broker unreachable")
+	// This start error is ambiguous (not a confirmed broker refusal), so no
+	// re-render of `previous` runs (ptone/scion#1935) and the row keeps the
+	// fresh config. TestReincarnateAgent_StartFailure_RerendersPreviousConfig
+	// covers a definitive start failure.
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -3027,7 +3028,7 @@ func TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig(t *testing.
 // succeeded (the disk is back at gen N) the row is restored to previous too.
 func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	disp.startErr = definitiveStartErr()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -3037,7 +3038,7 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	r := waitForReincarnationSettled(t, s, agent.ID)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	assert.Contains(t, r.Error, "start failed: no such image")
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
 
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls)
@@ -3057,7 +3058,7 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 // the ORIGINAL error, and the row keeps the gen N+1 config the disk holds.
 func TestReincarnateAgent_RerenderFailure_KeepsOriginalError(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	disp.startErr = definitiveStartErr()
 	disp.rerenderErr = fmt.Errorf("reprovision refused: container is still running")
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -3068,7 +3069,7 @@ func TestReincarnateAgent_RerenderFailure_KeepsOriginalError(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	r := waitForReincarnationSettled(t, s, agent.ID)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	assert.Contains(t, r.Error, "start failed: no such image")
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
 	assert.NotContains(t, r.Error, "container is still running", "the re-render failure must not mask the original error")
 	assert.NotContains(t, r.Error, "worker panic")
 
@@ -3079,8 +3080,230 @@ func TestReincarnateAgent_RerenderFailure_KeepsOriginalError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "error", final.Phase)
 	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
-	assert.Contains(t, final.Message, "no such image")
+	assert.Contains(t, final.Message, "runtime broker returned error 409")
 	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1, matching the disk")
+}
+
+// definitiveStartErr is a start failure the broker itself answered with its
+// error envelope and no start-attempted marker: the start was refused before
+// any container was created (reincarnationStartLeftNoContainer).
+func definitiveStartErr() error {
+	return &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"start_refused","message":"start refused"}}`}
+}
+
+// TestReincarnationStartLeftNoContainer pins the classification the
+// start-failure re-render uses (ptone/scion#1935).
+func TestReincarnationStartLeftNoContainer(t *testing.T) {
+	assert.True(t, reincarnationStartLeftNoContainer(definitiveStartErr()), "a broker refusal is definitive")
+	assert.True(t, reincarnationStartLeftNoContainer(fmt.Errorf("wrap: %w", errStartBrokerNotConnected)), "a request that never reached the broker is definitive")
+	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("request timeout after 2m0s")), "a timeout is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(&brokerStatusError{StatusCode: http.StatusGatewayTimeout, Body: "gateway timeout"}), "a proxy error is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("run-1"))),
+		"a failure from inside Manager.Start may have created a container")
+	assert.False(t, reincarnationStartLeftNoContainer(nil))
+}
+
+// TestReincarnateAgent_AmbiguousStartFailure_NoRerender covers
+// ptone/scion#1935 review F1: a start failure whose outcome is ambiguous
+// (here a transport timeout: a gen N+1 container may be running) makes no
+// re-render dispatch, so the credential that container would use is not
+// revoked, and the row stays at gen N+1. The re-render would have been
+// refused (and revoked) had it run.
+func TestReincarnateAgent_AmbiguousStartFailure_NoRerender(t *testing.T) {
+	srv, s, agent, mock, gen, calls := setupReincarnateCredentialTest(t, fmt.Errorf("request timeout after 2m0s"))
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: request timeout")
+
+	assert.Equal(t, int32(1), calls.Load(), "no re-render dispatch after an ambiguous start failure")
+	require.True(t, mock.lastCreateReq.Reprovision)
+	require.Len(t, gen.jtis, 1, "only the reprovision minted a credential")
+	assert.Nil(t, getTestAgentCredential(t, s, gen.jtis[0]).RevokedAt, "a credential a possibly running container uses must not be revoked")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "the row stays at gen N+1, matching the disk and any container")
+}
+
+// TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes covers
+// ptone/scion#1935 review F1: after a definitive start failure (the broker
+// refused it; no container exists) the re-render is dispatched. When that
+// re-render fails, dispatchProvision's create-failed revoke revokes the
+// agent's credentials by agent: every credential, including the one the
+// successful reprovision minted. That is the accepted outcome: no container
+// is using them, and the agent is failed and must be started again (which
+// mints afresh). The row stays at gen N+1.
+func TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes(t *testing.T) {
+	srv, s, agent, _, gen, calls := setupReincarnateCredentialTest(t, definitiveStartErr())
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "reprovision_refused", "the re-render failure must not mask the original error")
+
+	assert.Equal(t, int32(2), calls.Load(), "the re-render is dispatched after a definitive start failure")
+	require.Len(t, gen.jtis, 2, "the reprovision and the re-render each minted a credential")
+	for _, jti := range gen.jtis {
+		cred := getTestAgentCredential(t, s, jti)
+		require.NotNil(t, cred.RevokedAt, "a refused re-render revokes the agent's credentials by agent")
+		require.NotNil(t, cred.RevokeReason)
+		assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+	}
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1")
+}
+
+// setupReincarnateCredentialTest wires reprovision through the real
+// HTTPAgentDispatcher with a minting token generator, against a mock broker
+// whose first reprovision succeeds and every later one (the re-render) is
+// refused. The start is the fake's and fails with startErr. calls counts
+// reprovision round trips.
+func setupReincarnateCredentialTest(t *testing.T, startErr error) (*Server, store.Store, *store.Agent, *mockRuntimeBrokerClient, *fakeMintingTokenGenerator, *atomic.Int32) {
+	t.Helper()
+	ctx := context.Background()
+	fake := newReincarnateTestDispatcher()
+	fake.startErr = startErr
+	disp := &httpReprovisionDispatcher{reincarnateTestDispatcher: fake}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	broker.Endpoint = "http://localhost:9800"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	calls := &atomic.Int32{}
+	mock := &mockRuntimeBrokerClient{}
+	mock.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		if calls.Add(1) > 1 {
+			return nil, nil, &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"reprovision_refused","message":"container is still running"}}`}
+		}
+		return &RemoteAgentResponse{
+			Agent:         &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: "created"},
+			Created:       true,
+			Reprovisioned: req.Reprovision,
+		}, nil, nil
+	}
+	disp.http = NewHTTPAgentDispatcherWithClient(s, mock, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: s}
+	disp.http.SetTokenGenerator(gen)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	return srv, s, agent, mock, gen, calls
+}
+
+// TestReincarnateAgent_RerenderEchoDoesNotLeak covers ptone/scion#1935
+// review F4(a): the re-render dispatches a copy of previous, so the broker's
+// echo on that dispatch reaches neither the record's PreviousAppliedConfig
+// nor the restored row.
+func TestReincarnateAgent_RerenderEchoDoesNotLeak(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "rerender-echo:v9"
+		cfg.HarnessConfig = "rerender-echo-hc"
+		cfg.Profile = "rerender-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, _ := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"record previous": r.PreviousAppliedConfig, "restored row": final.AppliedConfig} {
+		assert.Equal(t, "old-image:v1", cfg.Image, name)
+		assert.Empty(t, cfg.HarnessConfig, name)
+		assert.Empty(t, cfg.Profile, name)
+	}
+}
+
+// failAdvanceToStartingStore fails every provisioning -> starting record
+// CAS with an error.
+type failAdvanceToStartingStore struct {
+	store.Store
+}
+
+func (f *failAdvanceToStartingStore) TryAdvanceAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation, fromState string, cutoff time.Time) (bool, error) {
+	if fromState == store.AgentReincarnationStateProvisioning && rec.State == store.AgentReincarnationStateStarting {
+		return false, fmt.Errorf("injected advance failure")
+	}
+	return f.Store.TryAdvanceAgentReincarnation(ctx, rec, fromState, cutoff)
+}
+
+// TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig
+// covers ptone/scion#1935 review F4(b): a record CAS error after a
+// successful reprovision (no start dispatched, so no container) re-renders
+// previous and, since that succeeded, restores the row.
+func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &failAdvanceToStartingStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	srv.store = orig
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to advance record to starting")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow covers
+// ptone/scion#1935 review F4(c): after a failed reprovision the row is
+// restored to previous whatever the re-render's outcome, including when the
+// re-render fails too.
+func TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("request timeout after 2m0s")
+	disp.rerenderErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: request timeout")
+	assert.NotContains(t, r.Error, "broker unreachable")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the row is restored to previous even when the re-render fails")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
 }
 
 // TestReincarnateAgent_FailureBeforeReprovision_NoRerender covers
@@ -3112,9 +3335,6 @@ func TestReincarnateAgent_FailureBeforeReprovision_NoRerender(t *testing.T) {
 func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
-	// The re-render of `previous` fails too (ptone/scion#1935), so the row
-	// keeps the fresh config and its preamble Task for the assertions below.
-	disp.rerenderErr = fmt.Errorf("re-render refused")
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	// Wire a real notification dispatcher, same pattern as
@@ -3188,9 +3408,6 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 func TestReincarnateAgent_SelfRequest_PreambleNeverEmitsOwnHandle(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
-	// The re-render of `previous` fails too (ptone/scion#1935), so the row
-	// keeps the fresh config and its preamble Task for the assertions below.
-	disp.rerenderErr = fmt.Errorf("re-render refused")
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -3225,9 +3442,6 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 	t.Run("changed: the exact line reaches AppliedConfig.Task", func(t *testing.T) {
 		disp := newReincarnateTestDispatcher()
 		disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
-		// The re-render of `previous` fails too (ptone/scion#1935), so the row
-		// keeps the fresh config and its preamble Task for the assertions below.
-		disp.rerenderErr = fmt.Errorf("re-render refused")
 		srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 		template := &store.Template{
@@ -3287,9 +3501,6 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 	t.Run("unchanged: no Changes: line at all", func(t *testing.T) {
 		disp := newReincarnateTestDispatcher()
 		disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
-		// The re-render of `previous` fails too (ptone/scion#1935), so the row
-		// keeps the fresh config and its preamble Task for the assertions below.
-		disp.rerenderErr = fmt.Errorf("re-render refused")
 		srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 		template := &store.Template{
