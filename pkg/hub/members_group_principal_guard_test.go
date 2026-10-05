@@ -25,6 +25,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -433,4 +434,54 @@ func TestMembersGroupPrincipalGuard_StoreErrorMapping(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, d.HTTPStatus)
 	assert.Equal(t, ErrCodeInvalidRequest, d.DenialCode)
 	assert.Nil(t, storeMembersGroupPrincipalDecision(store.ErrInvalidInput))
+}
+
+// legacyMembershipDenialDetails renders details only for the members-group
+// refusal; every other refusal body stays without details.
+func TestLegacyMembershipDenialDetails(t *testing.T) {
+	membersGroup := projectMembersGroupPrincipalDecision("g-1")
+	cases := []struct {
+		name string
+		d    *MembershipDecision
+		want map[string]interface{}
+	}{
+		{name: "nil decision", d: nil, want: nil},
+		{name: "other denial code", d: &MembershipDecision{
+			DenialCode: ErrCodeForbidden, HTTPStatus: http.StatusForbidden,
+			Details: map[string]interface{}{"reason": projectMembersGroupDetailReason, "groupId": "g-1"},
+		}, want: nil},
+		{name: "principal_ineligible with other details", d: &MembershipDecision{
+			DenialCode: ErrCodePrincipalIneligible, HTTPStatus: http.StatusBadRequest,
+			Details: map[string]interface{}{"roleDefinitionId": "rd-1", "missing": []string{"project.manage"}},
+		}, want: nil},
+		{name: "principal_ineligible without details", d: &MembershipDecision{
+			DenialCode: ErrCodePrincipalIneligible, HTTPStatus: http.StatusBadRequest,
+		}, want: nil},
+		{name: "members-group refusal", d: membersGroup,
+			want: map[string]interface{}{"reason": projectMembersGroupDetailReason, "groupId": "g-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, legacyMembershipDenialDetails(tc.d))
+		})
+	}
+}
+
+// A principal_ineligible refusal that is not about a members group keeps its
+// body without a details key on POST /members.
+func TestMembersGroupPrincipalGuard_OtherIneligibleRefusalHasNoDetails(t *testing.T) {
+	f := setupMembersGroupGuardFixture(t)
+	ctx := context.Background()
+	g := &store.Group{ID: tid("mgguard-owner-grp"), Name: "MG Guard Owner Group", Slug: "mgguard-owner-grp"}
+	require.NoError(t, f.s.CreateGroup(ctx, g))
+	ownerRD := projectRoleDef(t, f.s, store.ProjectRoleOwner)
+	rec := doRequestAsUser(t, f.srv, f.coOwner, http.MethodPost, "/api/v1/projects/"+f.y.ID+"/members",
+		map[string]interface{}{"principalType": "group", "principalId": g.ID, "roleDefinitionId": ownerRD.ID})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var body struct {
+		Error map[string]json.RawMessage `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	assert.Equal(t, `"`+ErrCodePrincipalIneligible+`"`, string(body.Error["code"]), rec.Body.String())
+	assert.NotContains(t, body.Error, "details", rec.Body.String())
 }
