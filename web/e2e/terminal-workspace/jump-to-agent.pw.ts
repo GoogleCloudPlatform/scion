@@ -560,7 +560,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
   await page.evaluate(() => {
     const w = window as unknown as { hideSettled?: Promise<void> };
     w.hideSettled = new Promise((resolve) => {
-      // Only the palette's own dialog: the header button's tooltip fires one too.
+      // Only the palette's own dialog: other tooltips on the page fire one too.
       const listener = (e: Event): void => {
         const dialog = document
           .querySelector('scion-quick-palette')
