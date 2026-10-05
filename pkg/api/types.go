@@ -209,9 +209,9 @@ type AgentK8sMetadata struct {
 
 // SharedDir defines a project-level shared directory available to all agents.
 type SharedDir struct {
-	Name        string `json:"name" yaml:"name"`
-	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	InWorkspace bool   `json:"in_workspace,omitempty" yaml:"in_workspace,omitempty"`
+	Name        string `json:"name" yaml:"name" koanf:"name"`
+	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty" koanf:"read_only"`
+	InWorkspace bool   `json:"in_workspace,omitempty" yaml:"in_workspace,omitempty" koanf:"in_workspace"`
 }
 
 // ValidateSharedDirs validates a slice of SharedDir entries.
@@ -251,21 +251,21 @@ func isValidSlug(s string) bool {
 }
 
 type VolumeMount struct {
-	Source   string `json:"source" yaml:"source"`
-	Target   string `json:"target" yaml:"target"`
-	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	Source   string `json:"source" yaml:"source" koanf:"source"`
+	Target   string `json:"target" yaml:"target" koanf:"target"`
+	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty" koanf:"read_only"`
 	// Type discriminates the volume kind:
 	//   "local" (default) — host bind mount; requires Source.
 	//   "gcs"             — GCS FUSE mount; requires Bucket.
 	//   "nfs"             — literal NFS protocol mount; requires Server, Source.
 	//   "cloudrun-volume" — Cloud Run managed volume; requires VolumeName.
 	//   "gke-shared-volume" — GKE-provided shared volume (e.g. Filestore CSI PVC); requires VolumeName.
-	Type       string `json:"type,omitempty" yaml:"type,omitempty"`
-	Bucket     string `json:"bucket,omitempty" yaml:"bucket,omitempty"`           // GCS bucket name
-	Prefix     string `json:"prefix,omitempty" yaml:"prefix,omitempty"`           // GCS object prefix
-	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty"`               // Mount options
-	Server     string `json:"server,omitempty" yaml:"server,omitempty"`           // NFS: server host/IP
-	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty"` // Cloud Run / GKE volume name
+	Type       string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+	Bucket     string `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`                // GCS bucket name
+	Prefix     string `json:"prefix,omitempty" yaml:"prefix,omitempty" koanf:"prefix"`                // GCS object prefix
+	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`                      // Mount options
+	Server     string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`                // NFS: server host/IP
+	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty" koanf:"volume_name"` // Cloud Run / GKE volume name
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.
@@ -362,15 +362,15 @@ type K8sResources struct {
 // ResourceSpec defines compute resource requirements for an agent container.
 // It follows Kubernetes resource model conventions.
 type ResourceSpec struct {
-	Requests ResourceList `json:"requests,omitempty" yaml:"requests,omitempty"`
-	Limits   ResourceList `json:"limits,omitempty" yaml:"limits,omitempty"`
-	Disk     string       `json:"disk,omitempty" yaml:"disk,omitempty"`
+	Requests ResourceList `json:"requests,omitempty" yaml:"requests,omitempty" koanf:"requests"`
+	Limits   ResourceList `json:"limits,omitempty" yaml:"limits,omitempty" koanf:"limits"`
+	Disk     string       `json:"disk,omitempty" yaml:"disk,omitempty" koanf:"disk"`
 }
 
 // ResourceList is a set of resource name/quantity pairs.
 type ResourceList struct {
-	CPU    string `json:"cpu,omitempty" yaml:"cpu,omitempty"`
-	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	CPU    string `json:"cpu,omitempty" yaml:"cpu,omitempty" koanf:"cpu"`
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty" koanf:"memory"`
 }
 
 // AgentHubConfig holds hub connection settings that can be specified per-agent
@@ -676,15 +676,15 @@ type AgentDetail struct {
 // RequiredSecret declares a secret that must be available for an agent to start.
 // Declared in templates (scion-agent.yaml), settings harness configs, or settings profiles.
 type RequiredSecret struct {
-	Key         string `json:"key" yaml:"key"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Type        string `json:"type,omitempty" yaml:"type,omitempty"`     // "environment" (default), "variable", "file"
-	Target      string `json:"target,omitempty" yaml:"target,omitempty"` // Projection target (defaults to Key for env type)
+	Key         string `json:"key" yaml:"key" koanf:"key"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" koanf:"description"`
+	Type        string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`       // "environment" (default), "variable", "file"
+	Target      string `json:"target,omitempty" yaml:"target,omitempty" koanf:"target"` // Projection target (defaults to Key for env type)
 	// AlternativeEnvKeys lists env var names that can satisfy this secret
 	// requirement as an alternative. If any of these env vars are present,
 	// the file secret is not required. For example, GOOGLE_APPLICATION_CREDENTIALS
 	// can substitute for a gcloud-adc file secret.
-	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty"`
+	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty" koanf:"alternative_env_keys"`
 }
 
 // SkillReference declares a skill dependency in a template's scion-agent.yaml.

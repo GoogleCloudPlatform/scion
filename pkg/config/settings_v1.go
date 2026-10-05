@@ -1907,13 +1907,13 @@ type V1TelemetrySamplingConfig struct {
 
 // CloudRunConfig holds Cloud Run runtime settings.
 type CloudRunConfig struct {
-	ProjectID      string `json:"project_id,omitempty" koanf:"project_id"`
-	Location       string `json:"location,omitempty" koanf:"location"`
-	ServiceAccount string `json:"service_account,omitempty" koanf:"service_account"`
-	Network        string `json:"network,omitempty" koanf:"network"`
-	Subnetwork     string `json:"subnetwork,omitempty" koanf:"subnetwork"`
-	NFSServer      string `json:"nfs_server,omitempty" koanf:"nfs_server"`
-	NFSExport      string `json:"nfs_export,omitempty" koanf:"nfs_export"`
+	ProjectID      string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Location       string `json:"location,omitempty" yaml:"location,omitempty" koanf:"location"`
+	ServiceAccount string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	Network        string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork     string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	NFSServer      string `json:"nfs_server,omitempty" yaml:"nfs_server,omitempty" koanf:"nfs_server"`
+	NFSExport      string `json:"nfs_export,omitempty" yaml:"nfs_export,omitempty" koanf:"nfs_export"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
