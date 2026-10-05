@@ -15,8 +15,8 @@
  */
 
 /**
- * Merge a coalesced `agents-changed` payload into a held agent array
- * (design §6.2, §7): the small/held/capped states' `H`, kept live with no
+ * Merge a coalesced `agents-changed` payload into a held agent array:
+ * the small/held/capped states' `H`, kept live with no
  * full rebuild.
  *
  * This is the one place the per-page `onAgentsUpdated` full-rebuild used to
@@ -44,7 +44,7 @@ export interface MergeChangedOptions {
    */
   getAgent: (id: string) => Agent | undefined;
   /**
-   * The page's add rule (design §6.2): whether a *new* ID — one not
+   * The page's add rule: whether a *new* ID — one not
    * already in `held` — should be added at all. Never called for an ID
    * already in `held`; an existing member is always updated in place
    * regardless of this rule, exactly as today's per-page merges do (an
@@ -56,8 +56,7 @@ export interface MergeChangedOptions {
   shouldAdd?: (agent: Agent) => boolean;
   /**
    * Scope-level capabilities to inherit onto a brand-new agent when its own
-   * object carries none (design §7: "scope-capability inheritance for
-   * SSE-created agents … applies to new IDs only"). Not consulted for an ID
+   * object carries none. Not consulted for an ID
    * already in `held` — that case instead carries the *held* object's own
    * `_capabilities` forward when the incoming update lacks them (see
    * `mergeChanged`'s existing-member branch). `stateManager`'s own object
@@ -78,11 +77,11 @@ function withInheritedCapabilities(agent: Agent, scopeCapabilities?: Capabilitie
 /**
  * Apply one coalesced `agents-changed` flush to `held`. Returns `held`
  * itself when nothing changed, and otherwise a new array with every
- * untouched element carried over by reference (design §7).
+ * untouched element carried over by reference.
  *
  * `change.unknown` is not consulted here: an "unknown" entry is, by
- * definition, for an ID `stateManager` has no full `Agent` object for yet
- * (§7) — there is nothing for the small/held state to adopt until a later
+ * definition, for an ID `stateManager` has no full `Agent` object for yet, so
+ * there is nothing for the small/held state to adopt until a later
  * flush reports it as a real upsert. (The paged state's member index
  * handles `unknown` deltas separately, through `AgentListWindow.applyChanges`.)
  */

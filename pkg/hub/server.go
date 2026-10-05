@@ -179,6 +179,10 @@ type ServerConfig struct {
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
 	StalledThreshold time.Duration
+	// StartClaim holds the start-claim timing settings from the settings
+	// file (zero fields use defaults; out-of-range values are replaced by
+	// defaults with a warning). Hot-reloaded through ApplySnapshot.
+	StartClaim StartClaimSettings
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing (an
@@ -1307,6 +1311,10 @@ type Server struct {
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
 
+	// startClaimCfg holds the current start-claim settings (see
+	// start_claim_settings.go); set at New and by ApplySnapshot.
+	startClaimCfg atomic.Pointer[StartClaimSettings]
+
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
 	authLog           *slog.Logger
@@ -1521,6 +1529,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	srv.setStartClaimSettings(cfg.StartClaim)
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale

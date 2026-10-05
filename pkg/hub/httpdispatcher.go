@@ -1199,6 +1199,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
+	// The global project also sends its slug alongside a provider path.
 	if agent.ProjectID == "" {
 		return projectDispatchInfo{}, nil
 	}
@@ -1238,6 +1239,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
+	} else if isGlobalHubProject(project.Slug) {
+		// The global project's slug travels with its provider path so the
+		// broker can tell the global project apart from another project
+		// whose path points at the broker's global directory. The broker
+		// keeps resolving the project from the path.
+		info.projectSlug = globalProjectSlug
 	}
 	return info, nil
 }

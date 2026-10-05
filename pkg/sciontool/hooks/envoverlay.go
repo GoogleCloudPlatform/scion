@@ -42,7 +42,7 @@ func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides 
 		if i > 0 && entry[:i] == NativeTelemetryPolicyKey {
 			return fmt.Errorf("native telemetry policy conflict: %s", NativeTelemetryPolicyKey)
 		}
-		if i <= 0 || (!reservedNativeTelemetryKey(entry[:i]) && (entry[:i] != "CODEX_HOME" || overlay["CODEX_HOME"] == "")) {
+		if i <= 0 || (!IsReservedNativeTelemetryKey(entry[:i]) && (entry[:i] != "CODEX_HOME" || overlay["CODEX_HOME"] == "")) {
 			continue
 		}
 		key := entry[:i]
@@ -61,7 +61,7 @@ func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides 
 		if key == NativeTelemetryPolicyKey {
 			return fmt.Errorf("native telemetry policy conflict: %s", key)
 		}
-		if !reservedNativeTelemetryKey(key) && (key != "CODEX_HOME" || overlay["CODEX_HOME"] == "") {
+		if !IsReservedNativeTelemetryKey(key) && (key != "CODEX_HOME" || overlay["CODEX_HOME"] == "") {
 			continue
 		}
 		want, ok := overlay[key]
@@ -82,6 +82,10 @@ func MergeEnvOverlayWithNativeTelemetryPolicy(policy string, env []string, overl
 	return MergeEnvOverlay(env, overlay), nil
 }
 
+// IsReservedNativeTelemetryKey reports whether key is reserved by the
+// native telemetry policy, so an inherited or secret value for it must match
+// the generated overlay (see ValidateNativeTelemetryEnv).
+//
 // OTEL_ keys can change SDK behavior, including OTEL_SDK_DISABLED. Under an
 // active policy, unknown inherited aliases are rejected rather than allowed
 // to silently change the generated configuration. COPILOT_OTEL_* and
@@ -89,7 +93,12 @@ func MergeEnvOverlayWithNativeTelemetryPolicy(policy string, env []string, overl
 // of CLAUDE_CODE_ENABLE_TELEMETRY and GEMINI_TELEMETRY_*: they switch native
 // telemetry on/off and pick the exporter, so they get the same protection
 // (harnesses/copilot/provision.py, harnesses/grok-build/provision.py).
-func reservedNativeTelemetryKey(key string) bool {
+//
+// It is exported so tests outside this package (pkg/sciontool/supervisor's
+// native telemetry env tests) clear exactly the keys the policy inspects.
+// CODEX_HOME is not included: ValidateNativeTelemetryEnv protects it only
+// when the overlay sets it.
+func IsReservedNativeTelemetryKey(key string) bool {
 	if key == "CLAUDE_CODE_ENABLE_TELEMETRY" || key == "GROK_EXTERNAL_OTEL" {
 		return true
 	}

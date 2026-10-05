@@ -719,14 +719,13 @@ export class ScionChatFilePreview extends LitElement {
      * generous enough for either content type. */
     .file-preview-dialog::part(panel) {
       width: min(90vw, 900px);
-      max-height: 85vh;
+      /* The app frame's height, not the viewport's: it shrinks with the
+         iOS keyboard and the browser toolbar (see client/viewport.ts). */
+      max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
     }
     .file-preview-dialog::part(body) {
       padding: 0;
       overflow: auto;
-    }
-    .file-preview-dialog scion-code-editor {
-      --editor-max-height: 70vh;
     }
     .file-preview-placeholder {
       padding: 2rem;
@@ -748,7 +747,7 @@ export class ScionChatFilePreview extends LitElement {
       display: block;
       margin: 0 auto;
       max-width: 100%;
-      max-height: 75vh;
+      max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
       object-fit: contain;
     }
     .footer {
