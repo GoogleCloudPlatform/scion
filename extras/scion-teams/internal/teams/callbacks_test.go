@@ -64,6 +64,7 @@ func TestCallbackHandler_AskResponse_Valid(t *testing.T) {
 	})
 
 	broker, _ := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 
 	// Create a pending ask-user request.
 	err := broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
@@ -381,7 +382,7 @@ func TestCallbackHandler_WrappedActionData(t *testing.T) {
 
 // askUserPayloadFor runs an ask_response through the callback handler and
 // returns the inbound payload delivered to the hub.
-func askUserPayloadFor(t *testing.T, linked bool) inboundPayload {
+func askUserPayloadFor(t *testing.T) inboundPayload {
 	t.Helper()
 	var payload inboundPayload
 	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
@@ -389,9 +390,7 @@ func askUserPayloadFor(t *testing.T, linked bool) inboundPayload {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
 		w.WriteHeader(http.StatusOK)
 	})
-	if linked {
-		linkTestUser(t, broker)
-	}
+	linkTestUser(t, broker)
 	require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
 		RequestID:      "req-1",
 		ActivityID:     "act-ask-1",
@@ -414,7 +413,7 @@ func askUserPayloadFor(t *testing.T, linked bool) inboundPayload {
 }
 
 func TestCallbackHandler_AskResponse_UsesCanonicalTopicAndSenderFields(t *testing.T) {
-	payload := askUserPayloadFor(t, true)
+	payload := askUserPayloadFor(t)
 
 	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
 	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
@@ -423,12 +422,36 @@ func TestCallbackHandler_AskResponse_UsesCanonicalTopicAndSenderFields(t *testin
 	assert.Equal(t, "approve", payload.Message.Msg)
 }
 
-func TestCallbackHandler_AskResponse_UnlinkedSenderUsesTeamsID(t *testing.T) {
-	payload := askUserPayloadFor(t, false)
+func TestCallbackHandler_AskResponse_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	hubCalled := false
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+		RequestID:      "req-1",
+		ConversationID: "conv-1",
+		AgentSlug:      "dev-1",
+		ProjectID:      "proj-1",
+		Choices:        []string{"approve"},
+		ExpiresAt:      time.Now().Add(10 * time.Minute),
+	}))
 
-	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
-	assert.Equal(t, "teams:aad-user-1", payload.Message.Sender)
-	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":     "ask_response",
+		"request_id": "req-1",
+		"choice":     "approve",
+	}))
+	require.NoError(t, err)
+	body, err := json.Marshal(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "`register`")
+	assert.False(t, hubCalled, "hub should not be called for an unlinked user")
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-1")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.False(t, pending.Responded, "request stays open so it can be answered after registering")
 }
 
 func TestCallbackHandler_SetupConfirm_RequiresLinkedUser(t *testing.T) {

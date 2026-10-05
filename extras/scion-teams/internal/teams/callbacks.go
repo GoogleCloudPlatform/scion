@@ -149,10 +149,20 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		}
 	}
 
+	// Answers are sent as the linked user. Without a usable link, reply with
+	// what to do next and leave the request open so it can still be answered.
+	teamsUserID := teamsUserIDOf(activity)
+	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserID)
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
+		}
+		return h.respondWithUpdatedCard(activity, problem), nil
+	}
+
 	// Deliver the response to the hub.
-	if err := h.deliverAskUserResponse(ctx, activity, pending, responseText); err != nil {
+	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		mapping, _ := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
 		return h.respondWithUpdatedCard(activity,
 			hubErrorText(err, mapping, h.projectSlugFor(ctx, pending.ConversationID), "Failed to deliver your response. Please try again.")), nil
 	}
@@ -338,28 +348,22 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 // --- Helpers ---
 
-// deliverAskUserResponse sends the user's choice to the hub via inbound delivery.
-func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, responseText string) error {
+// deliverAskUserResponse sends the user's choice to the hub via inbound
+// delivery as the linked user.
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, mapping *TeamsUserMapping, responseText string) error {
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
 		return fmt.Errorf("hub client not configured")
 	}
 
-	// Resolve user identity: Sender is the Scion principal, SenderID the
-	// Teams user ID.
-	teamsUserID := teamsUserIDOf(activity)
-	sender := "teams:" + teamsUserID
-	if mapping, _ := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID); mapping != nil {
-		sender = onBehalfOfUser(mapping)
-	}
-
+	// Sender is the linked Scion principal, SenderID the Teams user ID.
 	recipient := "agent:" + pending.AgentSlug
 
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    sender,
-		SenderID:  teamsUserID,
+		Sender:    onBehalfOfUser(mapping),
+		SenderID:  teamsUserIDOf(activity),
 		Recipient: recipient,
 		Msg:       responseText,
 		Type:      messages.TypeInstruction,
