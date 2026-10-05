@@ -1703,10 +1703,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip
-          content=${defaultTriggersHint()}
-          hoist
-        >
+        <sl-tooltip content=${defaultTriggersHint()} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>

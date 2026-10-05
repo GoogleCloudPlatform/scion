@@ -28,7 +28,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import type { Subscription, SubscriptionScope } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
-import { ALL_TRIGGERS, DEFAULT_TRIGGERS, triggerLabel } from '../../shared/notification-triggers.js';
+import {
+  ALL_TRIGGERS,
+  DEFAULT_TRIGGERS,
+  triggerLabel,
+} from '../../shared/notification-triggers.js';
 
 interface SubscriptionTemplate {
   id: string;
