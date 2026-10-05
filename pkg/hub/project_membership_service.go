@@ -1468,9 +1468,10 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		// Step 3: Point project.OwnerID at the new owner, so the old owner no
 		// longer gets access through the resource-owner relationship rule
 		// (ptone/scion#2554). Use the narrow writer, not a Get plus full-row
-		// UpdateProject: a full-row write can clobber a concurrent PATCH. That
-		// interleaving is not expressible in a single-threaded test, so this
-		// call site is guarded by review.
+		// UpdateProject: a full-row write can clobber a concurrent PATCH. The
+		// PATCH/transfer interleaving (a transfer landing inside a PATCH's
+		// read-then-write window) is pinned by
+		// TestUpdateProject_ConcurrentTransferOwnershipSurvives.
 		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
 			return fmt.Errorf("update project owner: %w", upErr)
 		}

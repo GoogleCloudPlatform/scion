@@ -68,7 +68,7 @@ func TestBackfillProjectAgentsGroupMarkers_MarksLegitimateGroup(t *testing.T) {
 	// Verify the annotation was set.
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"backfill should mark legitimate agents group with system annotation")
 }
 
@@ -109,7 +109,7 @@ func TestBackfillProjectAgentsGroupMarkers_UsesOwnMarkerSection(t *testing.T) {
 
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"agents backfill must run independently of members marker")
 }
 
@@ -193,7 +193,7 @@ func TestBackfillProjectAgentsGroupMarkers_OwnerMismatchWarning(t *testing.T) {
 
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"backfill should still mark group even with owner mismatch")
 	assert.Equal(t, groupOwnerID, group.OwnerID,
 		"backfill must not change the group owner")
@@ -237,7 +237,7 @@ func TestBackfillProjectAgentsGroupMarkers_SetsAdoptionReviewAnnotation(t *testi
 
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"system annotation should be set")
 	assert.Equal(t, "true", group.Annotations[adoptionReviewRequiredAnnotation],
 		"adoption-review-required should be set when owners mismatch")
@@ -276,7 +276,7 @@ func TestBackfillProjectAgentsGroupMarkers_NoAdoptionReviewOnMatchingOwner(t *te
 
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"system annotation should be set")
 	assert.Empty(t, group.Annotations[adoptionReviewRequiredAnnotation],
 		"adoption-review-required should NOT be set when owners match")
@@ -323,7 +323,7 @@ func TestBackfillProjectAgentsGroupMarkers_AdoptionReviewPersists(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, "true", group.Annotations[adoptionReviewRequiredAnnotation],
 		"adoption-review-required annotation must persist after backfill and be queryable")
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"system annotation must persist after backfill")
 }
 
@@ -359,6 +359,6 @@ func TestBackfillProjectAgentsGroupMarkers_SkipsMismatchedSlug(t *testing.T) {
 
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Empty(t, group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Empty(t, group.Annotations[store.AnnotationProjectAgentsGroup],
 		"backfill should skip groups with mismatched slugs")
 }

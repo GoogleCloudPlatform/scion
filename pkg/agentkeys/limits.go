@@ -17,8 +17,8 @@ package agentkeys
 // Rate limit defaults from .design/agent-keys-contract.md ("Concrete
 // defaults"). These are token-bucket parameters for two independent,
 // server-owned buckets task 2.2 implements: one per authenticated
-// principal+project, one per target agent. Both aliases (`/keys` and the
-// temporary raw bridge) share the same buckets; they are separate from the
+// principal+project, one per target agent. Both keys routes (top-level and
+// project-scoped) share the same buckets; they are separate from the
 // aggregate DM message allowance. Local mode has no Hub quota. These are
 // per-Hub-instance limits — there is no distributed quota service.
 const (
