@@ -475,6 +475,9 @@ var structParityBases = []structParityBase{
 	{name: "merge-key-explicit-override", file: "settings.yaml", content: "schema_version: \"1\"\nx-base: &b\n  endpoint: https://base\nhub:\n  <<: *b\n  endpoint: https://own\n"},
 	{name: "merge-key-root", file: "settings.yaml", content: "x-top: &t\n  active_profile: merged\n  image_registry: merged-registry\nschema_version: \"1\"\n<<: *t\n"},
 	{name: "tagged-map-parent", file: "settings.yaml", content: "schema_version: \"1\"\nhub: !!map\n  endpoint: https://e\n"},
+	{name: "alias-key-nested", file: "settings.yaml", content: "schema_version: \"1\"\nk: &k endpoint\nhub:\n  *k : https://own\n"},
+	{name: "alias-key-root", file: "settings.yaml", content: "schema_version: \"1\"\nk: &k hub\n*k :\n  endpoint: https://own\n"},
+	{name: "complex-key", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  ? [a, b]\n  : x\n  endpoint: https://own\n"},
 }
 
 // runStructParity checks, for every key and a spread of values, that the
@@ -990,4 +993,110 @@ func TestUpdateVersionedSetting_RoundTripRefusal(t *testing.T) {
 		assert.Contains(t, err.Error(), "do not round-trip")
 		assert.Equal(t, src, readSettingsFile(t, dir))
 	})
+}
+
+// TestUpdateVersionedSetting_AliasKeys covers the review repros: a key
+// written as an alias (`*k :`) expands to its anchor's value, which the
+// node edit cannot match by name, so the edit must take the struct path
+// rather than append a duplicate field (an unloadable file) or miss the
+// delete.
+func TestUpdateVersionedSetting_AliasKeys(t *testing.T) {
+	bases := map[string]string{
+		"nested": "schema_version: \"1\"\nk: &k endpoint\nhub:\n  *k : https://own\n",
+		"root":   "schema_version: \"1\"\nk: &k hub\n*k :\n  endpoint: https://own\n",
+	}
+	for name, src := range bases {
+		t.Run(name+"/set", func(t *testing.T) {
+			dir := writeSettingsFixture(t, src)
+			require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", "https://new"))
+			vs, err := LoadSingleFileVersioned(dir)
+			require.NoError(t, err, "settings file no longer loads")
+			assert.Equal(t, "https://new", vs.GetHubEndpoint())
+		})
+		t.Run(name+"/delete", func(t *testing.T) {
+			dir := writeSettingsFixture(t, src)
+			require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", ""))
+			vs, err := LoadSingleFileVersioned(dir)
+			require.NoError(t, err)
+			assert.Equal(t, "", vs.GetHubEndpoint())
+		})
+	}
+	t.Run("helpers refuse mappings with alias or non-scalar keys", func(t *testing.T) {
+		doc, err := parseYAMLMappingDocument([]byte("k: &k e\nh:\n  *k : 1\nc:\n  ? [a]\n  : 1\n"))
+		require.NoError(t, err)
+		root := doc.Content[0]
+		_, err = setYAMLPath(root, []string{"h", "e"}, newYAMLStringScalar("v"))
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = deleteYAMLPath(root, []string{"c", "x"})
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+	})
+}
+
+// TestUpdateVersionedSetting_StructDecodeGuard shows the output struct
+// decode alone blocks a write that is data-equivalent but unloadable: the
+// hooked encoder emits `endpoint` twice (once through an alias key), which
+// generic decoding accepts and VersionedSettings decoding rejects.
+func TestUpdateVersionedSetting_StructDecodeGuard(t *testing.T) {
+	const src = "schema_version: \"1\"\nhub: {linked: true}\n"
+	dir := writeSettingsFixture(t, src)
+	orig := encodeSettingsYAML
+	t.Cleanup(func() { encodeSettingsYAML = orig })
+	const bad = "schema_version: \"1\"\nhub:\n  linked: true\n  ? &k endpoint\n  : https://old\n  *k : https://new\n"
+	var want interface{}
+	require.NoError(t, yaml.Unmarshal([]byte("schema_version: \"1\"\nhub: {linked: true, endpoint: https://new}\n"), &want))
+	require.True(t, yamlDecodesTo([]byte(bad), want), "test output must pass the generic round-trip check")
+	encodeSettingsYAML = func(*yaml.Node, int) ([]byte, error) { return []byte(bad), nil }
+
+	err := UpdateVersionedSetting(dir, "hub.endpoint", "https://new")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "would not load")
+	assert.Equal(t, src, readSettingsFile(t, dir))
+}
+
+func TestSaveVersionedSettings_DanglingYMLSymlink(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0755))
+	link := filepath.Join(dir, "settings.yml")
+	require.NoError(t, os.Symlink(filepath.Join("real", "settings.yml"), link))
+	require.NoError(t, SaveVersionedSettings(dir, &VersionedSettings{SchemaVersion: "1", ActiveProfile: "local"}))
+	_, err := os.Lstat(filepath.Join(dir, "settings.yaml"))
+	assert.True(t, os.IsNotExist(err), "struct save created settings.yaml next to a dangling settings.yml link")
+	data, err := os.ReadFile(filepath.Join(dir, "real", "settings.yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "active_profile: local")
+
+	// A regular settings.yaml still wins over a dangling settings.yml.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0644))
+	assert.Equal(t, filepath.Join(dir, "settings.yaml"), newSettingsFilePath(dir))
+}
+
+func TestResolveSettingsWriteTarget_DanglingErrorWording(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0755))
+	link := filepath.Join(dir, "settings.yaml")
+	require.NoError(t, os.Symlink("real/x.yaml/", link))
+	_, err := resolveSettingsWriteTarget(link)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not name a file")
+	assert.NotContains(t, err.Error(), "directory does not exist")
+
+	missing := filepath.Join(dir, "missing.yaml")
+	require.NoError(t, os.Symlink(filepath.Join(dir, "nope", "x.yaml"), missing))
+	_, err = resolveSettingsWriteTarget(missing)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestSplitLastPathElem(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"x":      {".", "x"},
+		"/x":     {"/", "x"},
+		"a/b":    {"a", "b"},
+		"a/../b": {"a/..", "b"},
+		"a/b/":   {"a/b", ""},
+		"/":      {"/", ""},
+	} {
+		dir, base := splitLastPathElem(in)
+		assert.Equal(t, want, [2]string{dir, base}, in)
+	}
 }

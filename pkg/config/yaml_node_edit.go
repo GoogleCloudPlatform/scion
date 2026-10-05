@@ -44,20 +44,29 @@ var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias o
 
 // isYAMLShared reports whether n cannot be edited in place without
 // diverging from a decode/encode of the document: n is an alias, carries an
-// anchor that aliases can refer to, or is a mapping with a `<<` merge key
-// (whose merged keys a node edit cannot see or remove).
+// anchor that aliases can refer to, or is a mapping with a key the node
+// edit cannot match by name (see hasYAMLOpaqueKey).
 func isYAMLShared(n *yaml.Node) bool {
-	return n != nil && (n.Kind == yaml.AliasNode || n.Anchor != "" || hasYAMLMergeKey(n))
+	return n != nil && (n.Kind == yaml.AliasNode || n.Anchor != "" || hasYAMLOpaqueKey(n))
 }
 
-// hasYAMLMergeKey reports whether the mapping n has a `<<` merge key.
-func hasYAMLMergeKey(n *yaml.Node) bool {
+// hasYAMLOpaqueKey reports whether the mapping n has a key that findMapKey
+// cannot match by name the way the decoder does: a `<<` merge key (whose
+// merged keys a node edit cannot see or remove), an alias key (`*k :`,
+// whose Value is the anchor name, not the key it expands to), or any other
+// non-scalar key.
+func hasYAMLOpaqueKey(n *yaml.Node) bool {
 	if n.Kind != yaml.MappingNode {
 		return false
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k := n.Content[i]
-		if k.Kind == yaml.ScalarNode && (k.Tag == "!!merge" || (k.Value == "<<" && k.Style == 0)) {
+		if k.Kind != yaml.ScalarNode {
+			return true
+		}
+		// yaml.v3 resolves a plain `<<` to the !!merge tag, so the Value
+		// check is a defensive duplicate of the tag check.
+		if k.Tag == "!!merge" || (k.Value == "<<" && k.Style == 0) {
 			return true
 		}
 	}
@@ -238,7 +247,8 @@ func replacementScalar(old, value *yaml.Node) *yaml.Node {
 
 // checkYAMLPathUnshared returns errYAMLEditThroughAlias if root or any
 // existing node along path (the target value included) is shared in the
-// isYAMLShared sense: an alias, anchored, or a mapping with a merge key.
+// isYAMLShared sense: an alias, anchored, or a mapping with a merge, alias
+// or other non-scalar key.
 func checkYAMLPathUnshared(root *yaml.Node, path []string) error {
 	m := root
 	if isYAMLShared(m) {
