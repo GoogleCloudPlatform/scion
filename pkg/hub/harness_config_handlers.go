@@ -766,6 +766,21 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The manifest is the complete file list, so storage objects it no longer
+	// names (files deleted locally before a sync) are removed. Brokers with
+	// local storage hydrate the whole storage directory, so a stale object
+	// would otherwise still reach agents. This matches the reconcile done by
+	// ResourceStore.Bootstrap. manifest.json is a storage-level artifact
+	// checked by validation, not a config file, so it is kept.
+	if hc.StoragePath != "" {
+		keep := make(map[string]struct{}, len(req.Manifest.Files)+1)
+		for _, f := range req.Manifest.Files {
+			keep[hc.StoragePath+"/"+f.Path] = struct{}{}
+		}
+		keep[hc.StoragePath+"/manifest.json"] = struct{}{}
+		reconcileResourceStorage(ctx, stor, hc.StoragePath, hc.Name, keep, s.resourceLog, "harness-config finalize")
+	}
+
 	writeJSON(w, http.StatusOK, hc)
 }
 

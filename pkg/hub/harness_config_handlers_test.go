@@ -367,6 +367,52 @@ func TestHandleHarnessConfigFinalize_PersistsModelAliases(t *testing.T) {
 	}
 }
 
+// TestHandleHarnessConfigFinalize_DeletesObjectsMissingFromManifest verifies
+// that finalize removes storage objects the manifest no longer lists (files
+// deleted locally before a sync, ptone/scion#3161). Brokers with local storage
+// hydrate the whole storage directory, so a stale object would still reach
+// agents if only the record's file list were updated.
+func TestHandleHarnessConfigFinalize_DeletesObjectsMissingFromManifest(t *testing.T) {
+	srv, s, stor := testHarnessConfigFileServer(t)
+
+	hc := createTestHarnessConfigWithFiles(t, s, stor, map[string]string{
+		"config.yaml":          "harness: claude\n",
+		"removed.yaml":         "gone: true\n",
+		"scripts/provision.py": "print()\n",
+	})
+	manifestObj := hc.StoragePath + "/manifest.json"
+	stor.content[manifestObj] = []byte("{}")
+	stor.objects[manifestObj] = &storage.Object{Name: manifestObj, Size: 2}
+	// An object belonging to a different config that shares the path prefix
+	// must not be touched.
+	otherObj := hc.StoragePath + "-other/removed.yaml"
+	stor.content[otherObj] = []byte("other\n")
+	stor.objects[otherObj] = &storage.Object{Name: otherObj, Size: 6}
+
+	body := map[string]interface{}{
+		"manifest": map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"path": "config.yaml", "size": 16, "hash": "sha256:placeholder"},
+			},
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	for _, gone := range []string{"removed.yaml", "scripts/provision.py"} {
+		if _, ok := stor.objects[hc.StoragePath+"/"+gone]; ok {
+			t.Errorf("expected %s to be deleted from storage after finalize", gone)
+		}
+	}
+	for _, kept := range []string{hc.StoragePath + "/config.yaml", manifestObj, otherObj} {
+		if _, ok := stor.objects[kept]; !ok {
+			t.Errorf("expected %s to be kept in storage after finalize", kept)
+		}
+	}
+}
+
 func TestHarnessConfigExposesCapabilities(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
