@@ -67,7 +67,7 @@ const scaGenericDenyMsg = "You don't have permission to assign this GCP service 
 // spelled out literally for the same reason as scaGenericDenyMsg.
 const scaUnrecordedDenyMsg = "This agent cannot assign service accounts: its delegation chain includes an agent " +
 	"created without recorded provenance (this agent or one of the agents that created it). " +
-	"Have an authorized user recreate the affected agent directly, then create agents from it."
+	"Have an authorized user recreate this agent directly (not from another agent)."
 
 // scaCreateDelegatorWithoutAssign creates an active, existing user bound to a
 // minimal custom project-scoped role that omits gcp_service_account.assign.

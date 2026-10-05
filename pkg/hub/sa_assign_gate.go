@@ -339,16 +339,18 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // comment on authz.go, which already says "directly or transitively".
 //
 // DenyCauseCeilingUnrecorded names the usual origin of the cause, an agent
-// created before provenance was recorded, and the remedy that clears it. The
+// created without recorded provenance, and the remedy that clears it. The
 // unrecorded hop can be this agent's own edge or any edge further up the
-// chain, so the remedy names the affected agent rather than this one:
-// recreating only this agent from the same parent keeps the unrecorded
-// ancestor in its chain. A user's interactive create writes the new agent's
-// edge with recorded provenance (commitAgentCreate), and agents created from
-// it record theirs the same way, so their chains pass. Reincarnating an agent
-// keeps its existing edge and does not clear the cause. The same cause also
-// covers a hop whose provenance version this binary does not interpret
-// (hopEffectCeilingDeny); the remedy is the same for both.
+// chain. A user's create writes the new agent's edge with recorded provenance
+// (commitAgentCreate), and because a user is the root of a chain, a
+// user-created agent's chain contains only that one recorded edge. So having
+// a user recreate this agent directly always clears the cause, whether the
+// unrecorded link was this agent or an ancestor; the message does not need to
+// identify which hop failed. Recreating the agent from another agent keeps
+// that agent's chain, and reincarnating an agent keeps its existing edge, so
+// neither clears the cause. The same cause also covers a hop whose provenance
+// version this binary does not interpret (hopEffectCeilingDeny); the remedy
+// is the same for both.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
@@ -367,7 +369,7 @@ func saAssignForbiddenMessage(cause DenyCause) string {
 	case DenyCauseCeilingUnrecorded:
 		return "This agent cannot assign service accounts: its delegation chain includes an agent " +
 			"created without recorded provenance (this agent or one of the agents that created it). " +
-			"Have an authorized user recreate the affected agent directly, then create agents from it."
+			"Have an authorized user recreate this agent directly (not from another agent)."
 	default:
 		return saAssignGenericForbiddenMsg
 	}
