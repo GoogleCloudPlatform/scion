@@ -28,6 +28,18 @@ const PAGE_ONE_AGENT = { id: 'agent-page-one', name: 'Page One Agent', slug: 'pa
 const PAGE_TWO_AGENT = { id: 'agent-page-two', name: 'Page Two Agent', slug: 'page-two' };
 const CREATED_AGENT = { id: 'agent-created', name: 'Created Agent', slug: 'created' };
 
+/** The status of the open palette's Agents group, as the chat page holds it. */
+function agentsGroupStatus(page: Page): Promise<string | undefined> {
+  return page.evaluate(
+    () =>
+      (
+        document.querySelector('scion-page-chat') as unknown as {
+          v2PaletteGroups?: { agents?: { status?: string } };
+        }
+      ).v2PaletteGroups?.agents?.status
+  );
+}
+
 function paletteOptions(page: Page) {
   return page.locator('scion-quick-palette .palette-option');
 }
@@ -75,6 +87,7 @@ test('agent status events during and after a slow multi-page walk are applied wi
   // still on its way.
   await expect(paletteOptions(page).filter({ hasText: PAGE_ONE_AGENT.name })).toBeVisible();
   await expect(paletteOptions(page).filter({ hasText: PAGE_TWO_AGENT.name })).toHaveCount(0);
+  expect(await agentsGroupStatus(page)).toBe('loading');
 
   // Status traffic while the walk is still reading pages.
   for (let i = 0; i < 4; i++) {
