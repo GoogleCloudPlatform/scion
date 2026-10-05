@@ -54,6 +54,7 @@ import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
@@ -3464,7 +3465,7 @@ export class ScionPageChat extends LitElement {
    */
   private dismissKeyboard(): void {
     const el = deepActiveElement();
-    if (el instanceof HTMLElement || el instanceof SVGElement) el.blur();
+    if (el instanceof HTMLElement || el instanceof SVGElement) blurElement(el);
   }
 
   /** Swiping right reveals the panel to the left of the current one. */
@@ -4696,7 +4697,7 @@ export class ScionPageChat extends LitElement {
     if (!(dialog instanceof HTMLElement)) return;
     await (dialog as unknown as { updateComplete: Promise<boolean> }).updateComplete;
     const closeButton = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="close-button"]');
-    closeButton?.focus();
+    focusElement(closeButton);
   }
 
   private _capturePaletteInvokerFocus(): void {
@@ -4762,7 +4763,7 @@ export class ScionPageChat extends LitElement {
       this._focusPaletteFallback();
       return;
     }
-    el.focus();
+    focusElement(el);
     if (selection && (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement)) {
       try {
         el.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
@@ -4787,7 +4788,7 @@ export class ScionPageChat extends LitElement {
     const checkVisibility = (fallback as unknown as { checkVisibility?: () => boolean })
       .checkVisibility;
     if (typeof checkVisibility === 'function' && !checkVisibility.call(fallback)) return;
-    fallback.focus();
+    focusElement(fallback);
   }
 
   /**
@@ -4815,7 +4816,7 @@ export class ScionPageChat extends LitElement {
   private async _focusComposerAfterPaletteSelection(): Promise<void> {
     const slTextarea = await this._pollForNewComposerTextarea();
     if (slTextarea) {
-      slTextarea.focus();
+      focusElement(slTextarea);
       return;
     }
     // The composer never became available (e.g. read-only) — fall back to a
