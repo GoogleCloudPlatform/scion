@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -49,6 +51,14 @@ def temporary_home(path: str):
 CONFIG_REL = os.path.join(".config", "opencode", "opencode.json")
 
 
+def _seed_config(home: str, content: str, rel: str = CONFIG_REL) -> str:
+    path = os.path.join(home, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
+
+
 def _read_config(home: str) -> dict:
     with open(os.path.join(home, CONFIG_REL), "r", encoding="utf-8") as f:
         return json.load(f)
@@ -74,7 +84,8 @@ def _invoke(
         json.dump(candidates, f)
 
     manifest = {"harness_bundle_dir": bundle, "harness_config": harness_config or {}}
-    with temporary_home(home):
+    # Stub the models.dev prefetch so the tests make no network calls.
+    with temporary_home(home), unittest.mock.patch.object(provision, "_prefetch_models_catalog"):
         ctx = scion_harness.ProvisionContext("opencode", manifest)
         provision.provision(ctx)
         env_path = os.path.join(bundle, "outputs", "env.json")
@@ -230,6 +241,7 @@ class ConfigSchemaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._invoke_vertex(tmp)
             config = _read_config(tmp)
+        self.assertEqual(config["$schema"], "https://opencode.ai/config.json")
         self.assertEqual(config["model"], "google-vertex/gemini-2.5-pro")
         self.assertEqual(config["small_model"], "google-vertex/gemini-2.5-flash")
         self.assertIn("github-copilot", config["disabled_providers"])
@@ -241,6 +253,95 @@ class ConfigSchemaTest(unittest.TestCase):
             self._invoke_vertex(tmp, scion_model="google-vertex/gemini-2.5-flash-lite")
             config = _read_config(tmp)
         self.assertEqual(config["model"], "google-vertex/gemini-2.5-flash-lite")
+
+    def test_user_model_kept_when_no_model_resolves(self) -> None:
+        # R1: with no SCION_MODEL, a model already in opencode.json stays.
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(os.environ, {}):
+            os.environ.pop("SCION_MODEL", None)
+            _seed_config(tmp, json.dumps({"model": "openai/gpt-5", "theme": "x"}))
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "openai/gpt-5")
+        self.assertEqual(config["theme"], "x")
+
+    def test_unparsable_config_is_left_untouched(self) -> None:
+        # R2: opencode reads this file as JSONC, so a file json.load
+        # rejects must not be replaced.
+        content = '{\n  // keep\n  "theme": "x",\n  "mcp": {"keep": {"enabled": false}},\n}\n'
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            path = _seed_config(tmp, content)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(
+                    tmp,
+                    env_vars=["ANTHROPIC_API_KEY"],
+                    mcp_servers={"remote-tool": {"transport": "sse", "url": "https://example.com/mcp"}},
+                )
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), content)
+        self.assertIn("opencode.json", stderr.getvalue())
+        self.assertIn("left unchanged", stderr.getvalue())
+
+    def test_vertex_default_keeps_user_model(self) -> None:
+        # R3: the Vertex default must not overwrite a model the user set.
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(tmp, json.dumps({"model": "google-vertex/gemini-2.5-flash", "small_model": "google-vertex/x"}))
+            self._invoke_vertex(tmp)
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "google-vertex/gemini-2.5-flash")
+        # O1: a user small_model is kept too.
+        self.assertEqual(config["small_model"], "google-vertex/x")
+
+    def test_model_without_provider_is_not_written(self) -> None:
+        # R4: the bundled size aliases resolve to bare names such as
+        # "claude-sonnet", which opencode cannot parse as provider/model.
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(tmp, json.dumps({"model": "openai/gpt-5"}))
+            with unittest.mock.patch.dict(os.environ, {"SCION_MODEL": "claude-sonnet"}):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertEqual(_read_config(tmp)["model"], "openai/gpt-5")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp, scion_model="medium")
+            self.assertEqual(_read_config(tmp)["model"], "google-vertex/gemini-2.5-pro")
+
+    def test_vertex_defaults_removed_after_switch_to_api_key(self) -> None:
+        # O2: Vertex defaults written by an earlier provision are removed
+        # when the agent now uses another auth method.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp, scion_model="google-vertex/gemini-2.5-flash-lite")
+            with unittest.mock.patch.dict(os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "anthropic/claude-sonnet-4-5")
+        self.assertNotIn("small_model", config)
+        self.assertNotIn("disabled_providers", config)
+
+    def test_user_values_kept_after_switch_to_api_key(self) -> None:
+        # O2: values that differ from the Vertex defaults are user values.
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(
+                tmp,
+                json.dumps({"small_model": "anthropic/claude-haiku-4-5", "disabled_providers": ["github-copilot", "x"]}),
+            )
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertEqual(config["small_model"], "anthropic/claude-haiku-4-5")
+        self.assertEqual(config["disabled_providers"], ["github-copilot", "x"])
+
+    def test_legacy_seed_dotfile_is_removed(self) -> None:
+        # O3: the old seed content is removed; anything else is kept.
+        legacy_rel = os.path.join(".config", "opencode", ".opencode.json")
+        seed = '{\n  "$schema": "https://opencode.ai/config.json",\n  "theme": "matrix"\n}'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _seed_config(tmp, seed, legacy_rel)
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertFalse(os.path.exists(path))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _seed_config(tmp, json.dumps({"theme": "matrix", "mcpServers": {}}), legacy_rel)
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertTrue(os.path.exists(path))
 
     def test_seeded_home_config_uses_loaded_filename(self) -> None:
         home_dir = os.path.join(os.path.dirname(__file__), "home", ".config", "opencode")

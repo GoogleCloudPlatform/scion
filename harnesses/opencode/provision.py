@@ -67,6 +67,7 @@ OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
 # The legacy Go-opencode ".opencode.json" is not read (ptone/scion#2679).
 OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
 OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
+LEGACY_CONFIG_FILE = "~/.config/opencode/.opencode.json"
 
 # Model IDs use opencode's provider/model form (models.dev catalog).
 VERTEX_DEFAULT_MODEL = "google-vertex/gemini-2.5-pro"
@@ -212,17 +213,20 @@ def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
     sh.atomic_write_text(target, content, mode=0o600)
 
 
-def _load_config() -> dict[str, Any]:
-    """Load ~/.config/opencode/opencode.json, or {} if absent/unreadable."""
+def _load_config() -> dict[str, Any] | None:
+    """Load ~/.config/opencode/opencode.json: {} if absent, None if unusable.
+
+    opencode parses the file as JSONC, so a file that json.load rejects can
+    still be valid for opencode. None means: leave the file as it is.
+    """
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
-    if os.path.isfile(config_path):
-        try:
-            existing = sh.load_json(config_path)
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if isinstance(existing, dict):
-            return existing
-    return {}
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        existing = sh.load_json(config_path)
+    except (OSError, ValueError):
+        return None
+    return existing if isinstance(existing, dict) else None
 
 
 def _save_config(config_data: dict[str, Any]) -> None:
@@ -233,6 +237,8 @@ def _save_config(config_data: dict[str, Any]) -> None:
 def _write_mcp_config(servers: dict[str, Any]) -> None:
     """Merge translated MCP servers into the config's top-level "mcp" map."""
     config_data = _load_config()
+    if config_data is None:
+        return
     mcp_block = config_data.get("mcp")
     if not isinstance(mcp_block, dict):
         mcp_block = {}
@@ -247,13 +253,15 @@ def _write_vertex_provider_config() -> None:
 
     opencode's google-vertex provider autoloads from GOOGLE_CLOUD_PROJECT /
     VERTEX_LOCATION (set by _vertex_env_overlay), so only default models are
-    needed here. "model" is a default: _write_model_config overwrites it
-    when the user chose a model explicitly. github-copilot is disabled so a
-    stray GITHUB_TOKEN cannot make opencode pick Copilot over Vertex, in
+    needed here. Neither default replaces a model already in the file; an
+    explicit SCION_MODEL still wins (_write_model_config). github-copilot is
+    disabled so a stray GITHUB_TOKEN cannot make opencode pick Copilot over Vertex, in
     case the launch wrapper does not strip it.
     """
     config_data = _load_config()
-    config_data["model"] = VERTEX_DEFAULT_MODEL
+    if config_data is None:
+        return
+    config_data.setdefault("model", VERTEX_DEFAULT_MODEL)
     config_data.setdefault("small_model", VERTEX_DEFAULT_SMALL_MODEL)
     disabled = config_data.get("disabled_providers")
     if not isinstance(disabled, list):
@@ -264,18 +272,36 @@ def _write_vertex_provider_config() -> None:
     _save_config(config_data)
 
 
-def _write_model_config(model: str, *, keep_default: bool = False) -> None:
+def _write_model_config(ctx: sh.ProvisionContext, model: str, method: str) -> None:
     """Write the resolved model into the config.
 
-    With no resolved model, a stale "model" from an earlier provision is
-    removed unless keep_default is set (the vertex-ai default).
+    A "model" already in the file is never removed. Without vertex-ai, the
+    Vertex defaults that an earlier provision wrote are removed.
     """
     config_data = _load_config()
-    if model:
+    if config_data is None:
+        return
+    if method != "vertex-ai":
+        if config_data.get("small_model") == VERTEX_DEFAULT_SMALL_MODEL:
+            del config_data["small_model"]
+        if config_data.get("disabled_providers") == ["github-copilot"]:
+            del config_data["disabled_providers"]
+    provider, _, model_id = model.partition("/")
+    if provider and model_id:
         config_data["model"] = model
-    elif not keep_default:
-        config_data.pop("model", None)
+    elif model:
+        ctx.warn(f"model {model!r} is not in opencode's provider/model form; keeping the configured model")
     _save_config(config_data)
+
+
+def _remove_legacy_seed() -> None:
+    """Remove the unread legacy .opencode.json if it holds only the old seed."""
+    path = sh.expand_path(LEGACY_CONFIG_FILE)
+    try:
+        if sh.load_json(path) == {"$schema": OPENCODE_CONFIG_SCHEMA, "theme": "matrix"}:
+            os.remove(path)
+    except (OSError, ValueError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +344,12 @@ def provision(ctx: sh.ProvisionContext) -> None:
         _write_opencode_auth_file(ctx)
         extra["auth_file_written"] = True
 
+    if _load_config() is None:
+        ctx.warn(
+            f"{sh.expand_path(OPENCODE_CONFIG_FILE)} is not a plain JSON object and is left "
+            "unchanged; scion model, MCP and Vertex AI settings are not applied to it"
+        )
+
     if resolved.method == "vertex-ai":
         extra["vertex_project_env"] = "VERTEXAI_PROJECT"
         extra["vertex_location_env"] = "VERTEXAI_LOCATION"
@@ -329,7 +361,8 @@ def provision(ctx: sh.ProvisionContext) -> None:
     sh.apply_mcp_translated(ctx, _translate_mcp_server, _write_mcp_config)
 
     resolved_model = sh.resolve_model(ctx)
-    _write_model_config(resolved_model, keep_default=resolved.method == "vertex-ai")
+    _write_model_config(ctx, resolved_model, resolved.method)
+    _remove_legacy_seed()
 
     _prefetch_models_catalog(ctx)
 
