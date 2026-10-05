@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +56,25 @@ const (
 // wordings for the same outcome.
 const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
 
+// PTYCloseError reports that the server ended a PTY session with a close
+// code other than a clean detach (1000). Callers classify Code with
+// wsprotocol.ClassifyPTYClose to decide what to tell the user. The CLI does
+// not reconnect on any close code.
+type PTYCloseError struct {
+	// Code is the WebSocket close code (see the wsprotocol ClosePTY* constants).
+	// 1006 means the connection dropped without a close frame.
+	Code int
+	// Reason is the machine-readable close reason, possibly empty.
+	Reason string
+}
+
+func (e *PTYCloseError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("attach session closed by server (code %d)", e.Code)
+	}
+	return fmt.Sprintf("attach session closed by server (code %d: %s)", e.Code, e.Reason)
+}
+
 // PTYClientConfig holds configuration for the PTY client.
 type PTYClientConfig struct {
 	// Endpoint is the Hub or Runtime Broker URL.
@@ -75,14 +95,18 @@ type PTYClientConfig struct {
 
 // PTYClient manages a WebSocket PTY connection.
 type PTYClient struct {
-	config       PTYClientConfig
-	conn         *websocket.Conn
-	termState    *term.State
-	oldFd        int
-	writeMu      sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	receivedData bool // tracks whether we've received any data
+	config    PTYClientConfig
+	conn      *websocket.Conn
+	termState *term.State
+	oldFd     int
+	writeMu   sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	// receivedData records whether any data arrived from the server. It is
+	// written by the WebSocket reader goroutine and read by Run when it
+	// restores the terminal, which may happen while that goroutine is still
+	// running, so it is atomic.
+	receivedData atomic.Bool
 
 	// stdin is read once here and never re-read from the os.Stdin package
 	// variable elsewhere, so a test can inject its own reader without ever
@@ -212,8 +236,10 @@ func (c *PTYClient) buildWebSocketURL() (string, error) {
 		u.Scheme = "ws"
 	}
 
-	// Build path
-	u.Path = fmt.Sprintf("/api/v1/agents/%s/pty", c.config.Slug)
+	// Build path. Keep any path prefix on the endpoint (e.g. a hub served
+	// under https://example.com/scion), matching how the REST client joins
+	// BaseURL and path.
+	u.Path = joinEndpointPath(u.Path, fmt.Sprintf("/api/v1/agents/%s/pty", c.config.Slug))
 
 	// Add query params for terminal size
 	q := u.Query()
@@ -226,6 +252,12 @@ func (c *PTYClient) buildWebSocketURL() (string, error) {
 	u.RawQuery = q.Encode()
 
 	return u.String(), nil
+}
+
+// joinEndpointPath appends an API path to the endpoint's own path prefix,
+// dropping a trailing slash on the prefix so the result never has "//".
+func joinEndpointPath(prefix, apiPath string) string {
+	return strings.TrimSuffix(prefix, "/") + apiPath
 }
 
 // Run starts the PTY session and blocks until it ends.
@@ -243,7 +275,7 @@ func (c *PTYClient) Run() error {
 	var runErr error
 	defer func() {
 		slog.Debug("PTY client restoring terminal", "had_error", runErr != nil)
-		c.restoreTerminal(runErr == nil)
+		c.restoreAfterRun(runErr)
 	}()
 
 	// Send initial resize so the remote PTY matches our terminal size,
@@ -358,6 +390,23 @@ func (c *PTYClient) restoreTerminal(writeResetSeqs bool) {
 	}
 }
 
+// restoreAfterRun restores the terminal when Run ends. On a clean end it
+// always writes the reset sequences. On an error it writes them only when the
+// server has sent data: by then the remote tmux has switched to the
+// alternate screen and drawn its status line, so the CLI must leave it before
+// printing the error, or the error lands on top of the remote screen. If no
+// data ever arrived, the local screen was never touched, and skipping the
+// sequences keeps earlier output (and the cursor) where they were. After a
+// reset on error it also starts a fresh line for the error message.
+func (c *PTYClient) restoreAfterRun(runErr error) {
+	hadTerminal := c.termState != nil
+	writeReset := runErr == nil || c.receivedData.Load()
+	c.restoreTerminal(writeReset)
+	if hadTerminal && writeReset && runErr != nil {
+		_, _ = os.Stdout.Write([]byte("\r\n"))
+	}
+}
+
 // handleResize handles terminal resize events.
 func (c *PTYClient) handleResize() {
 	sigCh := make(chan os.Signal, 1)
@@ -453,15 +502,19 @@ func (c *PTYClient) readFromWebSocket() error {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			slog.Debug("PTY websocket reader: read error", "error", err)
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				slog.Debug("PTY websocket reader: clean close")
-				return nil
-			}
-			if websocket.IsCloseError(err, wsprotocol.ClosePTYAttachUnsupported) {
-				return errors.New(attachUnsupportedMessage)
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) {
+				if wsprotocol.ClassifyPTYClose(closeErr.Code) == wsprotocol.DispositionDetached {
+					slog.Debug("PTY websocket reader: clean close")
+					return nil
+				}
+				if closeErr.Code == wsprotocol.ClosePTYAttachUnsupported {
+					return errors.New(attachUnsupportedMessage)
+				}
+				return &PTYCloseError{Code: closeErr.Code, Reason: closeErr.Text}
 			}
 			// Check if this is a timeout on initial data
-			if !c.receivedData {
+			if !c.receivedData.Load() {
 				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
 					return fmt.Errorf("timed out waiting for PTY data (server may have failed to start the session)")
 				}
@@ -470,8 +523,8 @@ func (c *PTYClient) readFromWebSocket() error {
 		}
 
 		// Clear read deadline after receiving first data
-		if !c.receivedData {
-			c.receivedData = true
+		if !c.receivedData.Load() {
+			c.receivedData.Store(true)
 			slog.Debug("PTY websocket reader: received first data, clearing deadline")
 			if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
 				return fmt.Errorf("failed to clear read deadline: %w", err)
@@ -587,7 +640,7 @@ func BuildDirectAttachURL(hostEndpoint, slug string, cols, rows int) (string, er
 		u.Scheme = "ws"
 	}
 
-	u.Path = fmt.Sprintf("/api/v1/agents/%s/attach", slug)
+	u.Path = joinEndpointPath(u.Path, fmt.Sprintf("/api/v1/agents/%s/attach", slug))
 
 	q := u.Query()
 	q.Set("cols", fmt.Sprintf("%d", cols))
