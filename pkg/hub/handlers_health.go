@@ -26,6 +26,9 @@ import (
 )
 
 type HealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string            `json:"status"`
 	Version      string            `json:"version"`
 	ScionVersion string            `json:"scionVersion"`

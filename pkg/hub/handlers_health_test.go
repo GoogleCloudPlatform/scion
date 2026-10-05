@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -178,4 +180,21 @@ func TestGetHealthInfo_UnhealthyWhenDatabaseDown(t *testing.T) {
 	srv.EmbeddedBrokerRegistrationFailed(errors.New("boom"))
 	info = srv.GetHealthInfo(context.Background())
 	assert.Equal(t, HealthStatusUnhealthy, info.Status)
+}
+
+// TestHealthz_StatusIsFirstField: gce-start-hub.sh and
+// single-node-vm/deploy.sh read the top-level status by matching the body
+// prefix {"status":"...", so reordering HealthResponse fields would make
+// both scripts treat every hub as unknown and fail the deploy.
+func TestHealthz_StatusIsFirstField(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.HasPrefix(rec.Body.String(), `{"status":"healthy"`), "got %s", rec.Body.String())
+
+	srv.store = pingFailStore{srv.store}
+	rec = doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.HasPrefix(rec.Body.String(), `{"status":"unhealthy"`), "got %s", rec.Body.String())
 }

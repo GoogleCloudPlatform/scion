@@ -794,6 +794,10 @@ func TestWebHealthz_DegradedHub(t *testing.T) {
 
 	// Top-level status should be degraded because hub is degraded
 	assert.Equal(t, "degraded", result["status"])
+	// gce-start-hub.sh and single-node-vm/deploy.sh read the top-level
+	// status by body prefix, so "status" must be the first field.
+	assert.True(t, strings.HasPrefix(string(body), `{"status":"degraded"`),
+		"composite /healthz must start with the top-level status; got %s", body)
 
 	// Hub sub-object should show degraded
 	hubObj, ok := result["hub"].(map[string]interface{})
