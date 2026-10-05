@@ -332,6 +332,39 @@ describe('loadTerminalPaletteAgents', () => {
     await rejection;
   });
 
+  it('publishes no progress once the load is no longer current, even before it is aborted', async () => {
+    const h = storeWith([row('a1'), row('a2'), row('a3')], 1);
+    const progress: string[][] = [];
+    let current = true;
+
+    const { promise } = load(h, {
+      isCurrent: () => current,
+      onProgress: (c) => {
+        progress.push(labels(c));
+        current = false;
+      },
+    });
+    const rejection = expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    await h.connect();
+
+    await rejection;
+    expect(progress).toEqual([[]]);
+    expect(h.server.walks()).toBe(1);
+  });
+
+  it('a failed walk rejects a load that is no longer current as an AbortError, not the error', async () => {
+    const h = storeWith([row('a1')]);
+    h.server.status = 500;
+    let current = true;
+    const { promise } = load(h, { isCurrent: () => current });
+    const rejection = expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    current = false;
+
+    await h.connect();
+
+    await rejection;
+  });
+
   it("rejects with the store's error when the walk fails, and a retry walks again", async () => {
     const h = storeWith([row('a1', { name: 'Alpha' })]);
     h.server.status = 500;
