@@ -201,10 +201,6 @@ func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID s
 	return nil
 }
 
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
-}
-
 func (m *heartbeatMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }

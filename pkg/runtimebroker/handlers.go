@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2780,8 +2781,36 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.id", id))
 
+	if r.Body == nil {
+		BadRequest(w, "Invalid request body: empty request body")
+		return
+	}
+	// No byte cap here, matching the previous behaviour: this route is
+	// Hub-only and HMAC-authenticated, and the Hub forwards a rebuilt
+	// request in which the message text can appear several times (msg plus
+	// the rendered delivery_text, nested and top level), so a cap tied to
+	// the Hub's public ingress limit would refuse ordinary messages.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// Raw keystroke delivery through messages has been removed. A request
+	// that still carries structured_message.raw (any value, any case) is
+	// refused before decoding, so it can never be delivered as an ordinary
+	// message and never reaches the agent manager.
+	if messages.HasRetiredRawField(body, "structured_message") {
+		span.SetStatus(codes.Error, messages.RawInputRemovedCode)
+		writeError(w, http.StatusUnprocessableEntity, messages.RawInputRemovedCode,
+			messages.RawInputRemovedMessage, map[string]interface{}{
+				"ingress":     "broker_message",
+				"replacement": "POST /api/v1/agents/{id}/keys",
+			})
+		return
+	}
+
 	var req MessageRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
@@ -2811,60 +2840,43 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
-	// Raw messages bypass the paste buffer and debounce, sending literal
-	// bytes via tmux send-keys with no trailing Enter keypresses.
-	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
-	if isRaw {
-		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				span.SetStatus(codes.Error, err.Error())
-				NotFound(w, "Agent")
-				return
-			}
-			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
+	msgCtx := ctx
+	if !req.Interrupt && req.MessageID != "" {
+		// Non-interrupt messages are buffered and delivered after this
+		// handler has already answered 200. Register a callback so a
+		// later delivery failure is reported back to the hub, which
+		// then marks the message failed instead of "dispatched" (#1820).
+		failure := hubclient.MessageFailure{
+			MessageID: req.MessageID,
+			AgentID:   id,
+			ProjectID: projectID,
+		}
+		if failure.ProjectID == "" {
+			failure.ProjectID = req.ProjectID
+		}
+		connName := r.Header.Get("X-Scion-Hub-Connection")
+		msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
+			f := failure
+			f.Reason = "broker delivery failed: " + deliveryErr.Error()
+			go s.reportMessageFailure(connName, f)
+		})
+	}
+	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			span.SetStatus(codes.Error, err.Error())
+			NotFound(w, "Agent")
 			return
 		}
-	} else {
-		msgCtx := ctx
-		if !req.Interrupt && req.MessageID != "" {
-			// Non-interrupt messages are buffered and delivered after this
-			// handler has already answered 200. Register a callback so a
-			// later delivery failure is reported back to the hub, which
-			// then marks the message failed instead of "dispatched" (#1820).
-			failure := hubclient.MessageFailure{
-				MessageID: req.MessageID,
-				AgentID:   id,
-				ProjectID: projectID,
-			}
-			if failure.ProjectID == "" {
-				failure.ProjectID = req.ProjectID
-			}
-			connName := r.Header.Get("X-Scion-Hub-Connection")
-			msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
-				f := failure
-				f.Reason = "broker delivery failed: " + deliveryErr.Error()
-				go s.reportMessageFailure(connName, f)
-			})
-		}
-		if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				span.SetStatus(codes.Error, err.Error())
-				NotFound(w, "Agent")
-				return
-			}
-			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
-			return
-		}
+		s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
+		return
 	}
 
 	// Log message acceptance. Non-interrupt messages are buffered with a
 	// debounce delay before actual tmux delivery, so we log "accepted"
 	// rather than "delivered". Interrupt messages bypass the buffer and
-	// are delivered immediately. Raw messages are always delivered immediately.
+	// are delivered immediately.
 	logMsg := "message accepted (buffered)"
-	if isRaw {
-		logMsg = "message delivered (raw, unbuffered)"
-	} else if req.Interrupt {
+	if req.Interrupt {
 		logMsg = "message delivered (interrupt, unbuffered)"
 	}
 	logAttrs := []any{"agent_id", id}
@@ -2887,7 +2899,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 // injection route (POST /api/v1/agents/{id}/keys), frozen by
 // .design/agent-keys-contract.md §4. Per decision 1 (Option B), it shares no
 // code with sendMessage above: it never constructs or logs a
-// StructuredMessage, never calls mgr.Message/mgr.MessageRaw, and its
+// StructuredMessage, never calls mgr.Message, and its
 // delivery never goes through the message debounce buffer — only the
 // dedicated mgr.SendKeys primitive.
 //
