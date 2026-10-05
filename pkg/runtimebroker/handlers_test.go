@@ -5797,3 +5797,84 @@ profiles:
 		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
 	}
 }
+
+// newErrorRuntimeTestServer returns a test server whose default runtime is
+// the degraded *runtime.ErrorRuntime the broker falls back to when runtime
+// resolution fails at startup (ptone/scion#2766).
+func newErrorRuntimeTestServer(t *testing.T) *Server {
+	t.Helper()
+	srv := newTestServer(t)
+	srv.runtime = &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	return srv
+}
+
+func TestHealthInfoHealthyRuntime(t *testing.T) {
+	srv := newTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "healthy" {
+		t.Errorf("status = %q, want healthy", health.Status)
+	}
+	if got := health.Checks["mock"]; got != "available" {
+		t.Errorf("checks[mock] = %q, want available", got)
+	}
+	if _, ok := health.Checks["runtime"]; ok {
+		t.Errorf("checks[runtime] present for a healthy runtime: %v", health.Checks)
+	}
+}
+
+func TestHealthInfoErrorRuntimeDegraded(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "degraded" {
+		t.Errorf("status = %q, want degraded", health.Status)
+	}
+	if got := health.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("checks[runtime] = %q, want unavailable", got)
+	}
+	if _, ok := health.Checks["error"]; ok {
+		t.Errorf("checks[error] must not be reported: %v", health.Checks)
+	}
+}
+
+func TestHealthzErrorRuntimeStatusCode(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	// /healthz is a liveness signal: it stays 200 and reports degraded in
+	// the body, so a restart loop does not hide a persistent runtime fault.
+	if w.Code != http.StatusOK {
+		t.Errorf("healthz code = %d, want %d", w.Code, http.StatusOK)
+	}
+	var resp HealthResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "degraded" {
+		t.Errorf("healthz status = %q, want degraded", resp.Status)
+	}
+	if got := resp.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("healthz checks[runtime] = %q, want unavailable", got)
+	}
+}
+
+func TestReadyzErrorRuntimeNotReady(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz code = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "not_ready" {
+		t.Errorf("readyz status = %q, want not_ready", body["status"])
+	}
+}
