@@ -872,3 +872,63 @@ func TestCommandHandler_Status_ConcurrentSetProjects(t *testing.T) {
 	<-done
 	assert.Len(t, tgSrv.getSentMessages(), 5)
 }
+
+func TestCommandHandler_GroupsVisibleTo_CapsMembershipChecks(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	const groups = memberCheckLimit + 10
+	for i := 1; i <= groups; i++ {
+		chatID := int64(-2000 - i)
+		require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+			ChatID: chatID, ProjectID: fmt.Sprintf("p%d", i), LinkedBy: "999", LinkedAt: time.Now().UTC(), Active: true,
+		}))
+		tgSrv.setChatMember(chatID, 456, "member")
+	}
+	// A group the user linked needs no check and is not limited.
+	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -2999, ProjectID: "mine", LinkedBy: "456", LinkedAt: time.Now().UTC(), Active: true,
+	}))
+	links, err := store.GetAllGroupLinks(ctx)
+	require.NoError(t, err)
+
+	visible, unchecked := h.groupsVisibleTo(ctx, 456, links)
+
+	assert.True(t, unchecked, "groups beyond the limit are reported as not checked")
+	assert.Len(t, visible, memberCheckLimit+1)
+	calls, _ := tgSrv.chatMemberStats()
+	assert.Equal(t, memberCheckLimit, calls)
+}
+
+func TestCommandHandler_Status_SkipsInactiveLinks(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -701, ChatTitle: "Active Group", ProjectID: "p1", ProjectSlug: "alpha", LinkedBy: "999", LinkedAt: time.Now().UTC(), Active: true,
+	}))
+	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -702, ChatTitle: "Inactive Group", ProjectID: "p2", ProjectSlug: "beta", LinkedBy: "456", LinkedAt: time.Now().UTC(), Active: false,
+	}))
+	tgSrv.setChatMember(-701, 456, "member")
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Active Group")
+	assert.NotContains(t, sent[0].Text, "Inactive Group")
+	calls, _ := tgSrv.chatMemberStats()
+	assert.Equal(t, 1, calls, "no membership check for an inactive link")
+}
+
+func TestCommandHandler_Status_RegistrationLookupFailureIsNotUnregistered(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 456, "alice@example.com")
+	h.store = mappingLookupFailingStore{store}
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.NotContains(t, sent[0].Text, "Not registered")
+	assert.Contains(t, sent[0].Text, "Registration: Unknown")
+}

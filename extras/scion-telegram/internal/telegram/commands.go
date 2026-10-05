@@ -99,6 +99,12 @@ const (
 	memberFailureCacheTTL = 30 * time.Second
 	// memberCheckWorkers bounds concurrent membership checks for /status.
 	memberCheckWorkers = 6
+	// memberCheckLimit caps membership checks per /status; further groups
+	// are reported as not checked.
+	memberCheckLimit = 50
+	// statusMemberCheckBudget is the share of the /status time budget given
+	// to membership checks.
+	statusMemberCheckBudget = 6 * time.Second
 	// statusUncheckedNote is appended when some groups could not be checked.
 	statusUncheckedNote = "(some groups could not be checked)"
 )
@@ -506,13 +512,16 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	if msg.From == nil {
 		h.reply(chatID, "Could not identify your user.")
 		return
 	}
+
+	// Registration status first, on its own short budget.
+	regStatus := h.registrationStatus(msg.From.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	allLinks, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
@@ -520,9 +529,19 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
 	}
+	var activeLinks []*GroupLink
+	for _, link := range allLinks {
+		if link.Active {
+			activeLinks = append(activeLinks, link)
+		}
+	}
 
 	// List only groups the sender linked or is currently a member of.
-	links, unchecked := h.groupsVisibleTo(ctx, msg.From.ID, allLinks)
+	// Membership checks get their own share of the budget so title
+	// lookups below still have time.
+	memberCtx, memberCancel := context.WithTimeout(ctx, statusMemberCheckBudget)
+	links, unchecked := h.groupsVisibleTo(memberCtx, msg.From.ID, activeLinks)
+	memberCancel()
 
 	h.projectsMu.Lock()
 	cachedProjects := h.cachedProjects
@@ -559,19 +578,6 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		lines = append(lines, line)
 	}
 
-	// Build status with registration info first.
-	regStatus := "Not registered"
-	if msg.From != nil {
-		senderID := strconv.FormatInt(msg.From.ID, 10)
-		if m, _ := h.store.GetUserMapping(ctx, senderID); m != nil {
-			if m.ScionEmail != "" {
-				regStatus = "Registered as " + m.ScionEmail
-			} else if m.ScionUserID != "" {
-				regStatus = "Registered (user ID: " + m.ScionUserID + ")"
-			}
-		}
-	}
-
 	groups := "No groups you linked or belong to are linked to a project."
 	if len(lines) > 0 {
 		groups = "Linked groups:\n" + strings.Join(lines, "\n")
@@ -584,11 +590,33 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	h.reply(chatID, "Registration: "+regStatus+"\n\n"+groups)
 }
 
+// registrationStatus describes the Telegram user's link to Scion for
+// /status. A store error is reported as unknown, not as unregistered.
+func (h *CommandHandler) registrationStatus(userID int64) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	m, err := h.store.GetUserMapping(ctx, strconv.FormatInt(userID, 10))
+	switch {
+	case err != nil:
+		h.log.Warn("Failed to look up user mapping for /status", "error", err)
+		return "Unknown (could not be checked)"
+	case m == nil:
+		return "Not registered"
+	case m.ScionEmail != "":
+		return "Registered as " + m.ScionEmail
+	case m.ScionUserID != "":
+		return "Registered (user ID: " + m.ScionUserID + ")"
+	default:
+		return "Not registered"
+	}
+}
+
 // groupsVisibleTo returns, in their original order, the group links that
 // the Telegram user linked or is currently a member of. Membership is
-// checked with bounded concurrency and cached briefly per user and chat.
-// unchecked reports that some groups could not be checked (check failed or
-// ctx ended); those groups are left out.
+// checked with bounded concurrency, for at most memberCheckLimit groups per
+// call, and cached briefly per user and chat. unchecked reports that some
+// groups could not be checked (check failed, limit reached, or ctx ended);
+// those groups are left out.
 func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, links []*GroupLink) (visible []*GroupLink, unchecked bool) {
 	senderID := strconv.FormatInt(userID, 10)
 	const (
@@ -615,11 +643,17 @@ func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, link
 			}
 		}()
 	}
+	queued := 0
 	for i, link := range links {
 		if link.LinkedBy == senderID {
 			results[i] = member
 			continue
 		}
+		if queued >= memberCheckLimit {
+			results[i] = failed
+			continue
+		}
+		queued++
 		jobs <- i
 	}
 	close(jobs)
