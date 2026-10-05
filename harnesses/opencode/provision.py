@@ -238,7 +238,7 @@ def _write_mcp_config(servers: dict[str, Any]) -> None:
     """Merge translated MCP servers into the config's top-level "mcp" map."""
     config_data = _load_config()
     if config_data is None:
-        return
+        raise OSError(f"{sh.expand_path(OPENCODE_CONFIG_FILE)} is left unchanged")
     mcp_block = config_data.get("mcp")
     if not isinstance(mcp_block, dict):
         mcp_block = {}
@@ -255,8 +255,8 @@ def _write_vertex_provider_config() -> None:
     VERTEX_LOCATION (set by _vertex_env_overlay), so only default models are
     needed here. Neither default replaces a model already in the file; an
     explicit SCION_MODEL still wins (_write_model_config). github-copilot is
-    disabled so a stray GITHUB_TOKEN cannot make opencode pick Copilot over Vertex, in
-    case the launch wrapper does not strip it.
+    disabled so a stray GITHUB_TOKEN cannot make opencode pick Copilot over
+    Vertex, in case the launch wrapper does not strip it.
     """
     config_data = _load_config()
     if config_data is None:
@@ -272,36 +272,44 @@ def _write_vertex_provider_config() -> None:
     _save_config(config_data)
 
 
-def _write_model_config(ctx: sh.ProvisionContext, model: str, method: str) -> None:
-    """Write the resolved model into the config.
+def _write_model_config(ctx: sh.ProvisionContext, model: str, method: str) -> bool:
+    """Write the resolved model into the config; return True if written.
 
-    A "model" already in the file is never removed. Without vertex-ai, the
-    Vertex defaults that an earlier provision wrote are removed.
+    A "model" already in the file is kept. Without vertex-ai, values equal
+    to the Vertex defaults (an earlier provision's) are removed.
     """
     config_data = _load_config()
     if config_data is None:
-        return
+        return False
+    provider, _, model_id = model.partition("/")
+    written = bool(provider and model_id)
+    if written:
+        config_data["model"] = model
+    elif model:
+        ctx.warn(f"model {model!r} is not in provider/model form; model not changed")
     if method != "vertex-ai":
+        if not written and config_data.get("model") == VERTEX_DEFAULT_MODEL:
+            del config_data["model"]
         if config_data.get("small_model") == VERTEX_DEFAULT_SMALL_MODEL:
             del config_data["small_model"]
         if config_data.get("disabled_providers") == ["github-copilot"]:
             del config_data["disabled_providers"]
-    provider, _, model_id = model.partition("/")
-    if provider and model_id:
-        config_data["model"] = model
-    elif model:
-        ctx.warn(f"model {model!r} is not in opencode's provider/model form; keeping the configured model")
     _save_config(config_data)
+    return written
 
 
-def _remove_legacy_seed() -> None:
+def _remove_legacy_seed(ctx: sh.ProvisionContext) -> None:
     """Remove the unread legacy .opencode.json if it holds only the old seed."""
     path = sh.expand_path(LEGACY_CONFIG_FILE)
+    if not os.path.isfile(path):
+        return
     try:
         if sh.load_json(path) == {"$schema": OPENCODE_CONFIG_SCHEMA, "theme": "matrix"}:
             os.remove(path)
+            return
     except (OSError, ValueError):
         pass
+    ctx.info(f"{path} is not read by opencode 1.x; settings belong in opencode.json")
 
 
 # ---------------------------------------------------------------------------
@@ -361,12 +369,12 @@ def provision(ctx: sh.ProvisionContext) -> None:
     sh.apply_mcp_translated(ctx, _translate_mcp_server, _write_mcp_config)
 
     resolved_model = sh.resolve_model(ctx)
-    _write_model_config(ctx, resolved_model, resolved.method)
-    _remove_legacy_seed()
+    model_written = _write_model_config(ctx, resolved_model, resolved.method)
+    _remove_legacy_seed(ctx)
 
     _prefetch_models_catalog(ctx)
 
-    ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if resolved_model else ""))
+    ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if model_written else ""))
 
 
 # ---------------------------------------------------------------------------

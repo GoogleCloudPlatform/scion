@@ -282,7 +282,7 @@ class ConfigSchemaTest(unittest.TestCase):
             with open(path, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), content)
         self.assertIn("opencode.json", stderr.getvalue())
-        self.assertIn("left unchanged", stderr.getvalue())
+        self.assertIn("not a plain JSON object and is left unchanged", stderr.getvalue())
 
     def test_vertex_default_keeps_user_model(self) -> None:
         # R3: the Vertex default must not overwrite a model the user set.
@@ -318,6 +318,18 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertNotIn("small_model", config)
         self.assertNotIn("disabled_providers", config)
 
+    def test_vertex_default_model_removed_after_switch_without_model(self) -> None:
+        # RV2-R1: with no SCION_MODEL after a switch away from vertex-ai,
+        # the Vertex default model is removed (opencode cannot load it).
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp)
+            with unittest.mock.patch.dict(os.environ, {}):
+                os.environ.pop("SCION_MODEL", None)
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertNotIn("model", config)
+        self.assertNotIn("small_model", config)
+
     def test_user_values_kept_after_switch_to_api_key(self) -> None:
         # O2: values that differ from the Vertex defaults are user values.
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,6 +354,120 @@ class ConfigSchemaTest(unittest.TestCase):
             path = _seed_config(tmp, json.dumps({"theme": "matrix", "mcpServers": {}}), legacy_rel)
             _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
             self.assertTrue(os.path.exists(path))
+
+    def test_legacy_user_dotfile_kept_with_notice(self) -> None:
+        # RV2-O1: a kept legacy file gets one notice; the seed gets none.
+        legacy_rel = os.path.join(".config", "opencode", ".opencode.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(tmp, json.dumps({"theme": "x"}), legacy_rel)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+        self.assertEqual(stderr.getvalue().count("not read by opencode 1.x"), 1)
+        self.assertIn("settings belong in opencode.json", stderr.getvalue())
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+        self.assertNotIn("not read by opencode", stderr.getvalue())
+
+    def test_unparsable_config_logs_no_success(self) -> None:
+        # RV2-N2: no "applied N mcp server(s)" and no "model=" when the
+        # file is left unchanged.
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            _seed_config(tmp, "{ // jsonc\n}\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(
+                    tmp,
+                    env_vars=["ANTHROPIC_API_KEY"],
+                    mcp_servers={"remote-tool": {"transport": "sse", "url": "https://example.com/mcp"}},
+                )
+        log = stderr.getvalue()
+        self.assertNotIn("applied 1 mcp server", log)
+        self.assertIn("failed to write MCP config", log)
+        self.assertNotIn("model=", log)
+        self.assertIn("method=api-key", log)
+
+    def test_written_model_is_logged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+        self.assertIn("method=api-key model=anthropic/claude-sonnet-4-5", stderr.getvalue())
+
+    def test_bare_model_warning_text(self) -> None:
+        # RV2-N3: the warning does not claim a configured model exists.
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "claude-sonnet"}
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertNotIn("model", _read_config(tmp))
+        self.assertIn("is not in provider/model form; model not changed", stderr.getvalue())
+        self.assertNotIn("model=", stderr.getvalue())
+
+    def test_vertex_appends_to_user_disabled_providers(self) -> None:
+        # RV2-N4 (Mh): a user list is extended, not replaced.
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(tmp, json.dumps({"disabled_providers": ["x"]}))
+            self._invoke_vertex(tmp)
+            config = _read_config(tmp)
+        self.assertEqual(config["disabled_providers"], ["x", "github-copilot"])
+
+    def test_scion_mcp_server_replaces_same_name_user_entry(self) -> None:
+        # RV2-N4 (Mc): a scion server wins over a user entry of that name.
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed_config(tmp, json.dumps({"mcp": {"tool": {"type": "local", "command": ["old"]}}}))
+            _invoke(
+                tmp,
+                env_vars=["ANTHROPIC_API_KEY"],
+                mcp_servers={"tool": {"transport": "sse", "url": "https://example.com/mcp"}},
+            )
+            config = _read_config(tmp)
+        self.assertEqual(config["mcp"], {"tool": {"type": "remote", "url": "https://example.com/mcp"}})
+
+    def test_vertex_defaults_removed_after_switch_to_auth_file(self) -> None:
+        # RV2-N4 (Mg): the O2 cleanup also runs for auth-file.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp)
+            auth = os.path.join(tmp, ".local", "share", "opencode", "auth.json")
+            os.makedirs(os.path.dirname(auth))
+            with open(auth, "w", encoding="utf-8") as f:
+                f.write("{}")
+            with unittest.mock.patch.dict(os.environ, {}):
+                os.environ.pop("SCION_MODEL", None)
+                _invoke(tmp, env_vars=[], explicit_type="auth-file")
+            config = _read_config(tmp)
+        for key in ("model", "small_model", "disabled_providers"):
+            self.assertNotIn(key, config)
+
+    def test_model_with_empty_model_part_is_not_written(self) -> None:
+        # RV2-N4 (Md): "anthropic/" has no model part.
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/"}
+        ):
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertNotIn("model", _read_config(tmp))
+
+    def test_non_utf8_config_is_left_untouched(self) -> None:
+        # RV2-N4 (Mi): a file that is not UTF-8 is not replaced.
+        content = b'{"theme": "\xff"}'
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            path = _seed_config(tmp, "")
+            with open(path, "wb") as f:
+                f.write(content)
+            with contextlib.redirect_stderr(io.StringIO()):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), content)
 
     def test_seeded_home_config_uses_loaded_filename(self) -> None:
         home_dir = os.path.join(os.path.dirname(__file__), "home", ".config", "opencode")
