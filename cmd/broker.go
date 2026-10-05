@@ -115,7 +115,15 @@ agent operations to this broker.
 Prerequisites:
 - The broker server must be running (scion runtime-broker start)
 - The Hub endpoint must be configured
-- You must be authenticated with the Hub
+- You must be authenticated with the Hub: a sign-in (scion hub auth login),
+  or a hub-boundary user access token carrying broker:create (and
+  broker:read) in SCION_HUB_TOKEN. Either way, your user must hold
+  broker.create, which hub members do.
+
+The broker is owned by the signed-in user, or by the token's user.
+Re-registering an existing broker requires its owner or a super-admin.
+Registration never associates the broker with a project: the owner runs
+'scion runtime-broker provide' for each project the broker should serve.
 
 This command will:
 1. Verify the local broker server is running
@@ -126,6 +134,10 @@ This command will:
 Examples:
   # Register this host as a broker
   scion runtime-broker register
+
+  # Register a headless host with a hub-boundary token
+  SCION_HUB_ENDPOINT=https://hub.example.com SCION_HUB_TOKEN=scion_pat_... \
+    scion runtime-broker register -y
 
   # Force re-registration even if already registered
   scion runtime-broker register --force

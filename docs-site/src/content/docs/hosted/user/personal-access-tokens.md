@@ -59,6 +59,25 @@ project, and stores that ceiling with the token. Every later request made with t
 limited to that ceiling. A token whose stored ceiling is missing or has an unrecognized version is
 denied. Existing tokens are converted to versioned ceilings automatically on upgrade.
 
+### Hub-boundary tokens for broker registration
+
+Most tokens are bound to one project. A token can instead be bound to the **hub boundary**
+(`"boundary": {"kind": "hub"}` in `POST /api/v1/auth/tokens`), which is used for hub-level
+resources such as Runtime Brokers. The `broker:create` scope is available only with a hub
+boundary:
+
+| Scope | Boundary | Grants |
+|-------|----------|--------|
+| `broker:create` | Hub only | Register a Runtime Broker, or re-register one you own (a super-admin may re-register any broker). Requires that you currently hold `broker.create`, which hub members do. |
+| `broker:read` | Hub only | Read Runtime Broker records. `scion runtime-broker register` uses it to check an existing registration. |
+
+`broker:create` covers registration only. It never associates a broker with a project, never
+turns on auto-provide, and never rotates a broker's secret. Associating a broker with a project
+needs a sign-in by the broker's owner; see
+[Sharing a broker with a project](/scion/hosted/ha/runtime-broker/#sharing-a-broker-with-a-project).
+For the full steps, see
+[Headless registration with a hub token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-hub-token).
+
 ### Scopes are restrictions, not grants
 
 Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
@@ -153,9 +172,10 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
   scheduled `dispatch_agent` events or schedules. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
-- **Broker registration**: a UAT does not satisfy the owner or super-admin shortcuts when
-  registering a Runtime Broker. See
-  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
+- **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
+  secret or carry the broker owner's consent to associate a broker with a project. A
+  hub-boundary token with `broker:create` can register a broker. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
 
 ## Trust level separation
 

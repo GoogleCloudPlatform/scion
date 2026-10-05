@@ -399,11 +399,11 @@ The control channel uses a custom WebSocket protocol (`pkg/wsprotocol`) with the
 
 ### Broker Registration Flow
 
-1. Admin creates a broker record in the Hub: `POST /api/v1/runtime-brokers`.
-2. Hub generates a short-lived **join token**: `POST /api/v1/brokers/join`.
-3. Broker uses the join token to obtain HMAC credentials: `POST /api/v1/brokers/join` (with token).
-4. Broker stores credentials locally (`~/.scion/broker-credentials.json`).
-5. Broker authenticates subsequent requests using HMAC-SHA256 signatures.
+1. A user (session, or hub-boundary token with `broker:create`) registers the broker: `POST /api/v1/brokers` creates the broker record, owned by that user, and returns a short-lived, single-use **join token**.
+2. Broker exchanges the join token for HMAC credentials: `POST /api/v1/brokers/join`.
+3. Broker stores credentials locally (`~/.scion/broker-credentials.json`).
+4. Broker authenticates subsequent requests using HMAC-SHA256 signatures.
+5. The broker's owner associates it with projects (`POST /api/v1/projects/{id}/providers`); registration alone never does.
 
 ---
 

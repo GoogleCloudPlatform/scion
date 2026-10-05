@@ -593,7 +593,7 @@ env:
 
 #### Credentials-file fields
 
-The broker credentials file (written by `scion hub brokers register`) can also store transport settings per hub connection:
+The broker credentials file (written by `scion runtime-broker register`) can also store transport settings per hub connection:
 
 ```json
 {
@@ -613,7 +613,7 @@ Per-connection placement in the credentials file exists for the **multi-hub scen
 
 ### Broker registration without PAT (proxy-auth mode)
 
-With transport auth configured, `scion hub brokers register` works through IAP natively — no Personal Access Token (PAT) or hub token is needed. The broker authenticates via the IAP assertion of its service account identity.
+With transport auth configured, `scion runtime-broker register` works through IAP natively — no Personal Access Token (PAT) or hub token is needed. The broker authenticates via the IAP assertion of its service account identity.
 
 When the Hub is in `proxy` auth mode and the broker has a valid transport token source (Workload Identity), the registration command:
 
@@ -690,4 +690,4 @@ After the Job completes, the credentials file is written to the shared volume. T
 | 2 | Create a broker GSA; grant `roles/iap.httpsResourceAccessor` on the Hub backend service |
 | 3 | Bind KSA ↔ GSA via Workload Identity annotation on the broker's Kubernetes service account |
 | 4 | Broker Deployment env: `SCION_TRANSPORT_MODE=iap`, `SCION_TRANSPORT_AUDIENCE=<custom client id>` |
-| 5 | One-time registration Job (same KSA) runs `scion hub brokers register` — no curl scripts |
+| 5 | One-time registration Job (same KSA) runs `scion runtime-broker register` — no curl scripts |
