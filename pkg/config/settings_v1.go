@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -4030,7 +4032,7 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 // unknown keys and formatting elsewhere in the file survive. The file is not rewritten
 // when the value is already set, and is otherwise replaced atomically. A JSON file (or
 // a YAML edit that would have to write through an alias) goes through the struct
-// round-trip in updateVersionedSettingStruct.
+// round-trip in updateVersionedSettingStruct, which saves back to the same YAML file.
 func UpdateVersionedSetting(dir string, key string, value string) error {
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
@@ -4189,14 +4191,22 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 		return nil
 	}
 
+	// Both candidate outputs must decode to exactly the edited tree's data.
+	var want interface{}
+	if err := doc.Decode(&want); err != nil {
+		return fmt.Errorf("failed to decode edited settings: %w", err)
+	}
 	out, err := encodeYAMLDocument(doc, indent)
 	if err != nil {
 		return fmt.Errorf("failed to marshal versioned settings: %w", err)
 	}
 	if !fullEncode {
-		if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlSemanticallyEqual(spliced, out) {
+		if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlDecodesTo(spliced, want) {
 			out = spliced
 		}
+	}
+	if !yamlDecodesTo(out, want) {
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
 	}
 	if bytes.Equal(out, orig) {
 		return nil
@@ -4216,21 +4226,67 @@ func spliceVersionedSettingEdit(orig []byte, edit versionedSettingEdit, indent i
 	return spliceSetYAMLPath(orig, doc.Content[0], edit.path, edit.value, indent)
 }
 
-// writeSettingsFileAtomic atomically replaces the settings file at path. A
-// symlinked settings file is resolved first so the link itself survives and
-// the write lands in its target, as a plain os.WriteFile would.
+// writeSettingsFileAtomic atomically replaces the settings file at path.
+// A symlinked settings file is followed (see resolveSettingsWriteTarget) so
+// the link itself survives. If the directory refuses new files (no write
+// permission, read-only mount) the file is written in place instead, as a
+// plain os.WriteFile always did, so a writable file in a read-only
+// directory can still be updated.
 func writeSettingsFileAtomic(path string, data []byte) error {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	target, err := resolveSettingsWriteTarget(path)
+	if err != nil {
+		return err
 	}
-	return writeFileAtomic(path, data)
+	err = writeFileAtomic(target, data)
+	if errors.Is(err, errAtomicTempCreate) && (errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS)) {
+		if werr := os.WriteFile(target, data, 0644); werr != nil {
+			return fmt.Errorf("%w; in-place write also failed: %w", err, werr)
+		}
+		return nil
+	}
+	return err
+}
+
+// resolveSettingsWriteTarget follows path through any symlinks to the file
+// a write should replace. A dangling link resolves to its (relative-to-the-
+// link) target, so the write creates that file and keeps the link, as
+// os.WriteFile would; it is an error if the target's directory is missing.
+func resolveSettingsWriteTarget(path string) (string, error) {
+	p := path
+	for hops := 0; hops < 40; hops++ {
+		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			if p != path {
+				if st, derr := os.Stat(filepath.Dir(p)); derr != nil || !st.IsDir() {
+					return "", fmt.Errorf("settings file %s is a dangling symlink to %s, and its directory does not exist", path, p)
+				}
+			}
+			return p, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect settings file %s: %w", p, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		link, err := os.Readlink(p)
+		if err != nil {
+			return "", fmt.Errorf("failed to read symlink %s: %w", p, err)
+		}
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(p), link)
+		}
+		p = link
+	}
+	return "", fmt.Errorf("settings file %s: too many levels of symbolic links", path)
 }
 
 // updateVersionedSettingStruct is the struct round-trip form of
 // UpdateVersionedSetting: it loads the single file at dir into a
-// VersionedSettings, sets the field and saves via SaveVersionedSettings.
+// VersionedSettings, sets the field and saves via saveVersionedSettingsInPlace.
 // That drops comments and unknown keys, so it is only used for JSON files
-// and YAML that cannot be edited in place.
+// and YAML that cannot be edited in place (aliases, anchors). A YAML file is
+// saved back to the same path (settings.yml stays settings.yml).
 func updateVersionedSettingStruct(dir string, key string, value string) error {
 	vs, err := LoadSingleFileVersioned(dir)
 	if err != nil {
@@ -4242,7 +4298,7 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.ProjectID = value
-		return SaveVersionedSettings(dir, vs)
+		return saveVersionedSettingsInPlace(dir, vs)
 	}
 
 	switch key {
@@ -4359,7 +4415,7 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
-	return SaveVersionedSettings(dir, vs)
+	return saveVersionedSettingsInPlace(dir, vs)
 }
 
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
@@ -4688,6 +4744,22 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 // SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.
 // The file is replaced atomically, and left untouched when its bytes would not change.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
+	return writeVersionedSettingsFile(dir, filepath.Join(dir, "settings.yaml"), vs)
+}
+
+// saveVersionedSettingsInPlace saves vs back to the YAML settings file in
+// dir it was loaded from (settings.yaml or settings.yml; the mode is kept).
+// A JSON or missing file is saved as dir/settings.yaml, like
+// SaveVersionedSettings.
+func saveVersionedSettingsInPlace(dir string, vs *VersionedSettings) error {
+	if p := GetSettingsPath(dir); p != "" && filepath.Ext(p) != ".json" {
+		return writeVersionedSettingsFile(dir, p, vs)
+	}
+	return SaveVersionedSettings(dir, vs)
+}
+
+// writeVersionedSettingsFile marshals vs to targetPath in dir.
+func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
@@ -4697,7 +4769,6 @@ func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
 		return fmt.Errorf("failed to marshal versioned settings: %w", err)
 	}
 
-	targetPath := filepath.Join(dir, "settings.yaml")
 	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
 		return nil
 	}

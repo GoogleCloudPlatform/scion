@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -446,25 +447,46 @@ func pruneEmptyMaps(v interface{}) interface{} {
 	return out
 }
 
-// TestUpdateVersionedSetting_MatchesStructPath compares, for every key and a
-// spread of values, the settings loaded after the in-place edit with those
-// loaded after the pre-#1800 struct round-trip (updateVersionedSettingStruct).
-func TestUpdateVersionedSetting_MatchesStructPath(t *testing.T) {
-	bases := map[string]string{
-		"missing":   "",
-		"empty":     "\n",
-		"fixture":   writebackFixture,
-		"populated": "schema_version: \"1\"\nactive_profile: a\ndefault_template: t\ndefault_harness_config: h\nworkspace_path: /w\nimage_registry: r\ncli:\n  autohelp: true\nhub:\n  enabled: true\n  linked: false\n  endpoint: https://e\n  local_only: true\n  project_id: p\nserver:\n  broker:\n    broker_id: b\n    broker_token: bt\n    broker_nickname: bn\n  auth:\n    display_name: d\n    email: e@x\n    username: u\n",
-	}
+// structParityBase is a starting settings file for the struct-path parity
+// test. file is the settings file name ("" means no file at all).
+type structParityBase struct {
+	name    string
+	file    string
+	content string
+}
+
+// structParityBases are the starting files TestUpdateVersionedSetting_MatchesStructPath
+// runs every key against. A legacy hub project-key base lives with the
+// legacy migration tests.
+var structParityBases = []structParityBase{
+	{name: "missing"},
+	{name: "empty", file: "settings.yaml", content: "\n"},
+	{name: "fixture", file: "settings.yaml", content: writebackFixture},
+	{name: "populated", file: "settings.yaml", content: "schema_version: \"1\"\nactive_profile: a\ndefault_template: t\ndefault_harness_config: h\nworkspace_path: /w\nimage_registry: r\ncli:\n  autohelp: true\nhub:\n  enabled: true\n  linked: false\n  endpoint: https://e\n  local_only: true\n  project_id: p\nserver:\n  broker:\n    broker_id: b\n    broker_token: bt\n    broker_nickname: bn\n  auth:\n    display_name: d\n    email: e@x\n    username: u\n"},
+	{name: "anchored-scalars", file: "settings.yaml", content: "schema_version: \"1\"\nimage_registry: &r ghcr.io/a\ndefault_template: *r\nhub:\n  endpoint: &ep https://e\n  enabled: &on true\n  local_only: *on\nserver:\n  auth:\n    display_name: *ep\n"},
+	{name: "anchored-mapping", file: "settings.yaml", content: "schema_version: \"1\"\nserver:\n  broker: &b\n    broker_id: b\n  auth: &a\n    username: u\nhub: &h\n  endpoint: https://e\nx-copies:\n  broker: *b\n  hub: *h\n"},
+	{name: "hub-null", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\nactive_profile: a\n"},
+	{name: "schema-version-missing", file: "settings.yaml", content: "# c\nactive_profile: a\nhub:\n  endpoint: https://e\n"},
+	{name: "schema-version-null", file: "settings.yaml", content: "schema_version:\nactive_profile: a\n"},
+	{name: "schema-version-int", file: "settings.yaml", content: "schema_version: 1\nactive_profile: a\n"},
+	{name: "flow-parent", file: "settings.yaml", content: "schema_version: \"1\"\nhub: {endpoint: https://e, enabled: true}\nserver: {broker: {broker_id: b}}\n"},
+	{name: "yml", file: "settings.yml", content: writebackFixture},
+}
+
+// runStructParity checks, for every key and a spread of values, that the
+// settings loaded after UpdateVersionedSetting equal those loaded after the
+// pre-#1800 struct round-trip (updateVersionedSettingStruct).
+func runStructParity(t *testing.T, bases []structParityBase) {
+	t.Helper()
 	values := []string{"new-value", "", "true", "false", "yes", "123"}
-	for baseName, base := range bases {
+	for _, base := range bases {
 		for _, key := range updateVersionedSettingKeys {
 			for _, value := range values {
-				t.Run(baseName+"/"+key+"="+value, func(t *testing.T) {
+				t.Run(base.name+"/"+key+"="+value, func(t *testing.T) {
 					newDir, oldDir := t.TempDir(), t.TempDir()
-					if baseName != "missing" {
+					if base.file != "" {
 						for _, d := range []string{newDir, oldDir} {
-							require.NoError(t, os.WriteFile(filepath.Join(d, "settings.yaml"), []byte(base), 0644))
+							require.NoError(t, os.WriteFile(filepath.Join(d, base.file), []byte(base.content), 0644))
 						}
 					}
 					errNew := UpdateVersionedSetting(newDir, key, value)
@@ -486,6 +508,10 @@ func TestUpdateVersionedSetting_MatchesStructPath(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestUpdateVersionedSetting_MatchesStructPath(t *testing.T) {
+	runStructParity(t, structParityBases)
 }
 
 func TestSaveVersionedSettings_AtomicAndSkipsUnchanged(t *testing.T) {
@@ -560,5 +586,279 @@ func TestDetectYAMLIndent(t *testing.T) {
 		doc, err := parseYAMLMappingDocument([]byte(src))
 		require.NoError(t, err)
 		assert.Equal(t, want, detectYAMLIndent(doc.Content[0]), src)
+	}
+}
+
+// TestUpdateVersionedSetting_AnchorsNotShared is the review repro: editing
+// an anchored value must not change the aliases that refer to it.
+func TestUpdateVersionedSetting_AnchorsNotShared(t *testing.T) {
+	t.Run("anchored scalar", func(t *testing.T) {
+		dir := writeSettingsFixture(t, "schema_version: \"1\"\nimage_registry: &r ghcr.io/a\ndefault_template: *r\n")
+		require.NoError(t, UpdateVersionedSetting(dir, "image_registry", "ghcr.io/b"))
+		vs, err := LoadSingleFileVersioned(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "ghcr.io/b", vs.ImageRegistry)
+		assert.Equal(t, "ghcr.io/a", vs.DefaultTemplate)
+	})
+	t.Run("anchored nested scalar", func(t *testing.T) {
+		dir := writeSettingsFixture(t, "schema_version: \"1\"\nhub:\n  endpoint: &ep https://a\nserver:\n  auth:\n    display_name: *ep\n")
+		require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", "https://b"))
+		vs, err := LoadSingleFileVersioned(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "https://b", vs.Hub.Endpoint)
+		assert.Equal(t, "https://a", vs.Server.Auth.DisplayName)
+	})
+	t.Run("delete inside anchored mapping", func(t *testing.T) {
+		dir := writeSettingsFixture(t, "schema_version: \"1\"\nserver:\n  auth: &a\n    username: u\n    email: e@x\nx-copy: *a\n")
+		require.NoError(t, UpdateVersionedSetting(dir, "server.auth.email", ""))
+		vs, err := LoadSingleFileVersioned(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "", vs.Server.Auth.Email)
+		assert.Equal(t, "u", vs.Server.Auth.Username)
+	})
+	t.Run("helpers refuse anchored nodes", func(t *testing.T) {
+		doc, err := parseYAMLMappingDocument([]byte("a: &x 1\nb:\n  c: 1\nd: &m\n  e: 1\n"))
+		require.NoError(t, err)
+		root := doc.Content[0]
+		_, err = setYAMLPath(root, []string{"a"}, newYAMLStringScalar("2"))
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = setYAMLPath(root, []string{"d", "f"}, newYAMLStringScalar("2"))
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = deleteYAMLPath(root, []string{"d", "e"})
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = deleteYAMLPath(root, []string{"a"})
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		changed, err := setYAMLPath(root, []string{"b", "c"}, newYAMLStringScalar("2"))
+		require.NoError(t, err)
+		assert.True(t, changed)
+	})
+}
+
+func TestUpdateVersionedSetting_StructFallbackKeepsYMLAndMode(t *testing.T) {
+	dir := t.TempDir()
+	yml := filepath.Join(dir, "settings.yml")
+	require.NoError(t, os.WriteFile(yml, []byte("schema_version: \"1\"\nx-hub: &h\n  endpoint: https://h\nhub: *h\n"), 0600))
+	require.NoError(t, UpdateVersionedSetting(dir, "hub.linked", "true"))
+	_, err := os.Stat(filepath.Join(dir, "settings.yaml"))
+	assert.True(t, os.IsNotExist(err), "struct fallback created settings.yaml next to settings.yml")
+	info, err := os.Stat(yml)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	vs, err := LoadSingleFileVersioned(dir)
+	require.NoError(t, err)
+	require.NotNil(t, vs.Hub)
+	require.NotNil(t, vs.Hub.Linked)
+	assert.True(t, *vs.Hub.Linked)
+	assert.Equal(t, "https://h", vs.Hub.Endpoint)
+}
+
+func TestUpdateVersionedSetting_CRLF(t *testing.T) {
+	const src = "schema_version: \"1\"\r\nhub:\r\n  endpoint: a\r\n"
+	dir := writeSettingsFixture(t, src)
+	require.NoError(t, UpdateVersionedSetting(dir, "hub.linked", "true"))
+	assert.Equal(t, src+"  linked: true\r\n", readSettingsFile(t, dir))
+	require.NoError(t, UpdateVersionedSetting(dir, "server.auth.email", "e@x"))
+	assert.Equal(t, src+"  linked: true\r\nserver:\r\n  auth:\r\n    email: e@x\r\n", readSettingsFile(t, dir))
+}
+
+func TestUpdateVersionedSetting_DeleteLastChildKeepsSplice(t *testing.T) {
+	const src = "schema_version: \"1\"\n\nhub: # hub section\n  endpoint: https://h\n\nserver:\n  list:\n  - a\n"
+	dir := writeSettingsFixture(t, src)
+	require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", ""))
+	assert.Equal(t, "schema_version: \"1\"\n\nhub: {} # hub section\n\nserver:\n  list:\n  - a\n", readSettingsFile(t, dir))
+	vs, err := LoadSingleFileVersioned(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "", vs.GetHubEndpoint())
+}
+
+func TestWriteSettingsFileAtomic_DirectoryRefusesNewFiles(t *testing.T) {
+	t.Run("simulated EACCES falls back to in-place write", func(t *testing.T) {
+		dir := writeSettingsFixture(t, writebackFixture)
+		path := filepath.Join(dir, "settings.yaml")
+		require.NoError(t, os.Chmod(path, 0600))
+		orig := createTempFile
+		t.Cleanup(func() { createTempFile = orig })
+		createTempFile = func(string, string) (*os.File, error) {
+			return nil, &os.PathError{Op: "open", Path: dir, Err: syscall.EACCES}
+		}
+		require.NoError(t, UpdateVersionedSetting(dir, "hub.brokerId", "new"))
+		assert.Contains(t, readSettingsFile(t, dir), "broker_id: new")
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	})
+
+	t.Run("simulated other error is returned", func(t *testing.T) {
+		dir := writeSettingsFixture(t, writebackFixture)
+		orig := createTempFile
+		t.Cleanup(func() { createTempFile = orig })
+		createTempFile = func(string, string) (*os.File, error) {
+			return nil, &os.PathError{Op: "open", Path: dir, Err: syscall.ENOSPC}
+		}
+		require.Error(t, UpdateVersionedSetting(dir, "hub.brokerId", "new"))
+		assert.Equal(t, writebackFixture, readSettingsFile(t, dir))
+	})
+
+	t.Run("real read-only directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		dir := writeSettingsFixture(t, writebackFixture)
+		require.NoError(t, os.Chmod(dir, 0555))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+		require.NoError(t, UpdateVersionedSetting(dir, "hub.brokerId", "new"))
+		assert.Contains(t, readSettingsFile(t, dir), "broker_id: new")
+		assertNoTempFiles(t, dir)
+	})
+}
+
+func TestWriteSettingsFileAtomic_DanglingSymlink(t *testing.T) {
+	t.Run("creates the link target and keeps the link", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0755))
+		link := filepath.Join(dir, "settings.yaml")
+		require.NoError(t, os.Symlink(filepath.Join("real", "settings.yaml"), link))
+		require.NoError(t, UpdateVersionedSetting(dir, "active_profile", "local"))
+		fi, err := os.Lstat(link)
+		require.NoError(t, err)
+		assert.True(t, fi.Mode()&os.ModeSymlink != 0, "dangling symlink was replaced by a regular file")
+		data, err := os.ReadFile(filepath.Join(dir, "real", "settings.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "active_profile: local")
+	})
+
+	t.Run("target directory missing is a clear error", func(t *testing.T) {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "settings.yaml")
+		require.NoError(t, os.Symlink(filepath.Join(dir, "nope", "settings.yaml"), link))
+		err := UpdateVersionedSetting(dir, "active_profile", "local")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dangling symlink")
+		fi, lerr := os.Lstat(link)
+		require.NoError(t, lerr)
+		assert.True(t, fi.Mode()&os.ModeSymlink != 0)
+	})
+}
+
+// spliceSet parses src and runs spliceSetYAMLPath with a 2-space indent.
+func spliceSet(t *testing.T, src string, path []string, value *yaml.Node) (string, bool) {
+	t.Helper()
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(src), &doc))
+	out, ok := spliceSetYAMLPath([]byte(src), doc.Content[0], path, value, 2)
+	return string(out), ok
+}
+
+func TestSpliceSetYAMLPath(t *testing.T) {
+	str := newYAMLStringScalar
+	tests := []struct {
+		name   string
+		src    string
+		path   []string
+		value  *yaml.Node
+		want   string
+		wantOK bool
+	}{
+		{"escaped double quotes", "a: \"x\\\"y\" # c\n", []string{"a"}, str("z"), "a: \"z\" # c\n", true},
+		{"escaped backslash before closing quote", "a: \"x\\\\\" # c\n", []string{"a"}, str("z"), "a: \"z\" # c\n", true},
+		{"doubled single quote", "a: 'it''s' # c\nb: 1\n", []string{"a"}, str("ok"), "a: 'ok' # c\nb: 1\n", true},
+		{"single quoted value needing escape", "a: 'x'\n", []string{"a"}, str("it's"), "a: 'it''s'\n", true},
+		{"plain to bool", "a: x\n", []string{"a"}, newYAMLBoolScalar(true), "a: true\n", true},
+		{"multi-line plain scalar falls back", "a: one\n  two\nb: 1\n", []string{"a"}, str("z"), "", false},
+		{"multi-line double quoted falls back", "a: \"one\n  two\"\nb: 1\n", []string{"a"}, str("z"), "", false},
+		{"multi-line single quoted falls back", "a: 'one\n  two'\nb: 1\n", []string{"a"}, str("z"), "", false},
+		{"block scalar falls back", "a: |\n  x\nb: 1\n", []string{"a"}, str("z"), "", false},
+		{"bom on line one", "\ufeffa: x\nb: 1\n", []string{"a"}, str("z"), "\ufeffa: z\nb: 1\n", true},
+		{"insert after deeper comment", "s:\n  a: 1\n    # deeper\nh: 2\n", []string{"s", "b"}, str("v"), "s:\n  a: 1\n    # deeper\n  b: v\nh: 2\n", true},
+		{"insert before same-indent comment", "s:\n  a: 1\n  # about h\nh: 2\n", []string{"s", "b"}, str("v"), "s:\n  a: 1\n  b: v\n  # about h\nh: 2\n", true},
+		{"insert before document marker", "a: 1\ns:\n  x: 1\n---\nother: 2\n", []string{"s", "y"}, str("v"), "a: 1\ns:\n  x: 1\n  y: v\n---\nother: 2\n", true},
+		{"insert top-level before document end", "a: 1\n...\n", []string{"b", "c"}, str("v"), "a: 1\nb:\n  c: v\n...\n", true},
+		{"flow parent falls back", "h: {a: 1}\n", []string{"h", "b"}, str("v"), "", false},
+		{"flow root falls back", "{a: 1}\n", []string{"b"}, str("v"), "", false},
+		{"multi-line value falls back", "a: 1\n", []string{"b"}, str("x\ny"), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := spliceSet(t, tt.src, tt.path, tt.value)
+			require.Equal(t, tt.wantOK, ok, "splice result: %q", got)
+			if ok {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestSpliceReplaceYAMLScalar_Rejects(t *testing.T) {
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte("a: !!str x\nb: [1]\n"), &doc))
+	root := doc.Content[0]
+	lines := splitYAMLLines([]byte("a: !!str x\nb: [1]\n"))
+	_, ok := spliceReplaceYAMLScalar(lines, root.Content[1], newYAMLStringScalar("y"))
+	assert.False(t, ok, "explicitly tagged scalar")
+	_, ok = spliceReplaceYAMLScalar(lines, root.Content[3], newYAMLStringScalar("y"))
+	assert.False(t, ok, "sequence value")
+	_, ok = spliceReplaceYAMLScalar(lines, &yaml.Node{Kind: yaml.ScalarNode, Value: "x", Line: 9, Column: 1}, newYAMLStringScalar("y"))
+	assert.False(t, ok, "line out of range")
+}
+
+func TestSpliceDeleteYAMLPath(t *testing.T) {
+	tests := []struct {
+		name   string
+		src    string
+		path   []string
+		want   string
+		wantOK bool
+	}{
+		{"delete one of several", "h:\n  a: 1 # c\n  b: 2\n", []string{"h", "a"}, "h:\n  b: 2\n", true},
+		{"delete last child rewrites parent", "h: # keep\n  a: 1\nz: 2\n", []string{"h", "a"}, "h: {} # keep\nz: 2\n", true},
+		{"delete last child crlf", "h:\r\n  a: 1\r\n", []string{"h", "a"}, "h: {}\r\n", true},
+		{"delete top-level", "a: 1\nb: 2\n", []string{"a"}, "b: 2\n", true},
+		{"quoted parent key falls back", "\"h\":\n  a: 1\n", []string{"h", "a"}, "", false},
+		{"value on next line falls back", "h:\n  a:\n    x\n", []string{"h", "a"}, "", false},
+		{"block scalar falls back", "a: |\n  x\nb: 1\n", []string{"a"}, "", false},
+		{"missing key", "a: 1\n", []string{"b"}, "", false},
+		{"flow parent falls back", "h: {a: 1}\n", []string{"h", "a"}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var doc yaml.Node
+			require.NoError(t, yaml.Unmarshal([]byte(tt.src), &doc))
+			got, ok := spliceDeleteYAMLPath([]byte(tt.src), doc.Content[0], tt.path)
+			require.Equal(t, tt.wantOK, ok, "splice result: %q", got)
+			if ok {
+				assert.Equal(t, tt.want, string(got))
+			}
+		})
+	}
+}
+
+func TestDeleteYAMLPath_EmptiedParentWithKeyComment(t *testing.T) {
+	doc, err := parseYAMLMappingDocument([]byte("a: 1\nhub: # c\n  endpoint: x\nz: 1\n"))
+	require.NoError(t, err)
+	changed, err := deleteYAMLPath(doc.Content[0], []string{"hub", "endpoint"})
+	require.NoError(t, err)
+	require.True(t, changed)
+	out, err := encodeYAMLDocument(doc, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "a: 1\nhub: {} # c\nz: 1\n", string(out))
+}
+
+func TestReplaceYAMLMapValue_NonScalar(t *testing.T) {
+	for _, src := range []string{
+		"x: &a 1\nk: *a # alias\n",
+		"k: # mapping\n  inner: 1\n",
+		"k: [1, 2] # seq\n",
+	} {
+		doc, err := parseYAMLMappingDocument([]byte(src))
+		require.NoError(t, err)
+		root := doc.Content[0]
+		_, old := findMapKey(root, "k")
+		lineComment := old.LineComment
+		changed := replaceYAMLMapValue(root, "k", old, newYAMLStringScalar("v"))
+		assert.True(t, changed, src)
+		_, got := findMapKey(root, "k")
+		assert.Equal(t, yaml.ScalarNode, got.Kind, src)
+		assert.Equal(t, "v", got.Value, src)
+		assert.Equal(t, lineComment, got.LineComment, src)
 	}
 }

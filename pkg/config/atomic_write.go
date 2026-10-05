@@ -15,23 +15,42 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
+
+// createTempFile is os.CreateTemp. It is a variable so tests can simulate a
+// directory that refuses new files.
+var createTempFile = os.CreateTemp
+
+// errAtomicTempCreate marks a writeFileAtomic failure to create its
+// temporary file: nothing has been written and the target is untouched.
+var errAtomicTempCreate = errors.New("cannot create temporary file")
 
 // writeFileAtomic writes data to targetPath through a temporary file in the
 // same directory followed by a rename, so readers never see a partial file.
 // It preserves the mode of an existing regular file and uses 0644 otherwise.
+// The rename does not keep the owner: the new file belongs to the writing
+// user (for example root, under sudo).
+//
+// It needs write permission on the directory. A temp-file creation failure
+// wraps errAtomicTempCreate so callers can choose an in-place fallback.
+//
+// It does not serialise concurrent read-modify-write cycles: with two
+// writers the last rename wins and the other update is lost (no torn file,
+// though). That predates the atomic write and is tracked separately.
 func writeFileAtomic(targetPath string, data []byte) error {
 	mode := os.FileMode(0644)
 	if info, err := os.Lstat(targetPath); err == nil && info.Mode().IsRegular() {
 		mode = info.Mode().Perm()
 	}
 	dir := filepath.Dir(targetPath)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
+	tmp, err := createTempFile(dir, "."+filepath.Base(targetPath)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create temp file for %s: %w", targetPath, err)
+		return fmt.Errorf("create temp file for %s: %w: %w", targetPath, errAtomicTempCreate, err)
 	}
 	tmpName := tmp.Name()
 	renamed := false
@@ -58,5 +77,20 @@ func writeFileAtomic(targetPath string, data []byte) error {
 		return fmt.Errorf("replace %s: %w", targetPath, err)
 	}
 	renamed = true
+	return syncDir(dir)
+}
+
+// syncDir fsyncs dir so a completed rename survives a crash. Directories
+// that cannot be opened or do not support fsync are skipped: the new
+// content is already in place.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) && !errors.Is(err, errors.ErrUnsupported) {
+		return fmt.Errorf("sync directory %s: %w", dir, err)
+	}
 	return nil
 }

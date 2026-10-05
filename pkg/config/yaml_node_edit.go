@@ -22,8 +22,8 @@ package config
 // a byte-level splice of the original file (spliceSetYAMLPath /
 // spliceDeleteYAMLPath). A splice keeps blank lines, sequence indentation and
 // quoting that a yaml.v3 re-encode would normalise away. It is used only when
-// it parses to exactly the same data as the re-encoded tree, so it cannot
-// produce a different result from the tree edit.
+// it parses to exactly the same data as the re-encoded tree, so the result is
+// data-equivalent to the tree edit; comment placement is best-effort.
 
 import (
 	"bytes"
@@ -31,15 +31,23 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
 
 // errYAMLEditThroughAlias is returned when an edit would have to write
-// through a YAML alias. Writing into the anchored node would silently change
-// every other place that references it, so callers fall back to a full
-// decode/encode that expands the alias instead.
-var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias")
+// through a YAML alias or into an anchored node. Writing into an anchored
+// node would silently change every alias that references it, so callers fall
+// back to a full decode/encode that expands the aliases instead.
+var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias or anchor")
+
+// isYAMLShared reports whether editing n in place could affect other parts
+// of the document: n is an alias, or carries an anchor that aliases can
+// refer to.
+func isYAMLShared(n *yaml.Node) bool {
+	return n != nil && (n.Kind == yaml.AliasNode || n.Anchor != "")
+}
 
 // resolveAlias follows n through any YAML anchors/aliases (`key: *v`) to
 // the node it actually refers to, so value comparisons and the in-memory
@@ -129,17 +137,21 @@ func yamlPathString(path []string) string {
 // mapping). New keys are appended after the existing keys of their mapping,
 // so key order is preserved. An existing scalar value is updated in place,
 // keeping its comments and, for string-to-string updates, its quoting style.
-// It returns false, and leaves root untouched, when the existing value
-// already equals value.
+//
+// It returns false when the existing value already equals value; root is
+// then unmodified, because a null intermediate can only be met when the key
+// below it is missing, and that edit always changes something. It returns
+// errYAMLEditThroughAlias, before modifying anything, when a node on the
+// path (the target value included) is an alias or carries an anchor.
 func setYAMLPath(root *yaml.Node, path []string, value *yaml.Node) (bool, error) {
 	if len(path) == 0 {
 		return false, errors.New("empty yaml path")
 	}
+	if err := checkYAMLPathUnshared(root, path); err != nil {
+		return false, err
+	}
 	m := root
 	for i, k := range path {
-		if m.Kind == yaml.AliasNode {
-			return false, errYAMLEditThroughAlias
-		}
 		if isYAMLNull(m) {
 			m.Kind, m.Tag, m.Value, m.Style = yaml.MappingNode, "!!map", "", 0
 		}
@@ -209,30 +221,67 @@ func replacementScalar(old, value *yaml.Node) *yaml.Node {
 	return r
 }
 
+// checkYAMLPathUnshared returns errYAMLEditThroughAlias if root or any
+// existing node along path (the target value included) is an alias or
+// carries an anchor.
+func checkYAMLPathUnshared(root *yaml.Node, path []string) error {
+	m := root
+	if isYAMLShared(m) {
+		return errYAMLEditThroughAlias
+	}
+	for _, k := range path {
+		if m.Kind != yaml.MappingNode {
+			return nil
+		}
+		_, v := findMapKey(m, k)
+		if v == nil {
+			return nil
+		}
+		if isYAMLShared(v) {
+			return errYAMLEditThroughAlias
+		}
+		m = v
+	}
+	return nil
+}
+
 // deleteYAMLPath removes the key at path from the mapping node root. It
 // returns false when the key (or one of its parents) does not exist.
-// Parents left empty are kept, as an empty mapping.
+// Parents left empty are kept, as an empty mapping. Like setYAMLPath it
+// refuses to edit through an alias or anchored node.
 func deleteYAMLPath(root *yaml.Node, path []string) (bool, error) {
 	if len(path) == 0 {
 		return false, errors.New("empty yaml path")
 	}
+	if err := checkYAMLPathUnshared(root, path); err != nil {
+		return false, err
+	}
 	m := root
+	var parentKey *yaml.Node
 	for i, k := range path {
-		if m.Kind == yaml.AliasNode {
-			return false, errYAMLEditThroughAlias
-		}
 		if m.Kind != yaml.MappingNode {
 			// A null or scalar parent has no children to delete.
 			return false, nil
 		}
-		_, v := findMapKey(m, k)
+		kn, v := findMapKey(m, k)
 		if v == nil {
 			return false, nil
 		}
 		if i == len(path)-1 {
 			deleteMapKey(m, k)
+			if len(m.Content) == 0 && parentKey != nil {
+				// Encode the emptied mapping as `parent: {}`. yaml.v3 emits
+				// an unparseable `parent: # comment\n{}` for an empty block
+				// mapping whose key has a line comment, so the comment moves
+				// to the flow value: `parent: {} # comment`.
+				m.Style |= yaml.FlowStyle
+				if m.LineComment == "" {
+					m.LineComment, parentKey.LineComment = parentKey.LineComment, ""
+				}
+			}
 			return true, nil
 		}
+		parentKey = kn
 		m = v
 	}
 	return false, nil // unreachable: the loop returns on the last element
@@ -302,17 +351,14 @@ func encodeYAMLDocument(doc *yaml.Node, indent int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// yamlSemanticallyEqual reports whether a and b both parse and decode to
-// the same data, ignoring comments and layout.
-func yamlSemanticallyEqual(a, b []byte) bool {
-	var x, y interface{}
-	if err := yaml.Unmarshal(a, &x); err != nil {
+// yamlDecodesTo reports whether data parses and decodes to want (generic
+// data from decoding a yaml.Node), ignoring comments and layout.
+func yamlDecodesTo(data []byte, want interface{}) bool {
+	var got interface{}
+	if err := yaml.Unmarshal(data, &got); err != nil {
 		return false
 	}
-	if err := yaml.Unmarshal(b, &y); err != nil {
-		return false
-	}
-	return reflect.DeepEqual(x, y)
+	return reflect.DeepEqual(got, want)
 }
 
 // encodeYAMLInline encodes the scalar n as a single line of YAML (quoted
@@ -336,6 +382,34 @@ func splitYAMLLines(data []byte) [][]byte {
 		lines = lines[:n-1]
 	}
 	return lines
+}
+
+// yamlLineEnding returns the line terminator of line ("\r\n" or "\n"), or
+// "" if it has none.
+func yamlLineEnding(line []byte) string {
+	switch {
+	case bytes.HasSuffix(line, []byte("\r\n")):
+		return "\r\n"
+	case bytes.HasSuffix(line, []byte("\n")):
+		return "\n"
+	}
+	return ""
+}
+
+// insertLineEnding picks the terminator for lines inserted after
+// lines[idx-1]: that line's own, else the first terminated line's, else LF.
+func insertLineEnding(lines [][]byte, idx int) string {
+	if idx > 0 {
+		if eol := yamlLineEnding(lines[idx-1]); eol != "" {
+			return eol
+		}
+	}
+	for _, l := range lines {
+		if eol := yamlLineEnding(l); eol != "" {
+			return eol
+		}
+	}
+	return "\n"
 }
 
 // joinYAMLLines is the inverse of splitYAMLLines.
@@ -477,6 +551,7 @@ func spliceInsertYAMLKeys(lines [][]byte, m *yaml.Node, keys []string, value *ya
 	if !ok {
 		return nil, false
 	}
+	eol := insertLineEnding(lines, idx)
 	var block []byte
 	for j, k := range keys {
 		keyText, ok := encodeYAMLInline(newYAMLStringScalar(k))
@@ -490,12 +565,12 @@ func spliceInsertYAMLKeys(lines [][]byte, m *yaml.Node, keys []string, value *ya
 			block = append(block, ' ')
 			block = append(block, valueText...)
 		}
-		block = append(block, '\n')
+		block = append(block, eol...)
 	}
 	out := make([][]byte, 0, len(lines)+1)
 	out = append(out, lines[:idx]...)
-	if prev := out[idx-1]; !bytes.HasSuffix(prev, []byte("\n")) {
-		out[idx-1] = append(append([]byte(nil), prev...), '\n')
+	if prev := out[idx-1]; yamlLineEnding(prev) == "" {
+		out[idx-1] = append(append([]byte(nil), prev...), eol...)
 	}
 	out = append(out, block)
 	out = append(out, lines[idx:]...)
@@ -503,14 +578,17 @@ func spliceInsertYAMLKeys(lines [][]byte, m *yaml.Node, keys []string, value *ya
 }
 
 // spliceDeleteYAMLPath applies deleteYAMLPath(root, path) to orig at the
-// byte level by dropping the line of a `key: scalar` entry. root must be
-// the unedited parse of orig. Comments above the entry are left in place.
+// byte level by dropping the line of a `key: scalar` entry. When that entry
+// is the only child of a nested block mapping, the parent's line becomes
+// `parent: {}`, matching the empty mapping the tree edit leaves. root must
+// be the unedited parse of orig. Comments above the entry are left in place.
 func spliceDeleteYAMLPath(orig []byte, root *yaml.Node, path []string) ([]byte, bool) {
 	if len(path) == 0 {
 		return nil, false
 	}
 	lines := splitYAMLLines(orig)
 	m := root
+	var parentKey *yaml.Node
 	for i, k := range path {
 		if !isBlockYAMLMapping(m) {
 			return nil, false
@@ -520,6 +598,7 @@ func spliceDeleteYAMLPath(orig []byte, root *yaml.Node, path []string) ([]byte, 
 			return nil, false
 		}
 		if i < len(path)-1 {
+			parentKey = kn
 			m = v
 			continue
 		}
@@ -527,10 +606,81 @@ func spliceDeleteYAMLPath(orig []byte, root *yaml.Node, path []string) ([]byte, 
 			kn.Line != v.Line || kn.Line < 1 || kn.Line > len(lines) {
 			return nil, false
 		}
-		out := make([][]byte, 0, len(lines)-1)
-		out = append(out, lines[:kn.Line-1]...)
-		out = append(out, lines[kn.Line:]...)
+		out := append([][]byte(nil), lines...)
+		if len(m.Content) == 2 && parentKey != nil {
+			// Emptying a nested mapping: turn `parent:` into `parent: {}`.
+			if parentKey.Line >= kn.Line || parentKey.Line < 1 {
+				return nil, false
+			}
+			rewritten, ok := appendEmptyMappingToKeyLine(out[parentKey.Line-1], parentKey)
+			if !ok {
+				return nil, false
+			}
+			out[parentKey.Line-1] = rewritten
+		}
+		out = append(out[:kn.Line-1], out[kn.Line:]...)
 		return joinYAMLLines(out), true
 	}
 	return nil, false
+}
+
+// appendEmptyMappingToKeyLine rewrites the line holding the plain mapping
+// key kn (`  key:` with an optional trailing comment) as `  key: {}`.
+func appendEmptyMappingToKeyLine(line []byte, kn *yaml.Node) ([]byte, bool) {
+	if kn.Kind != yaml.ScalarNode || kn.Style != 0 {
+		return nil, false
+	}
+	start, ok := runeColumnToByteOffset(line, kn.Column, kn.Line == 1)
+	if !ok || !bytes.HasPrefix(line[start:], []byte(kn.Value)) {
+		return nil, false
+	}
+	colon := start + len(kn.Value)
+	for colon < len(line) && line[colon] == ' ' {
+		colon++
+	}
+	if colon >= len(line) || line[colon] != ':' {
+		return nil, false
+	}
+	out := make([]byte, 0, len(line)+3)
+	out = append(out, line[:colon+1]...)
+	out = append(out, " {}"...)
+	out = append(out, line[colon+1:]...)
+	return out, true
+}
+
+// utf8BOM is the byte-order-mark yaml.v3 skips before counting columns, but
+// which is still physically present at the start of the original file.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// runeColumnToByteOffset converts a 1-indexed, rune-counted yaml.v3 Column
+// on line into a 0-indexed byte offset. firstLine skips a leading UTF-8 BOM
+// before counting, matching yaml.v3's own column numbering, while still
+// returning an offset relative to line's real bytes (BOM included).
+func runeColumnToByteOffset(line []byte, column int, firstLine bool) (int, bool) {
+	if column < 1 {
+		return 0, false
+	}
+	rest := line
+	prefix := 0
+	if firstLine && bytes.HasPrefix(rest, utf8BOM) {
+		prefix = len(utf8BOM)
+		rest = rest[prefix:]
+	}
+	runeIdx := 1
+	byteIdx := 0
+	for byteIdx < len(rest) {
+		if runeIdx == column {
+			return prefix + byteIdx, true
+		}
+		_, size := utf8.DecodeRune(rest[byteIdx:])
+		if size == 0 {
+			return 0, false
+		}
+		byteIdx += size
+		runeIdx++
+	}
+	if runeIdx == column {
+		return prefix + byteIdx, true
+	}
+	return 0, false
 }

@@ -43,7 +43,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -1431,10 +1430,6 @@ func applyLegacyKeyActions(orig []byte, doc *yaml.Node, root *yaml.Node, actions
 	return out, hasConflict
 }
 
-// utf8BOM is the byte-order-mark yaml.v3 skips before counting columns, but
-// which is still physically present at the start of the original file.
-var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
-
 // surgicalRenameKey replaces node's key token, at its recorded Line/Column,
 // with canonical, in place within lines (as produced by bytes.Split(orig,
 // "\n")). node.Column is a 1-indexed *rune* column (yaml.v3's convention),
@@ -1478,39 +1473,6 @@ func surgicalRenameKey(lines [][]byte, node *yaml.Node, canonical string) bool {
 	newLine = append(newLine, line[end:]...)
 	lines[idx] = newLine
 	return true
-}
-
-// runeColumnToByteOffset converts a 1-indexed, rune-counted yaml.v3 Column
-// on line into a 0-indexed byte offset. firstLine skips a leading UTF-8 BOM
-// before counting, matching yaml.v3's own column numbering, while still
-// returning an offset relative to line's real bytes (BOM included).
-func runeColumnToByteOffset(line []byte, column int, firstLine bool) (int, bool) {
-	if column < 1 {
-		return 0, false
-	}
-	rest := line
-	prefix := 0
-	if firstLine && bytes.HasPrefix(rest, utf8BOM) {
-		prefix = len(utf8BOM)
-		rest = rest[prefix:]
-	}
-	runeIdx := 1
-	byteIdx := 0
-	for byteIdx < len(rest) {
-		if runeIdx == column {
-			return prefix + byteIdx, true
-		}
-		_, size := utf8.DecodeRune(rest[byteIdx:])
-		if size == 0 {
-			return 0, false
-		}
-		byteIdx += size
-		runeIdx++
-	}
-	if runeIdx == column {
-		return prefix + byteIdx, true
-	}
-	return 0, false
 }
 
 // writeConflictBackup writes orig, unchanged, to path+".grove-migration.bak"

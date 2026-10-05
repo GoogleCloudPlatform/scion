@@ -3938,3 +3938,13 @@ func TestUpdateVersionedSetting_MigratesLegacyHubProjectKey(t *testing.T) {
 		t.Errorf("hub = %+v, want project_id p1 and endpoint https://h", vs.Hub)
 	}
 }
+
+// TestUpdateVersionedSetting_LegacyHubProjectKeyParity runs the struct-path
+// parity check (runStructParity) on a file that still has the legacy hub
+// project key, for project_id, hub.project_id and every other key.
+func TestUpdateVersionedSetting_LegacyHubProjectKeyParity(t *testing.T) {
+	legacy := hubGroveIDRename[0].legacy
+	runStructParity(t, []structParityBase{
+		{name: "legacy-hub-key", file: "settings.yaml", content: "schema_version: \"1\"\n# hub\nhub:\n  " + legacy + ": p1 # legacy\n  endpoint: https://e\n"},
+	})
+}
