@@ -304,6 +304,28 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	return profiles
 }
 
+// heartbeatProfileAttach returns the attach capability of each profile
+// buildInfoProfiles advertises, for the heartbeat's ProfileAttach field.
+// A profile whose attach support is unknown (Attach == nil: no live
+// runtime instance to ask yet) is left out, so the hub keeps whatever it
+// has stored for it rather than flipping it on missing information.
+func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
+	runtimeType := "unknown"
+	s.mu.RLock()
+	if s.runtime != nil {
+		runtimeType = s.runtime.Name()
+	}
+	s.mu.RUnlock()
+	var out []hubclient.ProfileAttachState
+	for _, p := range s.buildInfoProfiles(runtimeType) {
+		if p.Attach == nil {
+			continue
+		}
+		out = append(out, hubclient.ProfileAttachState{Name: p.Name, Attach: *p.Attach})
+	}
+	return out
+}
+
 // resolveLiveRuntimeInstance returns the already-built Runtime instance
 // backing a profile resolving to rtType, without constructing anything new:
 // s.runtime for the default type, or an auxiliary runtime some prior
@@ -2187,6 +2209,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// RunID is the hub-minted identity of the run this start begins
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID                string                           `json:"runId,omitempty"`
+		TemplateName         string                           `json:"templateName,omitempty"` // naming only; never loaded
 		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
@@ -2316,6 +2339,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
+		TemplateName:             startReq.TemplateName,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -2790,6 +2814,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// RunID is the hub-minted identity of the run this restart starts
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID string `json:"runId,omitempty"`
+		// TemplateName mirrors the same field on the start path.
+		TemplateName string `json:"templateName,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 	}
@@ -2836,6 +2862,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
 		RunID:                    restartReq.RunID,
+		TemplateName:             restartReq.TemplateName,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})
