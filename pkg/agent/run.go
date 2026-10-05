@@ -137,6 +137,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
 
+	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
+	// mints one per create/start dispatch; local/CLI mode and older hubs
+	// send none, so mint it here instead. It is fixed this early so
+	// provisioning can record it as the run that owns the agent's files
+	// (ptone/scion#2675), before the container exists.
+	if opts.RunID == "" {
+		opts.RunID = uuid.NewString()
+	}
+	ctx = api.ContextWithRunID(ctx, opts.RunID)
+
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
@@ -223,6 +233,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
+	}
+	// An agent provisioned earlier (provision-only, a restart, a resume)
+	// was not provisioned by this start: record this run as the owner of
+	// its files now, before the container exists (ptone/scion#2675). A
+	// fresh provision above already wrote it.
+	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		util.Debugf("Start: failed to record run ID in agent-info.json for %s: %v", opts.Name, err)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
@@ -1583,13 +1600,8 @@ authDone:
 		}
 	}
 
-	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
-	// mints one per create/start dispatch; local/CLI mode and older hubs
-	// send none, so mint it here instead.
+	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
-	if runID == "" {
-		runID = uuid.NewString()
-	}
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),

@@ -1904,6 +1904,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
+	// Record the run that owns these files (ptone/scion#2675): a delete
+	// naming a different run then leaves them alone. A provision with no run
+	// (provision-only, reprovision) keeps whatever run already owned them,
+	// since the files still belong to that run's runtime entry.
+	info.RunID = api.RunIDFromContext(ctx)
+	if info.RunID == "" {
+		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
+	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -2216,6 +2224,42 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 		return nil
 	}
 	return &info
+}
+
+// readAgentInfoRunID returns the runId recorded in the agent-info.json at
+// path, or "" if the file is missing, unreadable or carries none.
+func readAgentInfoRunID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		RunID string `json:"runId"`
+	}
+	if json.Unmarshal(data, &info) != nil {
+		return ""
+	}
+	return info.RunID
+}
+
+// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
+// the run that owns the agent's files (ptone/scion#2675). It is "" for an
+// agent provisioned before run IDs were recorded, one provisioned but never
+// started, or one whose agent-info.json is missing or unreadable.
+func GetSavedRunID(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.RunID
+	}
+	return ""
+}
+
+// SetSavedRunID records runID in the agent's agent-info.json as the run that
+// owns the agent's files (ptone/scion#2675). It is a no-op when
+// agent-info.json does not exist yet.
+func SetSavedRunID(agentName string, projectPath string, runID string) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.RunID = runID
+	})
 }
 
 func GetSavedProfile(agentName string, projectPath string) string {
