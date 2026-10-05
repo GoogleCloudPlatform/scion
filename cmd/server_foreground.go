@@ -367,12 +367,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// The Hub handler may be served by two listeners (its own and the
 		// WebServer's), so neither listener's Shutdown closes the decision
-		// audit writer. This deferred call runs after wg.Wait (both
-		// listeners have drained) and before the store closer deferred
-		// above, so records from requests served during the drain are
-		// written.
+		// audit writer; exit.run does, before the store closer deferred
+		// above and before the OTel providers registered below flush, so
+		// the drain's drops and write latencies are exported. On a signal
+		// it runs after wg.Wait, once both listeners have drained, so
+		// records from requests served during the drain are written. On an
+		// error or early return there is no wg.Wait: a listener may still
+		// be draining, and records from requests that finish after the
+		// close are counted as shutdown drops.
 		hubSrv.DeferDecisionAuditClose()
-		defer hubSrv.CloseDecisionAudit(context.Background())
+		exit := &hubExitSequence{closeDecisionAudit: hubSrv.CloseDecisionAudit}
+		defer exit.run()
 
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
@@ -392,11 +397,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			if tpErr != nil {
 				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
 			} else {
-				defer func() {
-					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_ = tp.Shutdown(shutdownCtx)
-				}()
+				exit.addFlush(tp.Shutdown)
 				log.Printf("Hub OTel tracing enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
@@ -410,11 +411,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
 			} else {
-				defer func() {
-					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_ = mp.Shutdown(shutdownCtx)
-				}()
+				exit.addFlush(mp.Shutdown)
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 
@@ -3808,4 +3805,27 @@ func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend,
 		return ""
 	}
 	return gcputil.ParseProjectID([]byte(sw.Value))
+}
+
+// hubExitSequence is the Hub's exit work in runServerStart, deferred as
+// one call so its order is fixed and tested: drain and close the decision
+// audit writer first, then flush the OTel providers in reverse order of
+// registration (as separate defers would), so the drain's drops and write
+// latencies reach the final export.
+type hubExitSequence struct {
+	closeDecisionAudit func(context.Context)
+	flushes            []func(context.Context) error
+}
+
+func (h *hubExitSequence) addFlush(f func(context.Context) error) {
+	h.flushes = append(h.flushes, f)
+}
+
+func (h *hubExitSequence) run() {
+	h.closeDecisionAudit(context.Background())
+	for i := len(h.flushes) - 1; i >= 0; i-- {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = h.flushes[i](ctx)
+		cancel()
+	}
 }
