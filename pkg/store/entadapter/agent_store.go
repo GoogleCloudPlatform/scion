@@ -162,6 +162,18 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIntentAt
 		sa.RunIntentAt = &t
 	}
+	if a.StartClaimID != nil {
+		sa.StartClaimID = *a.StartClaimID
+	}
+	sa.StartClaimKind = store.StartClaimKind(a.StartClaimKind)
+	sa.StartClaimState = store.StartClaimState(a.StartClaimState)
+	sa.StartClaimOwner = a.StartClaimOwner
+	sa.StartClaimTarget = a.StartClaimTarget
+	sa.StartClaimAt = copyTimePtr(a.StartClaimAt)
+	sa.StartClaimLeaseUntil = copyTimePtr(a.StartClaimLeaseUntil)
+	sa.StartClaimUnconfirmedAt = copyTimePtr(a.StartClaimUnconfirmedAt)
+	sa.StartClaimHoldUntil = copyTimePtr(a.StartClaimHoldUntil)
+	sa.StartClaimLaunchID = a.StartClaimLaunchID
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
 		sa.ReincarnationUpdatedAt = &t
