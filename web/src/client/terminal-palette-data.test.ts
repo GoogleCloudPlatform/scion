@@ -17,8 +17,8 @@
 /**
  * Tests for the terminal view's agents-only candidate source: viability
  * (attach + running/stopping, not chat's lifecycle-or-attach messageability)
- * candidate shape (an `agent` target, no DM recency), and the bounded,
- * progressive load.
+ * candidate shape (an `agent` target, no DM recency), and the load and
+ * retain over the shared agent store's hub entry.
  */
 
 // @vitest-environment happy-dom
@@ -38,9 +38,13 @@ import {
   isTerminalPaletteAgentViable,
   buildTerminalAgentCandidates,
   loadTerminalPaletteAgents,
+  retainTerminalPaletteAgents,
+  selectTerminalPaletteCandidates,
 } from './terminal-palette-data.js';
-import { PaletteLoadError, type RawPaletteAgent } from './chat-palette-data.js';
+import { ChatPaletteDataController, type RawPaletteAgent } from './chat-palette-data.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
+import type { Agent } from '../shared/types.js';
+import { createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -64,8 +68,13 @@ function agent(
   return result;
 }
 
+let harness: Harness | null = null;
+
 afterEach(() => {
+  harness?.store.destroy();
+  harness = null;
   apiFetchMock.mockReset();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -184,115 +193,270 @@ describe('buildTerminalAgentCandidates', () => {
   });
 });
 
+/** An agent-list row as the store holds it: attachable and running unless overridden. */
+function row(id: string, extra: Partial<Agent> = {}): Agent {
+  return {
+    id,
+    name: id,
+    projectId: 'p1',
+    phase: 'running',
+    _capabilities: { actions: ['attach'] },
+    ...extra,
+  } as Agent;
+}
+
+/** A store over an in-memory hub serving `agents`, under fake timers. */
+function storeWith(agents: Agent[], pageSize?: number): Harness {
+  vi.useFakeTimers();
+  harness = createHarness(agents, pageSize ? { pageSize } : {});
+  return harness;
+}
+
 function load(
+  h: Harness,
   overrides: { onProgress?: (c: PaletteCandidate[]) => void; isCurrent?: () => boolean } = {}
 ): { controller: AbortController; promise: Promise<PaletteCandidate[]> } {
   const controller = new AbortController();
-  const promise = loadTerminalPaletteAgents({
-    controller,
-    isCurrent: overrides.isCurrent ?? ((): boolean => true),
-    ...(overrides.onProgress ? { onProgress: overrides.onProgress } : {}),
-  });
+  const promise = loadTerminalPaletteAgents(
+    {
+      controller,
+      isCurrent: overrides.isCurrent ?? ((): boolean => true),
+      ...(overrides.onProgress ? { onProgress: overrides.onProgress } : {}),
+    },
+    h.store
+  );
   return { controller, promise };
 }
 
-function hangUntilAborted(): (
-  url: string,
-  options?: { signal?: AbortSignal | null }
-) => Promise<Response> {
-  return (_url, options) =>
-    new Promise((_resolve, reject) => {
-      options?.signal?.addEventListener('abort', () => {
-        reject(new DOMException('aborted', 'AbortError'));
-      });
-    });
+function labels(candidates: readonly PaletteCandidate[]): string[] {
+  return candidates.map((c) => c.label);
 }
 
 describe('loadTerminalPaletteAgents', () => {
-  it('fetches /api/v1/agents (no project filter) and returns only viable candidates, with no DM fetch', async () => {
-    apiFetchMock.mockResolvedValueOnce(
-      jsonResponse({
-        agents: [
-          agent({ id: 'a1', name: 'Running' }),
-          agent({ id: 'a2', name: 'Stopped', phase: 'stopped' }),
-        ],
-      })
+  it('walks the hub list (no project filter) and returns only viable candidates, with no DM fetch', async () => {
+    const h = storeWith([row('a1', { name: 'Running' }), row('a2', { phase: 'stopped' })]);
+
+    const { promise } = load(h);
+    await h.connect();
+
+    expect(labels(await promise)).toEqual(['Running']);
+    expect(h.server.walks()).toBe(1);
+    expect(h.server.requests.every((path) => path.startsWith('/api/v1/agents?'))).toBe(true);
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('publishes the viable candidates seen so far as the walk starts and after each page', async () => {
+    const h = storeWith(
+      [
+        row('a1', { name: 'First' }),
+        row('x1', { phase: 'stopped' }),
+        row('x2', { _capabilities: { actions: ['lifecycle'] } }),
+        row('a2', { name: 'Second' }),
+      ],
+      2
     );
-
-    const candidates = await load().promise;
-
-    expect(apiFetchMock).toHaveBeenCalledTimes(1);
-    expect(apiFetchMock.mock.calls[0][0]).toBe('/api/v1/agents?limit=100');
-    expect(candidates.map((c) => c.label)).toEqual(['Running']);
-  });
-
-  it("passes the controller's signal through to the underlying fetch", async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ agents: [] }));
-
-    const { controller, promise } = load();
-    await promise;
-
-    expect(apiFetchMock.mock.calls[0][1]).toEqual({ signal: controller.signal });
-  });
-
-  it('publishes the viable candidates seen so far after each page, before the walk finishes', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(
-        jsonResponse({
-          agents: [
-            agent({ id: 'a1', name: 'First' }),
-            agent({ id: 'x1', name: 'Stopped', phase: 'stopped' }),
-          ],
-          nextCursor: 'c1',
-        })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          agents: [
-            agent({ id: 'x2', name: 'No-attach', _capabilities: { actions: ['lifecycle'] } }),
-            agent({ id: 'a2', name: 'Second' }),
-          ],
-        })
-      );
     const progress: string[][] = [];
 
-    const candidates = await load({
-      onProgress: (c) => progress.push(c.map((x) => x.label)),
-    }).promise;
+    const { promise } = load(h, { onProgress: (c) => progress.push(labels(c)) });
+    await h.connect();
 
-    expect(progress).toEqual([['First'], ['First', 'Second']]);
-    expect(candidates.map((c) => c.label)).toEqual(['First', 'Second']);
+    expect(progress).toEqual([[], ['First'], ['First', 'Second']]);
+    expect(labels(await promise)).toEqual(['First', 'Second']);
   });
 
-  it('does not publish progress for a superseded load, and rejects it as an AbortError', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ agents: [agent()] }));
+  it('a reopen answers from the store with no request', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    const requests = h.server.requests.length;
+
+    expect(labels(await load(h).promise)).toEqual(['Alpha']);
+    expect(labels(await load(h).promise)).toEqual(['Alpha']);
+    expect(h.server.requests.length).toBe(requests);
+  });
+
+  it('concurrent loads share one walk', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
+
+    const loads = [load(h).promise, load(h).promise, load(h).promise];
+    await h.connect();
+
+    for (const candidates of await Promise.all(loads))
+      expect(labels(candidates)).toEqual(['Alpha']);
+    expect(h.server.walks()).toBe(1);
+  });
+
+  it('shares one walk with the chat palette', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
+    apiFetchMock.mockResolvedValue(jsonResponse({ dms: [] }));
+    const chat = new ChatPaletteDataController(h.store);
+
+    const chatLoad = chat.loadAgentsGroup();
+    const terminalLoad = load(h).promise;
+    await h.connect();
+
+    expect(labels(await chatLoad)).toEqual(['Alpha']);
+    expect(labels(await terminalLoad)).toEqual(['Alpha']);
+    expect(h.server.walks()).toBe(1);
+  });
+
+  it('a superseded load rejects as an AbortError without publishing progress, and the walk goes on for the others', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
     const progress: PaletteCandidate[][] = [];
+    let current = true;
+    const stale = load(h, { isCurrent: () => current, onProgress: (c) => progress.push(c) });
+    const other = load(h).promise;
+    current = false;
+    stale.controller.abort();
+    progress.length = 0;
+    const rejection = expect(stale.promise).rejects.toMatchObject({ name: 'AbortError' });
 
-    const { promise } = load({ isCurrent: () => false, onProgress: (c) => progress.push(c) });
+    await h.connect();
 
-    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    await rejection;
     expect(progress).toEqual([]);
+    expect(labels(await other)).toEqual(['Alpha']);
+    expect(h.server.walks()).toBe(1);
   });
 
-  it('a request that never settles is aborted after the idle bound and rejects with a retryable PaletteLoadError', async () => {
-    vi.useFakeTimers();
-    let aborted = false;
-    apiFetchMock.mockImplementationOnce((url, options) => {
-      options?.signal?.addEventListener('abort', () => {
-        aborted = true;
-      });
-      return hangUntilAborted()(url, options);
+  it('a load no longer current when the walk resolves rejects as an AbortError', async () => {
+    const h = storeWith([row('a1')]);
+    let current = true;
+    const { promise } = load(h, { isCurrent: () => current });
+    const rejection = expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    current = false;
+
+    await h.connect();
+
+    await rejection;
+  });
+
+  it("rejects with the store's error when the walk fails, and a retry walks again", async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
+    h.server.status = 500;
+    const failed = load(h).promise;
+    const rejection = expect(failed).rejects.toBeInstanceOf(Error);
+    await h.connect();
+    await rejection;
+    await expect(failed).rejects.not.toMatchObject({ name: 'AbortError' });
+
+    h.server.status = 200;
+    const retry = load(h).promise;
+    await settle();
+
+    expect(labels(await retry)).toEqual(['Alpha']);
+    expect(h.server.walks()).toBe(2);
+  });
+});
+
+describe('selectTerminalPaletteCandidates', () => {
+  it('returns the same candidates for a republished, unchanged row array', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' })]);
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    const snapshot = h.store.peek({ scope: 'hub' })!;
+
+    const candidates = selectTerminalPaletteCandidates(snapshot);
+
+    expect(selectTerminalPaletteCandidates({ ...snapshot, version: snapshot.version + 1 })).toBe(
+      candidates
+    );
+    expect(selectTerminalPaletteCandidates({ ...snapshot, agents: [...snapshot.agents] })).not.toBe(
+      candidates
+    );
+  });
+});
+
+describe('retainTerminalPaletteAgents', () => {
+  it('an SSE status change reaches the retained listener with no request', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' }), row('a2', { name: 'Beta' })]);
+    const heard: string[][] = [];
+    const release = retainTerminalPaletteAgents((c) => heard.push(labels(c)), h.store);
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    const requests = h.server.requests.length;
+    heard.length = 0;
+
+    await h.emitAgent('status', { agentId: 'a2', phase: 'stopped' });
+
+    expect(heard).toEqual([['Alpha']]);
+    expect(h.server.requests.length).toBe(requests);
+    release();
+  });
+
+  it('an SSE status change reaches the terminal and the chat palette consumers of one entry with no request', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' }), row('a2', { name: 'Beta' })]);
+    apiFetchMock.mockResolvedValue(jsonResponse({ dms: [] }));
+    const chat = new ChatPaletteDataController(h.store);
+    const terminalHeard: string[][] = [];
+    const chatHeard: string[][] = [];
+    const releaseTerminal = retainTerminalPaletteAgents(
+      (c) => terminalHeard.push(labels(c)),
+      h.store
+    );
+    const releaseChat = h.store.retain({ scope: 'hub' }, (snapshot) => {
+      const candidates = chat.deriveAgentCandidates(snapshot);
+      if (snapshot.status === 'ready' && candidates) chatHeard.push(labels(candidates));
     });
+    const loads = [chat.loadAgentsGroup(), load(h).promise];
+    await h.connect();
+    await Promise.all(loads);
+    const requests = h.server.requests.length;
+    terminalHeard.length = 0;
+    chatHeard.length = 0;
 
-    const { promise } = load();
-    promise.catch(() => {});
+    // Stopping removes Beta from the terminal palette (not attachable) and
+    // keeps it in chat (a stopped agent can still be messaged).
+    await h.emitAgent('status', { agentId: 'a2', phase: 'stopped' });
+    await h.emitAgent('deleted', { agentId: 'a1' });
 
-    await vi.advanceTimersByTimeAsync(89_999);
-    expect(aborted).toBe(false);
+    expect(terminalHeard).toEqual([['Alpha'], []]);
+    expect(chatHeard).toEqual([['Alpha', 'Beta'], ['Beta']]);
+    expect(h.server.requests.length).toBe(requests);
+    expect(h.server.walks()).toBe(1);
+    releaseTerminal();
+    releaseChat();
+  });
 
-    const expectation = expect(promise).rejects.toBeInstanceOf(PaletteLoadError);
-    await vi.advanceTimersByTimeAsync(2);
-    expect(aborted).toBe(true);
-    await expectation;
+  it('hears ready snapshots only, not the progress of a walk', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' }), row('a2', { name: 'Beta' })], 1);
+    const heard: string[][] = [];
+    const release = retainTerminalPaletteAgents((c) => heard.push(labels(c)), h.store);
+
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+
+    expect(heard).toEqual([['Alpha', 'Beta']]);
+    release();
+  });
+
+  it('does not fetch by itself', async () => {
+    const h = storeWith([row('a1')]);
+    const release = retainTerminalPaletteAgents(() => {}, h.store);
+    await h.connect();
+
+    expect(h.server.requests).toEqual([]);
+    release();
+  });
+
+  it('stops hearing changes once released', async () => {
+    const h = storeWith([row('a1', { name: 'Alpha' }), row('a2', { name: 'Beta' })]);
+    const heard: string[][] = [];
+    const releaseRetain = retainTerminalPaletteAgents((c) => heard.push(labels(c)), h.store);
+    const keepAlive = h.store.retain({ scope: 'hub' }, () => {});
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    heard.length = 0;
+
+    releaseRetain();
+    await h.emitAgent('status', { agentId: 'a2', phase: 'stopped' });
+
+    expect(heard).toEqual([]);
+    keepAlive();
   });
 });
