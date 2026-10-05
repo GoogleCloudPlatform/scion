@@ -36,6 +36,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -101,6 +102,9 @@ function routeByPath(
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
+  // A connected page retains the agent store's hub list, which opens the
+  // store's feed; it never connects here.
+  vi.stubGlobal('EventSource', FakeEventSource);
 });
 
 /** Flushes pending microtasks (promise chains, `Response.json()`, etc.) enough times to settle `loadHubMembers`'s internal awaits. */

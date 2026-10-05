@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -3293,7 +3294,16 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			agent.AppliedConfig.HarnessAuth = cfg.AuthSelectedType
 		}
 		if cfg.Env != nil {
-			agent.AppliedConfig.Env = cfg.Env
+			// AppliedConfig.Env is a copy, so the auto-expose resolution
+			// below never leaks a derived value into InlineConfig.Env.
+			agent.AppliedConfig.Env = maps.Clone(cfg.Env)
+			project, err := s.store.GetProject(ctx, agent.ProjectID)
+			if err != nil {
+				slog.WarnContext(ctx, "applyAgentUpdate: project lookup failed; auto-expose project tier not re-derived",
+					"agent", agent.ID, "project", agent.ProjectID, "error", err)
+				project = nil
+			}
+			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
 		// Narrow carve-out, ptone/scion#2493 R3-1/R4-1 -- NOT part of
 		// recordExplicitEdits/invariant E above, which has already run and
@@ -3524,6 +3534,18 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
+	return s.brokerRecordReachable(broker)
+}
+
+// brokerRecordReachable reports whether an already-loaded broker looks
+// reachable: connected over the control channel, or marked online in the
+// store. It is the shared rule behind brokerReachable (lifecycle actions) and
+// the explicit-broker check in resolveRuntimeBroker (agent create), so the
+// two cannot disagree about what "offline" means.
+func (s *Server) brokerRecordReachable(broker *store.RuntimeBroker) bool {
+	if s.controlChannel != nil && s.controlChannel.IsConnected(broker.ID) {
+		return true
+	}
 	return broker.Status == store.BrokerStatusOnline
 }
 

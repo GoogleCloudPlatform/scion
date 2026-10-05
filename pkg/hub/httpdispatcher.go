@@ -1105,10 +1105,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
 			}
+			req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -3011,10 +3017,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 

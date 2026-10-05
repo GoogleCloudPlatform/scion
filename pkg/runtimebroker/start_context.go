@@ -1382,12 +1382,12 @@ func validateMountedWorktree(workspacePath, base string) error {
 // ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
 // assumes no worktree can exist yet whenever the sentinel is missing, and
 // would otherwise wipe every worktree under the shared base.
+//
+// The sentinel is looked for in exactly the directories ProvisionShared
+// checks (in.SentinelDirs: the sentinel directory, the base's parent by
+// default, and LegacyDir when set), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
-	sentinelDir := in.SentinelDir
-	if sentinelDir == "" {
-		sentinelDir = filepath.Dir(in.Resolved.HostPath)
-	}
-	if _, err := os.Stat(filepath.Join(sentinelDir, provision.ProvisionSentinelFile)); err != nil {
+	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); err != nil {

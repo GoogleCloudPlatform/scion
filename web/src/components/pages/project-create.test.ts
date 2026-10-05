@@ -23,6 +23,27 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 
 import type { Capabilities, PageData, UserRole } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
+import {
+  MEMBERSHIP_CHANGED_EVENT,
+  type MembershipChangedDetail,
+} from '../../utils/membership-events.js';
+
+const removeListeners: Array<() => void> = [];
+
+afterEach(() => {
+  for (const remove of removeListeners.splice(0)) remove();
+});
+
+/** Collect the membership-changed events dispatched on `window` during the test. */
+function heardMembership(): MembershipChangedDetail[] {
+  const heard: MembershipChangedDetail[] = [];
+  const onEvent = (e: Event): void => {
+    heard.push((e as CustomEvent<MembershipChangedDetail>).detail);
+  };
+  window.addEventListener(MEMBERSHIP_CHANGED_EVENT, onEvent);
+  removeListeners.push(() => window.removeEventListener(MEMBERSHIP_CHANGED_EVENT, onEvent));
+  return heard;
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -460,6 +481,41 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(posts(requests)).toEqual([
       { path: '/api/v1/projects', method: 'POST', body: { name: 'My Notes', slug: 'my-notes' } },
     ]);
+  });
+
+  it('announces a membership change for a project created from Blank', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+    const heard = heardMembership();
+
+    await setValue(el, '#name', 'My Notes', 'sl-input');
+    await submit(el);
+
+    expect(heard).toEqual([{ kind: 'project', id: 'new-blank' }]);
+  });
+
+  it('announces a membership change for a project created from a template', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+    const heard = heardMembership();
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'payments-api', 'sl-input');
+    await submit(el);
+
+    expect(heard).toEqual([{ kind: 'project', id: 'new-clone' }]);
+  });
+
+  it('announces nothing when the template clone fails', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE], cloneStatus: 500 });
+    element = el;
+    const heard = heardMembership();
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'payments-api', 'sl-input');
+    await submit(el);
+
+    expect(heard).toEqual([]);
   });
 
   it('Blank + Git Repository posts the git body to /projects', async () => {
@@ -961,9 +1017,12 @@ describe('scion-page-project-create — linked create and existing projects', ()
       createStatus: 200,
     });
     element = el;
+    const heard = heardMembership();
 
     await fillLinked(el);
     await submit(el);
+
+    expect(heard).toEqual([]);
 
     expect(posts(requests).map((r) => r.path)).toEqual([
       '/api/v1/system/fs/validate-path',
@@ -981,9 +1040,13 @@ describe('scion-page-project-create — linked create and existing projects', ()
       providersStatus: 500,
     });
     element = el;
+    const heard = heardMembership();
 
     await fillLinked(el);
     await submit(el);
+
+    // The project was created before the link failed.
+    expect(heard).toEqual([{ kind: 'project', id: 'new-blank' }]);
 
     expect(q(el, '.error-banner')).not.toBeNull();
     expect(window.history.pushState).not.toHaveBeenCalled();
@@ -1006,9 +1069,12 @@ describe('scion-page-project-create — linked create and existing projects', ()
   it('a non-linked 200 offers the existing project instead of navigating', async () => {
     const { el } = await createForm({ createStatus: 200 });
     element = el;
+    const heard = heardMembership();
 
     await setValue(el, '#name', 'Existing', 'sl-input');
     await submit(el);
+
+    expect(heard).toEqual([]);
 
     expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(true);
     expect(window.history.pushState).not.toHaveBeenCalled();
