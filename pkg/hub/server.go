@@ -973,6 +973,7 @@ type RemoteHubAgentDefaults struct {
 	MaxDuration     string            `json:"maxDuration,omitempty"`
 	Resources       *api.ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
+	Experiments     []string          `json:"experiments,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -3607,6 +3608,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// the accessor reads them under s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
+	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
