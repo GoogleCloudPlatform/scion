@@ -154,6 +154,16 @@ func (c *peerConn) Close() error {
 	return nil
 }
 
+// deliver hands b to the stream's reader, failing if it is not read.
+func deliver(t *testing.T, c *peerConn, b []byte) {
+	t.Helper()
+	select {
+	case c.in <- b:
+	case <-time.After(5 * time.Second):
+		t.Fatal("frame not read: the stream stopped reading")
+	}
+}
+
 func (c *peerConn) closePeer() { c.peerOnce.Do(func() { close(c.peer) }) }
 
 func (c *peerConn) Transport() string { return "test" }
@@ -252,6 +262,66 @@ func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 				t.Fatalf("%d timers still armed", n)
 			}
 		})
+	}
+}
+
+// TestWSStreamCloseWaitDeliversNothing: while a closed hop waits for the
+// peer, every frame the peer sends is discarded. No data, resize, credit or
+// new stream reaches the local side, and nothing is sent back.
+func TestWSStreamCloseWaitDeliversNothing(t *testing.T) {
+	const wait = 5 * time.Second
+	clk := clock.NewFake(time.Now())
+	c := newPeerConn()
+	s := newWSStream(c, 8, 8, clk, wait)
+	if err := s.CloseWithCode(conduit.CloseNormal, ""); err != nil {
+		t.Fatal(err)
+	}
+	<-c.writes // the StreamClose
+	window, err := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := []*conduitv1.Frame{
+		{Body: &conduitv1.Frame_StreamData{StreamData: &conduitv1.StreamData{StreamId: hopStreamID, Data: []byte("late")}}},
+		{Body: &conduitv1.Frame_StreamData{StreamData: &conduitv1.StreamData{StreamId: hopStreamID, Data: []byte("past the window")}}},
+		{Body: &conduitv1.Frame_StreamResize{StreamResize: &conduitv1.StreamResize{StreamId: hopStreamID, Cols: 80, Rows: 24}}},
+		{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: 1 << 20}}},
+		{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY}}},
+		{Body: &conduitv1.Frame_StreamAccept{StreamAccept: &conduitv1.StreamAccept{StreamId: hopStreamID, InitialWindow: 1 << 20}}},
+	}
+	for _, f := range late {
+		b, err := proto.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deliver(t, c, b) // unbuffered: returns once the previous frame was handled
+	}
+	deliver(t, c, window) // read only after the last late frame was handled
+	if isClosed(s.linkClosed()) {
+		t.Fatal("link closed by a discarded frame")
+	}
+	if n, err := s.Read(make([]byte, 64)); n != 0 || !errors.Is(err, conduit.ErrStreamClosed) {
+		t.Fatalf("Read = %d, %v; want 0, ErrStreamClosed", n, err)
+	}
+	if ws, ok := <-s.Resizes(); ok {
+		t.Fatalf("resize %v delivered after close", ws)
+	}
+	s.mu.Lock()
+	credit, buffered := s.sendCredit, s.rbuf.Len()
+	s.mu.Unlock()
+	if credit != 8 || buffered != 0 {
+		t.Fatalf("send credit %d, buffered %d after close; want 8, 0", credit, buffered)
+	}
+	select {
+	case b := <-c.writes:
+		t.Fatalf("sent %x while waiting, want nothing", b)
+	default:
+	}
+	clk.Advance(wait)
+	select {
+	case <-s.linkClosed():
+	case <-time.After(5 * time.Second):
+		t.Fatal("link not closed when the close wait passed")
 	}
 }
 

@@ -499,29 +499,8 @@ func TestBridgeCloseWait(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newPairWith(t, tc.cfg, func(c *relay.Config) { c.Session.HandshakeTimeout = wait })
-			url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
-			want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
-			req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
-			if err != nil {
-				t.Fatalf("dial: %v (%v)", err, resp)
-			}
-			defer func() { _ = c.Close() }()
-			open, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{Kind: tc.kind}}})
-			if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
-				t.Fatal(err)
-			}
-			_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
-			_, b, err := c.ReadMessage()
-			if err != nil {
-				t.Fatal(err)
-			}
-			f := &conduitv1.Frame{}
-			if err := proto.Unmarshal(b, f); err != nil {
-				t.Fatal(err)
-			}
+			c := dialHop(t, p, tc.kind)
+			f := readHopFrame(t, c)
 			sc := f.GetStreamClose()
 			if sc == nil {
 				t.Fatalf("first frame %v, want stream_close", f)
@@ -543,16 +522,131 @@ func TestBridgeCloseWait(t *testing.T) {
 			}
 			// Without the wait the clock is never advanced: the owner must
 			// close the link on its own.
-			if _, _, err := c.ReadMessage(); err == nil {
-				t.Fatal("caller read a frame after stream_close, want the link closed")
-			} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
-				t.Fatal("the owner did not close the link")
-			}
-			p.a.Relay.WaitBridgesForTest()
-			if n := p.a.Relay.ActiveBridges(); n != 0 {
-				t.Fatalf("%d active bridges after the link closed", n)
-			}
+			assertHopLinkClosed(t, p, c)
 		})
+	}
+}
+
+// TestBridgeCloseWaitAfterDrainDeadline: a session drained by GoAway on a
+// relay that keeps serving. At the drain deadline the bridged stream is
+// closed 4503; the hop then refuses new work, its session row is draining
+// or gone, and its link closes when the handshake timeout passes even
+// though the caller never closes its side.
+func TestBridgeCloseWaitAfterDrainDeadline(t *testing.T) {
+	const (
+		wait  = 2 * time.Second
+		drain = time.Second
+	)
+	p := newPairWith(t, echoConfig(), func(c *relay.Config) {
+		c.Session.HandshakeTimeout = wait
+		c.Session.Clock = c.Clock // the drain deadline runs on the fake clock too
+	})
+	c := dialHop(t, p, conduitv1.StreamKind_STREAM_KIND_PTY)
+	if f := readHopFrame(t, c); f.GetStreamAccept() == nil {
+		t.Fatalf("first frame %v, want stream_accept", f)
+	}
+	if err := p.a.Relay.GoAway(p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
+		t.Fatal(err)
+	}
+	p.a.Clock.Advance(drain)
+	f := readHopFrame(t, c)
+	if sc := f.GetStreamClose(); sc == nil || sc.GetCode() != conduit.CloseRelayRestart {
+		t.Fatalf("frame %v after the drain deadline, want stream_close 4503", f)
+	}
+	if !p.a.Relay.ServingForTest() {
+		t.Fatal("relay stopped serving; this test needs a relay that keeps running")
+	}
+	// The row is draining or already deleted.
+	for _, row := range p.w.Sessions(registry.PrincipalAgent, agentID).Sessions {
+		if row.Session.SessionID == p.rec.SessionID && !row.Session.Draining {
+			t.Fatal("session row neither draining nor deleted while the hop waits")
+		}
+	}
+	// Frames the caller still sends are discarded: nothing comes back.
+	data, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamData{StreamData: &conduitv1.StreamData{StreamId: 1, Data: []byte("late")}}})
+	if err := c.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		t.Fatal(err)
+	}
+	// New streams for the session are refused while the hop waits.
+	if c2, ok := tryDialHop(t, p, conduitv1.StreamKind_STREAM_KIND_PTY); ok {
+		if f := readHopFrame(t, c2); f.GetStreamAccept() != nil {
+			t.Fatal("a new stream was accepted on the drained session")
+		}
+		_ = c2.Close()
+	}
+	if n := p.a.Relay.ActiveBridges(); n < 1 {
+		t.Fatalf("%d active bridges while the caller's side is open, want the waiting hop", n)
+	}
+	p.a.Clock.Advance(wait - time.Nanosecond)
+	if n := p.a.Relay.ActiveBridges(); n < 1 {
+		t.Fatalf("%d active bridges before the wait passed, want the waiting hop", n)
+	}
+	p.a.Clock.Advance(time.Nanosecond)
+	assertHopLinkClosed(t, p, c)
+}
+
+// dialHop opens a raw internal stream WS to p's target session and sends
+// StreamOpen{kind}, as a caller relay would.
+func dialHop(t *testing.T, p *pair, kind conduitv1.StreamKind) *websocket.Conn {
+	t.Helper()
+	c, ok := tryDialHop(t, p, kind)
+	if !ok {
+		t.Fatal("internal stream dial refused")
+	}
+	return c
+}
+
+// tryDialHop is dialHop that reports a refused upgrade instead of failing.
+func tryDialHop(t *testing.T, p *pair, kind conduitv1.StreamKind) (*websocket.Conn, bool) {
+	t.Helper()
+	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
+	want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
+	req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
+	if err != nil {
+		if resp != nil {
+			return nil, false
+		}
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	open, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{Kind: kind}}})
+	if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
+		t.Fatal(err)
+	}
+	return c, true
+}
+
+// readHopFrame reads one frame from a raw hop.
+func readHopFrame(t *testing.T, c *websocket.Conn) *conduitv1.Frame {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, b, err := c.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &conduitv1.Frame{}
+	if err := proto.Unmarshal(b, f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// assertHopLinkClosed checks that the owner closed the hop's link with no
+// further frame, and that every bridge was released.
+func assertHopLinkClosed(t *testing.T, p *pair, c *websocket.Conn) {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, _, err := c.ReadMessage(); err == nil {
+		t.Fatal("caller read a frame after stream_close, want the link closed")
+	} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+		t.Fatal("the owner did not close the link")
+	}
+	p.a.Relay.WaitBridgesForTest()
+	if n := p.a.Relay.ActiveBridges(); n != 0 {
+		t.Fatalf("%d active bridges after the link closed", n)
 	}
 }
 
