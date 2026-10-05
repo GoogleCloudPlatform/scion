@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -28,15 +29,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestPaginatedLists_MalformedCursorReturns400 sends a malformed ?cursor to
-// every paginated hub list endpoint backed by the entadapter
-// decodeListCursor and asserts 400, never 500 (ptone/scion#1957). Some
-// endpoints validate or unseal the cursor before the store sees it; others
-// (runtime brokers, skills) hand it straight to the store, which is where
-// decodeListCursor's store.ErrInvalidInput wrapping matters.
+// every paginated hub list endpoint backed by an entadapter cursor decoder
+// (decodeListCursor, decodeCursor, or a UUID cursor) and asserts 400, never
+// 500 (ptone/scion#1957). Some endpoints validate or unseal the cursor before
+// the store sees it; others (runtime brokers, skills, messages, schedules)
+// hand it straight to the store, which is where the decoders'
+// store.ErrInvalidInput wrapping matters.
 func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -45,6 +49,26 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
 		ID: projectID, Name: "Cursor Project", Slug: "cursor-project",
 	}))
+
+	agentID := uuid.NewString()
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "cursor-agent", Name: "Cursor Agent", ProjectID: projectID,
+		Phase: string(state.PhaseStopped), CreatedBy: DevUserID, OwnerID: DevUserID,
+	}))
+
+	// DM reads authorize on the canonical DM key, which names a real user
+	// principal (the dev identity's kind is "dev", never a DM participant).
+	alice := &store.User{
+		ID: uuid.NewString(), Email: "cursor-alice@test.com", DisplayName: "Alice",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, alice))
+	dmKey, err := messages.DMConversationKey("user", alice.ID, "user", uuid.NewString())
+	require.NoError(t, err)
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+	})
+	require.NoError(t, err)
 
 	enc := func(raw string) string { return base64.URLEncoding.EncodeToString([]byte(raw)) }
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
@@ -56,21 +80,39 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		"bad id":        enc(ts + ",not-a-uuid"),
 	}
 
-	endpoints := map[string]string{
-		"agents":          "/api/v1/agents",
-		"projects":        "/api/v1/projects",
-		"project agents":  "/api/v1/projects/" + projectID + "/agents",
-		"templates":       "/api/v1/templates",
-		"harness configs": "/api/v1/harness-configs",
-		"groups":          "/api/v1/groups",
-		"skills":          "/api/v1/skills",
-		"runtime brokers": "/api/v1/runtime-brokers",
+	type endpoint struct {
+		path   string
+		caller *store.User // nil: dev (admin) identity
+	}
+	endpoints := map[string]endpoint{
+		"agents":          {path: "/api/v1/agents"},
+		"projects":        {path: "/api/v1/projects"},
+		"project agents":  {path: "/api/v1/projects/" + projectID + "/agents"},
+		"templates":       {path: "/api/v1/templates"},
+		"harness configs": {path: "/api/v1/harness-configs"},
+		"groups":          {path: "/api/v1/groups"},
+		"skills":          {path: "/api/v1/skills"},
+		"runtime brokers": {path: "/api/v1/runtime-brokers"},
+		// decodeCursor (unbound) callers: messages and schedules.
+		"messages":              {path: "/api/v1/messages"},
+		"agent messages":        {path: "/api/v1/agents/" + agentID + "/messages"},
+		"conversation messages": {path: "/api/v1/conversations/" + conv.ID + "/messages", caller: alice},
+		"chat history":          {path: "/api/v1/chat/conversations/" + dmKey + "/messages", caller: alice},
+		"schedules":             {path: "/api/v1/projects/" + projectID + "/schedules"},
+		// UUID cursor.
+		"scheduled events": {path: "/api/v1/projects/" + projectID + "/scheduled-events"},
 	}
 
-	for epName, path := range endpoints {
+	for epName, ep := range endpoints {
 		for cName, cursor := range cursors {
 			t.Run(epName+"/"+cName, func(t *testing.T) {
-				rec := doRequest(t, srv, http.MethodGet, path+"?"+url.Values{"cursor": {cursor}}.Encode(), nil)
+				path := ep.path + "?" + url.Values{"cursor": {cursor}}.Encode()
+				var rec *httptest.ResponseRecorder
+				if ep.caller != nil {
+					rec = doRequestAsUser(t, srv, ep.caller, http.MethodGet, path, nil)
+				} else {
+					rec = doRequest(t, srv, http.MethodGet, path, nil)
+				}
 				assert.Equal(t, http.StatusBadRequest, rec.Code,
 					"malformed cursor must be a 400, not a %d; body: %s", rec.Code, rec.Body.String())
 			})

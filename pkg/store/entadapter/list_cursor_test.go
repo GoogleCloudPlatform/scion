@@ -73,8 +73,37 @@ func TestDecodeListCursor_ErrorsAreInvalidInput(t *testing.T) {
 	})
 }
 
-// TestListStores_MalformedCursorIsInvalidInput hits every store list method
-// that decodes its cursor with decodeListCursor and asserts the error
+// TestDecodeCursor_ErrorsAreInvalidInput is decodeListCursor's contract for
+// the unbound decodeCursor used by messages, conversations and schedules.
+func TestDecodeCursor_ErrorsAreInvalidInput(t *testing.T) {
+	enc := func(s string) string { return base64.URLEncoding.EncodeToString([]byte(s)) }
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	for name, cursor := range map[string]string{
+		"not base64":    "not-base64-!!!",
+		"padding only":  "====",
+		"too few parts": enc("not-enough-parts"),
+		"bad timestamp": enc("not-a-timestamp," + uuid.NewString()),
+		"bad id":        enc(ts + ",not-a-uuid"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := decodeCursor(cursor)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
+
+	t.Run("valid cursor round-trips", func(t *testing.T) {
+		created := time.Now().UTC().Truncate(time.Microsecond)
+		id := uuid.New()
+		gotCreated, gotID, err := decodeCursor(encodeCursor(created, id.String()))
+		require.NoError(t, err)
+		assert.True(t, created.Equal(gotCreated))
+		assert.Equal(t, id, gotID)
+	})
+}
+
+// TestListStores_MalformedCursorIsInvalidInput hits every paginated store
+// list method (decodeListCursor, decodeCursor and UUID cursors) and asserts the error
 // surfaces as store.ErrInvalidInput (HTTP 400 at the hub), not a bare error
 // (HTTP 500). ptone/scion#1957.
 func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
@@ -108,6 +137,24 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 		},
 		"skills": func(opts store.ListOptions) error {
 			_, err := cs.ListSkills(ctx, store.SkillFilter{}, opts)
+			return err
+		},
+		// decodeCursor (no binding) callers.
+		"messages": func(opts store.ListOptions) error {
+			_, err := cs.ListMessages(ctx, store.MessageFilter{}, opts)
+			return err
+		},
+		"conversations": func(opts store.ListOptions) error {
+			_, err := cs.ListConversations(ctx, store.ConversationFilter{}, opts)
+			return err
+		},
+		"schedules": func(opts store.ListOptions) error {
+			_, err := cs.ListSchedules(ctx, store.ScheduleFilter{}, opts)
+			return err
+		},
+		// UUID cursor (parseUUID), included so every paginated list is covered.
+		"scheduled events": func(opts store.ListOptions) error {
+			_, err := cs.ListScheduledEvents(ctx, store.ScheduledEventFilter{}, opts)
 			return err
 		},
 	}

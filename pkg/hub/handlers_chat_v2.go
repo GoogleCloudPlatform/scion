@@ -2891,6 +2891,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		var err error
 		result, err = s.store.ListMessages(ctx, filter, opts)
 		if err != nil {
+			// Caller error such as a malformed ?cursor (store.ErrInvalidInput)
+			// is a 400, not a server failure (ptone/scion#1957).
+			if errors.Is(err, store.ErrInvalidInput) {
+				writeErrorFromErr(w, err, "")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 			return
 		}
