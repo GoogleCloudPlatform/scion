@@ -1325,6 +1325,20 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(typeOutside('a').defaultPrevented).toBe(false);
   });
 
+  it('a close between the initial focus and its update does not focus the closing input', async () => {
+    const el = await mountClosed();
+    await show(el);
+    el.shadowRoot!.querySelector('sl-dialog')!.dispatchEvent(
+      new CustomEvent('sl-initial-focus', { cancelable: true })
+    );
+    el.open = false;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(el.shadowRoot!.activeElement).not.toBe(input(el));
+    expect(document.activeElement).toBe(outside);
+  });
+
   it('nothing is captured while the palette is closed', async () => {
     await mountClosed();
     expect(typeOutside('a').defaultPrevented).toBe(false);

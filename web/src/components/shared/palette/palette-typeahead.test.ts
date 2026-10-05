@@ -383,6 +383,17 @@ describe('PaletteTypeahead', () => {
     expect(typeahead.take()).toBe('a');
   });
 
+  it('a start() after a capture reached its time limit begins with no text', () => {
+    vi.useFakeTimers();
+    typeahead.start();
+    press('c');
+    press('o');
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    expect(typeahead.pending).toBe('co');
+    typeahead.start();
+    expect(typeahead.pending).toBe('');
+  });
+
   it('a stop before the time limit leaves no timer behind', () => {
     vi.useFakeTimers();
     typeahead.start();
