@@ -109,7 +109,7 @@ func TestRunServerStart_DefersHubExitSequence(t *testing.T) {
 		switch {
 		case call == "exit.run()":
 			exitRunPos = d.Pos()
-		case strings.Contains(call, "closer.Close()"):
+		case strings.Contains(strings.ToLower(call), "closer.close()"):
 			storeClosePos = d.Pos()
 		}
 		// Only the plugin manager's Shutdown may be deferred; an OTel
