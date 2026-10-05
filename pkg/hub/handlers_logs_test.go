@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,5 +238,77 @@ func TestHandleAgentCloudLogs_Unauthenticated(t *testing.T) {
 	// Should get 404 or 401 - the auth middleware should prevent access
 	if w.Code == http.StatusOK || w.Code == http.StatusNotImplemented {
 		t.Errorf("status = %d, expected auth error", w.Code)
+	}
+}
+
+// TestAgentCloudLogOptions_QueryAndStreamAgree checks that the
+// non-streaming and streaming agent cloud-logs endpoints build the same
+// Cloud Logging filter for the same agent, and that neither narrows on
+// labels.project_id (many server entries carry agent_id without it).
+func TestAgentCloudLogOptions_QueryAndStreamAgree(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *store.Agent
+		query url.Values
+	}{
+		{
+			name:  "agent with project",
+			agent: &store.Agent{ID: "8f0c2a4e-agent", ProjectID: "proj-123"},
+			query: url.Values{},
+		},
+		{
+			name:  "agent without project",
+			agent: &store.Agent{ID: "8f0c2a4e-agent"},
+			query: url.Values{},
+		},
+		{
+			name:  "with severity and broker filters",
+			agent: &store.Agent{ID: "8f0c2a4e-agent", ProjectID: "proj-123"},
+			query: url.Values{"severity": {"ERROR"}, "broker_id": {"broker-1"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			list := agentCloudLogListOptions("hub-a", tt.agent, tt.query)
+			stream := agentCloudLogQueryOptions("hub-a", tt.agent, tt.query)
+
+			listFilter := BuildLogFilter(list, "gcp-proj")
+			streamFilter := BuildLogFilter(stream, "gcp-proj")
+
+			if listFilter != streamFilter {
+				t.Errorf("query and stream filters differ:\n query:  %s\n stream: %s", listFilter, streamFilter)
+			}
+			if strings.Contains(listFilter, "labels.project_id") {
+				t.Errorf("query filter must not narrow on project_id: %s", listFilter)
+			}
+			if !strings.Contains(listFilter, `labels.agent_id = "8f0c2a4e-agent"`) {
+				t.Errorf("query filter missing agent_id clause: %s", listFilter)
+			}
+		})
+	}
+}
+
+// TestAgentCloudLogListOptions_ParsesRange checks paging and time-range
+// parsing for the non-streaming endpoint.
+func TestAgentCloudLogListOptions_ParsesRange(t *testing.T) {
+	agent := &store.Agent{ID: "a1", ProjectID: "p1"}
+	q := url.Values{
+		"tail":  {"25"},
+		"since": {"2026-01-02T03:04:05Z"},
+		"until": {"2026-01-03T03:04:05Z"},
+	}
+	opts := agentCloudLogListOptions("hub-a", agent, q)
+	if opts.Tail != 25 {
+		t.Errorf("Tail = %d, want 25", opts.Tail)
+	}
+	if got := opts.Since.UTC().Format(time.RFC3339); got != "2026-01-02T03:04:05Z" {
+		t.Errorf("Since = %s", got)
+	}
+	if got := opts.Until.UTC().Format(time.RFC3339); got != "2026-01-03T03:04:05Z" {
+		t.Errorf("Until = %s", got)
+	}
+	if opts.HubName != "hub-a" || opts.AgentID != "a1" {
+		t.Errorf("unexpected base options: %+v", opts)
 	}
 }
