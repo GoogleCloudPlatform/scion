@@ -2396,7 +2396,12 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Validate LocalPath before persisting — fail fast before touching the DB.
+	// LocalPath names a directory on the broker's host. Only the embedded
+	// broker shares the hub's filesystem, so only for it does the hub check
+	// that the directory exists and initialize its .scion directory below.
+	// For any other broker the path is validated syntactically and stored.
 	var cleanPath string
+	embedded := s.isEmbeddedBroker(broker.ID)
 	if req.LocalPath != "" {
 		cleanPath = filepath.Clean(req.LocalPath)
 		if !filepath.IsAbs(cleanPath) {
@@ -2409,10 +2414,12 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 				return
 			}
 		}
-		info, err := os.Stat(cleanPath)
-		if err != nil || !info.IsDir() {
-			ValidationError(w, "localPath must be an existing directory", nil)
-			return
+		if embedded {
+			info, err := os.Stat(cleanPath)
+			if err != nil || !info.IsDir() {
+				ValidationError(w, "localPath must be an existing directory", nil)
+				return
+			}
 		}
 	}
 
@@ -2431,9 +2438,10 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// For linked projects (local directory), initialize the .scion directory
-	// so agents and templates directories exist before the first agent starts.
-	if cleanPath != "" {
+	// For linked projects (local directory) on the embedded broker, initialize
+	// the .scion directory so agents and templates directories exist before
+	// the first agent starts. Other brokers manage their own filesystem.
+	if cleanPath != "" && embedded {
 		scionDir := filepath.Join(cleanPath, ".scion")
 		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",

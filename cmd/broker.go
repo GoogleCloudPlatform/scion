@@ -189,6 +189,10 @@ broker when agents are created in the project.
 If --project is not specified, uses the current local project.
 If --broker is not specified, uses the local broker registration.
 
+Providing a broker requires update permission on the project and the
+broker owner's consent: the caller must be the broker's owner or a
+super-admin. Once provided, members of the project can run agents on it.
+
 Use --make-default to set the broker as the default for the project. If the
 project already has a different default broker, you will be prompted to confirm
 the change.
@@ -200,7 +204,7 @@ Examples:
   # Add local broker as provider for a specific project
   scion runtime-broker provide --project <project-id>
 
-  # Add a remote broker as provider for a project (admin only)
+  # Add a remote broker as provider for a project (its owner or a super-admin)
   scion runtime-broker provide --broker <broker-id> --project <project-id>
 
   # Add broker as provider and set as default
@@ -1140,39 +1144,32 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add broker as provider
-	req := &hubclient.RegisterProjectRequest{
-		ID:       projectID,
-		Name:     projectName,
-		BrokerID: brokerID,
-		Path:     localProjectPath,
-	}
-
-	resp, err := client.Projects().Register(ctx, req)
+	project, err := provideBrokerToProject(ctx, client, projectID, brokerID, localProjectPath)
 	if err != nil {
 		return fmt.Errorf("failed to add broker as provider: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
+	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, project.Name)
 
 	// Handle --make-default flag
 	if brokerMakeDefault {
-		currentDefault := resp.Project.DefaultRuntimeBrokerID
+		currentDefault := project.DefaultRuntimeBrokerID
 
 		switch currentDefault {
 		case brokerID:
 			// Already the default, nothing to do
-			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, project.Name)
 		case "":
 			// No default set - the server should have auto-set it during provide,
 			// but set it explicitly to be sure
-			_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+			_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 				DefaultRuntimeBrokerID: brokerID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to set default broker: %w", err)
 			}
-			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, project.Name)
 		default:
 			// Different default already set - resolve its name and confirm
 			currentDefaultName := currentDefault[:8] // fallback to truncated ID
@@ -1181,21 +1178,47 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 				currentDefaultName = currentBroker.Name
 			}
 
-			if !hubsync.ShowChangeDefaultBrokerPrompt(resp.Project.Name, currentDefaultName, brokerName, autoConfirm) {
+			if !hubsync.ShowChangeDefaultBrokerPrompt(project.Name, currentDefaultName, brokerName, autoConfirm) {
 				fmt.Println("Default broker not changed.")
 			} else {
-				_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+				_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 					DefaultRuntimeBrokerID: brokerID,
 				})
 				if err != nil {
 					return fmt.Errorf("failed to update default broker: %w", err)
 				}
-				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", resp.Project.Name, currentDefaultName, brokerName)
+				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", project.Name, currentDefaultName, brokerName)
 			}
 		}
 	}
 
 	return nil
+}
+
+// provideBrokerToProject links brokerID to projectID through the project
+// providers API (POST /api/v1/projects/{id}/providers), which requires
+// project update on the project and broker update on the broker (its owner
+// or a super-admin). When the broker is already a provider, its recorded
+// local path is kept, so providing again never turns a hub-managed project
+// into a linked one. Returns the project as it is after the link.
+func provideBrokerToProject(ctx context.Context, client hubclient.Client, projectID, brokerID, localPath string) (*hubclient.Project, error) {
+	if providers, err := client.Projects().ListProviders(ctx, projectID); err == nil {
+		for _, p := range providers.Providers {
+			if p.BrokerID == brokerID {
+				localPath = p.LocalPath
+				break
+			}
+		}
+	}
+
+	if _, err := client.Projects().AddProvider(ctx, projectID, &hubclient.AddProviderRequest{
+		BrokerID:  brokerID,
+		LocalPath: localPath,
+	}); err != nil {
+		return nil, err
+	}
+
+	return client.Projects().Get(ctx, projectID)
 }
 
 func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
