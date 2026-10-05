@@ -3963,3 +3963,80 @@ func TestPutServerConfigDB_SharedDirStorageBackend_Invalid(t *testing.T) {
 		}
 	})
 }
+
+// home_storage_backend and home_storage_leaf round-trip through the DB
+// settings on profiles and runtime entries: stored, returned by GET, kept
+// when another profile field is edited and written back, kept when another
+// section is written, and present in the overlay the co-located broker
+// reads at each dispatch. A docker profile on the same hub still resolves
+// its own value, which the broker ignores for non-Kubernetes runtimes.
+func TestPutServerConfigDB_HomeStorage_RoundTrip(t *testing.T) {
+	sdsWriteGlobalNFSBlock(t)
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+
+	srv, _, ops := newTestDBServer(t)
+	put := func(body string) string {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	resp := put(`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "broker"}, "docker": {"type": "docker", "home_storage_backend": "nfs"}},
+		"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "nfs", "home_storage_leaf": "pod"}, "local": {"runtime": "docker"}}}`)
+	if !strings.Contains(resp, "runtimes.docker.home_storage_backend") {
+		t.Errorf("an nfs value on a docker entry should be saved with a warning, got: %s", resp)
+	}
+	profiles := sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" {
+		t.Fatalf("GET after PUT: gke = %+v, want nfs/pod", got)
+	}
+
+	gke := profiles["gke"]
+	gke.DefaultTemplate = "edited-template"
+	profiles["gke"] = gke
+	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(string(body))
+	put(`{"server": {"hub": {"admin_mode": false}}}`)
+
+	profiles = sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" || got.DefaultTemplate != "edited-template" {
+		t.Errorf("after editing another field: gke = %+v", got)
+	}
+
+	ApplySnapshot(srv, ops.Snapshot())
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gs.ResolveHomeStorage("gke"); got.Backend != "nfs" || got.Leaf != "pod" {
+		t.Fatalf("overlay resolution for gke = %+v, want nfs/pod", got)
+	}
+	if got := gs.Runtimes["k8s"].HomeStorageLeaf; got != "broker" {
+		t.Errorf("runtime entry home_storage_leaf = %q, want broker", got)
+	}
+}
+
+// Unknown home storage values are rejected on a DB-mode write.
+func TestPutServerConfigDB_HomeStorage_Invalid(t *testing.T) {
+	for _, body := range []string{
+		`{"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "ceph"}}}`,
+		`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "node"}}}`,
+	} {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code < 400 {
+			t.Fatalf("%s: expected a 4xx, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+}

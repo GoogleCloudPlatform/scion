@@ -217,6 +217,11 @@ type HTTPAgentDispatcher struct {
 	// conduitCapability reports whether this hub serves conduit sessions
 	// (SCION_HUB_CONDUIT). Nil means never.
 	conduitCapability func() bool
+
+	// dispatchExperimentsProvider returns the enabled hub experiments that
+	// change broker behaviour, read on every create, start and restart
+	// dispatch. Nil provider = none sent.
+	dispatchExperimentsProvider func() []string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -395,6 +400,21 @@ func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.A
 // so a settings change reaches an agent at its next start.
 func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
 	d.autoExposePortsDefaultProvider = fn
+}
+
+// SetDispatchExperimentsProvider registers the accessor for the enabled
+// hub experiments sent to brokers with each create, start and restart
+// dispatch, so an admin toggle applies at the agent's next dispatch.
+func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
+	d.dispatchExperimentsProvider = fn
+}
+
+// dispatchExperiments returns the enabled dispatch experiments, or nil.
+func (d *HTTPAgentDispatcher) dispatchExperiments() []string {
+	if d.dispatchExperimentsProvider == nil {
+		return nil
+	}
+	return d.dispatchExperimentsProvider()
 }
 
 // autoExposePortsDefault returns the hub auto-expose default, or nil when no
@@ -781,7 +801,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.hubAgentDefaultsProvider != nil {
 			hubDefaults = d.hubAgentDefaultsProvider()
 		}
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), d.dispatchExperiments())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -1210,6 +1230,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
+	// The global project also sends its slug alongside a provider path.
 	if agent.ProjectID == "" {
 		return projectDispatchInfo{}, nil
 	}
@@ -1249,6 +1270,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
+	} else if isGlobalHubProject(project.Slug) {
+		// The global project's slug travels with its provider path so the
+		// broker can tell the global project apart from another project
+		// whose path points at the broker's global directory. The broker
+		// keeps resolving the project from the path.
+		info.projectSlug = globalProjectSlug
 	}
 	return info, nil
 }
@@ -3226,7 +3253,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3358,7 +3385,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)

@@ -7,7 +7,9 @@ package log
 import (
 	stdlog "log"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -104,4 +106,44 @@ func TestDebug_RacesWithSetDebug(t *testing.T) {
 		Debug("line %d", i)
 		_ = h.Enabled(t.Context(), slog.LevelDebug)
 	})
+}
+
+// TestSetLogPathBeforeInitStillRunsLazyInit pins ptone/scion#2657: calling
+// SetLogPath before any Init must not skip the lazy init's SCION_DEBUG read
+// and slog default handler installation, and the lazy init must keep the
+// explicitly set path.
+func TestSetLogPathBeforeInitStillRunsLazyInit(t *testing.T) {
+	resetUninitializedForTest(t)
+	t.Setenv("SCION_DEBUG", "1")
+	path := filepath.Join(t.TempDir(), "explicit.log")
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+
+	SetLogPath(path)
+	if initialized.Load() {
+		t.Fatal("SetLogPath must not mark the package initialized")
+	}
+	Info("first line")
+
+	if got := initRuns.Load(); got != 1 {
+		t.Fatalf("lazy init ran %d times, want 1", got)
+	}
+	if !debug.Load() {
+		t.Fatal("lazy init did not read SCION_DEBUG")
+	}
+	if _, ok := slog.Default().Handler().(*slogHandler); !ok {
+		t.Fatalf("slog default handler = %T, want *slogHandler", slog.Default().Handler())
+	}
+	mu.Lock()
+	gotPath := logPath
+	mu.Unlock()
+	if gotPath != path {
+		t.Fatalf("logPath = %q, want %q", gotPath, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "first line") {
+		t.Fatalf("log file = %q, want it to contain the first line", data)
+	}
 }
