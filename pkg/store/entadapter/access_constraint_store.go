@@ -713,10 +713,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 // Time field comparison helpers for keyset pagination
 // ---------------------------------------------------------------------------
 
-// mustParseCursorTime parses a time string from a server-generated cursor.
-// Cursors are always encoded with RFC3339Nano, so parse errors indicate a
-// corrupted cursor. Returns time.Time{} and logs a warning on failure rather
-// than silently discarding the error.
+// mustParseCursorTime parses the RFC3339Nano sort value of a time-sorted
+// cursor. ListAccessConstraintsFiltered validates that value before building
+// any predicate and rejects a corrupt one with store.ErrInvalidInput, so the
+// zero-time fallback here is only defence in depth: on failure it logs a
+// warning and returns time.Time{}.
 func mustParseCursorTime(val string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, val)
 	if err != nil {
