@@ -356,7 +356,9 @@ func TestAgentLifecycle_RunningRestartRefusedLeavesAgentRunning(t *testing.T) {
 }
 
 // failingSAGetStore makes GetGCPServiceAccount fail with a store error that
-// is not ErrNotFound while failGet is set.
+// is not ErrNotFound while failGet is set. The error wraps a store sentinel
+// (ErrVersionConflict) that writeErrorFromErr would map to 409, so the test
+// below pins that this path answers a plain 500 whatever the store returns.
 type failingSAGetStore struct {
 	store.Store
 	failGet atomic.Bool
@@ -364,7 +366,7 @@ type failingSAGetStore struct {
 
 func (f *failingSAGetStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
 	if f.failGet.Load() {
-		return nil, errors.New("injected lookup failure")
+		return nil, fmt.Errorf("injected lookup failure: %w", store.ErrVersionConflict)
 	}
 	return f.Store.GetGCPServiceAccount(ctx, id)
 }
@@ -425,8 +427,10 @@ func TestHandleExistingAgent_GCPIdentityStartRefusal(t *testing.T) {
 					status = store.GCPVerificationVerified
 				}
 				assignAgentGCPSA(t, f.store, agent, name, admissible, status)
+				// A ceiling makes the broker quota reservation observable.
+				setBrokerAgentCeiling(t, f.store, 5)
 
-				body := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID}
+				body := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID, "task": "new task text"}
 				if br.resume {
 					body["resume"] = true
 				}
@@ -435,6 +439,11 @@ func TestHandleExistingAgent_GCPIdentityStartRefusal(t *testing.T) {
 				if admissible {
 					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 					assert.Equal(t, 1, disp.starts, "an admissible assignment proceeds to dispatch")
+					if br.phase != state.PhaseCreated {
+						// The resume branches reserve a broker slot; seeing it
+						// here shows the refused-case assertion below is live.
+						assert.True(t, hasReservation(t, f.store, store.LimitMaxAgentsPerBroker, agent.ID))
+					}
 					return
 				}
 				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -447,6 +456,10 @@ func TestHandleExistingAgent_GCPIdentityStartRefusal(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, string(br.phase), got.Phase)
 				assert.Equal(t, before.RunIntent, got.RunIntent, "no run-intent write before the refusal")
+				require.NotNil(t, got.AppliedConfig)
+				assert.Equal(t, before.AppliedConfig.Task, got.AppliedConfig.Task, "the request's task is not applied")
+				assert.False(t, hasReservation(t, f.store, store.LimitMaxAgentsPerBroker, agent.ID),
+					"no broker quota reserved before the refusal")
 			})
 		}
 	}
