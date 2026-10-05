@@ -501,10 +501,9 @@ type healthProbeResponse struct {
 // nonHealthyChecks lists what kept a health response from being "healthy",
 // as sorted "key: value" strings: non-healthy hub checks from either the
 // top level (standalone Hub) or the nested "hub" object (combined mode),
-// plus "broker: <status>" when a nested broker reports non-healthy. (Broker
-// check values are not "healthy"-valued — e.g. docker: "available" — so
-// only its status is consulted.) Returns nil for a healthy or empty
-// response.
+// plus, when a nested broker reports non-healthy, its problem checks as
+// "broker.<key>: <value>" (falling back to "broker: <status>" if no check
+// qualifies). Returns nil for a healthy or empty response.
 func nonHealthyChecks(health healthProbeResponse) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -524,8 +523,21 @@ func nonHealthyChecks(health healthProbeResponse) []string {
 	if health.Hub != nil {
 		add(health.Hub.Checks)
 	}
-	if health.Broker != nil && health.Broker.Status != "" && health.Broker.Status != probeStatusHealthy {
-		out = append(out, "broker: "+health.Broker.Status)
+	if b := health.Broker; b != nil && b.Status != "" && b.Status != probeStatusHealthy {
+		// Same rule the broker uses to degrade itself
+		// (pkg/runtimebroker/handlers.go): a check value other than
+		// "available" or "healthy" is a problem. Name those; fall back to
+		// the bare broker status only when none qualifies.
+		named := false
+		for k, v := range b.Checks {
+			if v != "available" && v != probeStatusHealthy {
+				out = append(out, "broker."+k+": "+v)
+				named = true
+			}
+		}
+		if !named {
+			out = append(out, "broker: "+b.Status)
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -634,8 +646,11 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 					// non-healthy checks are named instead of a bare "not
 					// detected". Requiring webPortHasHub keeps an unrelated
 					// service on 8080 answering {"status":"degraded"} from
-					// being reported as the scion web server; a scion web
-					// server without a hub provider never reports degraded.
+					// being reported as the scion web server. A web+broker
+					// server without a hub (no nested "hub") that is
+					// degraded therefore stays "not detected" here, as
+					// before this change; only bodies with a nested hub are
+					// treated as the scion composite.
 					up := probeStatusIsUp(health.Status)
 					status.WebRunning = up
 					status.HubRunning = up
@@ -858,6 +873,8 @@ func waitForServerReady(host string, port int, timeout time.Duration) (ready boo
 // waitForServerReady, and whether to open the browser:
 //   - ready, healthy:            no message, open.
 //   - ready, degraded:           a warning naming the checks, open (it is up).
+//   - not ready, stale degraded: the server stopped answering after a
+//     degraded answer; say so, with the last checks, no open.
 //   - not ready, with a reason:  the status and checks (e.g. unhealthy), no open.
 //   - not ready, no answer:      "not yet ready", no open.
 func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg string, openBrowser bool) {
@@ -869,6 +886,12 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 		return fmt.Sprintf("  Warning: server is up but degraded: %s — %s", reason, healthProblemHint(reason)), true
 	case ready:
 		return "", true
+	case reason != "" && probeStatusIsUp(lastHealth.Status):
+		// Not ready, yet the last answer was an "up" status: the server
+		// answered (degraded) and then stopped answering before the
+		// deadline (waitForServerReady requires the last poll to answer).
+		// Do not claim it is up.
+		return fmt.Sprintf("  (server stopped answering /healthz; last status %s: %s — see server log)", lastHealth.Status, reason), false
 	case reason != "":
 		return fmt.Sprintf("  (server is up but %s: %s — open the URL manually; %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
 	default:

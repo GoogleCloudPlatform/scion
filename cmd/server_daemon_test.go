@@ -231,7 +231,9 @@ func TestHealthProblemReason(t *testing.T) {
 		{"standalone unhealthy, database", `{"status":"unhealthy","checks":{"database":"unhealthy"}}`, "database: unhealthy"},
 		{"several checks sorted", `{"status":"unhealthy","checks":{"database":"unhealthy","colocated_broker":"unhealthy: registration failed"}}`, "colocated_broker: unhealthy: registration failed; database: unhealthy"},
 		{"informational key", `{"status":"degraded","checks":{"workspace_storage":"healthy","workspace_storage_mount_verification":"unavailable: could not compare filesystem device IDs"}}`, "workspace_storage_mount_verification: unavailable: could not compare filesystem device IDs"},
-		{"composite degraded by broker only", `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"database":"healthy"}},"broker":{"status":"degraded","checks":{"docker":"available"}}}`, "broker: degraded"},
+		{"composite degraded by broker only, cause named", `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"database":"healthy"}},"broker":{"status":"degraded","checks":{"docker":"available","nfs_mounts":"unhealthy: share1 not mounted"}}}`, "broker.nfs_mounts: unhealthy: share1 not mounted"},
+		{"composite degraded by broker, no named check", `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"healthy","checks":{"database":"healthy"}},"broker":{"status":"degraded","checks":{"docker":"available"}}}`, "broker: degraded"},
+		{"healthy broker checks are ignored", `{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"},"broker":{"status":"healthy","checks":{"runtime":"unavailable"}}}`, ""},
 		{"degraded with no named check", `{"status":"degraded"}`, "status: degraded"},
 	}
 	for _, tt := range tests {
@@ -675,6 +677,8 @@ func TestQuickstartReadyMessage(t *testing.T) {
 			"  Warning: server is up but degraded: colocated_broker: unhealthy: registration failed — see server log; restart after fixing the broker config", true},
 		{"unhealthy", false, parse(`{"status":"unhealthy","hub":{"status":"unhealthy","checks":{"database":"unhealthy"}}}`),
 			"  (server is up but unhealthy: database: unhealthy — open the URL manually; see server log)", false},
+		{"stale degraded (answered, then stopped)", false, parse(`{"status":"degraded","hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration failed"}}}`),
+			"  (server stopped answering /healthz; last status degraded: colocated_broker: unhealthy: registration failed — see server log)", false},
 		{"never answered", false, healthProbeResponse{}, "  (server not yet ready — open the URL manually once it starts)", false},
 	}
 	for _, tt := range tests {
