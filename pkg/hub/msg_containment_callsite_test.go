@@ -165,7 +165,7 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// has already authorized the start (the lifecycle and create handlers'
 	// authz, the wake's DM admission) before calling it.
 	{file: "start_claim.go", function: "startAgentCore", symbol: "DispatchAgentStart",
-		class: "exempt", reason: "shared start path: callers authorize the start before calling it"},
+		class: "guarded", reason: "shared start path: every caller authorizes the start before calling it"},
 
 	// handlers_agent_lifecycle.go: DispatchAgentStart in handleAgentLifecycle.
 	{file: "handlers_agent_lifecycle.go", function: "handleAgentLifecycle", symbol: "DispatchAgentStart",

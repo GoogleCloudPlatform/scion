@@ -298,6 +298,7 @@ func TestStartClaim_CompensatingStop(t *testing.T) {
 	}
 	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
 	assert.Equal(t, int32(1), d.stops.Load(), "a start that completed after a stop was accepted is stopped")
+	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the compensating stop releases its stop claim")
 }
 
 func TestStartClaim_OutcomeClassification(t *testing.T) {
