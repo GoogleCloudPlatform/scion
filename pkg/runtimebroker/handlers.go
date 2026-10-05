@@ -234,7 +234,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
 			// Cross-broker agent move is not implemented by this broker.
-			AgentMove: false,
+			AgentMove:      false,
+			StartsInFlight: s.startsInFlight != nil,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1176,8 +1177,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+ssErr.Error())
 			return
 		}
+		// Tracked as a start in flight until Manager.Start, Run's deferred
+		// cleanup and ss.finish have all returned: finishTracked is
+		// deferred first, so it runs last.
+		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
+		defer finishTracked()
 		defer ss.finish()
-		ctx = startCtx
+		ctx = trackCtx
 	}
 
 	// Branch based on provision-only flag
@@ -2027,7 +2033,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 }
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	ctx := r.Context()
+	// Tracked until Manager.Start and Run's deferred cleanup have returned.
+	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	defer finishTracked()
 
 	// ProjectID reaches filesystem paths further on (the project-marker
 	// block in buildStartContext, and worktree provisioning); an empty
@@ -2557,6 +2565,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// Wake any local launch waiting on this agent (design §3.8.1); see the
 	// identical comment in deleteAgent.
 	s.cancelLocalLaunch(launchKey{ProjectID: projectID, Slug: id})
+	// Cancel a start of this agent still running on this broker and wait
+	// for its cleanup before stopping, so a start whose hub cancel was lost
+	// cannot create a container after this stop.
+	s.cancelInFlightStart(ctx, launchKey{ProjectID: projectID, Slug: id})
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
@@ -2662,7 +2674,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	ctx := r.Context()
+	// Tracked until the start leg, including Run's deferred cleanup, has
+	// returned.
+	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	defer finishTracked()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {
