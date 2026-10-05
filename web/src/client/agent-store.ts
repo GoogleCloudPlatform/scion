@@ -380,7 +380,12 @@ const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
  * The keys of a compact row from a project's agent list: the hub's compact
  * item, which omits a key whose value is empty. A merge deletes any of these
  * a row lacks (see {@link mergeCompactRow}), so the set must not hold a key
- * the server does not send.
+ * the server does not send. The hub ships and serves this client, so the
+ * two do not skew in practice; a hub without the compact view lists full
+ * rows, which also omit empty values and hold the creator name only inside
+ * `appliedConfig`.
+ * `deletion` is not in the set: a row without it comes from a hub that does
+ * not send it, so the held value stays.
  */
 const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'id',
