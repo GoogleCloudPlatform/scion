@@ -55,7 +55,10 @@ func newHubDeliveryTestAgent(t *testing.T, s store.Store, agentID, projectID, ow
 		ProjectID: projectID, Phase: string(state.PhaseRunning),
 		OwnerID: ownerID, CreatedBy: ownerID, Ancestry: []string{ownerID},
 	}))
-	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
+	// A recorded edge (session provenance, principal ceiling): delivery
+	// permissions require recorded provenance on every hop, so an edge
+	// without provenance would deny the ordinary-proof controls below.
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 }
 

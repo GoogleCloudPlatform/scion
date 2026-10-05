@@ -29,22 +29,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file runs the decision-count and candidate-ceiling gates at the
-// design's own test-plan sizes (n in 25, 100, 500, 501, 1200; real
-// 2000/2001-row ceiling rows). Fixtures use store.Store.WithTx (one
-// transaction for the whole batch)
-// rather than one CreateAgent call per row: a 1200-row bulk insert this way
-// takes well under a second in this sandbox, which is what makes these
-// sizes practical to run as unit tests at all — the smaller sizes used
-// elsewhere in this package were a overcautious reaction to this repo's
-// cold-build compile time, not to real per-row insert cost.
+// This file runs the decision-count and candidate-ceiling gates at
+// boundary sizes (n in 25, 100, 500, 501, 1200; real 2000/2001-row
+// ceiling rows). Fixtures use store.Store.WithTx (one transaction for the
+// whole batch) rather than one CreateAgent call per row: a 1200-row bulk
+// insert this way takes well under a second in this sandbox, which is what
+// makes these sizes practical to run as unit tests at all — the smaller
+// sizes used elsewhere in this package were a overcautious reaction to
+// this repo's cold-build compile time, not to real per-row insert cost.
 
 // TestListProjectAgentsSorted_DecisionCounts_DesignSizes is the non-waivable
-// decision-count hard gate at the design's own n values, all-readable (R=n).
-// n <= 500 can be a complete fit response (fit's valid range is 1..500,
-// design 4.1); n > 500 cannot, so those two sizes exercise the paged formula
-// instead, with limit=25 to match the design's own illustrative P (section
-// 6.4: "n + 180" is 7P with P=25).
+// decision-count hard gate at the sizes above, all-readable (R=n).
+// n <= 500 can be a complete fit response (fit's valid range is
+// 1..500); n > 500 cannot, so those two sizes exercise the paged formula
+// instead, with limit=25 as the page size P (so 7P = 175).
 func TestListProjectAgentsSorted_DecisionCounts_DesignSizes(t *testing.T) {
 	sizes := []int{25, 100, 500, 501, 1200}
 	for _, n := range sizes {
@@ -59,18 +57,18 @@ func TestListProjectAgentsSorted_DecisionCounts_DesignSizes(t *testing.T) {
 			var query string
 			var want int
 			if n <= 500 {
-				// fit must be >= limit (design 4.1); use limit=n too so a
+				// fit must be >= limit; use limit=n too so a
 				// small fit (e.g. 25) isn't rejected against the default
 				// limit of 500.
 				query = fmt.Sprintf("sort=updated&fit=%d&limit=%d", n, n)
-				want = 5 + 8*n // design 6.4: "5 + 8n", equal to today's 205/805/4005 at 25/100/500 when every candidate is readable
+				want = 5 + 8*n // complete formula "5 + 8n", equal to today's 205/805/4005 at 25/100/500 when every candidate is readable
 			} else {
 				const limit = 25
 				// fit=500 (the max allowed) is still < n here, so the
 				// response is paged regardless -- matching the real
-				// client's first request, which always sends fit (4.3).
+				// client's first request, which always sends fit.
 				query = fmt.Sprintf("sort=updated&fit=500&limit=%d", limit)
-				want = 5 + n + 7*limit // design 6.4/5.3: "5 + n + 7P"
+				want = 5 + n + 7*limit // paged formula "5 + n + 7P"
 			}
 
 			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(query), nil)
@@ -98,7 +96,7 @@ func TestListProjectAgentsSorted_DecisionCounts_DesignSizes(t *testing.T) {
 // caller, one project, one role, reads exactly its owned subset of agents —
 // the project endpoint's agent.read is otherwise all-or-nothing per
 // (principal, project) via role bindings and has no other per-resource
-// visibility narrowing (design 5.3's R < n note).
+// visibility narrowing (needed to get a readable count R < n).
 func grantProjectListOnly(t *testing.T, s store.Store, userID, projectID, roleName string) {
 	t.Helper()
 	rd := createTestRoleDefinition(t, s, roleName, store.RoleScopeProject, []string{"agent.list"})
@@ -114,9 +112,8 @@ func grantProjectListOnly(t *testing.T, s store.Store, userID, projectID, roleNa
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged is the
-// design's explicit decision-count sub-case: n=1200, R=400 (paged), exactly
-// 1380 decisions (design 9: "5 + 8n" withdrawn in favor of "n = 1,200 with
-// R = 400 (paged, 1,380, not complete)").
+// partial-read paged decision-count case: n=1200, R=400 (paged), exactly
+// 1380 decisions (5 + n + 7P with P=25).
 func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) {
 	f := sortedListSetup(t)
 
@@ -129,7 +126,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-list-only-1200")
 
 	const n, r = 1200, 400
-	f.createAgentsBulk(t, n, "pr1200", string(state.PhaseStopped), func(i int) string {
+	agents := f.createAgentsBulk(t, n, "pr1200", string(state.PhaseStopped), func(i int) string {
 		if i < r {
 			return caller.ID // first r agents are owned by caller -> readable via the owner grant
 		}
@@ -140,21 +137,22 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
 	const limit = 25
-	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=500&limit=%d", limit)), nil)
+	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=500&limit=%d&stats=1", limit)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
 	assert.False(t, *resp.Complete, "n=1200 > fit's 500 max, so this can only ever be paged")
 	assert.Equal(t, r, resp.TotalCount, "totalCount is the readable (phase-filtered) count, independent of page size")
+	assertStatsWithinReadable(t, resp, agents[:r])
 
-	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
+	// 5 (gate+scope caps) + n (read pass over every candidate) +
 	// 7*limit (remaining-action pass for the page only) = 5 + 1200 + 175 = 1380.
 	assert.Len(t, emitter.records, 1380)
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete is the
-// design's other explicit decision-count sub-case: n=500, R=200 (complete),
-// exactly 5 + 500 + 7*200 = 1905 decisions (design 9).
+// partial-read complete decision-count case: n=500, R=200 (complete),
+// exactly 5 + 500 + 7*200 = 1905 decisions.
 func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 
@@ -167,7 +165,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-list-only-500")
 
 	const n, r = 500, 200
-	f.createAgentsBulk(t, n, "pr500", string(state.PhaseStopped), func(i int) string {
+	agents := f.createAgentsBulk(t, n, "pr500", string(state.PhaseStopped), func(i int) string {
 		if i < r {
 			return caller.ID
 		}
@@ -177,20 +175,21 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
-	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d", n)), nil)
+	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d&stats=1", n)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
-	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R (design 5.3 step 2)")
+	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R")
 	assert.Len(t, resp.Agents, r, "a complete response's page is the whole readable set")
 	assert.Equal(t, r, resp.TotalCount)
+	assertStatsWithinReadable(t, resp, agents[:r])
 
-	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
+	// 5 (gate+scope caps) + n (read pass over every candidate) +
 	// 7*r (remaining-action pass over every readable item) = 5 + 500 + 1400 = 1905.
 	assert.Len(t, emitter.records, 1905)
 }
 
-// --- candidate ceiling: real rows at the ceiling (design hard gate) --------
+// --- candidate ceiling: real rows at the ceiling (hard gate) ---------------
 
 // TestListProjectAgentsSorted_CandidateCeiling_RealRows uses a real
 // 2001-row candidate pool (no store decorator): the ceiling trips on the
@@ -280,4 +279,23 @@ func TestListProjectAgentsSorted_LegacyUnaffectedAbove2001(t *testing.T) {
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Len(t, resp.Agents, 500)
 	assert.NotEmpty(t, resp.NextCursor)
+}
+
+// assertStatsWithinReadable checks that a project user response's stats
+// block counts and lists exactly the caller-readable agents: stats.total is
+// len(readable) and every stats.agents id is one of them. stats=1 adds no
+// decisions, so the exact decision counts in the callers still hold.
+func assertStatsWithinReadable(t *testing.T, resp ListAgentsResponse, readable []*store.Agent) {
+	t.Helper()
+	ids := make(map[string]bool, len(readable))
+	for _, a := range readable {
+		ids[a.ID] = true
+	}
+	require.NotNil(t, resp.Stats)
+	require.NotNil(t, resp.Stats.Agents)
+	assert.Equal(t, len(readable), resp.Stats.Total, "stats.total must be the readable count")
+	assert.Len(t, *resp.Stats.Agents, len(readable))
+	for _, ip := range *resp.Stats.Agents {
+		assert.True(t, ids[ip[0]], "stats.agents lists %s, which the caller cannot read", ip[0])
+	}
 }

@@ -15,9 +15,11 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -159,10 +161,7 @@ func resolveSharedDirs(
 	// computed something unexpected (round 2 review finding F1). This also
 	// protects the K8s subPath, since it comes from the same
 	// ServerRelativePath.
-	subPathRoot := sdCfg.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	for _, name := range names {
 		sd, ok := res.SharedDirs[name]
 		if !ok {
@@ -306,4 +305,170 @@ func isLocalContainerRuntime(name string) bool {
 // RunConfig.SharedDirStorage / buildPod's PVC-by-subPath branch).
 func isKubernetesRuntime(name string) bool {
 	return name == "kubernetes"
+}
+
+// sharedDirStorageBackendName returns the backend a resolved shared-dir
+// storage config selects: "nfs", or "local" for nil, "" and "local".
+func sharedDirStorageBackendName(cfg *config.V1SharedDirStorageConfig) string {
+	if cfg != nil && cfg.Backend == "nfs" {
+		return "nfs"
+	}
+	return "local"
+}
+
+// sharedDirStorageRecordFile is the per-agent file, in the agent directory
+// next to scion-agent.json, that records the backend the agent's shared
+// dirs were first set up with. It is outside the agent home, so the
+// agent's container never mounts it, and reprovisioning the agent leaves
+// it in place.
+const sharedDirStorageRecordFile = "shared-dir-storage.json"
+
+type sharedDirStorageRecord struct {
+	Backend string `json:"backend"`
+}
+
+// readSharedDirStorageRecord returns the recorded shared-dir storage
+// backend for the agent whose directory is agentDir, or "" when none is
+// recorded (a first start, or an agent created before the backend was
+// recorded). A record that exists but cannot be read or parsed, or that
+// names no backend, is an error, so a damaged record never silently falls
+// back to the current settings.
+func readSharedDirStorageRecord(agentDir string) (string, error) {
+	if agentDir == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, sharedDirStorageRecordFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the agent's shared-dir storage record: %w", err)
+	}
+	var rec sharedDirStorageRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return "", fmt.Errorf("parsing the agent's shared-dir storage record %s: %w", filepath.Join(agentDir, sharedDirStorageRecordFile), err)
+	}
+	if rec.Backend == "" {
+		return "", fmt.Errorf("the agent's shared-dir storage record %s names no backend", filepath.Join(agentDir, sharedDirStorageRecordFile))
+	}
+	return rec.Backend, nil
+}
+
+// writeSharedDirStorageRecord records backend for the agent whose
+// directory is agentDir, through writeAgentRecordFile.
+func writeSharedDirStorageRecord(agentDir, backend string) error {
+	if agentDir == "" {
+		return fmt.Errorf("no agent directory to record the shared-dir storage backend in")
+	}
+	return writeAgentRecordFile(agentDir, sharedDirStorageRecordFile, sharedDirStorageRecord{Backend: backend})
+}
+
+// writeAgentRecordFile writes v as JSON to the file name in agentDir. It is
+// the single writer for the per-agent storage records (shared-dir storage
+// and home storage). The file is written to a temporary name and renamed
+// into place, so a reader never sees a partial record. The file and the
+// directory are synced so the record survives a crash.
+func writeAgentRecordFile(agentDir, name string, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(agentDir, name)
+	tmp, err := os.CreateTemp(agentDir, name+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	closed, renamed := false, false
+	defer func() {
+		if !closed {
+			_ = tmp.Close()
+		}
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	closed = true
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	renamed = true
+	// Sync the directory so the rename survives a crash. Not all platforms
+	// support this; a failure here does not undo the write.
+	if d, derr := os.Open(agentDir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+// selectSharedDirStorage returns the shared-dir storage config for one
+// agent start. gs must come from config.LoadGlobalSettingsWithOverlay, so a
+// project's own settings never choose the backend.
+//
+// With a recorded backend that backend is kept, so a settings change never
+// moves an existing agent's shared dirs. The recorded backend is checked
+// first: a profile or runtime override that is now invalid only logs a
+// warning for such an agent, since the agent does not use it. A recorded
+// nfs backend whose server.shared_dir_storage.nfs block is no longer
+// complete is an error, returned before anything touches the filesystem.
+//
+// Without a recorded backend (a first start, or an agent created before
+// the backend was recorded) it is the per-profile resolution: the
+// profile's shared_dir_storage_backend, else its runtime entry's, else
+// server.shared_dir_storage.backend. An invalid override is an error that
+// names the key.
+func selectSharedDirStorage(gs *config.VersionedSettings, profile, recorded, agentName string) (*config.V1SharedDirStorageConfig, error) {
+	if gs == nil {
+		return nil, fmt.Errorf("no global settings to choose the shared-dir storage backend for agent %q from", agentName)
+	}
+	current, source := gs.ResolveSharedDirStorage(profile)
+	var overrideErr error
+	if current != nil && source != config.SharedDirStorageGlobalSource {
+		// An override names its own key, so a bad value or an nfs
+		// override without an nfs block points at where it is set.
+		if err := current.Validate(); err != nil {
+			overrideErr = fmt.Errorf("%s: %w", source, err)
+		}
+	}
+	if recorded == "" {
+		if overrideErr != nil {
+			return nil, overrideErr
+		}
+		return current, nil
+	}
+	if overrideErr != nil {
+		slog.Warn("Start: ignoring an invalid shared-dir storage override; the agent keeps its recorded backend",
+			"agent", agentName, "recorded", recorded, "error", overrideErr)
+	} else if recorded != sharedDirStorageBackendName(current) {
+		slog.Warn("Start: settings now select a different shared-dir storage backend than the agent was created with; keeping the agent's backend",
+			"agent", agentName, "recorded", recorded, "current", sharedDirStorageBackendName(current), "source", source)
+	}
+	switch recorded {
+	case "local":
+		return &config.V1SharedDirStorageConfig{Backend: "local"}, nil
+	case "nfs":
+		out := &config.V1SharedDirStorageConfig{Backend: "nfs"}
+		if gs.Server != nil && gs.Server.SharedDirStorage != nil {
+			out.NFS = gs.Server.SharedDirStorage.NFS
+		}
+		if err := out.Validate(); err != nil {
+			return nil, fmt.Errorf("agent %q was created with the nfs shared-dir storage backend, but server.shared_dir_storage.nfs is no longer complete: %w", agentName, err)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("agent %q records an unknown shared-dir storage backend %q", agentName, recorded)
+	}
 }

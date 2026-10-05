@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Shared mock data builders ──
 
@@ -109,6 +110,8 @@ function createFetchHandler(
       body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
+    checkUpdatesResponse?: Record<string, unknown>;
+    onOperationRun?: (path: string) => void;
   }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -172,6 +175,25 @@ function createFetchHandler(
           ),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         )
+      );
+    }
+
+    if (path.includes('/api/v1/admin/maintenance/check-updates')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(opts?.checkUpdatesResponse ?? { tier: 'source', update_available: false }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    }
+
+    if (path.includes('/api/v1/admin/maintenance/operations/') && path.endsWith('/run')) {
+      opts?.onOperationRun?.(path);
+      return Promise.resolve(
+        new Response(JSON.stringify({ runId: 'run-1', status: 'running' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
@@ -289,6 +311,56 @@ describe('scion-page-admin-server-config', () => {
       expect(metaText).toContain('Database');
       expect(metaText).toContain('rev 5');
       expect(metaText).toContain('admin@test.com');
+    });
+
+    it('section metadata time renders in the display zone, 24-hour, with a zone label (tz-refactor task 20)', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        section_metadata: {
+          // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+          endpoints: { source: 'db', revision: 5, updated_at: '2026-07-01T15:00:00Z' },
+        },
+      });
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        element = await createComponent(createFetchHandler(config));
+        const metaText = () => query(element!, '.section-meta')?.textContent ?? '';
+        expect(metaText()).toContain('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+
+        setPreferredTimeZone('UTC');
+        await element.updateComplete;
+        expect(metaText()).toContain('Jul 1, 2026, 15:00 (UTC)');
+      } finally {
+        setPreferredTimeZone('');
+      }
+    });
+
+    it('build time renders in the display zone with the raw value as its title (tz-refactor task 20)', async () => {
+      const buildTime = (el: HTMLElement) =>
+        Array.from(el.shadowRoot?.querySelectorAll('.version-item') ?? [])
+          .find(
+            (item) => item.querySelector('.version-label')?.textContent?.trim() === 'Build Time'
+          )
+          ?.querySelector('.version-value') ?? null;
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: '2026-07-01T15:00:00Z' }))
+        );
+        const value = buildTime(element);
+        expect(value?.textContent?.trim()).toBe('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+        expect(value?.getAttribute('title')).toBe('2026-07-01T15:00:00Z');
+
+        element.remove();
+        // A value that is not an instant is shown unchanged.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: 'unknown' }))
+        );
+        expect(buildTime(element)?.textContent?.trim()).toBe('unknown');
+      } finally {
+        setPreferredTimeZone('');
+      }
     });
 
     it('section metadata renders source:File for file-sourced sections', async () => {
@@ -998,6 +1070,121 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('Regression ptone/scion#2535 — clearing string fields in file mode', () => {
+    const clearable: Array<[string, string]> = [
+      ['active_profile', 'activeProfile'],
+      ['default_template', 'defaultTemplate'],
+      ['default_harness_auth', 'defaultHarnessAuth'],
+      ['image_registry', 'imageRegistry'],
+      ['workspace_path', 'workspacePath'],
+      ['default_max_agent_role', 'defaultMaxAgentRole'],
+      ['default_agent_role', 'defaultAgentRole'],
+      ['default_runtime_broker', 'defaultRuntimeBroker'],
+    ];
+
+    it('buildFilePayload sends cleared string fields as "" (not omitted)', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = '';
+      el.harnessConfigSelection = '';
+      el.customHarnessConfig = '';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key] of clearable) {
+        expect(payload, key).toHaveProperty(key, '');
+      }
+      expect(payload).toHaveProperty('default_harness_config', '');
+    });
+
+    it('buildFilePayload still sends non-empty string values', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = `v-${prop}`;
+      el.harnessConfigSelection = '__other__';
+      el.customHarnessConfig = 'x';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key, prop] of clearable) {
+        expect(payload, key).toHaveProperty(key, `v-${prop}`);
+      }
+      expect(payload).toHaveProperty('default_harness_config', 'x');
+    });
+
+    it('buildFilePayload sends GCP identity defaults when set', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildFilePayload sends cleared GCP identity defaults as ""', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = '';
+      el.defaultGCPIdentitySAID = '';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', '');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload clears the GCP service account when mode is empty', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = '';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', '');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload omits an env-pinned default_gcp_identity_mode', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            env_overrides: ['default_gcp_identity_mode'],
+          })
+        )
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
 
   describe('Cross-project messaging section', () => {
@@ -1316,6 +1503,454 @@ describe('scion-page-admin-server-config', () => {
       showTab(element, 'general');
       await element.updateComplete;
       expect(experimentsEl.active).toBe(false);
+    });
+  });
+
+  describe('safe_to_evict on runtimes and profiles', () => {
+    function steConfig() {
+      return makeBaseConfig({
+        runtimes: { k8s: { type: 'kubernetes', safe_to_evict: false } },
+        profiles: {
+          gke: { runtime: 'k8s' },
+          evictable: { runtime: 'k8s', safe_to_evict: true },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows false, true and unset distinctly', async () => {
+      element = await createComponent(createFetchHandler(steConfig()));
+      const values = queryAll(element, 'sl-select.safe-to-evict').map((s) =>
+        s.getAttribute('value')
+      );
+      // runtime k8s, then profiles gke and evictable
+      expect(values).toEqual(['false', '', 'true']);
+    });
+
+    it('labels the select as ignored on non-Kubernetes runtimes', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            runtimes: {
+              k8s: { type: 'kubernetes' },
+              docker: { type: 'docker', safe_to_evict: false },
+              remote: {},
+            },
+            profiles: {
+              gke: { runtime: 'k8s' },
+              local: { runtime: 'docker' },
+              far: { runtime: 'remote' },
+            },
+          })
+        )
+      );
+      await (element as any).updateComplete;
+      // the docker runtime card and the profile that uses it
+      expect(queryAll(element, '.safe-to-evict-ignored').length).toBe(2);
+    });
+
+    it('sends booleans, and clearing removes the key', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(steConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeSel, gkeSel, evictableSel] = queryAll(
+        element,
+        'sl-select.safe-to-evict'
+      ) as (HTMLElement & { value: string })[];
+      gkeSel.value = 'false';
+      gkeSel.dispatchEvent(new Event('sl-change'));
+      evictableSel.value = '';
+      evictableSel.dispatchEvent(new Event('sl-change'));
+      expect(runtimeSel).toBeDefined();
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.runtimes.k8s.safe_to_evict).toBe(false);
+      expect(capturedPayload!.profiles.gke.safe_to_evict).toBe(false);
+      expect('safe_to_evict' in capturedPayload!.profiles.evictable).toBe(false);
+    });
+  });
+
+  // ── Tier-based maintenance dispatch (fork issue: rebuild-server always used) ──
+
+  describe('Tier-based maintenance dispatch', () => {
+    it('defaults to source tier and dispatches rebuild-server/run', async () => {
+      let ranPath: string | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 2 },
+          onOperationRun: (path) => {
+            ranPath = path;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+      expect((element as any).deploymentTier).toBe('source');
+
+      await (element as any).triggerUpdate();
+      await (element as any).updateComplete;
+
+      expect(ranPath).not.toBeNull();
+      expect(ranPath).toContain('/operations/rebuild-server/run');
+    });
+
+    it('sets deploymentTier to binary and dispatches update-binary/run', async () => {
+      let ranPath: string | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+          },
+          onOperationRun: (path) => {
+            ranPath = path;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+      expect((element as any).deploymentTier).toBe('binary');
+
+      await (element as any).triggerUpdate();
+      await (element as any).updateComplete;
+
+      expect(ranPath).not.toBeNull();
+      expect(ranPath).toContain('/operations/update-binary/run');
+    });
+
+    it('renders binary-tier version info in the update banner', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+            release_url: 'https://example.com/releases/1.1.0',
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('1.0.0');
+      expect(text).toContain('1.1.0');
+      expect(text).toContain('stable');
+    });
+
+    it('omits the commit count in the source-tier banner when commits_behind is missing', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('Update');
+      expect(text).not.toContain('undefined');
+      expect(text).not.toMatch(/new\s+commit/);
+    });
+
+    it('renders the commit count in the source-tier banner when commits_behind is set', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      expect(shadowText(element)).toMatch(/3\s+new\s+commits/);
+    });
+
+    it('shows binary-tier confirm dialog text', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      (element as any).showUpdateConfirm = true;
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('download the latest release binary');
+      expect(text).not.toContain('pull the latest code');
+    });
+
+    it('shows source-tier confirm dialog text', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      (element as any).showUpdateConfirm = true;
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('pull the latest code');
+      expect(text).not.toContain('download the latest release binary');
+    });
+  });
+
+  describe('shared_dir_storage_backend on runtimes and profiles', () => {
+    function sdsConfig() {
+      // File mode (settings.yaml is authoritative), where every section
+      // without an env override is editable.
+      return makeBaseConfig({
+        runtimes: { k8s: { type: 'kubernetes', shared_dir_storage_backend: 'nfs' } },
+        profiles: {
+          gke: { runtime: 'k8s', shared_dir_storage_backend: 'nfs', timezone: 'UTC' },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows the current value on the runtime and profile cards', async () => {
+      element = await createComponent(createFetchHandler(sdsConfig()));
+      const selects = queryAll(element, 'sl-select.shared-dir-storage-backend');
+      expect(selects.length).toBe(2);
+      for (const sel of selects) {
+        expect(sel.getAttribute('value')).toBe('nfs');
+      }
+    });
+
+    it('editing another profile field keeps the key in the PUT payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(sdsConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
+        | (HTMLElement & { value: string })
+        | null;
+      expect(registry).not.toBeNull();
+      registry!.value = 'registry.example.com/team';
+      registry!.dispatchEvent(new Event('sl-input'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      const gke = capturedPayload!.profiles.gke;
+      expect(gke.image_registry).toBe('registry.example.com/team');
+      expect(gke.shared_dir_storage_backend).toBe('nfs');
+      expect(gke.timezone).toBe('UTC');
+      expect(capturedPayload!.runtimes.k8s.shared_dir_storage_backend).toBe('nfs');
+    });
+
+    it('changing and clearing the select updates the payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(sdsConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      const [runtimeSel, profileSel] = queryAll(
+        element,
+        'sl-select.shared-dir-storage-backend'
+      ) as (HTMLElement & { value: string })[];
+      runtimeSel.value = '';
+      runtimeSel.dispatchEvent(new Event('sl-change'));
+      profileSel.value = 'local';
+      profileSel.dispatchEvent(new Event('sl-change'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.shared_dir_storage_backend).toBe('local');
+      expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
+    });
+  });
+  describe('home storage on runtimes and profiles', () => {
+    function homeConfig() {
+      return makeBaseConfig({
+        runtimes: {
+          k8s: { type: 'kubernetes', home_storage_backend: 'nfs', home_storage_leaf: 'broker' },
+        },
+        profiles: {
+          gke: { runtime: 'k8s', home_storage_backend: 'nfs', home_storage_leaf: 'pod' },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows the current values on the runtime and profile cards', async () => {
+      element = await createComponent(createFetchHandler(homeConfig()));
+      const backends = queryAll(element, 'sl-select.home-storage-backend');
+      expect(backends.map((s) => s.getAttribute('value'))).toEqual(['nfs', 'nfs']);
+      const leaves = queryAll(element, 'sl-select.home-storage-leaf');
+      expect(leaves.map((s) => s.getAttribute('value'))).toEqual(['broker', 'pod']);
+    });
+
+    it('editing another profile field keeps both keys in the PUT payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
+        | (HTMLElement & { value: string })
+        | null;
+      expect(registry).not.toBeNull();
+      registry!.value = 'registry.example.com/team';
+      registry!.dispatchEvent(new Event('sl-input'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('pod');
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.runtimes.k8s.home_storage_leaf).toBe('broker');
+    });
+
+    it('changing and clearing the selects updates the payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeLeaf, profileLeaf] = queryAll(
+        element,
+        'sl-select.home-storage-leaf'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      runtimeLeaf.value = '';
+      runtimeLeaf.dispatchEvent(new Event('sl-change'));
+      profileLeaf.value = 'broker';
+      profileLeaf.dispatchEvent(new Event('sl-change'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('broker');
+      expect('home_storage_leaf' in capturedPayload!.runtimes.k8s).toBe(false);
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+    });
+  });
+  describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
+    const maskedServer = {
+      notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
+      oauth: { web: { github: { client_id: 'cid', client_secret: '********' } } },
+      github_app: { app_id: 42, private_key: '********', webhook_secret: '********' },
+    };
+    const withServer = (tier: string, extra: Record<string, unknown>) => {
+      const base = makeBaseConfig({ settings_tier: tier });
+      return { ...base, server: { ...base.server, ...extra } };
+    };
+
+    it('DB mode payload omits unedited masked notification_channels and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('db', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server).toBeDefined();
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildLayer1Payload())).not.toContain('********');
+    });
+
+    it('file mode payload omits unedited masked notification_channels, oauth and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('file', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.oauth).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildFilePayload())).not.toContain('********');
+    });
+
+    it('DB mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        github_app: { app_id: 42, webhooks_enabled: true },
+      };
+      element = await createComponent(createFetchHandler(withServer('db', plain)));
+      const el = element as any;
+      // Pin github_app: loadGitHubAppConfig may replace it after load.
+      el.rawConfig.server.github_app = plain.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.github_app).toEqual(plain.github_app);
+    });
+
+    it('file mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        oauth: { web: { github: { client_id: 'cid' } } },
+      };
+      element = await createComponent(createFetchHandler(withServer('file', plain)));
+      const server = (element as any).buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.oauth).toEqual(plain.oauth);
     });
   });
 });

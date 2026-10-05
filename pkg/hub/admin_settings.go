@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -403,9 +404,19 @@ func validateDefaultTimezone(tz string) error {
 
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
-	var req ServerConfigUpdateRequest
-	if err := readJSON(r, &req); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	var req ServerConfigUpdateRequest
+	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before settings.yaml is touched.
+	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
 
@@ -439,6 +450,72 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// shared_dir_size on runtime and profile entries must be a Kubernetes
+	// quantity; reject a bad value here, naming its key, rather than writing
+	// it to settings.yaml where it would fail every agent start.
+	if errs := config.ValidateSharedDirSizes(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+
+	// home_storage_backend and home_storage_leaf on runtime and profile
+	// entries, and server.home_storage, must hold known values.
+	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+	if req.Server != nil {
+		if err := req.Server.HomeStorage.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
+	// shared_dir_storage_backend on runtime and profile entries must be
+	// "local" or "nfs", and "nfs" needs a complete
+	// server.shared_dir_storage.nfs block (from this request, else the
+	// current global settings). When the request changes
+	// server.shared_dir_storage, it is also checked against the runtimes
+	// and profiles already stored, so removing or emptying the nfs block
+	// cannot strand an existing nfs override. Configuration only; no mount
+	// is checked.
+	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
+		runtimes, profiles := req.Runtimes, req.Profiles
+		var sdGlobal *config.V1SharedDirStorageConfig
+		if sdInRequest {
+			sdGlobal = req.Server.SharedDirStorage
+		}
+		sdKnown := true
+		if !sdInRequest || runtimes == nil || profiles == nil {
+			gs, _, gErr := config.LoadGlobalSettings()
+			switch {
+			case gErr != nil:
+				// The current settings cannot be read, so the merged
+				// result is unknown; validation at agent start still
+				// applies.
+				sdKnown = false
+			case gs != nil:
+				if sdInRequest {
+					if runtimes == nil {
+						runtimes = gs.Runtimes
+					}
+					if profiles == nil {
+						profiles = gs.Profiles
+					}
+				} else if gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
+			}
+		}
+		if sdKnown {
+			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+				return
+			}
+		}
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
@@ -457,6 +534,22 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
+	}
+
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field before anything is written. The stored view
+	// is decoded from the same read that is merged and written below, so the
+	// restore and the write see the same file contents.
+	if req.Server != nil {
+		stored, err := serverConfigFromRaw(raw)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
 	}
 
 	// Apply updates by marshaling the request fields and merging
@@ -500,6 +593,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// safe_to_evict on a non-Kubernetes runtime is saved and ignored, with
+	// the same warning as config validate. Checked on the merged file so a
+	// profile is matched against a runtime saved earlier.
+	var saveWarnings []string
+	if req.Runtimes != nil || req.Profiles != nil {
+		var merged struct {
+			Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
+			Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+		}
+		if yamlv3.Unmarshal(newData, &merged) == nil {
+			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
+		}
+	}
+
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
@@ -512,10 +619,28 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Attempt to reload applicable runtime settings
 	reloadResults := s.reloadSettings()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": reloadResults,
-	})
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
+// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
+// non-Kubernetes runtime. The value is saved and ignored at agent start;
+// this is the same rule as config validate. Used by both the file-mode and
+// DB-mode PUT handlers.
+func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
+	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
+	for _, msg := range warnings {
+		slog.Warn("Server config saved with an ignored setting", "warning", msg)
+	}
+	return warnings
 }
 
 // reloadSettings re-reads the settings file and applies runtime-changeable values.
@@ -568,26 +693,31 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	return results
 }
 
+// setOrDeleteString applies an optional string update to the raw settings
+// map: nil leaves the key untouched, "" deletes it, anything else sets it.
+func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
+	if v == nil {
+		return
+	}
+	if *v == "" {
+		delete(raw, key)
+		return
+	}
+	raw[key] = *v
+}
+
 // applySettingsUpdates merges the update request into the raw settings map.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
-	if req.ActiveProfile != nil {
-		raw["active_profile"] = *req.ActiveProfile
-	}
-	if req.DefaultTemplate != nil {
-		raw["default_template"] = *req.DefaultTemplate
-	}
-	if req.DefaultHarnessConfig != nil {
-		raw["default_harness_config"] = *req.DefaultHarnessConfig
-	}
-	if req.ImageRegistry != nil {
-		raw["image_registry"] = *req.ImageRegistry
-	}
-	if req.WorkspacePath != nil {
-		raw["workspace_path"] = *req.WorkspacePath
-	}
+	// Top-level string settings: an explicit "" deletes the key from
+	// settings.yaml; a nil pointer (key omitted) means "no change".
+	setOrDeleteString(raw, "active_profile", req.ActiveProfile)
+	setOrDeleteString(raw, "default_template", req.DefaultTemplate)
+	setOrDeleteString(raw, "default_harness_config", req.DefaultHarnessConfig)
+	setOrDeleteString(raw, "image_registry", req.ImageRegistry)
+	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
 		newServer := marshalToMap(req.Server)
@@ -656,27 +786,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			delete(raw, "default_thinking_level")
 		}
 	}
-	if req.DefaultMaxAgentRole != nil {
-		if *req.DefaultMaxAgentRole != "" {
-			raw["default_max_agent_role"] = *req.DefaultMaxAgentRole
-		} else {
-			delete(raw, "default_max_agent_role")
-		}
-	}
-	if req.DefaultAgentRole != nil {
-		if *req.DefaultAgentRole != "" {
-			raw["default_agent_role"] = *req.DefaultAgentRole
-		} else {
-			delete(raw, "default_agent_role")
-		}
-	}
-	if req.DefaultRuntimeBroker != nil {
-		if *req.DefaultRuntimeBroker != "" {
-			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
-		} else {
-			delete(raw, "default_runtime_broker")
-		}
-	}
+	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
+	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
+	setOrDeleteString(raw, "default_runtime_broker", req.DefaultRuntimeBroker)
 	if req.DefaultTimezone != nil {
 		if *req.DefaultTimezone != "" {
 			raw["default_timezone"] = *req.DefaultTimezone
@@ -755,79 +867,6 @@ func marshalToMap(v interface{}) interface{} {
 		return v
 	}
 	return m
-}
-
-// maskSensitiveFields redacts secrets from the response before sending to the client.
-func maskSensitiveFields(resp *ServerConfigResponse) {
-	if resp.Server == nil {
-		return
-	}
-
-	// Mask OAuth client secrets
-	if resp.Server.OAuth != nil {
-		maskOAuthClient(resp.Server.OAuth.Web)
-		maskOAuthClient(resp.Server.OAuth.CLI)
-		maskOAuthClient(resp.Server.OAuth.Device)
-	}
-
-	// Mask auth tokens
-	if resp.Server.Auth != nil {
-		if resp.Server.Auth.DevToken != "" {
-			resp.Server.Auth.DevToken = "********"
-		}
-	}
-
-	// Mask broker token
-	if resp.Server.Broker != nil {
-		if resp.Server.Broker.BrokerToken != "" {
-			resp.Server.Broker.BrokerToken = "********"
-		}
-	}
-
-	// Mask database URL (may contain credentials)
-	if resp.Server.Database != nil {
-		if resp.Server.Database.URL != "" {
-			resp.Server.Database.URL = "********"
-		}
-	}
-
-	// Mask secrets backend credentials
-	if resp.Server.Secrets != nil {
-		if resp.Server.Secrets.GCPCredentials != "" {
-			resp.Server.Secrets.GCPCredentials = "********"
-		}
-	}
-
-	// N1: Mask GitHubApp private key and webhook secret (pre-existing gap,
-	// applies to both DB-mode and file-mode GET paths).
-	if resp.Server.GitHubApp != nil {
-		if resp.Server.GitHubApp.PrivateKey != "" {
-			resp.Server.GitHubApp.PrivateKey = "********"
-		}
-		if resp.Server.GitHubApp.WebhookSecret != "" {
-			resp.Server.GitHubApp.WebhookSecret = "********"
-		}
-	}
-
-	// Mask notification channel params (may contain webhook URLs/tokens)
-	for i := range resp.Server.NotificationChannels {
-		for k := range resp.Server.NotificationChannels[i].Params {
-			resp.Server.NotificationChannels[i].Params[k] = "********"
-		}
-	}
-}
-
-// maskOAuthClient masks OAuth client secrets in the response.
-func maskOAuthClient(c *config.V1OAuthClientConfig) {
-	if c == nil {
-		return
-	}
-	if c.Google != nil && c.Google.ClientSecret != "" {
-		c.Google.ClientSecret = "********"
-	}
-	if c.GitHub != nil && c.GitHub.ClientSecret != "" {
-		c.GitHub.ClientSecret = "********"
-	}
 }
 
 // user returns the email or ID string for logging purposes.

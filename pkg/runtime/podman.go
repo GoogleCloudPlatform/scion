@@ -192,6 +192,12 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -204,7 +210,11 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	return strings.TrimSpace(out), nil
+	// Run returns the whole trimmed output, as before; only the launch
+	// handle is restricted to a well-formed container ID line.
+	id := strings.TrimSpace(out)
+	reportContainerCreated(hooks, config.Name, out)
+	return id, nil
 }
 
 func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
@@ -218,8 +228,10 @@ func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *PodmanRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -294,6 +306,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 			info := api.AgentInfo{
 				ContainerID:     c.Id,
+				RunID:           labels[api.LabelRunID],
 				Name:            name,
 				ContainerStatus: c.Status,
 				Phase:           phaseFromContainerStatus(c.Status),

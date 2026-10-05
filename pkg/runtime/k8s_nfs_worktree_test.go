@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // nfsWorktreeConfig is nfsBaseConfig for a worktree-per-agent agent.
@@ -56,14 +57,16 @@ func TestBuildPod_NFSWorktree_MountsAndEnv(t *testing.T) {
 	ic := pod.Spec.InitContainers[0]
 	assert.Equal(t, []corev1.VolumeMount{
 		{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"},
+		{Name: "workspace", MountPath: "/scion-provision", SubPath: "projects/proj-123/provision"},
 	}, ic.VolumeMounts)
 	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
 	for name, want := range map[string]string{
-		"SCION_WORKSPACE_MODE": "worktree-per-agent",
-		"SCION_AGENT_SLUG":     "agent-1",
-		"SCION_AGENT_BRANCH":   "agent-one",
-		"SCION_PROJECT_ID":     "proj-123",
-		"SCION_CLONE_URL":      "https://github.com/example/repo.git",
+		"SCION_PROVISION_STATE_DIR": "/scion-provision",
+		"SCION_WORKSPACE_MODE":      "worktree-per-agent",
+		"SCION_AGENT_SLUG":          "agent-1",
+		"SCION_AGENT_BRANCH":        "agent-one",
+		"SCION_PROJECT_ID":          "proj-123",
+		"SCION_CLONE_URL":           "https://github.com/example/repo.git",
 	} {
 		got, ok := envValue(ic.Env, name)
 		assert.True(t, ok, "init env %s missing", name)
@@ -187,7 +190,10 @@ func TestRun_NFSWorktreeLockLost_CreatesProvisioningPod(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	cfg := nfsWorktreeConfig("scion-wt-lock-lost")
 	cfg.Locker = &alwaysLoseLocker{}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, cfg) //nolint:errcheck
 

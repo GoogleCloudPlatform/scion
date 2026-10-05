@@ -51,6 +51,9 @@ type BrokerInfoResponse struct {
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
 	Projects     []ProjectInfo       `json:"projects,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor, the
+	// same value it reports to the hub on every heartbeat.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -90,6 +93,16 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates this broker provisions the
+	// empty-per-agent workspace sharing mode: a private, initially empty
+	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
+	// hub refuses to dispatch such agents to a broker without it (412).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates this broker can take part in moving an agent to
+	// or from another broker on the same workspace export (`scion
+	// reincarnate --broker`). The hub refuses a move unless both brokers
+	// report it (412).
+	AgentMove bool `json:"agentMove"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -155,6 +168,16 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	// Warnings carries only the hub-only env drop warnings (a broker-local
+	// TZ value ignored for a hub-dispatched agent), so the hub can relay
+	// them in its own create and start responses. Other broker-local start
+	// warnings are deliberately not included.
+	Warnings []string `json:"warnings,omitempty"`
+	// RunID is the run identity the runtime entry carries (its scion.run_id
+	// label). It usually echoes the runId the hub sent, but a start that
+	// found the agent already running reports the existing run's ID, so
+	// the hub can record the run that actually exists (ptone/scion#2550).
+	RunID string `json:"runId,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -298,6 +321,12 @@ type CreateAgentRequest struct {
 	// LaunchID is the Hub's launch identifier (BeginLaunch's return value),
 	// echoed back on every report for this launch.
 	LaunchID string `json:"launchId,omitempty"`
+	// RunID is the Hub-minted identity of the run this create starts
+	// (ptone/scion#2550), distinct from LaunchID. The broker labels the
+	// runtime entry with it (api.LabelRunID) so a later delete carrying it
+	// targets only this run. Empty from an older hub; pkg/agent then mints
+	// one itself.
+	RunID string `json:"runId,omitempty"`
 	// LaunchTimeoutSeconds is the remaining launch budget at send time
 	// (ceil(launch_deadline - send time)), not the Hub's configured
 	// launchTimeout setting.
@@ -504,6 +533,11 @@ type ExecRequest struct {
 // ResetAuthRequest is the request body for resetting auth on a running agent.
 type ResetAuthRequest struct {
 	Token string `json:"token"`
+	// TransportToken, when set, is a fresh hub-minted transport token
+	// (IAP / Cloud Run invoker). It is written to the agent's transport
+	// token file alongside the agent token, so a reset also recovers an
+	// agent whose transport token has expired.
+	TransportToken string `json:"transportToken,omitempty"`
 }
 
 // ResetAuthResponse is the response for auth reset.
@@ -575,6 +609,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		ID:                    info.ID,
 		Slug:                  info.Slug,
 		ContainerID:           info.ContainerID,
+		RunID:                 info.RunID,
 		Name:                  info.Name,
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,
@@ -591,6 +626,9 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+	}
+	if len(info.HubOnlyEnvWarnings) > 0 {
+		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

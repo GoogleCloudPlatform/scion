@@ -19,23 +19,27 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // sortedListFixture builds a project with an owner (full capabilities) and a
-// plain member (read-only: the design's read-pass and race tests need a
-// caller for whom some agents are unreadable), for the P1b sorted-mode
-// project list tests.
+// plain member (read-only: the read-pass and race tests need a
+// caller for whom some agents are unreadable), for the sorted-mode project
+// list tests.
 type sortedListFixture struct {
 	srv     *Server
 	store   store.Store
@@ -148,8 +152,8 @@ func TestListProjectAgentsSorted_InvalidParams(t *testing.T) {
 		query string
 	}{
 		{"invalid sort value", "sort=bogus"},
-		{"sort=created not yet supported in P1b", "sort=created"},
 		{"invalid dir", "sort=updated&dir=sideways"},
+		{"invalid dir with sort=created", "sort=created&dir=sideways"},
 		{"fit with cursor", "sort=updated&fit=10&cursor=AAAA"},
 		{"fit too large", "sort=updated&fit=501"},
 		{"fit zero", "sort=updated&fit=0"},
@@ -165,9 +169,54 @@ func TestListProjectAgentsSorted_InvalidParams(t *testing.T) {
 	}
 }
 
+// TestListProjectAgentsSorted_CreatedSort pins sort=created end to end on
+// the project endpoint: paging walks the agentsort "created" total order,
+// and a cursor minted under sort=created binds to it.
+func TestListProjectAgentsSorted_CreatedSort(t *testing.T) {
+	f := sortedListSetup(t)
+	var created []*store.Agent
+	for i := 0; i < 5; i++ {
+		created = append(created, f.createAgent(t, fmt.Sprintf("created-%d", i), string(state.PhaseStopped), nil))
+	}
+
+	// Ground truth from the agentsort reference over each agent's own
+	// Created/ID, not an assumption about CreateAgent's real-clock timing
+	// (two calls can land in the same clock tick).
+	rows := make([]agentsort.Row, len(created))
+	for i, a := range created {
+		rows[i] = agentsort.KeyFor(agentsort.Created, a.ID, a.Created, a.Updated, a.LastActivityEvent)
+	}
+	agentsort.SortRows(agentsort.Desc, rows)
+	want := make([]string, len(rows))
+	for i, row := range rows {
+		want[i] = row.ID
+	}
+
+	var walked []string
+	cursor := ""
+	for i := 0; i < 10; i++ {
+		q := "sort=created&dir=desc&limit=2"
+		if cursor != "" {
+			q += "&cursor=" + url.QueryEscape(cursor)
+		}
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(q), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		resp := mustDecodeListAgentsResponse(t, rec.Body)
+		assert.Equal(t, "created", resp.Sort)
+		assert.Equal(t, "desc", resp.Dir)
+		for _, a := range resp.Agents {
+			walked = append(walked, a.ID)
+		}
+		if resp.NextCursor == "" {
+			break
+		}
+		cursor = resp.NextCursor
+	}
+	assert.Equal(t, want, walked)
+}
+
 // TestListProjectAgentsSorted_CursorWrongSortOrDirRejected pins that a
-// cursor minted for one sort/dir is rejected when replayed against another
-// (design 4.4).
+// cursor minted for one sort/dir is rejected when replayed against another.
 func TestListProjectAgentsSorted_CursorWrongSortOrDirRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -187,7 +236,7 @@ func TestListProjectAgentsSorted_CursorWrongSortOrDirRejected(t *testing.T) {
 
 // TestListProjectAgentsSorted_CursorCrossPrincipalRejected pins that a
 // cursor minted for one identity cannot be replayed by another (the
-// binding includes the identity, design 4.4).
+// binding includes the identity).
 func TestListProjectAgentsSorted_CursorCrossPrincipalRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -205,8 +254,8 @@ func TestListProjectAgentsSorted_CursorCrossPrincipalRejected(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_CursorPhaseReplayRejected pins the phase-replay
-// rejection (design 4.4: "a phase=running cursor replayed under
-// phase=stopped returns 400").
+// rejection: a phase=running cursor replayed under phase=stopped returns
+// 400.
 func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -221,36 +270,6 @@ func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
 		f.listPath("sort=updated&dir=desc&limit=1&phase=stopped&cursor="+url.QueryEscape(resp.NextCursor)), nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-}
-
-// TestListProjectAgentsSorted_AgentJWT400BeforeSQL is the P1b agent-JWT gate
-// (design 5.3 "P1b build") and a hard-gate check: exactly the stated
-// message, no decisions beyond what routing itself costs.
-func TestListProjectAgentsSorted_AgentJWT400BeforeSQL(t *testing.T) {
-	f := sortedListSetup(t)
-	agent := f.createAgent(t, "self", string(state.PhaseStopped), nil)
-
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agent.ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
-
-	emitter := &recordingDecisionAuditEmitter{}
-	f.srv.authzService.SetDecisionAuditEmitter(emitter)
-
-	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath("sort=updated"), nil, tok)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-
-	var body struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, agentJWTSortedModeMessage, body.Error.Message)
-	assert.Equal(t, ErrCodeInvalidRequest, body.Error.Code)
-	assert.Empty(t, emitter.records, "no decision should be made before the agent-JWT sorted-mode gate")
 }
 
 // --- candidate ceiling (hard gate) -----------------------------------
@@ -371,7 +390,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 	// pre-check; then fake ListAgentMembers to report a grown pool. We
 	// achieve this by giving CountAgents a fixed "just under" answer and
 	// ListAgentMembers a fixed "over" answer independently.
-	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so step 0 passes
+	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so the ceiling pre-check passes
 	// Override ListAgentMembers behavior via a second wrapper layer that
 	// always returns an over-ceiling slice regardless of what CountAgents saw.
 	raceStore := &raceMembersStore{countingAgentStore: counting, memberCount: authorizedListMaxCandidates + 1}
@@ -387,7 +406,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 
 // raceMembersStore always answers ListAgentMembers with memberCount rows
 // (capped at the caller's max), independent of CountAgents' answer,
-// simulating candidate growth between the two reads (design 5.3 step 1).
+// simulating candidate growth between the two reads.
 type raceMembersStore struct {
 	*countingAgentStore
 	memberCount int
@@ -535,10 +554,11 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 	require.NotNil(t, resp.Stats)
 	assert.Equal(t, 3, resp.Stats.Total)
 	assert.Equal(t, 2, resp.Stats.Running)
-	assert.Len(t, resp.Stats.Agents, 3)
+	require.NotNil(t, resp.Stats.Agents)
+	assert.Len(t, *resp.Stats.Agents, 3)
 
-	// This response happens to be complete (n=3 <= fit=500), so per design
-	// 4.3/5.3 the page itself is the whole unphased set, not narrowed to
+	// This response happens to be complete (n=3 <= fit=500), so the
+	// page itself is the whole unphased set, not narrowed to
 	// phase=stopped -- phase only narrows a *paged* response. That is
 	// asserted separately in TestListProjectAgentsSorted_PagedAppliesPhase.
 	assert.Len(t, resp.Agents, 3)
@@ -546,8 +566,8 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 
 // TestListProjectAgentsSorted_PagedAppliesPhase confirms the complement:
 // once the response is paged (not complete), the phase filter narrows the
-// page, unlike a complete response (design 4.3: "Phase on a fit request is
-// applied only to a paged response").
+// page, unlike a complete response (phase on a fit request is applied
+// only to a paged response).
 func TestListProjectAgentsSorted_PagedAppliesPhase(t *testing.T) {
 	f := sortedListSetup(t)
 	f.createAgent(t, "pf-run-1", string(state.PhaseRunning), nil)
@@ -566,8 +586,8 @@ func TestListProjectAgentsSorted_PagedAppliesPhase(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_StatsOnlyValidWithSort pins that "stats=1"
-// without "sort" is not silently accepted (design 4.1: "Only valid with
-// sort"). The legacy endpoint has no stats concept, so this just checks the
+// without "sort" is not silently accepted (stats is only valid with
+// sort). The legacy endpoint has no stats concept, so this just checks the
 // legacy response has no stats block (stats is unrecognized/ignored there,
 // which is byte-identical to today per the legacy-mode contract).
 func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
@@ -583,13 +603,13 @@ func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
 
 // --- decision counts (hard gate) ---------------------------------------
 
-// TestListProjectAgentsSorted_DecisionCounts_Complete pins the section 6.4
+// TestListProjectAgentsSorted_DecisionCounts_Complete pins the decision-count
 // formula for a complete fit response: 5 + n + 7R (gate + one read decision
 // per candidate + 7 remaining-action decisions per readable item), which is
 // <= today's 5 + 8n and equal when R == n. n is kept small here as a quick
 // unit-style check of the formula's shape;
 // TestListProjectAgentsSorted_DecisionCounts_DesignSizes (designsizes_test.go)
-// re-asserts the same formula at the design's own sizes (25-1200).
+// re-asserts the same formula at larger sizes (25-1200).
 func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 6
@@ -614,8 +634,8 @@ func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_Paged pins the *paged* cost
-// bound, 5 + n + 7P, which does not depend on R at all (design 5.3,
-// "completeness does not depend on R"). The R < n sub-cases themselves
+// bound, 5 + n + 7P, which does not depend on R at all (completeness
+// does not depend on R). The R < n sub-cases themselves
 // (n=1200/R=400 paged=1380, n=500/R=200 complete=1905) are in
 // designsizes_test.go, using grantProjectListOnly plus per-agent ownership
 // -- a minimal project-scoped role granting only agent.list, combined with
@@ -707,19 +727,19 @@ func TestMergeCapabilities_EquivalentToSingleBatchPass(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision proves:
-// nil vs empty Labels/Ancestry must never trigger a step-5a re-decision.
+// nil vs empty Labels/Ancestry must never trigger a race re-decision.
 func TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision(t *testing.T) {
 	a := &Resource{Type: "agent", ID: "x", Labels: nil, Ancestry: nil}
 	b := &Resource{Type: "agent", ID: "x", Labels: map[string]string{}, Ancestry: []string{}}
 	assert.True(t, resourceEqual(*a, *b), "nil and empty Labels/Ancestry must compare equal")
 }
 
-// --- Step 5a race behavior -------------------------------------------------
+// --- Race behavior (member read vs full-row read) --------------------------
 
 // mutatingAfterMembersStore mutates an agent's labels (via the real store,
 // bypassing the read path) the first time ListAgentMembers is called,
-// simulating a write landing between the member read and the full-row read
-// (design 5.3 step 5a).
+// simulating a write landing between the member read and the full-row
+// read.
 type mutatingAfterMembersStore struct {
 	store.Store
 	once      sync.Once
@@ -746,8 +766,8 @@ func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 // TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the
 // decision-count gate's race sub-case: a page item's labels change between
 // the two reads but it still matches the request's label filter, so it is
-// kept and re-decided (9 decisions total: 1 in step 3, 8 in step 5a, 0 in
-// step 6).
+// kept and re-decided (9 decisions total: 1 in the read pass, 8 in the race
+// re-decision, 0 in the remaining-actions pass).
 func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-match", string(state.PhaseStopped), map[string]string{"team": "a", "extra": "1"})
@@ -763,7 +783,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.Len(t, resp.Agents, 1, "the raced item still matches label=team=a and must be kept")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 8 (step5a re-decision) + 0 (step6 skip) = 14.
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 8 (race re-decision) + 0 (remaining-actions skip) = 14.
 	assert.Len(t, emitter.records, 14)
 }
 
@@ -785,7 +805,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter(t *testi
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "the raced item no longer matches label=team=a and must be dropped")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 0 (filter-mismatch
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 0 (filter-mismatch
 	// drop, no additional decision) = 6.
 	assert.Len(t, emitter.records, 6)
 }
@@ -860,4 +880,79 @@ func (r *reprojectingListAgentsStore) ListAgents(ctx context.Context, filter sto
 		}
 	}
 	return result, nil
+}
+
+// fullRowReadRecorder records the full-row reads loadFullRowsForPage could
+// issue and answers them with no rows. Every other store method panics via
+// the nil embedded Store, so any unexpected read fails the test too.
+type fullRowReadRecorder struct {
+	store.Store
+	listAgentsCalls int
+	getByIDsCalls   int
+}
+
+func (r *fullRowReadRecorder) ListAgents(_ context.Context, _ store.AgentFilter, _ store.ListOptions) (*store.ListResult[store.Agent], error) {
+	r.listAgentsCalls++
+	return &store.ListResult[store.Agent]{}, nil
+}
+
+func (r *fullRowReadRecorder) GetAgentsByIDs(_ context.Context, _ []string) (map[string]*store.Agent, error) {
+	r.getByIDsCalls++
+	return map[string]*store.Agent{}, nil
+}
+
+// TestLoadFullRowsForPage_OverBoundFailsBeforeRead: the store clamps a
+// ListAgents read to its page cap, so more than maxSortedLimit ids could
+// come back short without an error. loadFullRowsForPage must refuse such a
+// request with an internal (non-validation) error before touching the
+// store, while a request at the bound still reads.
+func TestLoadFullRowsForPage_OverBoundFailsBeforeRead(t *testing.T) {
+	ids := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		}
+		return out
+	}
+
+	rec := &fullRowReadRecorder{}
+	srv := &Server{store: rec}
+	rows, err := srv.loadFullRowsForPage(context.Background(), ids(maxSortedLimit+1), false)
+	require.Error(t, err)
+	assert.Nil(t, rows)
+	assert.False(t, errors.Is(err, store.ErrInvalidInput), "an over-bound read is an internal error, not caller input")
+	assert.False(t, errors.Is(err, store.ErrNotFound))
+	assert.Equal(t, 0, rec.listAgentsCalls, "no full-row read may run once the bound is exceeded")
+	assert.Equal(t, 0, rec.getByIDsCalls, "no full-row read may run once the bound is exceeded")
+
+	w := httptest.NewRecorder()
+	writeErrorFromErr(w, err, "")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	// The client gets only the generic internal error: no id count, no
+	// bound value and no guard text.
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), w.Body.String())
+	assert.Equal(t, "internal_error", body.Error.Code)
+	assert.Equal(t, "Internal server error", body.Error.Message)
+	for _, leak := range []string{
+		fmt.Sprint(maxSortedLimit + 1),
+		fmt.Sprint(maxSortedLimit),
+		"501",
+		"500",
+		"bound",
+	} {
+		assert.NotContains(t, strings.ToLower(w.Body.String()), leak, "error body must not reveal %q", leak)
+	}
+
+	// At the bound the read runs, and a short (here empty) result is not an
+	// error: it is the race-drop signal handled by the callers.
+	rows, err = srv.loadFullRowsForPage(context.Background(), ids(maxSortedLimit), false)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	assert.Equal(t, 1, rec.listAgentsCalls)
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id string) {
@@ -139,9 +140,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// Publish status event (best-effort: fetch agent for ProjectID)
+	// Publish status event (best-effort: fetch agent for ProjectID). A
+	// soft-deleted row publishes nothing: its deletion was already announced,
+	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
-		s.events.PublishAgentStatus(ctx, agent)
+		if agent.DeletedAt.IsZero() {
+			s.events.PublishAgentStatus(ctx, agent)
+		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
 	}
@@ -162,6 +167,25 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 // see that guard's comment.
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
+
+	// Guard 0c: a delete in progress (design ptone/scion#2483 §2.1) owns the
+	// agent's Phase/Activity/ExitCode/ExitReason/Message, exactly like a
+	// reincarnation (Guard 0b): a dying container's report must not revive a
+	// row the delete engine is tearing down. A soft-deleted row is done — no
+	// report changes it. The store repeats this check inside the
+	// UpdateAgentStatus transaction, so a delete claim that lands between
+	// this read and that write is still honored.
+	if deletionActive(agent) || !agent.DeletedAt.IsZero() {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
+		// The store copy of this guard also drops ClearExit; mirror it so the
+		// two stay the same predicate (reports never set it: json:"-").
+		status.ClearExit = false
+		return
+	}
 
 	// Guard 0: suspended is sticky against async status updates. When an agent
 	// is suspended, its container is being torn down, and the dying container's
@@ -254,6 +278,7 @@ func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
 // broker, persists phase=suspended (container_status=stopped, activity cleared),
 // and publishes the resulting status event. It returns *errHarnessNoResume when
 // the harness cannot resume so callers can decline to suspend.
+// The run intent is set to stopped before the dispatch.
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, reason := s.harnessSupportsResume(agent); !ok {
 		return &errHarnessNoResume{reason: reason}
@@ -262,6 +287,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
 	defer s.beginLifecycleOp(agent.ID)()
+
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+		return err
+	}
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -302,6 +331,29 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
 
+// recordRunIntent sets the agent's run intent in the store and mirrors the
+// stored value on agent. Every lifecycle path that dispatches a start, stop,
+// restart, create or delete records the intent first (see
+// TestLifecycleDispatchCallsRecordRunIntent).
+func (s *Server) recordRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent) (time.Time, error) {
+	_, at, err := s.swapRunIntent(ctx, agent, intent)
+	return at, err
+}
+
+// swapRunIntent is recordRunIntent that also returns the intent the agent
+// held before the write ("" for none). A system-initiated stop uses it to
+// put back only an intent it actually replaced.
+func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	prior, at, err := s.store.SwapRunIntent(ctx, agent.ID, intent)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("record run intent %s: %w", intent, err)
+	}
+	agent.RunIntent = intent
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, nil
+}
+
 // AgentLifecycleStartRequest is the optional JSON body for the "start"
 // lifecycle action. It is empty for a normal start; ForceResume is only
 // meaningful when the agent is in phase=error, where it requests a
@@ -321,13 +373,65 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Start gate (design ptone/scion#2483 §2.1). Authz already ran in the
+	// caller. This runs before the managed-runtime branch so managed agents
+	// get the same answers. Restart is checked here, before its stop leg,
+	// so a launching agent is not stopped; the dispatcher guard is the
+	// backstop for the start leg. An in-flight launch is answered with 200
+	// and the current agent.
+	switch action {
+	case api.AgentActionStart, api.AgentActionRestart:
+		entry := startEntryStart
+		if action == api.AgentActionRestart {
+			entry = startEntryRestart
+		}
+		if ref := s.startGate(ctx, agent, entry); ref.refuses() {
+			if !ref.InFlight {
+				ref.write(w)
+				return
+			}
+			var warnings []string
+			if action == api.AgentActionRestart {
+				warnings = []string{launchRestartNotPerformedWarning}
+			} else if lifecycleStartHasInputs(r) {
+				warnings = []string{launchInFlightInputsWarning}
+			}
+			s.writeLaunchingAgent(ctx, w, agent, warnings)
+			return
+		}
+	case api.AgentActionStop, api.AgentActionSuspend:
+		// The agent is already going down: stop (and suspend, which would
+		// otherwise race the delete's teardown on the broker) is a no-op
+		// success.
+		if deleteStopNoop(agent) {
+			respAgent := *agent
+			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+			writeJSON(w, http.StatusOK, &respAgent)
+			return
+		}
+	}
+
 	// Managed agent lifecycle: handle directly without broker dispatch.
 	if isManagedAgentRuntime(agent.Runtime) {
 		s.handleManagedAgentLifecycle(w, r, agent, action)
 		return
 	}
 
-	if !s.checkBrokerAvailability(w, r, agent) {
+	if action == api.AgentActionStop {
+		// A stop is recorded before the broker check, so it holds even when
+		// the broker is offline: the stop is then queued for the broker's
+		// reconnect.
+		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.brokerReachable(ctx, agent) {
+			s.queueOfflineStop(w, r, agent, intentAt)
+			return
+		}
+	} else if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -339,6 +443,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	var newPhase string
 	var dispatchErr error
+
+	// Collect warnings the start leg raises (hub-side TZ drops and the
+	// broker's hub-only env warnings) so the start and restart responses
+	// carry them.
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
 
 	// If a dispatcher is available, dispatch the operation to the runtime broker
 	dispatcher := s.GetDispatcher()
@@ -378,6 +487,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if !ok {
 				return
 			}
+			// Intent stays running if the dispatch below fails: a failed
+			// start is still a start the user asked for (pod recovery
+			// design, run intent semantics).
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+				s.rollbackBrokerQuota(ctx, agent, reserved)
+				writeRunIntentError(w, err, agent.ID)
+				return
+			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
@@ -392,6 +509,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				// (ptone/scion#1978).
 				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
+		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeRunIntentError(w, err, agent.ID)
+			return
 		}
 	case api.AgentActionStop:
 		newPhase = string(state.PhaseStopped)
@@ -427,6 +547,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", noResume.Error()), nil)
 				return
 			}
+			if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 			return
 		}
@@ -436,7 +559,18 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
+		// A restart leaves the agent running: record that before the stop leg.
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeRunIntentError(w, err, agent.ID)
+			return
+		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// Refuse before the stop leg: otherwise a broker without
+			// the empty-per-agent capability would have the agent
+			// stopped and then the start refused (design #2703 D3).
+			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
 			// Stop errors are tolerated: the container may already be
@@ -444,6 +578,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
 			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			// The broker has no runtime of the agent's recorded type
+			// registered (ptone/scion#2748): the agent may still be
+			// running there, so do not start it anywhere else.
+			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
+				slog.Warn("Restart: agent's runtime not available on broker, not starting",
+					"agent_id", id, "runtime", agent.Runtime)
+				return
+			}
 			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
@@ -466,10 +608,21 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				if stopErr == nil {
+				if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
+					// A delete claimed the row between the legs
+					// (ptone/scion#2550, round 5 N3). The delete engine
+					// owns the row now: leave its phase and the
+					// reservation it held to the engine, and undo only a
+					// reservation this call created.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
-					// release the slot as an explicit stop would.
+					// release the slot and record the stopped state as an
+					// explicit stop would, so the agent does not keep
+					// showing its pre-restart phase until the next
+					// heartbeat.
 					s.releaseBrokerQuota(ctx, agent)
+					s.recordRestartStopped(ctx, agent.ID)
 				} else {
 					// The container may still be running: keep a
 					// reservation this call did not create.
@@ -479,8 +632,39 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 
-	// If dispatch failed, return error
+	// If dispatch failed, return error. A required-skill resolution failure
+	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
+			ref.write(w)
+			return
+		}
+		// A launch that began after the entry check is caught by the
+		// dispatcher guard; answer as the entry check does.
+		if refusal := s.launchRefusalFromError(ctx, agent.ID, dispatchErr); refusal != nil {
+			if !refusal.InFlight {
+				refusal.write(w)
+				return
+			}
+			var warnings []string
+			if action == api.AgentActionRestart {
+				warnings = []string{launchRestartNotPerformedWarning}
+			}
+			s.writeLaunchingAgent(ctx, w, agent, warnings)
+			return
+		}
+		if writeBrokerRuntimeUnavailable(w, dispatchErr, agent.Runtime) {
+			return
+		}
+		if writeAgentTokenIssueError(w, dispatchErr) {
+			return
+		}
+		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
+		if relaySkillResolutionError(w, dispatchErr) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}
@@ -514,12 +698,119 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	agent.Phase = newPhase
+	// A successful start/stop/restart clears a failed delete marker
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
-	writeJSON(w, http.StatusOK, respAgent)
+	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
+}
+
+// Offline stop: the container status and message an agent gets when its
+// stop is queued for an offline broker.
+const (
+	containerStatusStopQueued = "stop_queued"
+	offlineStopMessage        = "Stop queued: broker offline; it will be applied when the broker reconnects."
+)
+
+// queueOfflineStop handles a stop for an agent whose broker is offline. The
+// stop intent is already recorded at intentAt. It queues a durable stop
+// dispatch carrying intentAt, which the broker's reconnect drain applies only
+// if no newer start or stop has been recorded since (see execDispatchStop),
+// marks the agent stopped with container status stop_queued, and responds
+// 202 Accepted with a warning.
+func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
+	ctx := r.Context()
+	at := intentAt
+	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	dispatch := &store.BrokerDispatch{
+		ID:        uuid.NewString(),
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        "stop",
+		Args:      argsJSON,
+	}
+	setBrokerDispatchInitiator(ctx, dispatch)
+	if err := s.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	s.clearExposedPortsForAgent(ctx, agent.ID)
+	newPhase := string(state.PhaseStopped)
+	if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:           newPhase,
+		ContainerStatus: containerStatusStopQueued,
+		Activity:        "",
+		Message:         offlineStopMessage,
+	}); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	s.agentLifecycleLog.Info("Stop queued for offline broker",
+		"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "dispatch_id", dispatch.ID)
+
+	agent.Phase = newPhase
+	agent.ContainerStatus = containerStatusStopQueued
+	agent.Activity = ""
+	agent.Message = offlineStopMessage
+	s.events.PublishAgentStatus(ctx, agent)
+
+	// The broker may have reconnected after the reachability check, in which
+	// case its reconnect drain already ran and missed this row.
+	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
+
+	respAgent := *agent
+	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
+}
+
+// wakeBrokerDrain asks the node that holds brokerID's control channel to
+// drain its pending broker_dispatch rows. It sends a best-effort command-bus
+// signal (other nodes) and, when this node holds the channel, starts a local
+// drain. Both are wakeups only: the row is durable, and a reconnect drains
+// it as well. The drain is CAS-gated, so a duplicate wakeup is harmless.
+func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
+	if brokerID == "" {
+		return
+	}
+	if s.commandBus != nil {
+		if err := s.commandBus.SignalBrokerCmd(ctx, brokerID); err != nil {
+			s.agentLifecycleLog.Warn("Broker drain signal failed; the row drains on reconnect",
+				"broker_id", brokerID, "error", err)
+		}
+	}
+	if s.controlChannel != nil && s.controlChannel.IsConnected(brokerID) {
+		go func() {
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerDrainWakeTimeout)
+			defer cancel()
+			s.reconcileBroker(dctx, brokerID)
+		}()
+	}
+}
+
+// brokerDrainWakeTimeout bounds the local drain wakeBrokerDrain starts. A
+// drain cut short leaves its unclaimed rows queued for the next drain; the
+// row in flight at the deadline stays in progress until ReapStuckDispatch
+// requeues it.
+const brokerDrainWakeTimeout = 5 * time.Minute
+
+// agentLifecycleResponse is the lifecycle action response: the agent, plus
+// any warnings the dispatch raised. Warnings is omitted when empty, so the
+// body is unchanged for clients that only read the agent.
+type agentLifecycleResponse struct {
+	*store.Agent
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // stopAllResult represents the outcome of stopping a single agent.
@@ -530,18 +821,64 @@ type stopAllResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// recordRestartStopped records a restart whose stop leg succeeded but whose
+// start leg failed the way an explicit stop is recorded: phase and container
+// status stopped, exposed ports cleared, and a status event published, so
+// clients do not keep showing the pre-restart state until the next
+// heartbeat. Failures are logged; the caller still reports the start error.
+func (s *Server) recordRestartStopped(ctx context.Context, id string) {
+	s.clearExposedPortsForAgent(ctx, id)
+	zero := 0
+	if err := s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{
+		Phase:           string(state.PhaseStopped),
+		ContainerStatus: "stopped",
+		ExitCode:        &zero,
+	}); err != nil {
+		slog.Warn("Restart: failed to record stopped state after start leg failed",
+			"agent_id", id, "error", err)
+		return
+	}
+	stored, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		slog.Warn("Restart: failed to fetch agent for status event", "agent_id", id, "error", err)
+		return
+	}
+	if stored.DeletedAt.IsZero() {
+		s.events.PublishAgentStatus(ctx, stored)
+	}
+}
+
 // StopAllAgentsResponse is the response from the stop-all endpoint.
 type StopAllAgentsResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Scope   string          `json:"scope,omitempty"` // "all" or "own"
-	Results []stopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: their intent
+	// is now stopped, but the start was not interrupted.
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Scope        string          `json:"scope,omitempty"` // "all" or "own"
+	Results      []stopAllResult `json:"results"`
+}
+
+// stopAllStatusStopRecorded is the stop-all result status for an agent whose
+// start was in flight: the stop intent is recorded and nothing is dispatched.
+const stopAllStatusStopRecorded = "stop_recorded"
+
+// startInFlightPhase reports whether phase is one a start passes through
+// before the agent is running.
+func startInFlightPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting:
+		return true
+	}
+	return false
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
-// Global (projectID=="") requires platform admin. Project-scoped allows any project
-// member: owners/admins stop all agents, regular members stop only their own.
+// Global (projectID=="") requires agent.stop_all on the hub. Project-scoped
+// allows any project member: holders of agent.stop_all on the project
+// (project owners/admins, hub admins) stop all agents; other members, by
+// active direct or group-derived role binding, stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -559,40 +896,69 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	// Determine authorization and scope
 	scope := "all"
+	// Running agents, plus any agent whose recorded intent is still running
+	// (for example one in phase error), so stop-all leaves no agent
+	// intended to run.
 	filter := store.AgentFilter{
-		ProjectID: projectID,
-		Phase:     string(state.PhaseRunning),
+		ProjectID:   projectID,
+		Phase:       string(state.PhaseRunning),
+		OrRunIntent: string(store.RunIntentRunning),
 	}
 
-	isAdmin := s.authzService.Decide(ctx, AuthzRequest{
+	// agent.stop_all is decided against the hub for global stop-all and
+	// against the project-scoped agent collection for a project, so
+	// project-owner and project-admin role bindings count. This is the
+	// same resource the project's stop_all scope capability is computed on.
+	resource := Resource{Type: "agent", ID: "hub"}
+	if projectID != "" {
+		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+	}
+	canStopAll := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(userIdent),
 		Credential: credentialContextForIdentity(userIdent),
-		Resource:   Resource{Type: "agent", ID: "hub"},
-		Action:     Action("stop_all"),
+		Resource:   resource,
+		Action:     ActionStopAll,
 		Permission: "agent.stop_all",
 	}).Allowed
-	if projectID == "" {
-		// Global stop-all: requires agent.stop_all permission
-		if !isAdmin {
+	if !canStopAll {
+		if projectID == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
-	} else {
-		// Project-scoped stop-all: any project member allowed
-		if !isAdmin {
-			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
-			if projectRole == "" {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"You are not a member of this project", nil)
-				return
-			}
-			// Regular members can only stop their own agents
-			if projectRole != store.GroupMemberRoleOwner && projectRole != store.GroupMemberRoleAdmin {
-				filter.OwnerID = userIdent.ID()
-				scope = "own"
-			}
+		// Other project members stop only their own agents. Membership is the
+		// effective project role: direct or group-derived role bindings that
+		// are currently active. Only the built-in roles count: a custom
+		// project role ranks 0 in higherProjectRole, the same as no role, so
+		// a caller holding only a custom role gets 403, not scope "own".
+		// A store failure is a 500 rather than a misleading 403. That
+		// includes a binding whose role definition is missing: the store
+		// refuses to delete a role definition that still has bindings, so
+		// that is a data integrity fault, and failing closed is correct.
+		// A nil membership service is a wiring fault, also a 500, matching
+		// the other membership handlers.
+		if s.membershipService == nil {
+			s.agentLifecycleLog.Error("stop-all: membership service unavailable",
+				"project_id", projectID, "user_id", userIdent.ID())
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"membership service unavailable", nil)
+			return
 		}
+		role, err := s.membershipService.projectEffectiveRoleFromStore(ctx, s.store, userIdent.ID(), projectID)
+		if err != nil {
+			s.agentLifecycleLog.Error("stop-all: failed to resolve project membership",
+				"project_id", projectID, "user_id", userIdent.ID(), "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to resolve project membership", nil)
+			return
+		}
+		if role == "" {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You are not a member of this project", nil)
+			return
+		}
+		filter.OwnerID = userIdent.ID()
+		scope = "own"
 	}
 
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
@@ -604,6 +970,33 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	}
 
 	agents := result.Items
+	if scope == "own" && len(agents) > 0 {
+		// Members stop the agents the per-agent lifecycle rule allows.
+		identity := GetIdentityFromContext(ctx)
+		allowed := make([]store.Agent, 0, len(agents))
+		for i := range agents {
+			if s.agentLifecycleAllowed(ctx, identity, &agents[i]) {
+				allowed = append(allowed, agents[i])
+			}
+		}
+		if len(allowed) == 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Not authorized to stop these agents", nil)
+			return
+		}
+		agents = allowed
+	}
+
+	// Skip agents a delete is taking down: their stop would race the
+	// delete's teardown on the broker, and a stop is a no-op for them
+	// anyway (design ptone/scion#2483 §2.1).
+	live := make([]store.Agent, 0, len(agents))
+	for i := range agents {
+		if !deleteStopNoop(&agents[i]) {
+			live = append(live, agents[i])
+		}
+	}
+	agents = live
 	if len(agents) == 0 {
 		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
 			Scope:   scope,
@@ -626,9 +1019,46 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		go func(agent *store.Agent) {
 			defer wg.Done()
 
+			// The filter above used the list snapshot; re-read so a delete
+			// that claimed the row since is skipped the same way (a stop is
+			// a no-op for it). A delete claiming after this read is still
+			// harmless: the broker stop is idempotent, and the delete's own
+			// teardown follows.
+			if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				if deleteStopNoop(fresh) || !fresh.DeletedAt.IsZero() {
+					return
+				}
+				agent = fresh
+			}
+
 			res := stopAllResult{
 				ID:   agent.ID,
 				Name: agent.Name,
+			}
+
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+				res.Status = "error"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
+			}
+			// An agent that is not running only had its intent left at
+			// running: recording the stop intent is all it needs. For an
+			// agent whose start is still in flight, the start is not
+			// interrupted: the agent may still come up running, with
+			// intent stopped (as after a user stop whose dispatch failed).
+			// It is reported as stop_recorded rather than stopped.
+			if agent.Phase != string(state.PhaseRunning) {
+				res.Status = "stopped"
+				if startInFlightPhase(agent.Phase) {
+					res.Status = stopAllStatusStopRecorded
+				}
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
 			}
 
 			// Dispatch stop to broker
@@ -659,11 +1089,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					res.Error = updateErr.Error()
 				} else {
 					res.Status = "stopped"
-					agent.Phase = string(state.PhaseStopped)
+					// Clear a failed delete marker, as a single stop does,
+					// and publish the row as stored.
+					s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
 					// Release the per-broker reservation, same as a single
 					// explicit stop (ptone/scion#1963).
 					s.releaseBrokerQuota(ctx, agent)
-					s.events.PublishAgentStatus(ctx, agent)
+					// settleLifecycleWrite reloaded DeletedAt: a delete that
+					// soft-finished meanwhile gets no stale stopped status.
+					if agent.DeletedAt.IsZero() {
+						s.events.PublishAgentStatus(ctx, agent)
+					}
 				}
 			}
 
@@ -677,40 +1113,24 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	stopped := 0
 	failed := 0
+	recorded := 0
 	for _, r := range results {
-		if r.Status == "stopped" {
+		switch r.Status {
+		case "stopped":
 			stopped++
-		} else {
+		case stopAllStatusStopRecorded:
+			recorded++
+		default:
 			failed++
 		}
 	}
 
 	writeJSON(w, http.StatusOK, StopAllAgentsResponse{
-		Stopped: stopped,
-		Failed:  failed,
-		Total:   len(results),
-		Scope:   scope,
-		Results: results,
+		Stopped:      stopped,
+		Failed:       failed,
+		StopRecorded: recorded,
+		Total:        len(results),
+		Scope:        scope,
+		Results:      results,
 	})
-}
-
-// resolveUserProjectRole returns the user's role in the project's members group.
-// Returns "" if the user is not a member of the project.
-func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID string) string {
-	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID: projectID,
-		GroupType: store.GroupTypeExplicit,
-	}, store.ListOptions{Limit: 10})
-	if err != nil || len(groups.Items) == 0 {
-		return ""
-	}
-
-	for _, g := range groups.Items {
-		membership, err := s.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, userID)
-		if err != nil {
-			continue
-		}
-		return membership.Role
-	}
-	return ""
 }

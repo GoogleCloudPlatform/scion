@@ -904,6 +904,112 @@ Read this section before touching an existing (not brand-new) deployment.
   grant/pre-create:** see
   [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md#7-for-terraform-managed-hubs-what-can-be-removed-afterward)
   §7 for the required run order and what to expect in the plan.
+- **Changing a hub's NFS endpoint is a manual migration.**
+  - **Symptom:** a hub apply stops with
+    `persistentvolumes "<hub_name>-nfs" already exists` (or the same for
+    `storageclasses`). It happens after a change to the NFS server address
+    or the share path, for example a new or recreated Filestore instance
+    (new IP) or a changed `share_name` in shared-infra.
+  - **Why:** `agent-runtime-k8s` gives the PV, PVC and StorageClass fixed
+    names (`<hub_name>-nfs`). `hub-cloudrun`'s settings secret version is
+    `create_before_destroy` and embeds the PV name (`pv_name` in
+    `settings.yaml`). Terraform therefore applies create-before-destroy to
+    the PV and to the PV's dependencies: the StorageClass (through
+    `storage_class_name`) and the `nfs-init` Job (the PV `depends_on` the
+    Job). The replacement PV is created under the same name before the old
+    one is deleted, and the Kubernetes API rejects it.
+  - **What forces the replace** (`hashicorp/kubernetes` 2.38.0, the version
+    in `.terraform.lock.hcl`):
+    - PV: any change under `spec.persistent_volume_source`, which here means
+      `nfs.server` (the Filestore IP from `shared-lookup`) or `nfs.path`
+      (`<share_path>/<hub_name>`). `volume_mode` and `metadata.name` also
+      force a replace, but the module never changes them. `mount_options`,
+      `capacity`, `access_modes`, `persistent_volume_reclaim_policy` and
+      `storage_class_name` update in place.
+    - StorageClass: `storage_provisioner`, `parameters`,
+      `volume_binding_mode`, `mount_options`, `allowed_topologies` and
+      `metadata.name`. All of these are fixed in the module, and none come
+      from the NFS endpoint, so an endpoint change alone does not replace
+      the StorageClass. Only an edit to the module itself does.
+    - PVC: not replaced. Its replace-forcing fields (`volume_name`,
+      `storage_class_name`, `access_modes`, `selector`, `volume_mode` and
+      `resources.limits`) are fixed names or literals, or left unset.
+    - The `nfs-init` Job is also replaced, because its pod template mounts
+      the same server and share. It uses `generate_name`, so the new Job
+      does not hit a name collision.
+  - **Cloud Run also changes.** The hub service mounts NFS from the same
+    inputs (`nfs_server` from `shared-lookup`, `nfs_export` =
+    `<share_path>/<hub_name>` from `agent-runtime-k8s`). These values are
+    also rendered into `settings.yaml`. So the same plan replaces the
+    settings secret version and updates the service in place, which rolls a
+    new revision mounting the new endpoint.
+  - **It fails safe.** The PV create fails before anything is destroyed,
+    and the PV's reclaim policy is `Retain`. No data on either share is
+    removed. Because the Job is create-before-destroy and the PV depends on
+    it, the new `nfs-init` Job has normally already run against the new
+    share by the time the PV create fails. It only creates
+    `<hub_name>/<subpath_root>` and sets ownership on those two directories.
+  - **The data copy needs the old share to still exist.** In
+    `hashicorp/google` 8.4.0, `file_shares.name` is ForceNew, so a
+    `share_name` change replaces the Filestore instance. Replacing or
+    recreating the instance destroys the old share and every hub's data on
+    it. The `filestore` module sets `prevent_destroy = true` and deletion
+    protection, so the shared-infra plan stops with an error until both are
+    removed. That shared-infra change runs before any hub apply hits the
+    symptom above, so step 2 below is too late in that case. Before a
+    `share_name` change or an instance recreate:
+    - copy each hub's `<share_path>/<hub_name>/` off the old share, or
+      create the new instance alongside the old one and copy across, before
+      the shared-infra change is applied;
+    - run the procedure below for every hub on the shared instance, not
+      just one.
+  - **Procedure:**
+    1. Get cluster credentials:
+       `gcloud container clusters get-credentials <shared_prefix>-agents --region <region> --project <project>`.
+       Stop or delete the hub's agents, and confirm that no agent pods
+       remain: `kubectl get pods -n <hub_name>`. Completed `nfs-init` Job
+       pods do not matter, because they mount the share directly, not
+       through the PVC. Do not start agents or create projects until step 6.
+       Until the apply in step 5, the hub's Cloud Run revision still mounts
+       the old share, so anything written after the step 2 copy stays on the
+       old share and is missing after the cutover.
+    2. If the workspace data is being kept, copy it to the same path on the
+       new share. Run this as root from a host or pod that mounts both
+       shares (the share has no root squash):
+       ```bash
+       rsync -aH --numeric-ids <old_mount>/<hub_name>/ <new_mount>/<hub_name>/
+       ```
+       The trailing slashes copy the contents of the old `<hub_name>`
+       directory into the new one, which the `nfs-init` Job may already
+       have created, rather than nesting it as `<hub_name>/<hub_name>`.
+       `-a` with `--numeric-ids` keeps the numeric ownership
+       (`nfs_uid`:`nfs_gid`, default 1000:1000). The copy is a
+       point-in-time snapshot; see step 1.
+    3. Delete the PVC, then the PV:
+       ```bash
+       kubectl delete pvc <hub_name>-nfs -n <hub_name>
+       kubectl delete pv <hub_name>-nfs
+       ```
+       The PV is `Retain`, so the data on the old share is not touched. If
+       the PVC stays `Terminating`, a pod is still using it; go back to
+       step 1.
+    4. Delete the StorageClass (`kubectl delete storageclass <hub_name>-nfs`)
+       only if the plan shows it being replaced. Deleting it does not affect
+       existing volumes.
+    5. Re-plan into a new plan file and go through the plan-review gate
+       (§4, "Plan-review gate"). The PV and PVC (and the StorageClass, if
+       deleted) should now show as creates, not replaces. Expect the
+       settings secret version to be replaced and the Cloud Run service to
+       be updated. For the `nfs-init` Job:
+       - after the failed apply described under Symptom, the new Job is
+         already current in state, so expect only a destroy of the old,
+         deposed Job, not a Job replace;
+       - expect a Job replace only if you are running this procedure
+         before any failed apply, or if the Job create itself failed in the
+         earlier apply.
+
+       Apply. Terraform recreates the objects under the same names.
+    6. Verify per §8.
 
 ---
 

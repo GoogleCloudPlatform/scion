@@ -99,6 +99,12 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -112,7 +118,9 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	}
 
 	// The output of 'container run -d' is the container ID
-	return strings.TrimSpace(out), nil
+	id := strings.TrimSpace(out)
+	reportAppleContainerCreated(hooks, config.Name, id)
+	return id, nil
 }
 
 func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
@@ -120,7 +128,13 @@ func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *AppleContainerRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the container ref.ID and ignores ref.RunID. Apple's CLI
+// uses the container name as its ID, so between the caller's List and this
+// call a recreated container of the same name could be hit; the caller's
+// run_id filter narrows but does not close that window.
+// P4: enforce ref.RunID (ptone/scion#2550).
+func (r *AppleContainerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	// Apple's `container rm` doesn't support -f and fails on running containers,
 	// so kill first (ignoring errors if already stopped) then remove.
 	_, _ = runSimpleCommand(ctx, r.Command, "kill", id)
@@ -223,6 +237,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 
 		info := api.AgentInfo{
 			ContainerID:     c.Configuration.ID,
+			RunID:           c.Configuration.Labels[api.LabelRunID],
 			Name:            c.Configuration.Labels["scion.name"],
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],

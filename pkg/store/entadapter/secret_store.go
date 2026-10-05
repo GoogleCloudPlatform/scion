@@ -242,6 +242,27 @@ func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, 
 	return n > 0, nil
 }
 
+// UpdateSecretValueIfVersion conditionally replaces the encrypted value,
+// applying the change and incrementing Version only when the row's current
+// Version equals expectedVersion. Every other column is left untouched.
+func (s *SecretStore) UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (bool, error) {
+	n, err := s.client.Secret.Update().
+		Where(
+			entsecret.KeyEQ(key),
+			entsecret.ScopeEQ(scope),
+			entsecret.ScopeIDEQ(scopeID),
+			entsecret.VersionEQ(expectedVersion),
+		).
+		SetEncryptedValue(newEncryptedValue).
+		AddVersion(1).
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // UpdateSecretMeta updates only metadata columns of an existing secret without
 // touching the encrypted value. The version is incremented automatically.
 func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID string, meta *store.SecretMetaUpdate) (*store.Secret, error) {

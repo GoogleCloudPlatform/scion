@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -56,6 +57,16 @@ const (
 	ErrCodeUnavailable          = "unavailable"
 	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
 	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
+	// broker (by ID, name or slug) that does not exist at all, as opposed to
+	// one that exists but is offline/unreachable (runtime_broker_unavailable).
+	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
+	// ErrCodeRuntimeBrokerAmbiguous is returned when a runtime broker name
+	// or slug matches more than one broker; the caller must use the ID.
+	ErrCodeRuntimeBrokerAmbiguous = "runtime_broker_ambiguous"
+	// ErrCodeNotImplemented is returned for a request the API accepts but
+	// the hub does not carry out yet. Status 501.
+	ErrCodeNotImplemented = "not_implemented"
 
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
@@ -83,6 +94,12 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// ErrCodeDeleteInProgress is returned (409) by start, restart,
+	// reincarnate, restore, create-with-existing-agent and DM wake while a
+	// delete blocks starting the agent (design ptone/scion#2483 §2.1
+	// deleteBlocksStart).
+	ErrCodeDeleteInProgress = "delete_in_progress"
 
 	// Conversation resolution error codes (Tranche G read-switch)
 
@@ -302,6 +319,12 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = deleteInProgressRefusal("").Message
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -443,12 +466,12 @@ func InternalError(w http.ResponseWriter) {
 		"Internal server error", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-// If allowedMethods are provided, an Allow header is set per RFC 9110 §15.5.6.
-func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {
-	if len(allowedMethods) > 0 {
-		w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-	}
+// MethodNotAllowed writes a 405 Method Not Allowed response with the Allow
+// header RFC 9110 §15.5.6 requires. The signature requires at least one
+// method, so a bare call does not compile.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
 		"Method not allowed", nil)
 }
@@ -490,6 +513,29 @@ func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableB
 		"Specified runtime broker is unavailable", details)
 }
 
+// RuntimeBrokerNotFound writes a 404 Not Found response when the explicitly
+// requested runtime broker does not exist. The message names the requested
+// broker and the brokers the caller may use, because CLI clients print only
+// the message (not Details).
+func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBrokers []RuntimeBrokerSummary) {
+	names := make([]string, 0, len(usableBrokers))
+	for _, b := range usableBrokers {
+		names = append(names, fmt.Sprintf("%q", b.Name))
+	}
+	var message string
+	if len(names) > 0 {
+		message = fmt.Sprintf("Runtime broker %q not found. Brokers you can use for this project: %s",
+			requested, strings.Join(names, ", "))
+	} else {
+		message = fmt.Sprintf("Runtime broker %q not found, and no runtime brokers are currently available to you for this project", requested)
+	}
+	details := map[string]interface{}{
+		"requestedBrokerId": requested,
+		"availableBrokers":  usableBrokers,
+	}
+	writeError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
+}
+
 // MissingEnvVars writes a 422 Unprocessable Entity response when required
 // environment variables cannot be resolved from available sources.
 func MissingEnvVars(w http.ResponseWriter, keys []string, envInfo *EnvGatherResponse) {
@@ -511,4 +557,61 @@ type RuntimeBrokerSummary struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	IsDefault bool   `json:"isDefault,omitempty"`
+}
+
+// brokerCodeRuntimeUnavailable is the runtime broker's error code for a 503
+// meaning the runtime that holds the agent is not available on the broker
+// right now — for an existing-agent request, typically because no runtime of
+// the agent's recorded type is registered there (ptone/scion#2748).
+const brokerCodeRuntimeUnavailable = "runtime_unavailable"
+
+// defaultBrokerRuntimeRetryAfter is the Retry-After the hub sends with a
+// relayed runtime_unavailable 503 when the broker gave no usable value.
+const defaultBrokerRuntimeRetryAfter = "30"
+
+// isBrokerRuntimeUnavailable reports whether err is a runtime broker's 503
+// answer with error code runtime_unavailable.
+func isBrokerRuntimeUnavailable(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusServiceUnavailable &&
+		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
+}
+
+// writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
+// an existing-agent operation as a retryable 503 (with Retry-After) instead of
+// the generic 502, and reports whether it did; for any other error it writes
+// nothing and returns false. runtime is the agent's recorded runtime type.
+// Like the logs relay, the message is the hub's own text rather than the
+// broker's response body, and the broker's Retry-After is used only if it is
+// a positive number of seconds.
+func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime string) bool {
+	if !isBrokerRuntimeUnavailable(err) {
+		return false
+	}
+	w.Header().Set("Retry-After", brokerRuntimeRetryAfter(err))
+	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
+	return true
+}
+
+// brokerRuntimeRetryAfter is the Retry-After to send for a broker's
+// runtime_unavailable answer: the broker's value if it is a positive number
+// of seconds, otherwise defaultBrokerRuntimeRetryAfter.
+func brokerRuntimeRetryAfter(err error) string {
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(se.RetryAfter)); convErr == nil && n > 0 {
+			return strconv.Itoa(n)
+		}
+	}
+	return defaultBrokerRuntimeRetryAfter
+}
+
+// brokerRuntimeUnavailableMessage is the hub's client-facing text for a
+// broker's runtime_unavailable answer; runtime is the agent's recorded
+// runtime type.
+func brokerRuntimeUnavailableMessage(runtime string) string {
+	if rt := dispatchRecordedRuntime(runtime); rt != "" {
+		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
+	}
+	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
 }

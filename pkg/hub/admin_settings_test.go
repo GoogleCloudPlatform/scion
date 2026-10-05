@@ -881,3 +881,420 @@ func TestHandlePutServerConfig_DefaultTimezone_ValidPersisted(t *testing.T) {
 		})
 	}
 }
+
+// TestApplySettingsUpdates_ClearTopLevelStrings covers ptone/scion#2535: an
+// explicit "" for a top-level string setting must delete the key from
+// settings.yaml (not persist an empty string), and a nil pointer must leave
+// the stored value unchanged.
+func TestApplySettingsUpdates_ClearTopLevelStrings(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+	newRaw := func() map[string]interface{} {
+		raw := map[string]interface{}{"schema_version": "1"}
+		for _, k := range keys {
+			raw[k] = "old-" + k
+		}
+		return raw
+	}
+	empty := func() *string { s := ""; return &s }
+
+	t.Run("empty string deletes", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{
+			ActiveProfile:        empty(),
+			DefaultTemplate:      empty(),
+			DefaultHarnessConfig: empty(),
+			ImageRegistry:        empty(),
+			WorkspacePath:        empty(),
+			DefaultMaxAgentRole:  empty(),
+			DefaultAgentRole:     empty(),
+			DefaultRuntimeBroker: empty(),
+		})
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				t.Errorf("expected %s to be deleted, got %q", k, v)
+			}
+		}
+	})
+
+	t.Run("nil leaves unchanged", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{})
+		for _, k := range keys {
+			if raw[k] != "old-"+k {
+				t.Errorf("expected %s unchanged, got %v", k, raw[k])
+			}
+		}
+	})
+
+	t.Run("non-empty sets", func(t *testing.T) {
+		raw := newRaw()
+		v := "new"
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{ActiveProfile: &v, WorkspacePath: &v})
+		if raw["active_profile"] != "new" || raw["workspace_path"] != "new" {
+			t.Errorf("expected values set, got %v / %v", raw["active_profile"], raw["workspace_path"])
+		}
+	})
+}
+
+// TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip is the
+// handler-level complement of TestApplySettingsUpdates_ClearTopLevelStrings
+// (ptone/scion#2535): a file-mode PUT that sends "" for each top-level
+// string setting must remove those keys from the written settings.yaml,
+// while a key the request omits is left as it was.
+func TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(scionDir, "settings.yaml")
+
+	seed := map[string]interface{}{
+		"schema_version": "1",
+		"default_model":  "keep-model",
+	}
+	for _, k := range keys {
+		seed[k] = "old-" + k
+	}
+	seedData, err := yamlv3.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, seedData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	body := map[string]string{}
+	for _, k := range keys {
+		body[k] = ""
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", string(bodyJSON)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not readable: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	for _, k := range keys {
+		if v, ok := raw[k]; ok {
+			t.Errorf("expected %s to be absent from settings.yaml after clearing, got %v", k, v)
+		}
+	}
+	if got, _ := raw["default_model"].(string); got != "keep-model" {
+		t.Errorf("default_model was not in the request and should be unchanged, got %v (settings.yaml: %s)", raw["default_model"], data)
+	}
+}
+
+// File-mode PUT rejects a shared_dir_size that is not a Kubernetes quantity,
+// naming the key, and writes nothing.
+func TestHandlePutServerConfig_SharedDirSize_InvalidRejected(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1TB"}}}`: "runtimes.gke.shared_dir_size",
+		`{"profiles":{"big":{"runtime":"gke","shared_dir_size":"lots"}}}`:    "profiles.big.shared_dir_size",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+		})
+	}
+}
+
+// File-mode PUT accepts a valid shared_dir_size and persists it.
+func TestHandlePutServerConfig_SharedDirSize_ValidPersisted(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1Ti"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "shared_dir_size: 1Ti") {
+		t.Errorf("settings.yaml should carry the size, got: %s", data)
+	}
+}
+
+// File-mode PUT accepts shared_dir_storage_backend on runtime and profile
+// entries when the request carries a complete nfs block, and persists it.
+func TestHandlePutServerConfig_SharedDirStorageBackend_ValidPersisted(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv, `{
+		"server": {"shared_dir_storage": {"backend": "local", "nfs": {"mount_root": "/srv/nfs", "shares": [{"id": "share-1", "pv_name": "pv-1"}]}}},
+		"runtimes": {"docker": {"type": "docker"}, "k8s": {"type": "kubernetes", "shared_dir_storage_backend": "nfs"}},
+		"profiles": {"local": {"runtime": "docker", "shared_dir_storage_backend": "local"}, "gke": {"runtime": "k8s", "shared_dir_storage_backend": "nfs"}}
+	}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "shared_dir_storage_backend: nfs"); got != 2 {
+		t.Errorf("settings.yaml should carry both nfs overrides, got %d in: %s", got, data)
+	}
+	if !strings.Contains(string(data), "shared_dir_storage_backend: local") {
+		t.Errorf("settings.yaml should carry the local override: %s", data)
+	}
+}
+
+// File-mode PUT rejects an unknown shared_dir_storage_backend, and an nfs
+// override with no nfs block in the request or the current settings,
+// naming the key and writing nothing.
+func TestHandlePutServerConfig_SharedDirStorageBackend_InvalidRejected(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"profiles":{"gke":{"runtime":"k8s","shared_dir_storage_backend":"ceph"}}}`:    "profiles.gke.shared_dir_storage_backend",
+		`{"runtimes":{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"nfs"}}}`: "runtimes.k8s.shared_dir_storage_backend",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+		})
+	}
+}
+
+// File-mode PUT of another section keeps an existing
+// shared_dir_storage_backend in settings.yaml, and the file's new content
+// is what the next dispatch resolves (no restart).
+func TestHandlePutServerConfig_SharedDirStorageBackend_KeptOnOtherWrite(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	dir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /srv/nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"auth":{"default_user_role":"member"}}}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := gs.ResolveSharedDirStorage("gke")
+	if cfg == nil || cfg.Backend != "nfs" {
+		data, _ := os.ReadFile(settingsPath)
+		t.Fatalf("gke should still resolve to nfs after another write, got %+v; settings.yaml: %s", cfg, data)
+	}
+}
+
+// sdsWriteFileWithNFSOverride writes a global settings.yaml whose gke
+// profile selects nfs, with a complete nfs block, and returns its path.
+func sdsWriteFileWithNFSOverride(t *testing.T) string {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	dir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /srv/nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return settingsPath
+}
+
+// A file-mode PUT that changes only server.shared_dir_storage is checked
+// against the runtimes and profiles already stored: removing or emptying
+// the nfs block while a stored override selects nfs is rejected, naming
+// the override, and nothing is written.
+func TestHandlePutServerConfig_SharedDirStorage_CheckedAgainstStoredOverrides(t *testing.T) {
+	for name, body := range map[string]string{
+		"nfs block removed": `{"server":{"shared_dir_storage":{"backend":"local"}}}`,
+		"no shares":         `{"server":{"shared_dir_storage":{"backend":"local","nfs":{"mount_root":"/srv/nfs"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			settingsPath := sdsWriteFileWithNFSOverride(t)
+			before, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &Server{}
+			rr := httptest.NewRecorder()
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "profiles.gke.shared_dir_storage_backend") {
+				t.Errorf("400 body should name the stored override, got: %s", rr.Body.String())
+			}
+			after, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Errorf("settings.yaml must be unchanged, got: %s", after)
+			}
+		})
+	}
+}
+
+// A file-mode PUT of server.shared_dir_storage is accepted when the merged
+// result is consistent: a new complete nfs block, or a request that also
+// drops the stored nfs override.
+func TestHandlePutServerConfig_SharedDirStorage_MergedResultAccepted(t *testing.T) {
+	for name, body := range map[string]string{
+		"new complete nfs block": `{"server":{"shared_dir_storage":{"backend":"local","nfs":{"mount_root":"/mnt/other","shares":[{"id":"share-2","pv_name":"pv-2"}]}}}}`,
+		"override dropped too":   `{"server":{"shared_dir_storage":{"backend":"local"}},"profiles":{"gke":{"runtime":"k8s"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			settingsPath := sdsWriteFileWithNFSOverride(t)
+			srv := &Server{}
+			rr := httptest.NewRecorder()
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			if rr.Code != http.StatusOK {
+				data, _ := os.ReadFile(settingsPath)
+				t.Fatalf("expected 200, got %d: %s; settings.yaml: %s", rr.Code, rr.Body.String(), data)
+			}
+		})
+	}
+}
+
+// File-mode PUT persists home_storage_backend and home_storage_leaf on
+// runtime and profile entries and server.home_storage, and rejects unknown
+// values naming the key.
+func TestHandlePutServerConfig_HomeStorage(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv, `{
+		"server": {"home_storage": {"leaf": "pod", "stop_grace_seconds": 40}},
+		"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "broker"}},
+		"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "nfs", "home_storage_leaf": "pod"}}
+	}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"home_storage_backend: nfs", "home_storage_leaf: broker", "home_storage_leaf: pod", "stop_grace_seconds: 40"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("settings.yaml should contain %q: %s", want, data)
+		}
+	}
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gs.ResolveHomeStorage("gke"); got.Backend != "nfs" || got.Leaf != "pod" {
+		t.Errorf("gke resolves to %+v, want nfs/pod", got)
+	}
+
+	for body, key := range map[string]string{
+		`{"profiles":{"gke":{"runtime":"k8s","home_storage_backend":"ceph"}}}`:  "profiles.gke.home_storage_backend",
+		`{"runtimes":{"k8s":{"type":"kubernetes","home_storage_leaf":"node"}}}`: "runtimes.k8s.home_storage_leaf",
+		`{"server":{"home_storage":{"backend":"NFS"}}}`:                         "server.home_storage.backend",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				t.Errorf("nothing should be persisted for an invalid value")
+			}
+		})
+	}
+}

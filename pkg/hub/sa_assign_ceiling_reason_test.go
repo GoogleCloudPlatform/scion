@@ -394,10 +394,10 @@ func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	createDCAgent(t, s, agentBID, projectID, agentAID, AgentRoleFull)
 	sa := scaCreateSA(t, s, projectID)
 
-	createDCEdge(t, s, store.DelegationPrincipalUser, goneUserID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, goneUserID,
 		store.DelegationPrincipalAgent, agentAID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
-	createDCEdge(t, s, store.DelegationPrincipalAgent, agentAID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalAgent, agentAID,
 		store.DelegationPrincipalAgent, agentBID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
@@ -454,7 +454,7 @@ func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
 		prev, prevType := f.userID, store.DelegationPrincipalUser
 		for _, id := range ids {
 			createDCAgent(t, f.s, id, f.projectID, prev, AgentRoleFull)
-			createDCEdge(t, f.s, prevType, prev, store.DelegationPrincipalAgent, id,
+			seedRecordedDelegationEdge(t, f.s, prevType, prev, store.DelegationPrincipalAgent, id,
 				store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 			prev, prevType = id, store.DelegationPrincipalAgent
 		}

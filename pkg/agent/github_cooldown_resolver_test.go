@@ -17,11 +17,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,7 +59,7 @@ func newCooldownTestResolver(t *testing.T, mux *http.ServeMux, clock *fakeClock)
 	t.Helper()
 	server, srvMux := newTestGitHubServer(t)
 	srvMux.Handle("/", mux)
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Hour)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -239,7 +241,10 @@ func TestGitHubSkillResolver_ProvisionBatchWithRateLimitedRef(t *testing.T) {
 
 // TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast: when the
 // rate-limited ref shares its credential with the rest of the batch, the
-// refs after it that have no cached entry fail fast without requests.
+// refs started after it that have no cached entry fail fast without
+// requests. Refs are resolved one at a time here so that ref c starts only
+// after ref b's rate limit; the parallel case is covered by
+// TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs.
 func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) {
 	var calls, limitedCalls atomic.Int64
 	mux := http.NewServeMux()
@@ -252,6 +257,7 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) 
 	})
 	clock := newFakeClock()
 	r := newCooldownTestResolver(t, mux, clock)
+	r.maxConcurrent = 1
 
 	res, err := r.Resolve(context.Background(), []api.SkillReference{
 		{URI: "gh://org/skills/a@main"},
@@ -278,6 +284,77 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) 
 	// Only ref a's three requests went out: c was held back.
 	if calls.Load() != 3 {
 		t.Errorf("expected 3 requests for ref a only, got %d", calls.Load())
+	}
+}
+
+// TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs:
+// with refs resolved in parallel, a rate limit on one ref still holds back
+// the rest of the batch that shares its credential. A ref already in flight
+// when the cooldown starts sends no further request, and refs started
+// after it send none at all.
+func TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs(t *testing.T) {
+	var calls, limitedCalls atomic.Int64
+	mux := http.NewServeMux()
+	clock := newFakeClock()
+	r := newCooldownTestResolver(t, mux, clock)
+	r.maxConcurrent = 2
+	identity := GitHubCooldownIdentity(r.token)
+
+	// Ref b's rate limit is answered only once ref c's commit lookup has
+	// arrived, and c's lookup is answered only once that rate limit has
+	// started the cooldown, so c is in flight across that moment.
+	cArrived := make(chan struct{})
+	var cArrivedOnce sync.Once
+	mux.HandleFunc("/repos/org/skills/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		cArrivedOnce.Do(func() { close(cArrived) })
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, active := r.cooldownTracker().Active(identity); active {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	for _, name := range []string{"c", "d", "e"} {
+		serveTestSkill(mux, "org", "skills", name, &calls)
+	}
+	mux.HandleFunc("/repos/org/limited/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		limitedCalls.Add(1)
+		select {
+		case <-cArrived:
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	res, err := r.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://org/limited/b@main"},
+		{URI: "gh://org/skills/c@main"},
+		{URI: "gh://org/skills/d@main"},
+		{URI: "gh://org/skills/e@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Resolved) != 0 {
+		t.Errorf("expected no ref to resolve, got %+v", res.Resolved)
+	}
+	if len(res.Errors) != 4 {
+		t.Fatalf("expected 4 errors, got %+v", res.Errors)
+	}
+	for _, e := range res.Errors {
+		if e.Code != GitHubRateLimitedCode {
+			t.Errorf("%s: code %q, want %q", e.URI, e.Code, GitHubRateLimitedCode)
+		}
+	}
+	if limitedCalls.Load() != 1 {
+		t.Errorf("expected one request for the limited ref, got %d", limitedCalls.Load())
+	}
+	// Only ref c's commit lookup went out.
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 request (ref c's commit lookup), got %d", calls.Load())
 	}
 }
 
@@ -323,7 +400,7 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 			CachedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsBranchRef: true,
 		},
 	})
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,5 +441,84 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 	}
 	if _, ok := cache.Get(keyFor(missURI)); ok {
 		t.Error("a rate_limited error must not be stored as a resolution")
+	}
+}
+
+// TestGitHubResolveError_UnwrapReachesRateLimitError: a rate-limit error
+// wrapped in a githubResolveError is still found by errors.As and errors.Is,
+// withRateLimitRef still names the ref, and Resolve's classification would
+// report it as rate_limited.
+func TestGitHubResolveError_UnwrapReachesRateLimitError(t *testing.T) {
+	rl := &GitHubRateLimitError{RetryAt: time.Now().Add(time.Minute), Sent: true}
+	wrapped := fmt.Errorf("failed to resolve ref: %w",
+		&githubResolveError{code: SkillErrCodeUpstreamUnavailable, msg: "outer", err: rl})
+
+	var got *GitHubRateLimitError
+	if !errors.As(wrapped, &got) || got != rl {
+		t.Fatalf("errors.As must reach the rate-limit error, got %v", got)
+	}
+	if !errors.Is(wrapped, rl) {
+		t.Error("errors.Is must reach the rate-limit error")
+	}
+	named := withRateLimitRef(wrapped, "gh://o/r/s@main")
+	if !strings.Contains(named.Error(), "gh://o/r/s@main") {
+		t.Errorf("expected the ref in %q", named.Error())
+	}
+}
+
+// TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping: a 503
+// is normally retried after a backoff. If a cooldown for the same identity
+// starts in the meantime (here, while the 503 is served), the retry is not
+// sent and the call fails at once with a rate-limit error instead of
+// sleeping the backoff first.
+func TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping(t *testing.T) {
+	clock := newFakeClock()
+	var r *GitHubSkillResolver
+	var commitCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		commitCalls.Add(1)
+		r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	r = newCooldownTestResolver(t, mux, clock)
+
+	start := time.Now()
+	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: "gh://owner/repo/s@main"}}, ResolveOpts{})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Code != GitHubRateLimitedCode || res.Errors[0].RetryAfter != "60" {
+		t.Fatalf("expected one rate_limited error with RetryAfter 60, got %+v", res.Errors)
+	}
+	if n := commitCalls.Load(); n != 1 {
+		t.Errorf("expected 1 request, got %d", n)
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("expected no backoff sleep, took %s", elapsed)
+	}
+}
+
+// TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor pins how
+// cooldownRetryAfter renders the time left on a cooldown: a fraction of a
+// second rounds up, and the result is never below 1, even when RetryAt has
+// already passed by the tracker's clock.
+func TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor(t *testing.T) {
+	clock := newFakeClock()
+	r := &GitHubSkillResolver{cooldown: NewGitHubCooldown(clock.Now)}
+	now := clock.Now()
+	for _, tc := range []struct {
+		left time.Duration
+		want string
+	}{
+		{30*time.Second + 200*time.Millisecond, "31"},
+		{100 * time.Millisecond, "1"},
+		{-time.Second, "1"},
+	} {
+		if got := r.cooldownRetryAfter(&GitHubRateLimitError{RetryAt: now.Add(tc.left)}); got != tc.want {
+			t.Errorf("RetryAt = now + (%v): got %q, want %q", tc.left, got, tc.want)
+		}
 	}
 }

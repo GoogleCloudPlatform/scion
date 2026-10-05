@@ -85,6 +85,20 @@ const (
 	HeaderServerlessAuthorization
 )
 
+// HeaderName returns the HTTP header that carries the transport token in
+// this mode. For HeaderAuthorization the header is only set when the
+// request has no Authorization header already.
+func (m HeaderMode) HeaderName() string {
+	switch m {
+	case HeaderProxyAuthorization:
+		return "Proxy-Authorization"
+	case HeaderServerlessAuthorization:
+		return "X-Serverless-Authorization"
+	default:
+		return "Authorization"
+	}
+}
+
 // TokenSource yields transport-layer Google OIDC ID tokens. Thread-safe.
 type TokenSource interface {
 	// Token returns a valid OIDC token, refreshing if necessary.
@@ -156,6 +170,13 @@ func ModeFromString(mode string) HeaderMode {
 	}
 }
 
+// IsProxyMode reports whether mode (a SCION_TRANSPORT_MODE value) names a
+// platform proxy in front of the hub that requires a transport credential:
+// "iap" or "cloudrun_invoker".
+func IsProxyMode(mode string) bool {
+	return mode == "iap" || mode == "cloudrun_invoker"
+}
+
 // ModeFromEnv reads SCION_TRANSPORT_MODE and returns the corresponding
 // HeaderMode. Returns HeaderAuthorization when unset or unrecognised.
 func ModeFromEnv() HeaderMode {
@@ -167,27 +188,48 @@ func ModeFromEnv() HeaderMode {
 // exactly as before this change.
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource
+//  1. SCION_TRANSPORT_TOKEN_FILE or SCION_TRANSPORT_TOKEN set (inside an
+//     agent) → FileSource. It reads the refreshed transport token file and
+//     uses the injected env value only as a bootstrap fallback; whichever
+//     expires last wins.
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience configured (SCION_TRANSPORT_AUDIENCE or
 //     SCION_HUB_OIDC_AUDIENCE) → MetadataSource
-//  3. Otherwise → nil (no transport auth)
+//  3. SCION_TRANSPORT_MODE names a proxy mode and the default transport
+//     token file exists → FileSource for that file. This covers an agent
+//     that started without a transport token and received one later, from
+//     a token refresh or reset-auth.
+//  4. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
-	if tok := os.Getenv(EnvTransportToken); tok != "" {
-		source := NewInjectedSource()
-		expiry, err := ParseTokenExpiry(tok)
-		if err != nil {
-			expiry = time.Now().Add(DefaultTTL)
-		}
-		source.SetToken(tok, expiry)
-		return source, nil
-	}
+	return FromEnvWithReader(nil)
+}
 
+// FromEnvWithReader is FromEnv with the reader used by both file-backed
+// steps (the injected transport token file and the proxy-mode default
+// file). A nil read uses ReadTransportTokenFile, as FromEnv does. Callers
+// that may run with elevated privileges should pass a stricter reader,
+// such as sciontool's guarded one.
+func FromEnvWithReader(read FileReadFunc) (TokenSource, error) {
+	if src := fileSourceFromEnv(read); src != nil {
+		return src, nil
+	}
+	if src := metadataSourceFromEnv(); src != nil {
+		return src, nil
+	}
+	if src := lateFileSourceFromEnv(read); src != nil {
+		return src, nil
+	}
+	return nil, nil
+}
+
+// metadataSourceFromEnv returns a MetadataSource when running on GCE with
+// the real metadata server reachable and a transport audience configured.
+func metadataSourceFromEnv() *MetadataSource {
 	if !IsOnGCEFunc() {
-		return nil, nil
+		return nil
 	}
 	if mode := os.Getenv(EnvMetadataMode); IsMetadataRedirected(mode) {
-		return nil, nil
+		return nil
 	}
 
 	audience := os.Getenv(EnvTransportAudience)
@@ -195,10 +237,9 @@ func FromEnv() (TokenSource, error) {
 		audience = os.Getenv(EnvHubOIDCAudience)
 	}
 	if audience == "" {
-		return nil, nil
+		return nil
 	}
-
-	return NewMetadataSource(audience), nil
+	return NewMetadataSource(audience)
 }
 
 // TransportSettings holds transport auth settings read from settings.yaml.
@@ -212,7 +253,9 @@ type TransportSettings struct {
 // available (keeping the sciontool binary lean).
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource (env always wins)
+//  1. Injected transport token (file or env) → FileSource (always wins);
+//     in a proxy mode, otherwise after the metadata step of FromEnv, the
+//     default transport token file once it exists → FileSource
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience available → MetadataSource
 //  3. Settings audience + adcNew → ADCSource

@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -238,29 +237,6 @@ func TestConversationCatchUpFlags(t *testing.T) {
 	f = flags.Lookup("json")
 	require.NotNil(t, f, "--json flag should exist")
 	assert.Equal(t, "false", f.DefValue)
-}
-
-func TestFormatTimeAgo(t *testing.T) {
-	tests := []struct {
-		name     string
-		duration time.Duration
-		expected string
-	}{
-		{"just now", 30 * time.Second, "just now"},
-		{"1 minute", 1 * time.Minute, "1m ago"},
-		{"5 minutes", 5 * time.Minute, "5m ago"},
-		{"1 hour", 1 * time.Hour, "1h ago"},
-		{"3 hours", 3 * time.Hour, "3h ago"},
-		{"1 day", 24 * time.Hour, "1d ago"},
-		{"7 days", 7 * 24 * time.Hour, "7d ago"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatTimeAgo(time.Now().Add(-tt.duration))
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
 
 // ---------------------------------------------------------------------------

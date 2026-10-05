@@ -47,6 +47,16 @@ module.exports = {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
+        {
+            files: [
+                'src/client/agent-store.test.ts',
+                'src/client/agent-store-feed.test.ts',
+                'src/client/paginate-all.test.ts',
+                'src/client/state.test.ts',
+                'src/client/__fixtures__/agent-store-harness.ts',
+            ],
+            parserOptions: { project: './src/client/tsconfig.client-tests.json' },
+        },
         // Explicit lists, not globs: only these files are lint-clean against
         // their project. Other files in the same directories are not.
         {
@@ -54,9 +64,16 @@ module.exports = {
                 'src/components/shared/palette/quick-palette.test.ts',
                 'src/components/shared/palette/quick-palette-groups.test.ts',
                 'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
+                'src/components/shared/palette/quick-palette-host.test.ts',
+                'src/components/shared/palette/graph-palette-controller.test.ts',
+                'src/components/pages/graph-palette-hosts.test.ts',
                 'src/components/shared/open-modal.test.ts',
+                'src/components/shared/agent-tree-view.test.ts',
+                'src/components/shared/deep-active-element.test.ts',
                 'src/components/terminal/terminal-pane.test.ts',
                 'src/components/shared/header.test.ts',
+                'src/components/shared/group-member-editor-membership.test.ts',
+                'src/components/pages/onboarding.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },

@@ -39,9 +39,25 @@ var provisionCmd = &cobra.Command{
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
 the environment and invokes the shared provisioning function. The sentinel
-file (.scion-provisioned) is placed inside the workspace directory itself
-because the init container's PVC subPath mount only exposes the workspace
-dir, not its parent.
+file (.scion-provisioned) and the provisioning lock are kept in the
+project's provisioning state directory, which the Kubernetes runtime mounts
+next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
+them is visible in the workspace. Without that variable (an older runtime)
+they are kept in the workspace directory itself, as before. A sentinel
+already in the workspace directory still counts as provisioned, and the
+lock in the workspace directory is taken before the one in the state
+directory, so older and newer images exclude each other.
+
+In clone-per-agent mode (SCION_WORKSPACE_MODE=clone-per-agent, with
+SCION_AGENT_SLUG and SCION_AGENT_BRANCH), the mounted directory is the
+agent's own directory: it prepares the empty workspace directory inside it
+for the agent container's clone, records the branch, and writes the
+sentinel next to the workspace. It does not clone.
+
+In empty-per-agent mode (SCION_WORKSPACE_MODE=empty-per-agent, with
+SCION_AGENT_SLUG), it does the same without a branch: it makes sure the
+agent's empty workspace directory exists and writes the sentinel. Nothing
+is cloned and no git is run.
 
 In --wait-for-sentinel mode, polls for the sentinel file written by the
 winning node's init container and exits 0 when found or non-zero on timeout.
@@ -78,7 +94,7 @@ func init() {
 	provisionCmd.Flags().StringVar(&provisionWorkspace, "workspace", "/workspace",
 		"Path to the workspace directory")
 	provisionCmd.Flags().StringVar(&provisionMode, "mode", "shared-plain",
-		"Workspace sharing mode (shared-plain, worktree-per-agent)")
+		"Workspace sharing mode (shared-plain, worktree-per-agent, clone-per-agent)")
 	provisionCmd.Flags().IntVar(&provisionDepth, "depth", 1,
 		"Git clone depth (0=full clone, >0=that depth; default 1=shallow)")
 	provisionCmd.Flags().IntVar(&provisionUID, "uid", 1000,
@@ -123,12 +139,18 @@ func runProvision(ctx context.Context) error {
 	// The agent's worktree directory is named after the agent's slug.
 	agentSlug := os.Getenv("SCION_AGENT_SLUG")
 	worktree := mode == store.SharingModeWorktreePerAgent
-	if worktree {
+	// Clone-per-agent: the workspace path is the agent's directory
+	// (<project>/agents/<agent name>); this step prepares its workspace
+	// directory and the agent container clones into it.
+	// Empty-per-agent on NFS: the same agent directory, whose workspace
+	// stays empty (no branch, no clone).
+	agentDir := mode == store.SharingModeClonePerAgent || mode == store.SharingModeEmptyPerAgent
+	if worktree || agentDir {
 		if slug, err := api.ValidateAgentName(agentSlug); err != nil || slug != agentSlug {
-			return fmt.Errorf("provision: worktree-per-agent mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", agentSlug)
+			return fmt.Errorf("provision: %s mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", mode, agentSlug)
 		}
 	}
-	if worktree {
+	if worktree || agentDir {
 		// Files the worktree step creates as root keep group write, like
 		// the directories the broker prepares.
 		defer setProvisionUmask()()
@@ -164,6 +186,30 @@ func runProvision(ctx context.Context) error {
 		}
 	}
 
+	// Shared-plain and worktree-per-agent: keep the sentinel and the lock
+	// in the provisioning state directory when the pod mounts one. The
+	// agent-directory modes keep them in the mounted agent directory,
+	// outside the workspace already.
+	sentinelDir := provisionWorkspace
+	legacyDir := ""
+	if !agentDir {
+		stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
+		if err != nil {
+			return err
+		}
+		if stateDir != "" {
+			// Without the broker's preparation (no setgid and group write),
+			// the node created the directory as root: give it to the
+			// workspace owner, the same condition under which the workspace
+			// chown stays strict.
+			if err := provision.PrepareStateDir(stateDir, provisionUID, provisionGID, provisionRequireChownSuccess(os.Getenv)); err != nil {
+				return fmt.Errorf("provision: %w", err)
+			}
+			sentinelDir = stateDir
+			legacyDir = provisionWorkspace
+		}
+	}
+
 	in := provision.ProvisionInput{
 		Ctx: ctx,
 		Resolved: provision.ResolvedWorkspace{
@@ -176,7 +222,8 @@ func runProvision(ctx context.Context) error {
 		Locker:      nil, // no advisory locker in init container
 		NFSUID:      provisionUID,
 		NFSGID:      provisionGID,
-		SentinelDir: provisionWorkspace,
+		SentinelDir: sentinelDir,
+		LegacyDir:   legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -198,6 +245,13 @@ func runProvision(ctx context.Context) error {
 			}
 		}
 	}
+	if agentDir {
+		branch := os.Getenv("SCION_AGENT_BRANCH")
+		if mode == store.SharingModeEmptyPerAgent {
+			branch = ""
+		}
+		setAgentDirInput(&in, agentSlug, branch, provisionTimeout)
+	}
 	if !in.RequireChownSuccess {
 		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
 	}
@@ -207,11 +261,29 @@ func runProvision(ctx context.Context) error {
 	if worktree {
 		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
 	}
+	if agentDir {
+		log.Info("Preparing the workspace of agent %s at %s", agentSlug, filepath.Join(provisionWorkspace, provision.AgentWorkspaceDir))
+		if err := provision.ProvisionAgentDir(in); err != nil {
+			return fmt.Errorf("provision failed: %w", err)
+		}
+		log.Info("Agent workspace prepared")
+		return nil
+	}
 	if err := provision.ProvisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
 	return nil
+}
+
+// setAgentDirInput fills in the clone-per-agent part of in: the agent's
+// slug and branch, and a lock wait of at least the --timeout value. The
+// clone itself is left to the agent container: ProvisionAgentDir does not
+// use clone settings.
+func setAgentDirInput(in *provision.ProvisionInput, agentSlug, branch string, timeoutSeconds int) {
+	in.AgentID = agentSlug
+	in.AgentName = branch
+	in.LockWait = time.Duration(timeoutSeconds) * time.Second
 }
 
 // setWorktreeInput fills in the worktree-per-agent part of in. The branch
@@ -258,8 +330,51 @@ func provisionRequireChownSuccess(getenv func(string) string) bool {
 	return !provision.ChownBestEffortRequested(getenv)
 }
 
+// provisionStateDirEnv names the provisioning state directory the
+// Kubernetes runtime mounts into the init container (shared-plain and
+// worktree-per-agent modes). An environment variable rather than a flag, so
+// an older sciontool ignores it and keeps the sentinel in the workspace.
+const provisionStateDirEnv = "SCION_PROVISION_STATE_DIR"
+
+// provisionStateDir returns the provisioning state directory from
+// SCION_PROVISION_STATE_DIR, or "" when it is unset. It must be a clean
+// absolute path other than /, and neither inside the workspace nor
+// containing it.
+func provisionStateDir(getenv func(string) string, workspace string) (string, error) {
+	dir := getenv(provisionStateDirEnv)
+	if dir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
+		return "", fmt.Errorf("provision: %s=%q must be a clean absolute path other than /", provisionStateDirEnv, dir)
+	}
+	ws := filepath.Clean(workspace)
+	if within(dir, ws) || within(ws, dir) {
+		return "", fmt.Errorf("provision: %s=%q must be outside the workspace %s", provisionStateDirEnv, dir, ws)
+	}
+	return dir, nil
+}
+
+// within reports whether path is dir or below it (both clean).
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && filepath.IsLocal(rel)
+}
+
 func runWaitForSentinel(ctx context.Context) error {
+	// The provisioning container writes the sentinel in the state directory
+	// when the pod mounts one; an older one (or an earlier provisioning)
+	// wrote it in the workspace, which is still accepted.
+	stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
+	if err != nil {
+		return err
+	}
+	dirs := []string{provisionWorkspace}
 	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
+	if stateDir != "" {
+		dirs = []string{stateDir, provisionWorkspace}
+		sentinelPath = filepath.Join(stateDir, provision.ProvisionSentinelFile)
+	}
 	timeout := time.Duration(provisionTimeout) * time.Second
 	interval := time.Duration(provisionPollInterval) * time.Second
 	start := time.Now()
@@ -268,7 +383,9 @@ func runWaitForSentinel(ctx context.Context) error {
 	log.Info("Waiting for sentinel %s (timeout=%s, interval=%s)", sentinelPath, timeout, interval)
 
 	for {
-		if _, err := os.Stat(sentinelPath); err == nil {
+		// Any error (including EACCES on a state directory the node just
+		// created as root) means "not yet".
+		if provision.SentinelPresent(dirs...) {
 			log.Info("Sentinel found after %s", time.Since(start).Truncate(time.Second))
 			return nil
 		}

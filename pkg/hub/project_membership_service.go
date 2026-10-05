@@ -17,9 +17,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -324,6 +324,17 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 // project-owner binding using the provided (transactional) store.
 // R5 O-1: returns an error so callers can distinguish "not owner" from "store
 // failure" and surface 500 instead of a misleading 403.
+//
+// Fail-closed defence in depth: the five in-transaction "only direct project
+// owners" refusals (AddMember x2, UpdateMemberRole x2, RemoveMember x1) pair
+// this check with an actorRole of project-owner. With valid data that
+// combination cannot occur: projectEffectiveRoleFromStore takes project-owner
+// only from direct bindings, the store rejects group and agent project-owner
+// bindings, and only one project-scoped project-owner role definition can
+// exist. The branches are kept on purpose. They can still be reached when a
+// direct owner binding expires between the two independent svc.nowFunc()
+// reads, and they guard against future group or derived ownership. Their
+// pins reach them through the pinNoDirectOwnerStore test seam.
 func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Context, s store.Store, userID, projectID string) (bool, error) {
 	now := svc.nowFunc()
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
@@ -595,12 +606,7 @@ func (svc *ProjectMembershipService) checkGovernance(ctx context.Context, req Me
 		if svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op) {
 			return MembershipDecision{Allowed: true}
 		}
-		return MembershipDecision{
-			Allowed:    false,
-			DenialCode: ErrCodeRoleAssignmentForbidden,
-			Reason:     "actor has no project role",
-			HTTPStatus: 403,
-		}
+		return *noProjectRoleDecision()
 	}
 
 	// The governance matrix from CT1 D5:
@@ -762,7 +768,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "role definition not found", HTTPStatus: 400}
 	}
-	if !validProjectRoles[roleDef.Name] {
+	if !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + roleDef.Name, HTTPStatus: 400}
 	}
 	if roleDef.ScopeType != store.RoleScopeProject {
@@ -795,12 +801,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			ScopeID:          req.ProjectID,
 		})
 		if !delDecision.Allowed {
-			return nil, &MembershipDecision{
-				Allowed:    false,
-				DenialCode: ErrCodeTargetRoleProtected,
-				Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-				HTTPStatus: 403,
-			}
+			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
 		}
 	}
 
@@ -849,7 +850,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 		if !hubOverride {
@@ -859,10 +860,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 			}
 			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
-				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
 		}
 
@@ -892,11 +894,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if req.CreateOnly {
 				if oldRoleDef.Name == roleDef.Name && len(existingBindings) == 1 {
 					// Exact duplicate built-in — conflict, not false success.
-					return fmt.Errorf("governance:%d:%s", 409,
+					return governanceDenial(409,
 						fmt.Sprintf("principal already has built-in membership role %q in this project", oldRoleDef.Name))
 				}
 				// Different built-in — conflict naming the existing role.
-				return fmt.Errorf("governance:%d:%s", 409,
+				return governanceDenial(409,
 					fmt.Sprintf("principal already has built-in membership role %q in this project; use the project membership endpoint to change roles", oldRoleDef.Name))
 			}
 
@@ -914,10 +916,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 					if isProtectedRole(oldRoleDef.Name) {
 						reason = "target role is protected: " + reason
 					}
-					return fmt.Errorf("governance:%d:%s", 403, reason)
+					return governanceDenial(403, reason)
 				}
+				// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 				if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
-					return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles")
+					return governanceDenial(403, "only direct project owners can manage admin and owner roles")
 				}
 			}
 			// Last-owner guard for demotions.
@@ -987,8 +990,9 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
-		if govDenial := isGovernanceError(txErr); govDenial != nil {
-			return nil, govDenial
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "failed to create binding: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -1030,7 +1034,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "new role definition not found", HTTPStatus: 400}
 	}
-	if !validProjectRoles[newRoleDef.Name] {
+	if !store.IsBuiltInProjectMembershipRole(newRoleDef.Name) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + newRoleDef.Name, HTTPStatus: 400}
 	}
 	if newRoleDef.ScopeType != store.RoleScopeProject {
@@ -1069,12 +1073,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				ScopeID:          req.ProjectID,
 			})
 			if !delDecision.Allowed {
-				return nil, &MembershipDecision{
-					Allowed:    false,
-					DenialCode: ErrCodeTargetRoleProtected,
-					Reason:     "actor cannot delegate the new role: " + delDecision.Reason,
-					HTTPStatus: 403,
-				}
+				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)
 			}
 		}
 	}
@@ -1108,7 +1107,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 
@@ -1116,7 +1115,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		existing, err = tx.GetRoleBinding(ctx, req.BindingID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				return fmt.Errorf("governance:%d:%s", 404, "binding not found (re-fetched under lock)")
+				return governanceDenial(404, "binding not found (re-fetched under lock)")
 			}
 			return fmt.Errorf("re-fetch binding: %w", err)
 		}
@@ -1134,18 +1133,20 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 			}
 			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
-				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
+				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
 			}
 			if oldRoleDef.Name != newRoleDef.Name {
 				if !svc.isOperationPermitted(actorRole, req.Op, newRoleDef.Name) {
-					return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
+					return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
 				}
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
 		}
 
@@ -1194,8 +1195,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
-		if govDenial := isGovernanceError(txErr); govDenial != nil {
-			return nil, govDenial
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -1272,7 +1274,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return governanceDenial(403, "actor has no project role (re-evaluated under lock)")
 			}
 		}
 
@@ -1280,7 +1282,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		binding, err = tx.GetRoleBinding(ctx, req.BindingID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				return fmt.Errorf("governance:%d:%s", 404, "binding not found (re-fetched under lock)")
+				return governanceDenial(404, "binding not found (re-fetched under lock)")
 			}
 			return fmt.Errorf("re-fetch binding: %w", err)
 		}
@@ -1294,15 +1296,16 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		// Hub-override actors bypass project governance matrix.
 		if !hubOverride {
 			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
-				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
 			if requiresDirectOwner(roleDef.Name) {
 				actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
 				if ownerErr != nil {
 					return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 				}
+				// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 				if !actorIsDirectOwner {
-					return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+					return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 				}
 			}
 		}
@@ -1331,8 +1334,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
-		if govDenial := isGovernanceError(txErr); govDenial != nil {
-			return nil, govDenial
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
 		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
@@ -1418,7 +1422,7 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 		}
 		if !stillOwner {
-			return fmt.Errorf("governance:%d:%s", 403, "actor is no longer a direct project owner (re-evaluated under lock)")
+			return governanceDenial(403, "actor is no longer a direct project owner (re-evaluated under lock)")
 		}
 
 		// Step 1: Give the new owner a project-owner binding (or replace existing).
@@ -1464,9 +1468,10 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		// Step 3: Point project.OwnerID at the new owner, so the old owner no
 		// longer gets access through the resource-owner relationship rule
 		// (ptone/scion#2554). Use the narrow writer, not a Get plus full-row
-		// UpdateProject: a full-row write can clobber a concurrent PATCH. That
-		// interleaving is not expressible in a single-threaded test, so this
-		// call site is guarded by review.
+		// UpdateProject: a full-row write can clobber a concurrent PATCH. The
+		// PATCH/transfer interleaving (a transfer landing inside a PATCH's
+		// read-then-write window) is pinned by
+		// TestUpdateProject_ConcurrentTransferOwnershipSurvives.
 		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
 			return fmt.Errorf("update project owner: %w", upErr)
 		}
@@ -1497,8 +1502,9 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		})
 	})
 	if txErr != nil {
-		if govDenial := isGovernanceError(txErr); govDenial != nil {
-			return nil, govDenial
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "ownership transfer failed: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -1785,41 +1791,6 @@ func isLastOwnerError(err error) bool {
 	return ok
 }
 
-// isGovernanceError checks whether a transaction error is a governance denial
-// produced by the in-tx re-evaluation helpers. Returns a MembershipDecision
-// if so.
-func isGovernanceError(err error) *MembershipDecision {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	if !strings.HasPrefix(msg, "governance:") {
-		return nil
-	}
-	// Format: "governance:STATUS:REASON"
-	parts := strings.SplitN(msg, ":", 3)
-	if len(parts) < 3 {
-		return nil
-	}
-	status := 403
-	if _, scanErr := fmt.Sscanf(parts[1], "%d", &status); scanErr != nil {
-		status = 403
-	}
-	code := ErrCodeRoleAssignmentForbidden
-	switch status {
-	case 404:
-		code = "not_found"
-	case 409:
-		code = "conflict"
-	}
-	return &MembershipDecision{
-		Allowed:    false,
-		DenialCode: code,
-		Reason:     parts[2],
-		HTTPStatus: status,
-	}
-}
-
 // lastOwnerDenial converts a lastOwnerError into a MembershipDecision.
 func lastOwnerDenial() *MembershipDecision {
 	return &MembershipDecision{
@@ -1833,6 +1804,16 @@ func lastOwnerDenial() *MembershipDecision {
 // countActiveDirectOwnersFromStore counts active direct-user project-owner
 // bindings in the provided store, which may be transactional.
 func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx context.Context, s store.Store, projectID string) (int, error) {
+	return countActiveDirectProjectOwners(ctx, s, projectID, svc.nowFunc(), "")
+}
+
+// countActiveDirectProjectOwners counts the active (not expired, not
+// scheduled) direct-user project-owner bindings on projectID in s, which may
+// be transactional. Bindings whose principal is excludeUserID are skipped, so
+// callers can ask "how many owners remain besides this user"; pass "" to count
+// every owner. This is the single definition of "owner" used by the last-owner
+// rule, shared by the members API and user deletion.
+func countActiveDirectProjectOwners(ctx context.Context, s store.Store, projectID string, now time.Time, excludeUserID string) (int, error) {
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
 		return 0, err
@@ -1841,10 +1822,12 @@ func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx contex
 	if err != nil {
 		return 0, err
 	}
-	now := svc.nowFunc()
 	count := 0
 	for _, b := range bindings {
 		if b.PrincipalType != store.RoleBindingPrincipalUser || b.RoleDefinitionID != ownerRoleDef.ID {
+			continue
+		}
+		if excludeUserID != "" && b.PrincipalID == excludeUserID {
 			continue
 		}
 		if !isBindingActive(b, now) {

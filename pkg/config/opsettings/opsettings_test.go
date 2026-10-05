@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -243,6 +244,11 @@ func TestValidateValidDoc(t *testing.T) {
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
 		{"harness_configs", `{"claude":{"harness":"claude","image":"scion-claude:latest","image_pull_policy":"IfNotPresent"}}`},
 		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image":"scion-claude:staging","image_pull_policy":"Always"}}}}`},
+		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"nfs"}}`},
+		{"profiles", `{"local":{"runtime":"docker","shared_dir_storage_backend":"local"}}`},
+		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"nfs"}}`},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_backend":"nfs","home_storage_leaf":"pod"}}`},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_backend":"local","home_storage_leaf":"broker"}}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -275,6 +281,12 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"federation", `{"unknown_field": true}`, "additional property"},
 		{"harness_configs", `{"claude":{"harness":"claude","image_pull_policy":"always"}}`, "invalid image_pull_policy enum (case-sensitive)"},
 		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image_pull_policy":"always"}}}}`, "invalid profile harness_overrides image_pull_policy enum"},
+		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"ceph"}}`, "invalid profile shared_dir_storage_backend enum"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"NFS"}}`, "invalid runtime shared_dir_storage_backend enum (case-sensitive)"},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_backend":"ceph"}}`, "invalid profile home_storage_backend enum"},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_leaf":"node"}}`, "invalid profile home_storage_leaf enum"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_backend":"NFS"}}`, "invalid runtime home_storage_backend enum (case-sensitive)"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_leaf":"Pod"}}`, "invalid runtime home_storage_leaf enum (case-sensitive)"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -951,6 +963,7 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.secrets",
 		"server.storage",
 		"server.workspace_storage",
+		"server.workspace_storage.nfs.auto_mount",
 		"server.shared_dir_storage",
 		"server.shared_dir_storage.nfs",
 		"server.mode",
@@ -1697,5 +1710,98 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("koanfKeyToEnvSuffix(%q) = %q, want %q", tt.key, got, tt.want)
 		}
+	}
+}
+
+// TestSharedDirKeysSchemaValidation verifies the runtimes and profiles
+// section schemas accept shared_dir_storage_class / shared_dir_size as
+// strings and reject a non-string shared_dir_size.
+func TestSharedDirKeysSchemaValidation(t *testing.T) {
+	valid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+	}
+	for sec, doc := range valid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("%s: expected string shared_dir_* keys to be valid, got errors: %v", sec, errs)
+		}
+	}
+
+	invalid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_size": 10}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_size": 10}}`,
+	}
+	for sec, doc := range invalid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("%s: expected a numeric shared_dir_size to be rejected", sec)
+		}
+	}
+}
+
+// TestSafeToEvictSchemaValidation verifies the runtimes and profiles section
+// schemas accept safe_to_evict as a boolean and reject other types.
+func TestSafeToEvictSchemaValidation(t *testing.T) {
+	valid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "safe_to_evict": false}}`,
+		"profiles": `{"gke": {"runtime": "gke", "safe_to_evict": true}}`,
+	}
+	for sec, doc := range valid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("%s: expected boolean safe_to_evict to be valid, got errors: %v", sec, errs)
+		}
+	}
+	invalid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "safe_to_evict": "false"}}`,
+		"profiles": `{"gke": {"runtime": "gke", "safe_to_evict": 0}}`,
+	}
+	for sec, doc := range invalid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("%s: expected a non-boolean safe_to_evict to be rejected", sec)
+		}
+	}
+}
+
+// TestKubernetesAssignSettingsSchemaValidation checks the runtimes and
+// profiles section schemas for kubernetes_service_account_mappings and the
+// runtime namespace, which use the same patterns as settings-v1.schema.json.
+func TestKubernetesAssignSettingsSchemaValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		section   string
+		doc       string
+		wantValid bool
+	}{
+		{name: "runtime mapping", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
+		{name: "profile mapping", section: "profiles", wantValid: true,
+			doc: `{"prod": {"runtime": "k8s", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "profile-ksa"}}}`},
+		{name: "runtime mapping key not a GSA email", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"not-a-gsa-email": "agent-worker-ksa"}}}`},
+		{name: "profile mapping uppercase key", section: "profiles",
+			doc: `{"prod": {"kubernetes_service_account_mappings": {"Agent-Worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
+		{name: "runtime mapping invalid KSA name", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "Not_A_Valid_KSA"}}}`},
+		{name: "profile mapping empty KSA name", section: "profiles",
+			doc: `{"prod": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": ""}}}`},
+		{name: "runtime mapping KSA name too long", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "` + strings.Repeat("a", 254) + `"}}}`},
+		{name: "runtime namespace label", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "scion-agents"}}`},
+		{name: "runtime namespace empty means unset", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "namespace": ""}}`},
+		{name: "runtime namespace uppercase", section: "runtimes",
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "Scion-Agents"}}`},
+		{name: "runtime namespace too long", section: "runtimes",
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "` + strings.Repeat("a", 64) + `"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(tc.section, json.RawMessage(tc.doc))
+			if tc.wantValid && len(errs) > 0 {
+				t.Errorf("expected the document to pass, got errors: %v", errs)
+			}
+			if !tc.wantValid && len(errs) == 0 {
+				t.Error("expected the document to fail validation")
+			}
+		})
 	}
 }

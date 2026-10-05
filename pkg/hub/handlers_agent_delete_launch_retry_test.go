@@ -20,6 +20,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -106,12 +107,85 @@ func TestPerformAgentDelete_H3_RetriesOnVersionConflictFromLaunchTerminal(t *tes
 
 	srv.performAgentDelete(rec, req, stale)
 
-	assert.Equal(t, http.StatusNoContent, rec.Code, "the delete must succeed via the one-retry re-read, not surface the conflict: %s", rec.Body.String())
+	assert.Equal(t, http.StatusNoContent, rec.Code, "the delete must succeed despite the stale snapshot, not surface the conflict: %s", rec.Body.String())
+
+	// The failed launch report left the row an incomplete async create
+	// (kind create, phase error, launch_error set). Under acceptance (bb) and
+	// T1 §0c such a row is always hard-deleted, even with soft-delete
+	// retention configured, so its name can be reused at once. Before the
+	// delete engine (ptone/scion#2483) this test asserted a soft delete; the
+	// stale-snapshot race it targets is kept by
+	// TestPerformAgentDelete_H3_StaleSnapshotRaceOnPlainCreatedRow.
+	_, err = s.GetAgent(ctx, agent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "an incomplete create must be hard-deleted")
+	_, err = s.GetAgentBySlug(ctx, project.ID, agent.Slug)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the slug must be free for reuse")
+}
+
+// TestPerformAgentDelete_H3_StaleSnapshotRaceOnPlainCreatedRow keeps H-3's
+// original intent on a row that is not an incomplete create: a concurrent
+// write bumps state_version between the caller's read and the delete, and
+// the delete still completes exactly once — soft-deleted, one deleted event,
+// one quota release.
+func TestPerformAgentDelete_H3_StaleSnapshotRaceOnPlainCreatedRow(t *testing.T) {
+	srv, s := testServer(t)
+	srv.config.SoftDeleteRetention = 24 * time.Hour
+
+	events := &deleteCountingEventPublisher{}
+	srv.events = events
+
+	ctx := context.Background()
+	project := &store.Project{
+		ID: tid("h3c-project"), Slug: "h3c-project", Name: "H3c Project",
+		GitRemote: "https://github.com/test/h3c", Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	adminID := tid("h3c-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminID, Email: "h3c-admin@test.com", DisplayName: "H3c Admin", Role: "member", Status: "active",
+	}))
+	agent := &store.Agent{
+		ID: tid("h3c-agent"), Slug: "h3c-agent", Name: "H3c Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseCreated),
+		StateVersion: 1, Created: time.Now(), Updated: time.Now(),
+		CreatedBy: adminID, OwnerID: adminID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	stale, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+
+	// A concurrent full-row write lands between the read and the delete.
+	racer, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	racer.Message = "concurrent write"
+	require.NoError(t, s.UpdateAgent(ctx, racer))
+	require.NotEqual(t, stale.StateVersion, racer.StateVersion)
+
+	releases := countQuotaReleases(t, srv)
+
+	admin := NewAuthenticatedUser(adminID, "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rec := httptest.NewRecorder()
+	srv.performAgentDelete(rec, req, stale)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	final, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.False(t, final.DeletedAt.IsZero(), "the agent must end up soft-deleted")
 	assert.Equal(t, string(state.PhaseStopped), final.Phase)
+	assert.Equal(t, "concurrent write", final.Message, "the delete must not overwrite the concurrent write")
+	assert.Equal(t, 1, events.Count(), "exactly one deleted event")
+	assert.Equal(t, 1, releases(), "exactly one quota release")
+
+	// A redundant second delete on the same stale snapshot is a 204 no-op.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	srv.performAgentDelete(rec2, req2.WithContext(contextWithIdentity(req2.Context(), admin)), stale)
+	assert.Equal(t, http.StatusNoContent, rec2.Code, rec2.Body.String())
+	assert.Equal(t, 1, events.Count())
+	assert.Equal(t, 1, releases())
 }
 
 // TestPerformAgentDelete_H3_ConcurrentDoubleDeleteShortCircuits verifies that
@@ -185,4 +259,34 @@ func TestPerformAgentDelete_H3_ConcurrentDoubleDeleteShortCircuits(t *testing.T)
 	require.NoError(t, err)
 	assert.True(t, final.DeletedAt.Equal(firstDeleted.DeletedAt), "the second delete must not overwrite the first delete's DeletedAt")
 	assert.Equal(t, 1, events.Count(), "the second, redundant delete must not publish AgentDeleted again")
+}
+
+// quotaReleaseCountingStore counts project quota releases: every
+// releaseAgentQuotas call looks up max_agents_per_project once.
+type quotaReleaseCountingStore struct {
+	store.Store
+	mu    sync.Mutex
+	count int
+}
+
+func (c *quotaReleaseCountingStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	if name == "max_agents_per_project" {
+		c.mu.Lock()
+		c.count++
+		c.mu.Unlock()
+	}
+	return c.Store.GetLimitDefinitionByName(ctx, name)
+}
+
+// countQuotaReleases swaps srv's quota service for one that counts
+// releaseAgentQuotas calls and returns the counter.
+func countQuotaReleases(t *testing.T, srv *Server) func() int {
+	t.Helper()
+	cs := &quotaReleaseCountingStore{Store: srv.store}
+	srv.quotaService = &QuotaService{store: cs, logger: slog.Default()}
+	return func() int {
+		cs.mu.Lock()
+		defer cs.mu.Unlock()
+		return cs.count
+	}
 }

@@ -16,8 +16,10 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,7 +42,7 @@ const (
 	// GitHubRateLimitedCode is the ResolveError / ResolveSkillError code
 	// reported for a ref that failed because its credential identity is
 	// rate limited by GitHub.
-	GitHubRateLimitedCode = "rate_limited"
+	GitHubRateLimitedCode = SkillErrCodeRateLimited
 
 	// githubAnonIdentity is the cooldown identity for unauthenticated calls.
 	// GitHub limits those per source address, so every unauthenticated
@@ -262,8 +264,8 @@ func isGitHubRateLimitResponse(resp *http.Response) (bool, error) {
 func githubCooldownFor(resp *http.Response, now time.Time) time.Duration {
 	d := GitHubCooldownDefault
 	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
-		if secs, err := strconv.ParseInt(ra, 10, 64); err == nil && secs > 0 {
-			return capCooldown(time.Duration(secs) * time.Second)
+		if secs, ok := parseRetryAfterSeconds(ra); ok && secs > 0 {
+			return secondsUpTo(secs, GitHubCooldownMax)
 		}
 		if t, err := http.ParseTime(ra); err == nil && t.After(now) {
 			return capCooldown(t.Sub(now))
@@ -277,6 +279,36 @@ func githubCooldownFor(resp *http.Response, now time.Time) time.Duration {
 		}
 	}
 	return d
+}
+
+// parseRetryAfterSeconds parses a Retry-After value given in seconds. A
+// string of digits too large for int64 reads as math.MaxInt64, so callers
+// cap it like any other large value instead of treating it as absent. ok is
+// false for anything else that is not a decimal integer (an HTTP date, a
+// value with a fraction, garbage).
+func parseRetryAfterSeconds(v string) (int64, bool) {
+	secs, err := strconv.ParseInt(v, 10, 64)
+	if err == nil {
+		return secs, true
+	}
+	if errors.Is(err, strconv.ErrRange) && v != "" && strings.Trim(v, "0123456789") == "" {
+		return math.MaxInt64, true
+	}
+	return 0, false
+}
+
+// secondsUpTo converts a non-negative count of seconds, as read from a
+// Retry-After header, to a duration no longer than max. The comparison is
+// made in seconds, before multiplying, so a very large header value gives
+// max rather than overflowing time.Duration into a negative or short value.
+func secondsUpTo(secs int64, max time.Duration) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs >= int64(max/time.Second) {
+		return max
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func capCooldown(d time.Duration) time.Duration {

@@ -236,6 +236,15 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_id").
 			Optional().
 			Default(""),
+		// run_id is the identity of the agent's current or most recent run
+		// (ptone/scion#2550): minted by the Hub for every create, start and
+		// restart dispatch, persisted before the broker call, and carried
+		// on the runtime entry as the scion.run_id label. A delete sends it
+		// so the broker never removes a different run of the same name. ""
+		// for rows that have not been dispatched since run IDs existed.
+		field.String("run_id").
+			Optional().
+			Default(""),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -293,6 +302,116 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_error").
 			Optional().
 			Default(""),
+
+		// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+		// A leased, sticky delete marker. Every write goes through
+		// AgentStore.UpdateAgentDeletion (never UpdateAgent), which bumps
+		// state_version so a stale whole-row writer gets ErrVersionConflict.
+		//
+		// deletion_state is "" (no delete), "deleting", "finalizing" or
+		// "failed".
+		field.String("deletion_state").
+			Optional().
+			Default(""),
+		// deletion_claim is the claim epoch, bumped on every successful claim.
+		field.Int64("deletion_claim").
+			Default(0),
+		// deletion_lease_at is the lease expiry the live engine renews. A
+		// deleting/finalizing row whose lease has passed reads as failed.
+		field.Time("deletion_lease_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_started_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_failed_at").
+			Optional().
+			Nillable(),
+		// deletion_code is the failure code (runtime_error, conflict,
+		// in_doubt, revoke_failed, finalize_failed, ...).
+		field.String("deletion_code").
+			Optional().
+			Default(""),
+		field.String("deletion_error").
+			Optional().
+			Default(""),
+		// deletion_prior is JSON {phase, activity, launchId}, captured once
+		// per delete attempt so a failed delete can restore it.
+		field.String("deletion_prior").
+			Optional().
+			Default(""),
+		// deletion_request is JSON {deleteFiles, removeBranch, soft, force,
+		// requestedBy}.
+		field.String("deletion_request").
+			Optional().
+			Default(""),
+
+		// --- Run intent ---
+		// run_intent records whether the user (or the system acting for the
+		// user) wants this agent running: "running" or "stopped". NULL means
+		// unknown; nothing treats a NULL intent as wanting the agent to run.
+		// It is written only by AgentStore.SetRunIntent and RevertRunIntent
+		// (and the one-time boot backfill), never by UpdateAgent or
+		// CreateAgent, and writing it never bumps state_version.
+		field.String("run_intent").
+			Optional().
+			Nillable(),
+		// run_intent_at is the store-clock time of the last run_intent
+		// write. It strictly increases per row, so it orders intent writes.
+		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
+
+		// --- Start claim ---
+		// An owned, leased claim taken before any start is dispatched, so at
+		// most one start (or queued-stop drain) acts on an agent at a time.
+		// The start_claim_* columns are written only by the AgentStore
+		// start-claim methods (start_claim.go), never by UpdateAgent or
+		// CreateAgent, and writing them never bumps state_version.
+		//
+		// start_claim_id is NULL when no claim is held.
+		field.String("start_claim_id").
+			Optional().
+			Nillable(),
+		// start_claim_kind: user, restart, wake, create, recovery,
+		// reincarnate or stop.
+		field.String("start_claim_kind").
+			Optional().
+			Default(""),
+		// start_claim_state: live (the holder renews its lease) or
+		// unconfirmed (the outcome is unknown; held until the runtime shows
+		// what happened).
+		field.String("start_claim_state").
+			Optional().
+			Default(""),
+		// start_claim_owner is the hub instance that holds a live claim.
+		field.String("start_claim_owner").
+			Optional().
+			Default(""),
+		// start_claim_target is the runtime target the start is expected to
+		// use, for agents that have no recorded target yet.
+		field.String("start_claim_target").
+			Optional().
+			Default(""),
+		// Store-clock times: when the claim was taken, when its lease ends,
+		// when it became unconfirmed, and the end of the unconfirmed hold.
+		field.Time("start_claim_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_lease_until").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_unconfirmed_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_hold_until").
+			Optional().
+			Nillable(),
+		// start_claim_launch_id is the launch a create claim was linked to
+		// when that launch began, so only that launch's end settles it.
+		field.String("start_claim_launch_id").
+			Optional().
+			Default(""),
 	}
 }
 
@@ -326,6 +445,13 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Lookup of agents on a broker by run intent.
+		index.Fields("runtime_broker_id", "run_intent"),
+		// The start-claim reaper's scan: only rows holding a claim.
+		index.Fields("start_claim_state", "start_claim_lease_until").
+			Annotations(
+				entsql.IndexWhere("start_claim_id IS NOT NULL"),
+			),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

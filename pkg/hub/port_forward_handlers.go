@@ -435,13 +435,18 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		return
 	}
 	for k, vals := range resp.Header {
-		if hopByHopHeader(k) {
+		if hopByHopHeader(k) || stripFromProxyResponse(k) {
 			continue
 		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
 	}
+	// Hub-controlled response headers: the proxied content cannot override
+	// these, so it is sandboxed to an opaque origin and cannot set cookies
+	// on the hub origin.
+	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK
 	}
@@ -606,6 +611,25 @@ func cloneForwardHeaders(in http.Header) http.Header {
 func hopByHopHeader(k string) bool {
 	switch strings.ToLower(k) {
 	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+// stripFromProxyResponse reports whether a header from the proxied agent
+// response must not be relayed onto the hub origin: these are set by the
+// hub itself (or intentionally omitted) so the response is sandboxed and
+// cannot set or clear cookies, storage, or cache on the hub origin. CORS
+// response headers are owned by the hub's corsMiddleware; relaying the
+// agent's copies would duplicate them, which browsers reject.
+func stripFromProxyResponse(k string) bool {
+	switch strings.ToLower(k) {
+	case "set-cookie", "set-cookie2", "content-security-policy", "x-content-type-options", "clear-site-data":
+		return true
+	case "access-control-allow-origin", "access-control-allow-credentials", "access-control-allow-methods",
+		"access-control-allow-headers", "access-control-allow-private-network", "access-control-expose-headers",
+		"access-control-max-age":
 		return true
 	default:
 		return false

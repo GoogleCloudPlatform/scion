@@ -32,21 +32,28 @@ type launchKey struct {
 
 // launchRecord is one launch's local bookkeeping (design §3.8.1). It is an
 // optimisation only: correctness comes from the Hub's answers to claim,
-// checkpoint and keepalive reports, never from this record. Seq and Handles
-// are written only by the launch's own runLaunch goroutine (and the sender
-// it owns), so they need no lock of their own; OwnerHub can be read and
-// written from the sender's fan-out routing and is guarded by mu.
+// checkpoint and keepalive reports, never from this record. Seq is written
+// only by the launch's own runLaunch goroutine (and the sender it owns), so
+// it needs no lock of its own. Handles is appended from the runtime's
+// OnResourceCreated hook, which runs on Manager.Start's goroutine, so it is
+// guarded by mu (AddHandle, HandlesSnapshot); OwnerHub can be read and
+// written from the sender's fan-out routing and is also guarded by mu.
 type launchRecord struct {
 	ID       string
 	AgentID  string
 	Kind     string
 	Deadline time.Time
+	// RunID is the Hub-minted run this launch starts (ptone/scion#2550),
+	// or "" when the request carried none. Set before Begin and never
+	// changed, so it needs no lock.
+	RunID string
 
 	// Seq is the last report sequence number sent for this launch.
 	Seq int64
 	// Handles accumulates every runtime resource created during the launch
-	// (design §3.8.4), for CleanupLaunch on an abort. Always empty in P1b-1,
-	// since no runtime yet calls OnResourceCreated (P1b-2 adds that).
+	// (design §3.8.4), reported by the runtime's OnResourceCreated hook, for
+	// CleanupLaunch on an abort. Guarded by mu: use AddHandle and
+	// HandlesSnapshot rather than the field once the launch has started.
 	Handles []agent.ResourceHandle
 	// HubName is the hub connection resolved at admission time (routing
 	// rules 1-3, design §3.8.5); "" means the sender fans out and pins
@@ -79,6 +86,24 @@ func (rec *launchRecord) SetOwnerHub(connName string) {
 	if rec.ownerHub == "" {
 		rec.ownerHub = connName
 	}
+}
+
+// AddHandle records one runtime resource the launch created (the runtime's
+// OnResourceCreated hook, design §3.8.4).
+func (rec *launchRecord) AddHandle(h agent.ResourceHandle) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.Handles = append(rec.Handles, h)
+}
+
+// HandlesSnapshot returns a copy of the handles recorded so far.
+func (rec *launchRecord) HandlesSnapshot() []agent.ResourceHandle {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.Handles) == 0 {
+		return nil
+	}
+	return append([]agent.ResourceHandle(nil), rec.Handles...)
 }
 
 // CancelLocal wakes any local wait on this launch (e.g. a blocked
@@ -153,6 +178,27 @@ func (r *launchRegistry) CancelLocal(key launchKey) {
 	if rec != nil {
 		rec.CancelLocal()
 	}
+}
+
+// CancelLocalForRun is CancelLocal for a delete that names run runID
+// (ptone/scion#2550): it leaves alone a launch of a different run, so a
+// stale delete for an earlier run cannot cancel the start of the agent
+// recreated under the same name. A launch or a delete without a run ID
+// matches as before.
+func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	rec := r.records[key]
+	r.mu.Unlock()
+	if rec == nil {
+		return
+	}
+	if runID != "" && rec.RunID != "" && rec.RunID != runID {
+		return
+	}
+	rec.CancelLocal()
 }
 
 // Finish closes rec's done channel and removes it from the registry if it is

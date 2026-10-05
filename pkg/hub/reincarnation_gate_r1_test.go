@@ -305,7 +305,7 @@ func TestSendAgentRouted_R3_MigratingPrimaryDuringProvisioningDeferred(t *testin
 	rr := httptest.NewRecorder()
 
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil)
+		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, false)
 
 	require.NotEmpty(t, msgID, "the message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 	require.Empty(t, dispatcher.getMessages(), "a migrating primary during provisioning must not be dispatched to")

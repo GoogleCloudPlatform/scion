@@ -35,6 +35,8 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Settings File**: `~/.gemini/settings.json` (inside the agent container). Scion automatically updates `security.auth.selectedType` in this file to match the resolved auth method.
 - **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config. Additionally, Scion injects the system prompt into the `GEMINI_SYSTEM_MD` environment variable to ensure direct pickup by the Gemini CLI tool during initialization.
 - **Model Aliases**: Supports both traditional alias sizes and single-letter model alias mappings (`S` / `M` / `L` for Small / Medium / Large). The `provision.py` script automatically maps and handles fallback alias resolution during startup.
+- **Default model**: the harness-config declares `model: medium`, so an agent started without a model runs on the model that the `medium` alias maps to in `model_aliases` (see `harnesses/gemini-cli/config.yaml`). The broker resolves that tier before it sets `SCION_MODEL`. The container image does not pin a model in `settings.json`.
+- **Model selection**: the model is resolved in this order: the agent's resolved model (`--model`, template `model:`, or `SCION_MODEL`), then `harness_config.model`. Tier aliases (`small`, `medium`, `large`, `extra-large`, and `S` / `M` / `L` / `XL`) are resolved through the harness's `model_aliases` table. The provisioner writes the resolved model to `model.name` in `~/.gemini/settings.json` on every provision. If neither source gives a model, it removes any existing `model.name`, so a stale value is never kept and the Gemini CLI uses its own built-in default.
 
 ### Known Limitations
 - The `gemini` CLI tool must be installed in the container image (included in default images).
@@ -117,7 +119,7 @@ Codex supports two authentication methods (auto-detected in this order):
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
 
 ### Reasoning Effort (Thinking Level)
-When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets:
+When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets. The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
 
 | Thinking Level | Reasoning Effort |
 | :--- | :--- |
@@ -128,7 +130,9 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 
 Values outside the 0–100 range are clamped to the nearest boundary.
 
-When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference.
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` (the block's `default`) rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference. A non-integer value also logs a warning.
+
+If a customized Codex `config.yaml` has no `thinking:` block, the provisioner logs a warning and writes no `model_reasoning_effort`, so Codex's own default applies. Copy the block from the bundled `config.yaml`, or run `scion harness-config upgrade codex`, which merges missing top-level keys such as `thinking:` into a customized `config.yaml` without overwriting your values.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
@@ -234,6 +238,21 @@ the Antigravity bundle's `capture_auth.py` (which can also extract the token fro
 - **Hooks**: Antigravity ships a hook dialect (`dialect.yaml`) mapping `agy` events to Scion lifecycle events. Hooks fire **project-locally** (wired via `/workspace/.agents/hooks.json`).
 - **Runtime**: requires gnome-keyring and D-Bus in the container (provided by the base image); a generated wrapper script bootstraps the keyring and injects the token before launching `agy`.
 - **Model selection**: the model is resolved in this order: the agent's model (`--model` / `SCION_MODEL`), then `harness_config.model`, then the operator-set `AGY_MODEL` env var, then the default `Gemini 3.8 Flash (Medium)`. Tier aliases (`small`, `medium`, `large`, `extra-large`) are resolved through the harness's `model_aliases` table. The resolved model is written into `settings.json` on every provision, including into an existing `settings.json`, so changing the model takes effect on the next start.
+
+### Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (0–100, from `--thinking-level` on `scion start` or Hub agent defaults), the provisioner adds `--effort <tier>` to the `agy` command in the generated wrapper script (`~/.scion/harness/agy-wrapper.sh`). The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
+
+| Thinking Level | `--effort` |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–100 | `high` |
+
+Values outside the 0–100 range are clamped, so `-5` maps to `low` and `150` to `high`. When the level is unset or blank, no `--effort` flag is passed and AGY's own default applies. A value that is not an integer (`abc`, `1.5`) also passes no flag, and logs a warning.
+
+:::note[Changed cut points]
+Before ptone/scion#2673 the cut points were 50 and 75 (0–49 `low`, 50–74 `medium`, 75–100 `high`), negative values were silently ignored, and non-integer values were dropped without a warning. Levels 26–49 now map to `medium` and 51–74 to `high`.
+:::
 
 ### Known Limitations
 - **System Prompt**: approximated via `GEMINI.md` (no native override).

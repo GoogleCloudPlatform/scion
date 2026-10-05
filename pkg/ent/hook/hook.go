@@ -81,6 +81,18 @@ func (f AgentIdentityKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentIdentityKeyMutation", m)
 }
 
+// The AgentRecoveryFunc type is an adapter to allow the use of ordinary
+// function as AgentRecovery mutator.
+type AgentRecoveryFunc func(context.Context, *ent.AgentRecoveryMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentRecoveryFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentRecoveryMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentRecoveryMutation", m)
+}
+
 // The AgentReincarnationFunc type is an adapter to allow the use of ordinary
 // function as AgentReincarnation mutator.
 type AgentReincarnationFunc func(context.Context, *ent.AgentReincarnationMutation) (ent.Value, error)
@@ -177,6 +189,18 @@ func (f BrokerSettingFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerSettingMutation", m)
 }
 
+// The BrokerTargetInventoryFunc type is an adapter to allow the use of ordinary
+// function as BrokerTargetInventory mutator.
+type BrokerTargetInventoryFunc func(context.Context, *ent.BrokerTargetInventoryMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BrokerTargetInventoryFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.BrokerTargetInventoryMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerTargetInventoryMutation", m)
+}
+
 // The ChatLinkCodeFunc type is an adapter to allow the use of ordinary
 // function as ChatLinkCode mutator.
 type ChatLinkCodeFunc func(context.Context, *ent.ChatLinkCodeMutation) (ent.Value, error)
@@ -187,6 +211,30 @@ func (f ChatLinkCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatLinkCodeMutation", m)
+}
+
+// The ConduitPrincipalEpochFunc type is an adapter to allow the use of ordinary
+// function as ConduitPrincipalEpoch mutator.
+type ConduitPrincipalEpochFunc func(context.Context, *ent.ConduitPrincipalEpochMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ConduitPrincipalEpochFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ConduitPrincipalEpochMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ConduitPrincipalEpochMutation", m)
+}
+
+// The ConduitSessionFunc type is an adapter to allow the use of ordinary
+// function as ConduitSession mutator.
+type ConduitSessionFunc func(context.Context, *ent.ConduitSessionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ConduitSessionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ConduitSessionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ConduitSessionMutation", m)
 }
 
 // The ConversationFunc type is an adapter to allow the use of ordinary
@@ -595,6 +643,18 @@ func (f ProjectSyncStateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectSyncStateMutation", m)
+}
+
+// The RelayInstanceFunc type is an adapter to allow the use of ordinary
+// function as RelayInstance mutator.
+type RelayInstanceFunc func(context.Context, *ent.RelayInstanceMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RelayInstanceFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RelayInstanceMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RelayInstanceMutation", m)
 }
 
 // The RoleBindingFunc type is an adapter to allow the use of ordinary

@@ -35,10 +35,14 @@ type AccessSettings struct {
 
 // LifecycleSettings holds Layer-1 agent lifecycle settings.
 type LifecycleSettings struct {
-	AutoSuspendStalled    *bool  `json:"auto_suspend_stalled,omitempty"`
-	StalledThreshold      string `json:"stalled_threshold,omitempty"`
-	SoftDeleteRetention   string `json:"soft_delete_retention,omitempty"`
-	SoftDeleteRetainFiles *bool  `json:"soft_delete_retain_files,omitempty"`
+	AutoSuspendStalled         *bool  `json:"auto_suspend_stalled,omitempty"`
+	StalledThreshold           string `json:"stalled_threshold,omitempty"`
+	SoftDeleteRetention        string `json:"soft_delete_retention,omitempty"`
+	SoftDeleteRetainFiles      *bool  `json:"soft_delete_retain_files,omitempty"`
+	StartClaimLeaseTTL         string `json:"start_claim_lease_ttl,omitempty"`
+	StartMaxDuration           string `json:"start_max_duration,omitempty"`
+	StartUnconfirmedHold       string `json:"start_unconfirmed_hold,omitempty"`
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty"`
 }
 
 // MaintenanceSettings holds Layer-1 maintenance/admin-mode settings.
@@ -73,8 +77,9 @@ type AgentDefaultsSettings struct {
 	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 	DefaultRuntimeBroker string            `json:"default_runtime_broker,omitempty"`
 	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
-	// "America/Los_Angeles"). Applied as TZ when neither the profile's
-	// first-class timezone field nor a raw TZ in the profile env is set.
+	// "America/Los_Angeles") for agent containers: applied as TZ when the
+	// agent has no pinned timezone and no storage-scope TZ environment
+	// variable applies.
 	DefaultTimezone string `json:"default_timezone,omitempty"`
 	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
 	// ("block", "passthrough", or "assign") applied when neither the agent

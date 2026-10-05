@@ -40,6 +40,30 @@ type Section struct {
 // would otherwise fail the strict subdomain pattern.
 const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 
+// dns1123LabelOrEmptyPattern mirrors the runtime namespace pattern in
+// settings-v1.schema.json: a DNS-1123 label (the Kubernetes namespace name
+// format, at most 63 characters), or the empty string for the runtime's
+// default namespace.
+const dns1123LabelOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+
+// kubernetesServiceAccountMappingsSchema mirrors
+// kubernetes_service_account_mappings in settings-v1.schema.json: lowercase
+// GCP service account email keys, Kubernetes ServiceAccount name values
+// (DNS-1123 subdomain, at most 253 characters).
+func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"propertyNames": map[string]interface{}{
+			"pattern": `^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+gserviceaccount\.com$`,
+		},
+		"additionalProperties": map[string]interface{}{
+			"type":      "string",
+			"pattern":   `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+			"maxLength": 253,
+		},
+	}
+}
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -60,7 +84,7 @@ func init() {
 		},
 		{
 			Name:       "lifecycle",
-			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files"},
+			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 			New:        func() any { return &LifecycleSettings{} },
 		},
 		{
@@ -332,10 +356,14 @@ func compileSchemas() {
 		"lifecycle": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"auto_suspend_stalled":     getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
-				"stalled_threshold":        getSchemaProperty(root, "server", "hub", "stalled_threshold"),
-				"soft_delete_retention":    getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
-				"soft_delete_retain_files": getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
+				"auto_suspend_stalled":          getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
+				"stalled_threshold":             getSchemaProperty(root, "server", "hub", "stalled_threshold"),
+				"soft_delete_retention":         getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
+				"soft_delete_retain_files":      getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
+				"start_claim_lease_ttl":         getSchemaProperty(root, "server", "hub", "start_claim_lease_ttl"),
+				"start_max_duration":            getSchemaProperty(root, "server", "hub", "start_max_duration"),
+				"start_unconfirmed_hold":        getSchemaProperty(root, "server", "hub", "start_unconfirmed_hold"),
+				"start_create_unconfirmed_hold": getSchemaProperty(root, "server", "hub", "start_create_unconfirmed_hold"),
 			},
 			"additionalProperties": false,
 		},
@@ -470,16 +498,25 @@ func compileSchemas() {
 			"additionalProperties": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"type":                map[string]interface{}{"type": "string"},
-					"host":                map[string]interface{}{"type": "string"},
-					"context":             map[string]interface{}{"type": "string"},
-					"namespace":           map[string]interface{}{"type": "string"},
-					"env":                 map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
-					"sync":                map[string]interface{}{"type": "string"},
-					"gke":                 map[string]interface{}{"type": "boolean"},
-					"list_all_namespaces": map[string]interface{}{"type": "boolean"},
-					"priority_class_name": map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
-					"cloudrun":            map[string]interface{}{"type": "object"},
+					"type":                       map[string]interface{}{"type": "string"},
+					"host":                       map[string]interface{}{"type": "string"},
+					"context":                    map[string]interface{}{"type": "string"},
+					"namespace":                  map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
+					"env":                        map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"sync":                       map[string]interface{}{"type": "string"},
+					"gke":                        map[string]interface{}{"type": "boolean"},
+					"list_all_namespaces":        map[string]interface{}{"type": "boolean"},
+					"priority_class_name":        map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
+					"cloudrun":                   map[string]interface{}{"type": "object"},
+					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
+					"shared_dir_size":            map[string]interface{}{"type": "string"},
+					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+
+					// GCP identity "assign" on Kubernetes.
+					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
 				},
 			},
 		},
@@ -512,8 +549,16 @@ func compileSchemas() {
 							},
 						},
 					},
-					"secrets":  map[string]interface{}{"type": "array"},
-					"timezone": map[string]interface{}{"type": "string"},
+					"secrets":                    map[string]interface{}{"type": "array"},
+					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
+					"shared_dir_size":            map[string]interface{}{"type": "string"},
+					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+
+					// GCP identity "assign" on Kubernetes.
+					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
 				},
 			},
 		},

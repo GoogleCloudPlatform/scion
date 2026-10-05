@@ -864,6 +864,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		ReplyToID      string            `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
 		Metadata       map[string]string `json:"metadata,omitempty"`    // Client-supplied metadata (e.g. RE_msg_starting)
 		IdempotencyKey string            `json:"idempotency_key,omitempty"`
+		// Interrupt asks the hub to interrupt the harness of each agent
+		// recipient (the primary and any @mentioned secondaries) that is
+		// running before delivery. Recipients that are not running get the
+		// ordinary non-interrupt dispatch, which the broker buffers; for a
+		// secondary this includes suspended, stopped and error phases. A
+		// primary whose dispatch is skipped (unreachable or reincarnating)
+		// and a reincarnating secondary ignore it. It only affects
+		// agent-routed sends; human-to-human sends ignore it.
+		Interrupt bool `json:"interrupt,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -1056,7 +1065,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata)
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata, body.Interrupt)
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
@@ -1246,7 +1255,7 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 // Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, interrupt bool) string {
 
 	ctx := r.Context()
 
@@ -1279,7 +1288,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
-		Timestamp:   now.Format(time.RFC3339),
+		Timestamp:   now.UTC().Format(time.RFC3339),
 		Sender:      "user:" + senderLabel,
 		SenderID:    user.ID(),
 		Recipient:   "agent:" + primaryAgent.Slug,
@@ -1579,13 +1588,29 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// failed even though this synchronous call returns nil (message_delivery_failures.go).
 		retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, storeMsg.ID), 30*time.Second)
 		defer cancel()
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
+		// interrupt applies to this primary and to each @mention secondary
+		// below, as routed inbound (dispatchRoutedRecipient, which shares
+		// the resolveRoutingAgents planner) propagates urgency to secondary
+		// mention recipients. Like routed inbound, only a recipient whose
+		// phase is running is interrupted: any other phase (created,
+		// provisioning, cloning, starting, ...) gets the ordinary
+		// non-interrupt dispatch, which the runtime broker buffers; an
+		// interrupt there would bypass the buffer and fail synchronously.
+		// Recipients whose dispatch is skipped (an unreachable or
+		// reincarnating primary, a reincarnating secondary) ignore it.
+		// Interrupt delivery is synchronous at the broker for each
+		// recipient, so an interrupted send to a primary plus k mentions
+		// blocks this request for up to k+1 deliveries.
+		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
+		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
-			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
-			// Keep storeMsg's in-memory state in sync with the store update
-			// above so the response below reports the real outcome instead
-			// of the optimistic "dispatched" state set at persist time.
-			errText := err.Error()
+			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
+			// Mirror the store update above in storeMsg so the response
+			// below reports the real outcome instead of the optimistic
+			// "dispatched" state set at persist time. markFailed persists
+			// the sanitized reason (ptone/scion#1841), so sanitize here too:
+			// the response must carry exactly what the store holds.
+			errText := sanitizeFailureReason(err.Error())
 			storeMsg.DispatchState = store.MessageDispatchFailed
 			storeMsg.DispatchFailureReason = &errText
 			dispatchFailureCode = dispatchFailureCodeDispatchError
@@ -1749,9 +1774,28 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				// above, so a buffered-delivery failure on this mention row can
 				// also be reported back and marked failed.
 				retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, mentionStoreMsg.ID), 30*time.Second)
-				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
+				// Same running-only rule as the primary (see above). A
+				// secondary has no unreachable-phase gate, so suspended,
+				// stopped and error secondaries also take the buffered
+				// non-interrupt dispatch.
+				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
+				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
+					// Like the primary: a synchronous dispatch failure must
+					// not leave the row "dispatched" or the client told
+					// "delivered".
+					errText := err.Error()
+					if mentionPersisted {
+						_ = s.markFailed(ctx, mentionStoreMsg.ID, errText)
+					}
+					for i, mr := range mentionResults {
+						if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+							mentionResults[i].Status = "error"
+							mentionResults[i].Error = errText
+							break
+						}
+					}
 				}
 				cancel()
 			}
@@ -3625,6 +3669,12 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 // Members Endpoint
 // ---------------------------------------------------------------------------
 
+// spaceMembersMaxAgents bounds how many agents the members endpoint will
+// collect. It is a safety net against a runaway walk, set far above any
+// realistic project; hitting it logs a warning and returns the agents
+// collected so far.
+var spaceMembersMaxAgents = 10000
+
 // handleSpaceMembers handles GET /api/v1/chat/spaces/{projectId}/members.
 func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
@@ -3657,67 +3707,103 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	// --- Humans: list project members via role bindings (PM1) ---
 	var humans []chatMemberEntry
 	projectMembers, err := s.store.ListProjectMembers(ctx, project.ID)
-	if err == nil {
-		seen := make(map[string]bool)
-		for _, m := range projectMembers {
-			if seen[m.UserID] {
-				continue
-			}
-			seen[m.UserID] = true
-			u, err := s.store.GetUser(ctx, m.UserID)
-			if err != nil {
-				continue
-			}
-			entry := chatMemberEntry{
-				ID:          u.ID,
-				Kind:        "user",
-				DisplayName: u.DisplayName,
-				Email:       u.Email,
-				AvatarURL:   u.AvatarURL,
-				Role:        m.Role,
-			}
-			if pm != nil {
-				entry.PresenceState = string(pm.GetState(u.ID))
-			}
-			humans = append(humans, entry)
+	if err != nil {
+		slog.Error("chat members: failed to list project members", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project members", nil)
+		return
+	}
+	seen := make(map[string]bool)
+	for _, m := range projectMembers {
+		if seen[m.UserID] {
+			continue
 		}
+		seen[m.UserID] = true
+		u, err := s.store.GetUser(ctx, m.UserID)
+		if err != nil {
+			continue
+		}
+		entry := chatMemberEntry{
+			ID:          u.ID,
+			Kind:        "user",
+			DisplayName: u.DisplayName,
+			Email:       u.Email,
+			AvatarURL:   u.AvatarURL,
+			Role:        m.Role,
+		}
+		if pm != nil {
+			entry.PresenceState = string(pm.GetState(u.ID))
+		}
+		humans = append(humans, entry)
 	}
 	if humans == nil {
 		humans = []chatMemberEntry{}
 	}
 
 	// --- Agents: list agents for the project ---
+	// Agent rows are gated on agent.list exactly as GET /api/v1/agents
+	// gates them: project read alone shows the humans section only.
+	agentsVisible, err := s.spaceMembersAgentsVisible(ctx, user, project.ID)
+	if err != nil {
+		slog.Error("chat members: failed to resolve agent list scope", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to resolve agent list scope", nil)
+		return
+	}
+	if !agentsVisible {
+		writeJSON(w, http.StatusOK, chatMembersResponse{
+			Humans: humans,
+			Agents: []chatMemberEntry{},
+		})
+		return
+	}
+
 	var agents []chatMemberEntry
-	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
-	if err == nil {
-		for _, a := range agentList.Items {
-			entry := chatMemberEntry{
-				ID:          a.ID,
-				Kind:        "agent",
-				DisplayName: a.Name,
-				Slug:        a.Slug,
-				Phase:       a.Phase,
-				Activity:    a.Activity,
-				ProjectID:   a.ProjectID,
-				Message:     a.Message,
-			}
-			// Whether this viewer may open a terminal on this agent. The PTY
-			// route gates on authorizeAgentLifecycle, which decides
-			// ActionAttach for a user identity, so ask the same question here
-			// rather than offering a control the server will refuse.
-			entry.CanAttach = s.authzService.CheckAccess(
-				ctx, user, agentResource(&a), ActionAttach).Allowed
-			if !a.LastSeen.IsZero() {
-				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
-			}
-			switch {
-			case !a.LastActivityEvent.IsZero():
-				entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
-			case !a.Updated.IsZero():
-				entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
-			}
-			agents = append(agents, entry)
+	projectAgents, truncated, err := walkProjectAgentPages(ctx, s.store, project.ID, spaceMembersMaxAgents)
+	if err != nil {
+		// A client that has gone away is not a server failure, and nothing
+		// can receive a response; stop quietly as the attach loop does.
+		if errors.Is(err, context.Canceled) {
+			return
 		}
+		slog.Error("chat members: failed to list project agents", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project agents", nil)
+		return
+	}
+	if truncated {
+		slog.Warn("chat members: agent list truncated at safety cap",
+			"project", project.ID, "cap", spaceMembersMaxAgents)
+	}
+	for _, a := range projectAgents {
+		// Each attach check reads the store and may write an audit record,
+		// so stop once the client has gone rather than finishing the list.
+		if ctx.Err() != nil {
+			return
+		}
+		entry := chatMemberEntry{
+			ID:          a.ID,
+			Kind:        "agent",
+			DisplayName: a.Name,
+			Slug:        a.Slug,
+			Phase:       a.Phase,
+			Activity:    a.Activity,
+			ProjectID:   a.ProjectID,
+			Message:     a.Message,
+		}
+		// Whether this viewer may open a terminal on this agent. The PTY
+		// route gates on authorizeAgentLifecycle, which decides
+		// ActionAttach for a user identity, so ask the same question here
+		// rather than offering a control the server will refuse.
+		entry.CanAttach = s.authzService.CheckAccess(
+			ctx, user, agentResource(&a), ActionAttach).Allowed
+		if !a.LastSeen.IsZero() {
+			entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
+		}
+		switch {
+		case !a.LastActivityEvent.IsZero():
+			entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
+		case !a.Updated.IsZero():
+			entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
+		}
+		agents = append(agents, entry)
 	}
 	if agents == nil {
 		agents = []chatMemberEntry{}
@@ -3727,6 +3813,26 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		Humans: humans,
 		Agents: agents,
 	})
+}
+
+// spaceMembersAgentsVisible reports whether identity may see the agent rows
+// of projectID in the space members list. It applies the same agent.list
+// decision as GET /api/v1/agents: the project must be inside the resolved
+// scope and must not be excluded by a project-scoped access constraint.
+func (s *Server) spaceMembersAgentsVisible(ctx context.Context, identity Identity, projectID string) (bool, error) {
+	scope, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	if err != nil {
+		return false, err
+	}
+	if scope.Scopes.IsNone() || !scope.Scopes.Contains(projectID) {
+		return false, nil
+	}
+	for _, excluded := range scope.ExcludedProjectIDs {
+		if excluded == projectID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -4106,6 +4212,10 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
+	if errors.Is(err, ErrInvalidSearchCursor) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page", nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return

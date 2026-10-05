@@ -1341,3 +1341,58 @@ func TestD11Fix3_AdminRotationAliceToBob(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "admin", bob.Role, "bob should be promoted after rotation")
 }
+
+// TestCanDelegate_PortAccessCustomRole pins that project owners and admins,
+// who carry agent.port_access through their built-in role, can define and
+// bind a custom project role that grants it (the delegation ceiling no longer
+// blocks it), while a plain member still cannot.
+func TestCanDelegate_PortAccessCustomRole(t *testing.T) {
+	authz, s := setupCanDelegateTest(t)
+	ctx := context.Background()
+
+	projectID := tid("project-port-cr")
+	createDelegateTestProject(t, s, projectID, "test-project-port-cr", tid("owner"))
+
+	customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "port-viewer",
+		Description: "Opens forwarded ports on project agents",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.read", "agent.port_access"},
+	})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		role    string
+		allowed bool
+	}{
+		{store.ProjectRoleOwner, true},
+		{store.ProjectRoleAdmin, true},
+		{store.ProjectRoleMember, false},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			userID := tid("port-cr-" + tc.role)
+			email := tc.role + "-port-cr@test.com"
+			createTestUserWithProjectRole(t, s, userID, email, projectID, tc.role)
+			actor := NewAuthenticatedUser(userID, email, tc.role, "member", "api")
+
+			define := authz.CanDelegate(ctx, actor, GrantDescriptor{
+				Type:                  GrantTypeCustomRole,
+				CustomRolePermissions: customRole.Permissions,
+				ScopeType:             store.RoleScopeProject,
+				ScopeID:               projectID,
+			})
+			assert.Equal(t, tc.allowed, define.Allowed, "define custom role: %s", define.Reason)
+
+			bind := authz.CanDelegate(ctx, actor, GrantDescriptor{
+				Type:             GrantTypeRoleBinding,
+				RoleDefinitionID: customRole.ID,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          projectID,
+			})
+			assert.Equal(t, tc.allowed, bind.Allowed, "bind custom role: %s", bind.Reason)
+			if !tc.allowed {
+				assert.Contains(t, define.Reason, "agent.port_access")
+			}
+		})
+	}
+}

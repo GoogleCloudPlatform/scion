@@ -33,7 +33,7 @@ import { expect, type Page } from '@playwright/test';
  * future tap-triggered UI).
  */
 const OPEN_POPUP_SELECTOR =
-  '.context-menu-overlay, sl-dropdown[open], sl-menu[open], sl-dialog[open]';
+  '.context-menu-overlay, sl-dropdown[open], sl-menu[open], sl-dialog[open], scion-action-sheet[open]';
 
 /**
  * Fails fast, with a clear message naming the stroke that caused it, if an
@@ -184,6 +184,56 @@ export async function touchSwipe(
   }
 }
 
+/**
+ * A two-finger horizontal pinch through CDP, both fingers at height `y`.
+ * Finger 0 starts at `x0` and finger 1 at `x1`; over `steps` moves they
+ * travel `dx0` and `dx1` (fingers moving apart zoom in). With `solo`,
+ * finger 0 first travels `solo.dx` alone over `solo.steps` moves before
+ * finger 1 lands, a pinch whose fingers land a moment apart. Solo travel
+ * within the browser's touch slop (about 15px in Chromium) never reaches
+ * the page as touchmoves, so make it larger when those moves matter.
+ */
+export async function touchPinch(
+  page: Page,
+  opts: {
+    y: number;
+    x0: number;
+    dx0: number;
+    x1: number;
+    dx1: number;
+    steps?: number;
+    solo?: { steps: number; dx: number };
+  }
+): Promise<void> {
+  const steps = opts.steps ?? 8;
+  const solo = opts.solo ?? { steps: 0, dx: 0 };
+  const cdp = await page.context().newCDPSession(page);
+  const soloAt = (i: number) => ({ id: 0, x: opts.x0 + (solo.dx * i) / solo.steps, y: opts.y });
+  const x0 = opts.x0 + solo.dx;
+  const f0 = (i: number) => ({ id: 0, x: x0 + (opts.dx0 * i) / steps, y: opts.y });
+  const f1 = (i: number) => ({ id: 1, x: opts.x1 + (opts.dx1 * i) / steps, y: opts.y });
+  try {
+    if (solo.steps > 0) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [soloAt(0)] });
+      for (let i = 1; i <= solo.steps; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [soloAt(i)] });
+        await page.waitForTimeout(15);
+      }
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [f0(0), f1(0)] });
+    for (let i = 1; i <= steps; i++) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [f0(i), f1(i)],
+      });
+      await page.waitForTimeout(15);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  } finally {
+    await cdp.detach();
+  }
+}
+
 /** Press and hold at one point — the gesture a long-press controller listens to. */
 export async function touchHold(page: Page, x: number, y: number, holdMs = 600): Promise<void> {
   const cdp = await page.context().newCDPSession(page);
@@ -195,6 +245,9 @@ export async function touchHold(page: Page, x: number, y: number, holdMs = 600):
     await cdp.detach();
   }
 }
+
+/** Sideways scrollers that message content brings with it: a wide table's wrapper. */
+const CONTENT_SIDE_SCROLLERS = ['.md-table-scroll'];
 
 /** CSS class of the panel that is on screen for a given `data-panel` value. */
 const ACTIVE_PANEL_SELECTOR: Record<string, string> = {
@@ -213,54 +266,85 @@ const ACTIVE_PANEL_SELECTOR: Record<string, string> = {
  * its immediate children's shadow roots. Content like the thread header's
  * title or the members header lives several plain-DOM levels below the
  * panel inside the same shadow root, so a shallow scan would miss it.
+ *
+ * `sideScrollers` names elements that are meant to scroll sideways (a
+ * toolbar row that scrolls when its buttons do not fit). Each must itself
+ * fit and must actually be a sideways scroller; what it clips is reachable
+ * by scrolling it, so its descendants are not scanned. The scroller a
+ * message wraps around a wide table is always one of them.
  */
-export async function assertNoHorizontalOverflow(page: Page): Promise<void> {
-  const result = await page.evaluate((activePanelSelectors) => {
-    const se = document.scrollingElement as HTMLElement;
-    const pageEl = document.querySelector('scion-page-chat') as
-      | (HTMLElement & { shadowRoot: ShadowRoot })
-      | null;
-    const panels = pageEl?.shadowRoot?.querySelector('.v2-panels') as HTMLElement | null;
-    const dataPanel = panels?.getAttribute('data-panel') || 'left';
-    const activeSelector = activePanelSelectors[dataPanel] || '.v2-rail';
-    const active = panels?.querySelector(activeSelector) as HTMLElement | null;
-    const activeRect = active?.getBoundingClientRect();
+export async function assertNoHorizontalOverflow(
+  page: Page,
+  sideScrollers: readonly string[] = []
+): Promise<void> {
+  const result = await page.evaluate(
+    ([activePanelSelectors, sideScrollers]) => {
+      const se = document.scrollingElement as HTMLElement;
+      const pageEl = document.querySelector('scion-page-chat') as
+        | (HTMLElement & { shadowRoot: ShadowRoot })
+        | null;
+      const panels = pageEl?.shadowRoot?.querySelector('.v2-panels') as HTMLElement | null;
+      const dataPanel = panels?.getAttribute('data-panel') || 'left';
+      const activeSelector = activePanelSelectors[dataPanel] || '.v2-rail';
+      const active = panels?.querySelector(activeSelector) as HTMLElement | null;
+      const activeRect = active?.getBoundingClientRect();
 
-    let maxRight = -Infinity;
-    const considerRect = (el: HTMLElement): void => {
-      const style = getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        maxRight = Math.max(maxRight, rect.right);
+      let maxRight = -Infinity;
+      const considerRect = (el: HTMLElement): void => {
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          maxRight = Math.max(maxRight, rect.right);
+        }
+      };
+      const notScrollers: string[] = [];
+      const isSideScroller = (el: HTMLElement): boolean => {
+        if (!sideScrollers.some((selector) => el.matches(selector))) return false;
+        const overflowX = getComputedStyle(el).overflowX;
+        if (overflowX !== 'auto' && overflowX !== 'scroll') {
+          notScrollers.push(`${el.tagName.toLowerCase()}.${el.className}`);
+          return false;
+        }
+        return true;
+      };
+      // Recurse into every shadow root under `root`, at any depth, skipping
+      // what a declared sideways scroller clips.
+      const walkSubtree = (root: ParentNode): void => {
+        const clipped: HTMLElement[] = [];
+        for (const el of root.querySelectorAll('*')) {
+          if (!(el instanceof HTMLElement)) continue;
+          if (clipped.some((scroller) => scroller.contains(el))) continue;
+          considerRect(el);
+          if (isSideScroller(el)) {
+            clipped.push(el);
+            continue;
+          }
+          if (el.shadowRoot) walkSubtree(el.shadowRoot);
+        }
+      };
+      if (active) {
+        considerRect(active);
+        walkSubtree(active);
       }
-    };
-    // Recurse into every shadow root under `root`, at any depth.
-    const walkSubtree = (root: ParentNode): void => {
-      for (const el of root.querySelectorAll('*')) {
-        if (!(el instanceof HTMLElement)) continue;
-        considerRect(el);
-        if (el.shadowRoot) walkSubtree(el.shadowRoot);
-      }
-    };
-    if (active) {
-      considerRect(active);
-      walkSubtree(active);
-    }
 
-    return {
-      activeFound: active !== null,
-      panelsFound: panels !== null,
-      scrollWidth: se.scrollWidth,
-      clientWidth: se.clientWidth,
-      panelsScrollLeft: panels?.scrollLeft ?? null,
-      activeLeft: activeRect?.left ?? null,
-      activeWidth: activeRect?.width ?? null,
-      innerWidth: window.innerWidth,
-      maxRight,
-    };
-  }, ACTIVE_PANEL_SELECTOR);
+      return {
+        activeFound: active !== null,
+        panelsFound: panels !== null,
+        scrollWidth: se.scrollWidth,
+        clientWidth: se.clientWidth,
+        panelsScrollLeft: panels?.scrollLeft ?? null,
+        activeLeft: activeRect?.left ?? null,
+        activeWidth: activeRect?.width ?? null,
+        innerWidth: window.innerWidth,
+        maxRight,
+        notScrollers,
+      };
+    },
+    [ACTIVE_PANEL_SELECTOR, [...CONTENT_SIDE_SCROLLERS, ...sideScrollers]] as const
+  );
 
+  expect(result.notScrollers, 'declared sideways scrollers scroll sideways').toEqual([]);
   expect(result.panelsFound, '.v2-panels was found').toBe(true);
   expect(result.activeFound, 'the active panel element was found').toBe(true);
   expect(

@@ -215,7 +215,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// supported event types — not just "message". A malformed or non-object
 	// payload is rejected first, with a sanitized 400; see
 	// validateAndRejectScheduledPayload for the required order.
-	if !s.validateAndRejectScheduledPayload(w, req.EventType, req.Payload) {
+	if !s.validateAndRejectScheduledPayload(w, r, req.EventType, req.Payload) {
 		return
 	}
 	if req.EventType == "dispatch_agent" {
@@ -395,7 +395,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if req.EventType != "" {
 		effectiveEventType = req.EventType
 	}
-	// Tombstone a caller-supplied (ptone/scion#2200)
+	// Tombstone a caller-supplied
 	// "raw" key in the advanced Payload JSON, for both supported event types
 	// — not just "message". Checked whenever the caller supplies a
 	// replacement Payload in this request: an update that leaves Payload
@@ -404,7 +404,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// payload is rejected first, with a sanitized 400; see
 	// validateAndRejectScheduledPayload for the required order.
 	if req.Payload != "" {
-		if !s.validateAndRejectScheduledPayload(w, effectiveEventType, req.Payload) {
+		if !s.validateAndRejectScheduledPayload(w, r, effectiveEventType, req.Payload) {
 			return
 		}
 	} else if req.EventType != "" && req.EventType != schedule.EventType {
@@ -415,7 +415,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		// Payload against the new type now, so an incompatible stored
 		// payload (e.g. one with a field only valid for the old type) is
 		// caught at authoring time instead of failing silently later.
-		if !s.validateAndRejectScheduledPayload(w, effectiveEventType, schedule.Payload) {
+		if !s.validateAndRejectScheduledPayload(w, r, effectiveEventType, schedule.Payload) {
 			return
 		}
 	}

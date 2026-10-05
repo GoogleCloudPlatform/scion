@@ -54,10 +54,13 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import {
@@ -81,6 +84,9 @@ import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -133,6 +139,14 @@ function formatDurationHMS(totalSeconds: number): string {
 
 @customElement('scion-page-agent-detail')
 export class ScionPageAgentDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
+  /** Lease timer for this agent's delete view (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agent ? [this.agent] : []
+  );
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -278,6 +292,22 @@ export class ScionPageAgentDetail extends LitElement {
       display: flex;
       gap: 0.5rem;
       flex-shrink: 0;
+    }
+    /* On a phone the actions drop below the title and wrap, rather than
+       pushing the last of them off the right edge. */
+    @media (max-width: 640px) {
+      .header {
+        flex-wrap: wrap;
+      }
+      .header-info {
+        min-width: 0;
+        flex-basis: 100%;
+      }
+      .header-actions {
+        flex-wrap: wrap;
+        flex-shrink: 1;
+        min-width: 0;
+      }
     }
 
     /* ---- Error banner ---- */
@@ -749,6 +779,16 @@ export class ScionPageAgentDetail extends LitElement {
     }, DELETE_REDIRECT_DELAY_MS);
   }
 
+  /**
+   * DELETE returned 202: the hub is still deleting (ptone/scion#2483). Stay
+   * on the page with "Deleting…" shown from the response's `deletion`; the
+   * SSE `deleted` event then runs `showDeletedStateThenRedirect` through
+   * `onAgentsUpdated`, as it does for a delete started elsewhere.
+   */
+  private async keepDeletingAgent(response: Response): Promise<void> {
+    stateManager.applyDeleteAccepted(this.agentId, await readAcceptedDeletion(response));
+  }
+
   private onProjectsUpdated(): void {
     if (this.agent?.projectId) {
       const updatedProject = stateManager.getProject(this.agent.projectId);
@@ -898,19 +938,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private isZeroDate(dateString: string): boolean {
@@ -920,29 +949,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatRelative(dateString);
   }
 
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
@@ -990,11 +998,20 @@ export class ScionPageAgentDetail extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
+              if (forceResponse.status === 202) {
+                await this.keepDeletingAgent(forceResponse);
+                return;
+              }
               this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
+        }
+
+        if (response.status === 202) {
+          await this.keepDeletingAgent(response);
+          return;
         }
 
         this.showDeletedStateThenRedirect();
@@ -1284,7 +1301,9 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .conversationKey=${this.currentUserId
+          ? `dm:agent:${this.agentId}:user:${this.currentUserId}`
+          : ''}
         .projectId=${agent.projectId || ''}
         .currentUserId=${this.currentUserId}
         ?isDM=${true}
@@ -1311,6 +1330,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderHeader() {
     const agent = this.agent!;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
       <div class="header">
         <div class="header-info">
@@ -1319,8 +1341,12 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
+              label=${stateLabel(getAgentDisplayStatus(agent))}
             ></scion-status-badge>
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              live
+            ></scion-deletion-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1406,7 +1432,7 @@ export class ScionPageAgentDetail extends LitElement {
             : nothing}
           ${isAgentRunning(agent)
             ? html`
-                ${canLifecycle(agent._capabilities)
+                ${lifecycleOk
                   ? html`
                       ${agent.harnessCapabilities?.resume?.support !== 'no'
                         ? html`
@@ -1438,7 +1464,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-button
                       variant="success"
@@ -1452,7 +1478,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -1481,7 +1507,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created'
+          ${agent.phase === 'created' || can(agent._capabilities, 'update')
             ? html`
                 <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
                   <sl-button variant="default" size="small">
@@ -1491,7 +1517,7 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
                   variant="danger"
@@ -1558,6 +1584,10 @@ export class ScionPageAgentDetail extends LitElement {
                 label=${agent.phase}
                 size="small"
               ></scion-status-badge>
+              <scion-deletion-badge
+                .deletion=${this.deletionLease.view(agent)}
+                size="small"
+              ></scion-deletion-badge>
             </span>
           </div>
           <div class="info-item">
@@ -1566,7 +1596,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
@@ -1724,23 +1754,35 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `
@@ -1771,27 +1813,27 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL SESSIONS</span>
-            <span class="info-value">${m.totalSessions.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalSessions)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">INPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensInput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensInput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">OUTPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensOutput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensOutput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">CACHED TOKENS</span>
-            <span class="info-value">${m.totalTokensCached.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensCached)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">REASONING TOKENS</span>
-            <span class="info-value">${m.totalTokensReasoning.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensReasoning)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG TOKENS / SESSION</span>
-            <span class="info-value">${m.avgTokensPerSession.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.avgTokensPerSession)}</span>
           </div>
         </div>
       </div>
@@ -1801,7 +1843,7 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL TOOL CALLS</span>
-            <span class="info-value">${m.totalToolCalls.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalToolCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG DURATION</span>
@@ -1932,8 +1974,12 @@ export class ScionPageAgentDetail extends LitElement {
                       )}
                     </sl-select>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
-                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;"
+                        >
+                          Hub mode: sends within this project and to permitted agents in other
+                          projects. External messaging requires the Hub cross-project switch to be
+                          enabled.
                         </div>`
                       : nothing}
                   `
@@ -1946,7 +1992,9 @@ export class ScionPageAgentDetail extends LitElement {
                       ${modeDisplay.description}
                     </span>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;"
+                        >
                           External messaging requires the Hub cross-project switch to be enabled.
                         </div>`
                       : nothing}

@@ -30,26 +30,18 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import type { Message } from '../../../shared/types.js';
-
-/** Compact 24-hour time label, matching `chat-message.ts`'s `MESSAGE_TIME_FORMAT`. */
-const IA_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
-/** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
-const IA_DATETIME_FORMAT = new Intl.DateTimeFormat('en', {
-  month: 'short',
-  day: 'numeric',
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
+  /**
+   * Re-renders this marker when the effective display zone changes
+   * (review R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Number of messages in this group. */
   @property({ type: Number })
   messageCount = 0;
@@ -387,16 +379,17 @@ export class ScionChatInteragentMarker extends LitElement {
 
   /** Compact time-only label for the two-line expanded row, e.g. "14:15". */
   private formatTime(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return IA_TIME_FORMAT.format(d);
+    return formatInstant(iso, 'time');
   }
 
   /** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
   private formatDateTime(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return IA_DATETIME_FORMAT.format(d);
+    return formatInstant(iso, 'datetime');
+  }
+
+  /** Full instant plus zone label for the `.ia-time` tooltip (review R1-3, AC4). */
+  private formatTimeTitle(iso: string): string {
+    return formatInstantWithZone(iso);
   }
 
   /** Render a single expanded inter-agent message row (header + body). */
@@ -404,7 +397,9 @@ export class ScionChatInteragentMarker extends LitElement {
     return html`
       <div class="ia-msg">
         <div class="ia-msg-header">
-          <span class="ia-time">${this.formatTime(m.createdAt)}</span>
+          <span class="ia-time" title=${this.formatTimeTitle(m.createdAt)}
+            >${this.formatTime(m.createdAt)}</span
+          >
           <span class="ia-sender">${this.formatParticipant(m.sender, m.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
@@ -445,7 +440,9 @@ export class ScionChatInteragentMarker extends LitElement {
         @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
       >
         <div class="ia-full-header">
-          <span class="ia-time">${this.formatDateTime(msg.createdAt)}</span>
+          <span class="ia-time" title=${this.formatTimeTitle(msg.createdAt)}
+            >${this.formatDateTime(msg.createdAt)}</span
+          >
           <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"

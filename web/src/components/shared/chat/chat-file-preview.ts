@@ -30,6 +30,7 @@
  * cancelled or superseded load is not a failure of the load the user is
  * currently waiting on. Object URLs created for image previews are revoked
  * on replacement, close and disconnect.
+ * The image is reloaded after reconnect, as disconnect revokes its URL.
  */
 
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
@@ -227,8 +228,26 @@ export class ScionChatFilePreview extends LitElement {
 
   private copyTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Set when a disconnect invalidated the loaded state (revoked its object
+   * URL or aborted its fetch). A keyed `repeat` move detaches and
+   * re-attaches this same instance with an unchanged `target`, so without
+   * this the reconnected dialog would render the revoked `blob:` URL.
+   */
+  private reloadOnConnect = false;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    if (this.reloadOnConnect) this.requestUpdate();
+  }
+
   override willUpdate(changed: PropertyValues<this>): void {
+    if (this.reloadOnConnect && this.isConnected && !changed.has('target')) {
+      this.reloadOnConnect = false;
+      void this.load();
+    }
     if (changed.has('target')) {
+      this.reloadOnConnect = false;
       this.showSource = false;
       this.copied = false;
       // `copied` is already reset above, so a timer still pending from the
@@ -242,8 +261,18 @@ export class ScionChatFilePreview extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    // Revoking/aborting leaves nothing usable to show, so drop the state and
+    // reload it if this instance is ever reconnected.
+    const invalidated = !!this.loadState.objectUrl || this.loadState.status === 'loading';
     this.controller?.abort();
     this.revokeObjectUrl();
+    if (invalidated) {
+      // Discard any in-flight load: a blob() continuation already queued
+      // would otherwise create an object URL nothing ever revokes.
+      this.generation++;
+      this.reloadOnConnect = this.target !== null;
+      this.loadState = IDLE_STATE;
+    }
     // A copy-feedback timer is a plain JS timer, not tied to the element's
     // connection state, so it keeps running after disconnect regardless.
     // Clearing it alone isn't enough: once cleared, nothing would ever
@@ -690,14 +719,13 @@ export class ScionChatFilePreview extends LitElement {
      * generous enough for either content type. */
     .file-preview-dialog::part(panel) {
       width: min(90vw, 900px);
-      max-height: 85vh;
+      /* The app frame's height, not the viewport's: it shrinks with the
+         iOS keyboard and the browser toolbar (see client/viewport.ts). */
+      max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
     }
     .file-preview-dialog::part(body) {
       padding: 0;
       overflow: auto;
-    }
-    .file-preview-dialog scion-code-editor {
-      --editor-max-height: 70vh;
     }
     .file-preview-placeholder {
       padding: 2rem;
@@ -719,7 +747,7 @@ export class ScionChatFilePreview extends LitElement {
       display: block;
       margin: 0 auto;
       max-width: 100%;
-      max-height: 75vh;
+      max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
       object-fit: contain;
     }
     .footer {

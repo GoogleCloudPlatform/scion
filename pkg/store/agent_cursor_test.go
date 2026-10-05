@@ -16,6 +16,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,7 +24,7 @@ import (
 func TestAgentCursor_RoundTrip(t *testing.T) {
 	k := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := EncodeAgentCursor("updated", "desc", k, created, "agent-1", "bind123")
+	cursor := EncodeAgentCursor("updated", "desc", k, created, testCursorID, "bind123")
 
 	decoded, err := DecodeAgentCursor(cursor, "updated", "desc", "bind123")
 	if err != nil {
@@ -35,14 +36,14 @@ func TestAgentCursor_RoundTrip(t *testing.T) {
 	if !decoded.Created.Equal(created) {
 		t.Errorf("Created = %v, want %v", decoded.Created, created)
 	}
-	if decoded.ID != "agent-1" {
-		t.Errorf("ID = %q, want agent-1", decoded.ID)
+	if decoded.ID != testCursorID {
+		t.Errorf("ID = %q, want %s", decoded.ID, testCursorID)
 	}
 }
 
 func TestAgentCursor_SortMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
-	cursor := EncodeAgentCursor("updated", "desc", k, k, "agent-1", "bind")
+	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind")
 	if _, err := DecodeAgentCursor(cursor, "created", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("sort mismatch: err = %v, want ErrInvalidInput", err)
 	}
@@ -50,7 +51,7 @@ func TestAgentCursor_SortMismatchRejected(t *testing.T) {
 
 func TestAgentCursor_DirMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
-	cursor := EncodeAgentCursor("updated", "desc", k, k, "agent-1", "bind")
+	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind")
 	if _, err := DecodeAgentCursor(cursor, "updated", "asc", "bind"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("dir mismatch: err = %v, want ErrInvalidInput", err)
 	}
@@ -58,7 +59,7 @@ func TestAgentCursor_DirMismatchRejected(t *testing.T) {
 
 func TestAgentCursor_BindingMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
-	cursor := EncodeAgentCursor("updated", "desc", k, k, "agent-1", "bind-a")
+	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind-a")
 	if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind-b"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("binding mismatch: err = %v, want ErrInvalidInput", err)
 	}
@@ -82,7 +83,7 @@ func TestAgentCursor_MalformedBase64Rejected(t *testing.T) {
 
 func TestAgentCursor_TamperedByteRejected(t *testing.T) {
 	k := time.Now().UTC()
-	cursor := EncodeAgentCursor("updated", "desc", k, k, "agent-1", "bind")
+	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind")
 	tampered := "X" + cursor[1:]
 	if _, err := DecodeAgentCursor(tampered, "updated", "desc", "bind"); err == nil {
 		t.Fatalf("tampered cursor decoded without error")
@@ -94,12 +95,45 @@ func TestAgentCursor_BindingMayContainCommas(t *testing.T) {
 	// contains a raw comma, but the codec must not assume that).
 	k := time.Now().UTC()
 	binding := "part,with,commas"
-	cursor := EncodeAgentCursor("updated", "desc", k, k, "agent-1", binding)
+	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, binding)
 	decoded, err := DecodeAgentCursor(cursor, "updated", "desc", binding)
 	if err != nil {
 		t.Fatalf("DecodeAgentCursor: %v", err)
 	}
-	if decoded.ID != "agent-1" {
-		t.Fatalf("ID = %q, want agent-1", decoded.ID)
+	if decoded.ID != testCursorID {
+		t.Fatalf("ID = %q, want %s", decoded.ID, testCursorID)
+	}
+}
+
+// testCursorID is a well-formed agent id for cursor round trips.
+const testCursorID = "6f1c2a3e-4b5d-4c6e-8f70-123456789abc"
+
+func TestAgentCursor_NonUUIDIDRejected(t *testing.T) {
+	// The binding, sort and dir all match, so only the id is wrong: a
+	// non-UUID id must be rejected as invalid input before it reaches SQL.
+	k := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const canonical = "6f1c2a3e-4b5d-4c6e-8f70-1a2b3c4d5e6f"
+	for _, id := range []string{
+		"agent-1", "", "not-a-uuid", "6f1c2a3e-4b5d-4c6e-8f70",
+		// Non-canonical forms that uuid.Parse accepts.
+		"urn:uuid:" + canonical,
+		"{" + canonical + "}",
+		strings.ReplaceAll(canonical, "-", ""),
+		strings.ToUpper(canonical),
+	} {
+		cursor := EncodeAgentCursor("updated", "desc", k, k, id, "bind")
+		if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("id %q: err = %v, want ErrInvalidInput", id, err)
+		}
+	}
+
+	// The canonical lowercase dashed form is accepted unchanged.
+	cursor := EncodeAgentCursor("updated", "desc", k, k, canonical, "bind")
+	got, err := DecodeAgentCursor(cursor, "updated", "desc", "bind")
+	if err != nil {
+		t.Fatalf("canonical id: err = %v, want nil", err)
+	}
+	if got.ID != canonical {
+		t.Errorf("canonical id: ID = %q, want %q", got.ID, canonical)
 	}
 }

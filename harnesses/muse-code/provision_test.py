@@ -91,6 +91,8 @@ def _make_bundle(tmp: str, home: str, *, candidates: dict | None = None,
                  harness_config: dict | None = None) -> dict:
     """Create a fake harness bundle and return the manifest dict."""
     bundle = os.path.join(tmp, "bundle")
+    workspace = os.path.join(tmp, "workspace")
+    os.makedirs(workspace, exist_ok=True)
     inputs_dir = os.path.join(bundle, "inputs")
     outputs_dir = os.path.join(bundle, "outputs")
     os.makedirs(inputs_dir, exist_ok=True)
@@ -140,7 +142,9 @@ def _make_bundle(tmp: str, home: str, *, candidates: dict | None = None,
     manifest = {
         "harness_bundle_dir": bundle,
         "agent_home": home,
-        "agent_workspace": "/workspace",
+        # Keep the workspace inside the test's tempdir so provisioning can
+        # never write into a live checkout mounted at /workspace.
+        "agent_workspace": workspace,
         "harness_config": config,
     }
 

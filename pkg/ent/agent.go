@@ -111,6 +111,8 @@ type Agent struct {
 	LaunchAsyncOptIn bool `json:"launch_async_opt_in,omitempty"`
 	// LaunchID holds the value of the "launch_id" field.
 	LaunchID string `json:"launch_id,omitempty"`
+	// RunID holds the value of the "run_id" field.
+	RunID string `json:"run_id,omitempty"`
 	// LaunchState holds the value of the "launch_state" field.
 	LaunchState string `json:"launch_state,omitempty"`
 	// LaunchEndReason holds the value of the "launch_end_reason" field.
@@ -129,6 +131,48 @@ type Agent struct {
 	LaunchStep string `json:"launch_step,omitempty"`
 	// LaunchError holds the value of the "launch_error" field.
 	LaunchError string `json:"launch_error,omitempty"`
+	// DeletionState holds the value of the "deletion_state" field.
+	DeletionState string `json:"deletion_state,omitempty"`
+	// DeletionClaim holds the value of the "deletion_claim" field.
+	DeletionClaim int64 `json:"deletion_claim,omitempty"`
+	// DeletionLeaseAt holds the value of the "deletion_lease_at" field.
+	DeletionLeaseAt *time.Time `json:"deletion_lease_at,omitempty"`
+	// DeletionStartedAt holds the value of the "deletion_started_at" field.
+	DeletionStartedAt *time.Time `json:"deletion_started_at,omitempty"`
+	// DeletionFailedAt holds the value of the "deletion_failed_at" field.
+	DeletionFailedAt *time.Time `json:"deletion_failed_at,omitempty"`
+	// DeletionCode holds the value of the "deletion_code" field.
+	DeletionCode string `json:"deletion_code,omitempty"`
+	// DeletionError holds the value of the "deletion_error" field.
+	DeletionError string `json:"deletion_error,omitempty"`
+	// DeletionPrior holds the value of the "deletion_prior" field.
+	DeletionPrior string `json:"deletion_prior,omitempty"`
+	// DeletionRequest holds the value of the "deletion_request" field.
+	DeletionRequest string `json:"deletion_request,omitempty"`
+	// RunIntent holds the value of the "run_intent" field.
+	RunIntent *string `json:"run_intent,omitempty"`
+	// RunIntentAt holds the value of the "run_intent_at" field.
+	RunIntentAt *time.Time `json:"run_intent_at,omitempty"`
+	// StartClaimID holds the value of the "start_claim_id" field.
+	StartClaimID *string `json:"start_claim_id,omitempty"`
+	// StartClaimKind holds the value of the "start_claim_kind" field.
+	StartClaimKind string `json:"start_claim_kind,omitempty"`
+	// StartClaimState holds the value of the "start_claim_state" field.
+	StartClaimState string `json:"start_claim_state,omitempty"`
+	// StartClaimOwner holds the value of the "start_claim_owner" field.
+	StartClaimOwner string `json:"start_claim_owner,omitempty"`
+	// StartClaimTarget holds the value of the "start_claim_target" field.
+	StartClaimTarget string `json:"start_claim_target,omitempty"`
+	// StartClaimAt holds the value of the "start_claim_at" field.
+	StartClaimAt *time.Time `json:"start_claim_at,omitempty"`
+	// StartClaimLeaseUntil holds the value of the "start_claim_lease_until" field.
+	StartClaimLeaseUntil *time.Time `json:"start_claim_lease_until,omitempty"`
+	// StartClaimUnconfirmedAt holds the value of the "start_claim_unconfirmed_at" field.
+	StartClaimUnconfirmedAt *time.Time `json:"start_claim_unconfirmed_at,omitempty"`
+	// StartClaimHoldUntil holds the value of the "start_claim_hold_until" field.
+	StartClaimHoldUntil *time.Time `json:"start_claim_hold_until,omitempty"`
+	// StartClaimLaunchID holds the value of the "start_claim_launch_id" field.
+	StartClaimLaunchID string `json:"start_claim_launch_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -188,11 +232,11 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
 			values[i] = new(sql.NullBool)
-		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq:
+		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -503,6 +547,12 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LaunchID = value.String
 			}
+		case agent.FieldRunID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field run_id", values[i])
+			} else if value.Valid {
+				_m.RunID = value.String
+			}
 		case agent.FieldLaunchState:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field launch_state", values[i])
@@ -558,6 +608,142 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field launch_error", values[i])
 			} else if value.Valid {
 				_m.LaunchError = value.String
+			}
+		case agent.FieldDeletionState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_state", values[i])
+			} else if value.Valid {
+				_m.DeletionState = value.String
+			}
+		case agent.FieldDeletionClaim:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_claim", values[i])
+			} else if value.Valid {
+				_m.DeletionClaim = value.Int64
+			}
+		case agent.FieldDeletionLeaseAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_lease_at", values[i])
+			} else if value.Valid {
+				_m.DeletionLeaseAt = new(time.Time)
+				*_m.DeletionLeaseAt = value.Time
+			}
+		case agent.FieldDeletionStartedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_started_at", values[i])
+			} else if value.Valid {
+				_m.DeletionStartedAt = new(time.Time)
+				*_m.DeletionStartedAt = value.Time
+			}
+		case agent.FieldDeletionFailedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_failed_at", values[i])
+			} else if value.Valid {
+				_m.DeletionFailedAt = new(time.Time)
+				*_m.DeletionFailedAt = value.Time
+			}
+		case agent.FieldDeletionCode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_code", values[i])
+			} else if value.Valid {
+				_m.DeletionCode = value.String
+			}
+		case agent.FieldDeletionError:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_error", values[i])
+			} else if value.Valid {
+				_m.DeletionError = value.String
+			}
+		case agent.FieldDeletionPrior:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_prior", values[i])
+			} else if value.Valid {
+				_m.DeletionPrior = value.String
+			}
+		case agent.FieldDeletionRequest:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_request", values[i])
+			} else if value.Valid {
+				_m.DeletionRequest = value.String
+			}
+		case agent.FieldRunIntent:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent", values[i])
+			} else if value.Valid {
+				_m.RunIntent = new(string)
+				*_m.RunIntent = value.String
+			}
+		case agent.FieldRunIntentAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent_at", values[i])
+			} else if value.Valid {
+				_m.RunIntentAt = new(time.Time)
+				*_m.RunIntentAt = value.Time
+			}
+		case agent.FieldStartClaimID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_id", values[i])
+			} else if value.Valid {
+				_m.StartClaimID = new(string)
+				*_m.StartClaimID = value.String
+			}
+		case agent.FieldStartClaimKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_kind", values[i])
+			} else if value.Valid {
+				_m.StartClaimKind = value.String
+			}
+		case agent.FieldStartClaimState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_state", values[i])
+			} else if value.Valid {
+				_m.StartClaimState = value.String
+			}
+		case agent.FieldStartClaimOwner:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_owner", values[i])
+			} else if value.Valid {
+				_m.StartClaimOwner = value.String
+			}
+		case agent.FieldStartClaimTarget:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_target", values[i])
+			} else if value.Valid {
+				_m.StartClaimTarget = value.String
+			}
+		case agent.FieldStartClaimAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_at", values[i])
+			} else if value.Valid {
+				_m.StartClaimAt = new(time.Time)
+				*_m.StartClaimAt = value.Time
+			}
+		case agent.FieldStartClaimLeaseUntil:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_lease_until", values[i])
+			} else if value.Valid {
+				_m.StartClaimLeaseUntil = new(time.Time)
+				*_m.StartClaimLeaseUntil = value.Time
+			}
+		case agent.FieldStartClaimUnconfirmedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_unconfirmed_at", values[i])
+			} else if value.Valid {
+				_m.StartClaimUnconfirmedAt = new(time.Time)
+				*_m.StartClaimUnconfirmedAt = value.Time
+			}
+		case agent.FieldStartClaimHoldUntil:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_hold_until", values[i])
+			} else if value.Valid {
+				_m.StartClaimHoldUntil = new(time.Time)
+				*_m.StartClaimHoldUntil = value.Time
+			}
+		case agent.FieldStartClaimLaunchID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field start_claim_launch_id", values[i])
+			} else if value.Valid {
+				_m.StartClaimLaunchID = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -761,6 +947,9 @@ func (_m *Agent) String() string {
 	builder.WriteString("launch_id=")
 	builder.WriteString(_m.LaunchID)
 	builder.WriteString(", ")
+	builder.WriteString("run_id=")
+	builder.WriteString(_m.RunID)
+	builder.WriteString(", ")
 	builder.WriteString("launch_state=")
 	builder.WriteString(_m.LaunchState)
 	builder.WriteString(", ")
@@ -791,6 +980,89 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("launch_error=")
 	builder.WriteString(_m.LaunchError)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_state=")
+	builder.WriteString(_m.DeletionState)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_claim=")
+	builder.WriteString(fmt.Sprintf("%v", _m.DeletionClaim))
+	builder.WriteString(", ")
+	if v := _m.DeletionLeaseAt; v != nil {
+		builder.WriteString("deletion_lease_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeletionStartedAt; v != nil {
+		builder.WriteString("deletion_started_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeletionFailedAt; v != nil {
+		builder.WriteString("deletion_failed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("deletion_code=")
+	builder.WriteString(_m.DeletionCode)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_error=")
+	builder.WriteString(_m.DeletionError)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_prior=")
+	builder.WriteString(_m.DeletionPrior)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_request=")
+	builder.WriteString(_m.DeletionRequest)
+	builder.WriteString(", ")
+	if v := _m.RunIntent; v != nil {
+		builder.WriteString("run_intent=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.RunIntentAt; v != nil {
+		builder.WriteString("run_intent_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.StartClaimID; v != nil {
+		builder.WriteString("start_claim_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("start_claim_kind=")
+	builder.WriteString(_m.StartClaimKind)
+	builder.WriteString(", ")
+	builder.WriteString("start_claim_state=")
+	builder.WriteString(_m.StartClaimState)
+	builder.WriteString(", ")
+	builder.WriteString("start_claim_owner=")
+	builder.WriteString(_m.StartClaimOwner)
+	builder.WriteString(", ")
+	builder.WriteString("start_claim_target=")
+	builder.WriteString(_m.StartClaimTarget)
+	builder.WriteString(", ")
+	if v := _m.StartClaimAt; v != nil {
+		builder.WriteString("start_claim_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.StartClaimLeaseUntil; v != nil {
+		builder.WriteString("start_claim_lease_until=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.StartClaimUnconfirmedAt; v != nil {
+		builder.WriteString("start_claim_unconfirmed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.StartClaimHoldUntil; v != nil {
+		builder.WriteString("start_claim_hold_until=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("start_claim_launch_id=")
+	builder.WriteString(_m.StartClaimLaunchID)
 	builder.WriteByte(')')
 	return builder.String()
 }

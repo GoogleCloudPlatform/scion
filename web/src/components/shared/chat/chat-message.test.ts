@@ -29,6 +29,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
@@ -1224,5 +1225,84 @@ describe('scion-chat-message gs:// linkification', () => {
     const links = ghRefLinksIn(el);
     expect(links).toHaveLength(1);
     expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
+});
+
+// Review round 2, R2-3: AC4 ("sees native chat timestamps in Tokyo time,
+// with a zone label") was implemented (R1-3) but had no test pinning it.
+describe('scion-chat-message zone label (AC4, review R2-3)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  it('renders the preferred-zone time and a title with the full instant and zone', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z'; // -> 2026-09-24T00:00 JST
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+
+  // Review R2-1: a message already mounted (e.g. before /auth/me resolves,
+  // or before a later preference change) must not stay stuck in the
+  // browser zone — DisplayZoneController re-renders it.
+  it('re-renders in the new zone after a mounted message outlives a preference change', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.msg-time')?.textContent).toBe('15:00'); // UTC (Auto)
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+});
+
+describe('scion-chat-message wide tables', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('wraps each table in a named, keyboard-reachable sideways scroller, once', async () => {
+    const el = await mount(
+      '<table><tr><td>a</td></tr></table><table><caption> Agents </caption><tr><td>b</td></tr></table>'
+    );
+    const wrappers = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('.md-content .md-table-scroll') ?? []
+    );
+    expect(wrappers).toHaveLength(2);
+    for (const w of wrappers) {
+      expect(w.firstElementChild?.tagName).toBe('TABLE');
+      expect(w.tabIndex).toBe(0);
+      expect(w.getAttribute('role')).toBe('region');
+    }
+    expect(wrappers.map((w) => w.getAttribute('aria-label'))).toEqual(['Table', 'Agents']);
+
+    // A re-render of the same content does not wrap twice.
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.md-table-scroll .md-table-scroll')).toHaveLength(0);
   });
 });

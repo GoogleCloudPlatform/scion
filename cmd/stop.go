@@ -342,6 +342,11 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		Status  string
 		Error   string
 		Removed bool
+		// Pending is set when removal was accepted (202) but its completion
+		// could not be observed.
+		Pending  string
+		Queued   bool
+		Warnings []string
 	}
 
 	var (
@@ -360,7 +365,8 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer agentCancel()
 
-			if err := agentSvc.Stop(agentCtx, ag.Name); err != nil {
+			stopResp, err := agentSvc.Stop(agentCtx, ag.Name)
+			if err != nil {
 				res.Status = "error"
 				res.Error = wrapHubError(fmt.Errorf("failed to stop: %w", err)).Error()
 				mu.Lock()
@@ -368,21 +374,38 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 				mu.Unlock()
 				return
 			}
+			if stopResp != nil {
+				res.Queued = stopResp.Queued
+				res.Warnings = stopResp.Warnings
+			}
 
-			if stopRm {
+			// A queued stop has not run yet, so the agent is not removed.
+			if stopRm && !res.Queued {
 				opts := &hubclient.DeleteAgentOptions{
 					DeleteFiles:  true,
 					RemoveBranch: false,
 				}
-				if err := agentSvc.Delete(agentCtx, ag.Name, opts); err != nil {
+				outcome, err := deleteViaHubAndWait(agentCtx, agentSvc, ag.Name, opts, func() {
+					statusf("Agent '%s': removal in progress...\n", ag.Name)
+				})
+				if err != nil {
+					err = wrapHubError(err)
+				} else {
+					err = hubDeleteFailure(ag.Name, outcome, "agent kept")
+				}
+				if err != nil {
 					res.Status = "error"
-					res.Error = wrapHubError(fmt.Errorf("stopped but failed to remove: %w", err)).Error()
+					res.Error = fmt.Errorf("stopped but failed to remove: %w", err).Error()
 					mu.Lock()
 					results = append(results, res)
 					mu.Unlock()
 					return
 				}
-				res.Removed = true
+				if outcome.Confirmed() {
+					res.Removed = true
+				} else {
+					res.Pending = hubRemovalPendingMessage(outcome)
+				}
 			}
 
 			mu.Lock()
@@ -427,6 +450,16 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			if r.Removed {
 				entry["removed"] = true
 			}
+			if r.Pending != "" {
+				entry["removalPending"] = true
+				entry["message"] = r.Pending
+			}
+			if r.Queued {
+				entry["queued"] = true
+			}
+			if len(r.Warnings) > 0 {
+				entry["warnings"] = r.Warnings
+			}
 			jsonResults[i] = entry
 		}
 		overallStatus := "success"
@@ -442,11 +475,20 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var errs []string
 	for _, r := range results {
+		for _, w := range r.Warnings {
+			statusf("Agent '%s': warning: %s\n", r.Name, w)
+		}
 		if r.Error != "" {
 			statusf("Agent '%s': error: %s\n", r.Name, r.Error)
 			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
+		} else if r.Queued && stopRm {
+			statusf("Agent '%s': %s\n", r.Name, stopQueuedNotRemovedMessage)
+		} else if r.Queued {
+			statusf("Agent '%s': stop queued via Hub.\n", r.Name)
 		} else if r.Removed {
 			statusf("Agent '%s' stopped and removed via Hub.\n", r.Name)
+		} else if r.Pending != "" {
+			statusf("Agent '%s' stopped via Hub; %s.\n", r.Name, r.Pending)
 		} else {
 			statusf("Agent '%s' stopped via Hub.\n", r.Name)
 		}
@@ -474,17 +516,44 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	// Use project-scoped client to allow lookup by name/slug
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	if err := agentSvc.Stop(ctx, agentName); err != nil {
+	stopResp, err := agentSvc.Stop(ctx, agentName)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to stop agent via Hub: %w", err))
 	}
+	if stopResp != nil && stopResp.Queued {
+		return reportQueuedStop(agentName, stopResp.Warnings)
+	}
+	printLifecycleWarnings(stopResp)
 
 	if stopRm {
 		opts := &hubclient.DeleteAgentOptions{
 			DeleteFiles:  true,
 			RemoveBranch: false,
 		}
-		if err := agentSvc.Delete(ctx, agentName, opts); err != nil {
+		outcome, err := deleteViaHubAndWait(ctx, agentSvc, agentName, opts, func() {
+			statusf("Agent '%s' stopped; removal in progress...\n", agentName)
+		})
+		if err != nil {
 			return wrapHubError(fmt.Errorf("agent stopped but failed to delete via Hub: %w", err))
+		}
+		if err := hubDeleteFailure(agentName, outcome, "agent kept"); err != nil {
+			return fmt.Errorf("agent stopped but failed to delete via Hub: %w", err)
+		}
+		if !outcome.Confirmed() {
+			// Accepted but not observed: not a failure; leave the sync state
+			// alone until the removal is known to be done.
+			msg := hubRemovalPendingMessage(outcome)
+			if isJSONOutput() {
+				return outputJSON(ActionResult{
+					Status:  "success",
+					Command: "stop",
+					Agent:   agentName,
+					Message: fmt.Sprintf("Agent '%s' stopped via Hub; %s.", agentName, msg),
+					Details: map[string]interface{}{"removed": false, "removalPending": true, "hub": true},
+				})
+			}
+			statusf("Agent '%s' stopped via Hub; %s.\n", agentName, msg)
+			return nil
 		}
 		if hubCtx.ProjectPath != "" {
 			// Keep sync watermark current after hub-side delete operations.
@@ -515,6 +584,45 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	}
 
 	return nil
+}
+
+// stopQueuedNotRemovedMessage is printed when stop --rm finds the stop queued
+// for an offline broker: the agent is not removed.
+const stopQueuedNotRemovedMessage = "Broker offline: stop queued; the agent was not removed. Run scion delete when the broker is back."
+
+// reportQueuedStop reports a stop the Hub queued for an offline broker. With
+// --rm the agent is not removed, since its container has not stopped yet.
+// Either way the command succeeds.
+func reportQueuedStop(agentName string, warnings []string) error {
+	msg := fmt.Sprintf("Agent '%s': stop queued via Hub.", agentName)
+	if stopRm {
+		msg = stopQueuedNotRemovedMessage
+	}
+	if isJSONOutput() {
+		return outputJSON(ActionResult{
+			Status:   "success",
+			Command:  "stop",
+			Agent:    agentName,
+			Message:  msg,
+			Warnings: warnings,
+			Details:  map[string]interface{}{"hub": true, "queued": true, "removed": false},
+		})
+	}
+	for _, w := range warnings {
+		statusf("Warning: %s\n", w)
+	}
+	statusf("%s\n", msg)
+	return nil
+}
+
+// printLifecycleWarnings prints the warnings a Hub lifecycle action returned.
+func printLifecycleWarnings(resp *hubclient.LifecycleResponse) {
+	if resp == nil {
+		return
+	}
+	for _, w := range resp.Warnings {
+		statusf("Warning: %s\n", w)
+	}
 }
 
 func init() {

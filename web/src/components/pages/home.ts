@@ -21,17 +21,40 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Agent, Project, Capabilities } from '../../shared/types.js';
 import { can, isAgentRunning } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
 import { apiFetch } from '../../client/api.js';
+import { AgentMemberIndex } from '../../client/agent-member-index.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
+import { dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
+import { formatNumber } from '../../utils/format-number.js';
 import {
   fetchHubProjectCapabilities,
   seedHubProjectCapabilities,
 } from '../../client/hub-capabilities.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+
+/**
+ * Home's agents request: one agent, plus the complete set when it fits in
+ * 500, and the counts. A complete response is today's full list; otherwise
+ * the counts come from `stats`.
+ */
+const HOME_AGENTS_URL = '/api/v1/agents?sort=updated&dir=desc&limit=1&fit=500&stats=1';
+
+/** The parts of the global agents response home reads. */
+interface HomeAgentsResponse {
+  agents?: Agent[];
+  nextCursor?: string;
+  complete?: boolean;
+  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+}
 
 interface InviteStats {
   pendingInvites: number;
@@ -50,6 +73,9 @@ interface InviteStats {
 
 @customElement('scion-page-home')
 export class ScionPageHome extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * Page data from SSR
    */
@@ -72,7 +98,35 @@ export class ScionPageHome extends LitElement {
   @state()
   private projectScopeCapabilities: Capabilities | undefined;
 
+  /**
+   * The agent counts when the last agents response was not the complete
+   * set (more than 500 agents): seeded from `stats` and kept live under
+   * the dashboard add rule (every agent the dashboard scope delivers).
+   * `null` while `this.agents` is the complete set. Above 2,000 agents it
+   * is a count-only snapshot.
+   */
+  private memberIndex: AgentMemberIndex | null = null;
+
+  /**
+   * The counts may be stale, so the refresh chip shows. In count-only mode
+   * it is set after any live change or a resync; with stats IDs, only
+   * after a resync of the live connection.
+   */
+  @state()
+  private countsMayHaveChanged = false;
+
+  /** Forces a re-render when the member index changes. */
+  @state()
+  private countsTick = 0;
+
+  @state()
+  private countsLoading = false;
+
+  private agentsLoadSeq = 0;
+
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
+  private boundOnAgentsResync = this.onAgentsResync.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
@@ -81,6 +135,8 @@ export class ScionPageHome extends LitElement {
 
     // Subscribe before snapshot so no deltas are missed between read and listen
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
 
     // Use hydrated data if available, avoiding unnecessary fetches on SSR load
@@ -91,11 +147,21 @@ export class ScionPageHome extends LitElement {
 
     if (this.agents.length === 0 && this.projects.length === 0) {
       void this.loadData();
-    } else if (!this.projectScopeCapabilities) {
-      // Hydrated from another page (e.g. Agents) that did not carry project
-      // scope capabilities. Ask the shared helper rather than refetching
-      // everything.
-      void this.loadProjectScopeCapabilities();
+    } else if (stateManager.isAgentSetComplete('compact')) {
+      // State holds every dashboard agent: its counts are exact.
+      if (!this.projectScopeCapabilities) {
+        // Hydrated from another page (e.g. Agents) that did not carry project
+        // scope capabilities. Ask the shared helper rather than refetching
+        // everything.
+        void this.loadProjectScopeCapabilities();
+      }
+    } else if (this.projects.length > 0) {
+      // State may hold only a subset of the agents (a label, mine or shared
+      // load, or one page): the projects are kept, the agents are counted.
+      void this.loadAgentCounts();
+      if (!this.projectScopeCapabilities) void this.loadProjectScopeCapabilities();
+    } else {
+      void this.loadData();
     }
   }
 
@@ -108,6 +174,8 @@ export class ScionPageHome extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.removeEventListener(
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
@@ -122,15 +190,159 @@ export class ScionPageHome extends LitElement {
     this.projects = stateManager.getProjects();
   }
 
+  /**
+   * Keeps the member index live: a delete leaves it, and every agent the
+   * dashboard scope delivers is a member (the dashboard add rule). In
+   * count-only mode the snapshot is not adjusted; any change shows the chip.
+   */
+  private onAgentsChanged(e: Event): void {
+    const index = this.memberIndex;
+    if (!index) return;
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    if (index.countOnly) {
+      if (detail.upserted.length > 0 || detail.deleted.length > 0 || detail.unknown.size > 0) {
+        this.countsMayHaveChanged = true;
+      }
+      return;
+    }
+    for (const id of detail.deleted) index.delete(id);
+    for (const id of detail.upserted) {
+      const agent = stateManager.getAgent(id);
+      if (agent) index.set(id, agent.phase);
+    }
+    for (const [id, delta] of detail.unknown) {
+      if (delta.phase && index.has(id)) index.set(id, delta.phase);
+    }
+    this.countsTick++;
+  }
+
+  /**
+   * The live connection came back after a drop: changes may have been
+   * missed. Counts from a response that was not the complete set (stats
+   * IDs or a count-only snapshot) show the chip. The complete set stays
+   * as it is.
+   */
+  private onAgentsResync(): void {
+    if (this.memberIndex) this.countsMayHaveChanged = true;
+  }
+
   private get activeAgentCount(): number {
+    if (this.memberIndex) return this.memberIndex.stats.running;
     return this.agents.filter((a) => isAgentRunning(a)).length;
+  }
+
+  /**
+   * Apply home's agents response, seeded under `epoch`. Complete: today's
+   * full list, and the state store then holds every dashboard agent.
+   * Otherwise: the one agent is seeded and the counts come from `stats`.
+   */
+  private applyAgentsResponse(data: HomeAgentsResponse, epoch: AgentSeedEpoch): void {
+    const deleted = stateManager.getDeletedAgentIds();
+    const agents = dropTombstoned(data.agents || [], deleted);
+    if (data.complete) {
+      this.agents = epoch.seed(agents, { partial: false, isMember: () => true }).agents;
+      this.memberIndex = null;
+      this.countsMayHaveChanged = false;
+      stateManager.markAgentSetComplete('full');
+      return;
+    }
+    epoch.seed(agents, { partial: false, isMember: () => true });
+    const stats = data.stats ?? { total: 0, running: 0, agents: [] };
+    const index = new AgentMemberIndex();
+    if (stats.agents) {
+      index.seed(dropTombstonedPairs(stats.agents, deleted));
+      // Changes that landed while the request was in flight, in the order
+      // the paged window replays them: agents upserted live, then phase
+      // changes of agents not in the store. The epoch leaves out an ID
+      // upserted after its unknown delta, so the two never overlap.
+      for (const id of epoch.changedIds) {
+        const agent = stateManager.getAgent(id);
+        if (agent) index.set(id, agent.phase);
+      }
+      for (const [id, delta] of epoch.unknownChanges) {
+        if (delta.phase && index.has(id)) index.set(id, delta.phase);
+      }
+      // Every change the epoch saw is applied above. A resync may have
+      // missed some, so it shows the chip.
+      this.countsMayHaveChanged = epoch.sawResync;
+    } else {
+      index.seedCounts(stats.total, stats.running);
+      // The snapshot cannot be adjusted, so any change that landed while
+      // the request was in flight, or a resync that may have missed some,
+      // may already have changed it.
+      this.countsMayHaveChanged = epoch.sawChanges || epoch.sawResync;
+    }
+    this.memberIndex = index;
+    this.agents = stateManager.getAgents();
+  }
+
+  /**
+   * Fetch home's agents request and apply it under a seed epoch. A server
+   * without sorted mode answers with a legacy page (no `complete`); then
+   * today's unsorted request is sent once instead. Returns false when the
+   * page left the dashboard scope or a newer load superseded this one.
+   */
+  private async fetchAgents(): Promise<boolean> {
+    const seq = ++this.agentsLoadSeq;
+    const current = (): boolean =>
+      seq === this.agentsLoadSeq &&
+      this.isConnected &&
+      // Redundant with isConnected today; kept so a scope change alone discards.
+      stateManager.currentScope?.type === 'dashboard';
+    const epoch = new AgentSeedEpoch();
+    try {
+      const resp = await apiFetch(HOME_AGENTS_URL);
+      if (!current() || !resp.ok) return false;
+      const body = (await resp.json()) as HomeAgentsResponse | Agent[];
+      if (!current()) return false;
+      if (!Array.isArray(body) && body.complete !== undefined) {
+        this.applyAgentsResponse(body, epoch);
+        return true;
+      }
+    } finally {
+      epoch.close();
+    }
+    return this.fetchLegacyAgents(current);
+  }
+
+  /** Today's unsorted agents request, for a server without sorted mode. */
+  private async fetchLegacyAgents(current: () => boolean): Promise<boolean> {
+    const epoch = new AgentSeedEpoch();
+    try {
+      const resp = await apiFetch('/api/v1/agents');
+      if (!current() || !resp.ok) return false;
+      const data = (await resp.json()) as HomeAgentsResponse | Agent[];
+      if (!current()) return false;
+      const agents = Array.isArray(data) ? data : data.agents || [];
+      this.agents = epoch.seed(dropTombstoned(agents, stateManager.getDeletedAgentIds()), {
+        partial: false,
+        isMember: () => true,
+      }).agents;
+      this.memberIndex = null;
+      if (!Array.isArray(data) && !data.nextCursor) stateManager.markAgentSetComplete('full');
+      return true;
+    } finally {
+      epoch.close();
+    }
+  }
+
+  /** The agents half of `loadData` alone, when the projects are already in state. */
+  private async loadAgentCounts(): Promise<void> {
+    this.countsLoading = true;
+    try {
+      await this.fetchAgents();
+    } catch (err) {
+      console.error('Failed to load agents for dashboard:', err);
+    } finally {
+      this.countsLoading = false;
+    }
   }
 
   private async loadData(): Promise<void> {
     try {
       const isAdmin = this.pageData?.user?.role === 'admin';
-      const [agentsResp, projectsResp, inviteStatsResp] = await Promise.all([
-        apiFetch('/api/v1/agents'),
+      const [, projectsResp, inviteStatsResp] = await Promise.all([
+        this.fetchAgents(),
         apiFetch('/api/v1/projects'),
         isAdmin
           ? apiFetch('/api/v1/admin/invites/stats', {
@@ -140,16 +352,6 @@ export class ScionPageHome extends LitElement {
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
-
-      if (agentsResp.ok) {
-        const data = (await agentsResp.json()) as
-          | { agents?: Agent[]; _capabilities?: Capabilities }
-          | Agent[];
-        if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
-        const agents = Array.isArray(data) ? data : data.agents || [];
-        this.agents = agents;
-        stateManager.seedAgents(agents);
-      }
 
       if (projectsResp.ok) {
         const data = (await projectsResp.json()) as
@@ -359,6 +561,17 @@ export class ScionPageHome extends LitElement {
       margin-top: 0.125rem;
     }
 
+    .counts-note {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .counts-chip {
+      cursor: pointer;
+    }
+
     .empty-state {
       text-align: center;
       padding: 3rem 2rem;
@@ -387,9 +600,16 @@ export class ScionPageHome extends LitElement {
           <div class="stat-value">
             <span>${this.activeAgentCount}</span>
           </div>
-          <div class="stat-change">
-            <scion-status-badge status="success" label="Ready" size="small"></scion-status-badge>
-          </div>
+          ${this.memberIndex?.countOnly
+            ? this.renderCountOnlyNote()
+            : html`<div class="stat-change">
+                <scion-status-badge
+                  status="success"
+                  label="Ready"
+                  size="small"
+                ></scion-status-badge>
+                ${this.memberIndex ? this.renderCountsChip() : nothing}
+              </div>`}
         </div>
         <div class="stat-card">
           <h3>Projects</h3>
@@ -496,20 +716,51 @@ export class ScionPageHome extends LitElement {
     `;
   }
 
+  /**
+   * Count-only mode (more than 2,000 agents): the count is the last
+   * refresh's snapshot. A live change shows the chip; a click refreshes the
+   * counts with one agents request.
+   */
+  private renderCountOnlyNote(): TemplateResult {
+    return html`<div class="stat-change counts-note">
+      <span>${formatNumber(this.memberIndex?.stats.total ?? 0)} agents, as of last refresh</span>
+      ${this.renderCountsChip()}
+    </div>`;
+  }
+
+  /**
+   * The counts chip, while the counts may have changed: in count-only mode
+   * after any live change or a resync, and in stats-ID mode after a resync.
+   * A click refreshes the counts with one agents request.
+   */
+  private renderCountsChip(): TemplateResult | typeof nothing {
+    if (!this.countsMayHaveChanged) return nothing;
+    return html`<sl-tag
+      class="counts-chip"
+      size="small"
+      variant="primary"
+      pill
+      @click=${(): void => this.onCountsChip()}
+    >
+      <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+      counts may have changed · Refresh
+    </sl-tag>`;
+  }
+
+  private onCountsChip(): void {
+    if (this.countsLoading) return;
+    void this.loadAgentCounts();
+  }
+
   private formatRelativeTime(dateStr: string): string {
     if (!dateStr) return '';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffSecs = Math.floor(diffMs / 1000);
-    if (diffSecs < 60) return 'just now';
-    const diffMins = Math.floor(diffSecs / 60);
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    if (diffDays < 30) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
+    const ms = new Date(dateStr).getTime();
+    if (Number.isNaN(ms)) return dateStr;
+    const diffMs = Date.now() - ms;
+    // A future instant is clock skew between hub and browser.
+    if (diffMs < 0) return 'just now';
+    if (diffMs < 30 * 24 * 60 * 60 * 1000) return formatRelative(dateStr, { style: 'narrow' });
+    return formatInstantWithZone(dateStr, 'date');
   }
 }
 

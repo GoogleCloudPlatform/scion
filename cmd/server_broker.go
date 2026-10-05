@@ -32,8 +32,10 @@ import (
 // registerGlobalProjectAndBroker creates the global project and registers this
 // runtime broker as a provider. This enables automatic agent handoff.
 // Returns the effective broker ID, which may differ from the input if an
-// existing broker was found by name (deduplication).
-func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings) (string, error) {
+// existing broker was found by name (deduplication). workspaceStorage is the
+// broker's workspace storage descriptor; nil leaves an existing record's
+// descriptor unchanged.
+func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage) (string, error) {
 	// Check if global project already exists
 	globalProject, err := s.GetProjectBySlug(ctx, GlobalProjectName)
 	if err != nil && err != store.ErrNotFound {
@@ -134,15 +136,18 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
 			Capabilities: &store.BrokerCapabilities{
-				WebPTY:      false,
-				Sync:        true,
-				Attach:      runtime.HasAttachSupport(rt),
-				Reprovision: true,
-				AsyncLaunch: true,
+				WebPTY:                 false,
+				Sync:                   true,
+				Attach:                 runtime.HasAttachSupport(rt),
+				Reprovision:            true,
+				AsyncLaunch:            true,
+				EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
+				AgentMove:              false,
 			},
-			Profiles:       profiles,
-			DefaultProfile: defaultProfile,
-			Labels:         brokerLabels,
+			Profiles:         profiles,
+			DefaultProfile:   defaultProfile,
+			WorkspaceStorage: workspaceStorage,
+			Labels:           brokerLabels,
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -176,11 +181,18 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
 		broker.Capabilities = &store.BrokerCapabilities{
-			WebPTY:      false,
-			Sync:        true,
-			Attach:      runtime.HasAttachSupport(rt),
-			Reprovision: true,
-			AsyncLaunch: true,
+			WebPTY:                 false,
+			Sync:                   true,
+			Attach:                 runtime.HasAttachSupport(rt),
+			Reprovision:            true,
+			AsyncLaunch:            true,
+			EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
+			AgentMove:              false,
+		}
+		// A nil descriptor (not reported) keeps the stored one; the
+		// broker's heartbeats refresh it either way.
+		if workspaceStorage != nil {
+			broker.WorkspaceStorage = workspaceStorage
 		}
 		// Ensure deployment-type labels are set on re-registration
 		if broker.Labels == nil {

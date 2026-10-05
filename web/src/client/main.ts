@@ -44,6 +44,8 @@ import { nonOwnerOpenStatus, openPalettePickedAgent } from './terminal-palette-o
 import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
+import { setPreferredTimeZone } from '../utils/time.js';
+import { withTimeout } from './with-timeout.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -52,10 +54,18 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
 } from './chat-recent-files-lifecycle.js';
+
+/**
+ * Milliseconds `init()` waits for the SSR-path display-timezone refresh
+ * before proceeding with the first render in Auto and letting
+ * `DisplayZoneController` correct it late (review R3-1).
+ */
+const TZ_LOAD_BUDGET_MS = 1500;
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -277,9 +287,49 @@ async function fetchCurrentUser(): Promise<User | null> {
       name: data.displayName || data.name || '',
       avatar: data.avatarUrl || data.avatar,
       role: data.role || undefined,
+      preferences: data.preferences || undefined,
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Refreshes the display-timezone preference and applies it to the
+ * effective-zone store (`setPreferredTimeZone`). Used when the SSR-injected
+ * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
+ * without `preferences` — that field is deliberately never cached on the
+ * session (`webSessionUser.Preferences`) and so is absent from SSR data,
+ * only ever populated by a live `/auth/me` read.
+ *
+ * Callers should bound the wait with `withTimeout` (review R3-1): this
+ * fetch is cosmetic, but blocking first render on it unconditionally means
+ * a stalled `/auth/me` (a busy store, a stuck proxy) blocks the whole shell
+ * until the browser's own fetch timeout, which can be minutes. A timed-out
+ * wait still lets this promise keep running in the background — when it
+ * lands, `setPreferredTimeZone` fires `DISPLAY_TIMEZONE_CHANGED_EVENT`, and
+ * every mounted `DisplayZoneController` subscriber re-renders in the
+ * correct zone.
+ *
+ * That self-correction is **not universal** (review R4-1): it only helps a
+ * component that re-renders cleanly from a fresh formatter call. A
+ * component that *also* caches a wall-clock string derived from the zone
+ * (e.g. a `datetime-local` input pre-populated via `toWallClockInput`) needs
+ * its own re-derivation logic on top of the controller — see
+ * `access-boundary-schedule-editor.ts`'s `willUpdate` and `time.ts`'s
+ * "Effective-zone store" header — or a late arrival silently moves an
+ * untouched field's stored instant. A bounded wait is still strictly better
+ * than an unbounded one on every surface; it just isn't a complete fix by
+ * itself for every surface.
+ */
+async function loadPreferredTimeZone(): Promise<void> {
+  try {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    setPreferredTimeZone(data.preferences?.timezone);
+  } catch {
+    // Non-critical — the effective zone falls back to the browser zone.
   }
 }
 
@@ -758,6 +808,11 @@ window.addEventListener('unhandledrejection', (event) => {
 async function init(): Promise<void> {
   console.info('[Scion] Initializing client...');
 
+  // Size the app frame to the visible area while the on-screen keyboard is
+  // open (iOS), and undo any page pan in frame mode. Installed for the life
+  // of the page, so the disposer is not kept.
+  installViewportFrame();
+
   // Get initial data from SSR and hydrate state manager
   const initialData = getInitialData();
   if (initialData) {
@@ -785,8 +840,27 @@ async function init(): Promise<void> {
   const featureFlagsReady = applyServerFeatureFlags();
 
   // Fetch current user from session if not provided by SSR
+  let tzReady: Promise<void> = Promise.resolve();
   if (!currentUser) {
     currentUser = await fetchCurrentUser();
+    if (currentUser) {
+      setPreferredTimeZone(currentUser.preferences?.timezone);
+    }
+  } else {
+    // SSR supplied the user without `preferences` (never cached on the
+    // session); refresh it from the live endpoint. Awaited below alongside
+    // featureFlagsReady, not fire-and-forget (review R2-1): a chat thread
+    // already in the DOM at first render would otherwise show at least its
+    // first messages in the browser zone instead of the preference, with
+    // nothing to correct it until some unrelated re-render (the
+    // DISPLAY_TIMEZONE_CHANGED_EVENT a late-arriving preference dispatches
+    // only helps a component that is listening for it, which a component
+    // not yet mounted cannot be). Bounded to TZ_LOAD_BUDGET_MS (review
+    // R3-1): a stalled `/auth/me` must not hang first render — past the
+    // budget, render in Auto and let a late result correct itself via
+    // DisplayZoneController once it lands (the fetch itself is not
+    // cancelled, only the wait for it).
+    tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
   // Fetch admin status early so the route guard can use the cached result
@@ -841,7 +915,11 @@ async function init(): Promise<void> {
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  await featureFlagsReady;
+  // tzReady is awaited alongside it (review R2-1), bounded to
+  // TZ_LOAD_BUDGET_MS (review R3-1); both fetches started above and
+  // overlap, so this adds no latency beyond the slower of
+  // featureFlagsReady and min(the /auth/me refresh, the budget).
+  await Promise.all([featureFlagsReady, tzReady]);
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
@@ -1302,6 +1380,28 @@ function navigateTo(path: string): void {
   void renderRoute(path);
 }
 
+/**
+ * Rewrites the current URL to an equivalent app path without rendering
+ * anything, keeping its query and hash, for a page that already shows what
+ * the new path names. Records the path as the active shell's rendered path,
+ * as a render would, so returning to it (e.g. from the terminal workspace)
+ * still reuses the page. Resolves once the shell has re-rendered for it.
+ */
+function replaceRoute(path: string): Promise<void> {
+  const search = window.location.search;
+  window.history.replaceState(
+    window.history.state,
+    '',
+    browserPath(path) + search + window.location.hash
+  );
+  const shell = activeShell?.element as
+    | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
+    | undefined;
+  if (!shell) return Promise.resolve();
+  shell.currentPath = search ? `${path}${search}` : path;
+  return Promise.resolve(shell.updateComplete).then(() => undefined);
+}
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -1316,4 +1416,4 @@ if (document.readyState === 'loading') {
 export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
-export { getInitialData, navigateTo, stateManager };
+export { getInitialData, navigateTo, replaceRoute, stateManager };

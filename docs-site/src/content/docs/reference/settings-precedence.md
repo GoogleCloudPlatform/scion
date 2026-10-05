@@ -106,7 +106,7 @@ existing value.
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
-| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, or `worktree-per-agent`) | **Unconditional** — overwrites |
+| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, `worktree-per-agent`, or `empty-per-agent`) | **Unconditional** — overwrites |
 | `SCION_WORKSPACE_GIT` | `"true"` when the workspace is a git repository, absent otherwise | **Unconditional** — overwrites |
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
@@ -123,16 +123,19 @@ not the environment variable.
 
 ### `Known gap` — the gemini-cli harness does not consume `SCION_THINKING_LEVEL`
 
-Repo-wide, `SCION_THINKING_LEVEL` is read by exactly two harnesses:
-`harnesses/codex/provision.py` and `harnesses/antigravity/provision.py`. There is no gemini-cli
-harness file that reads it. So even with correct end-to-end delivery from the hub, **setting a
-thinking level for a gemini-cli agent has no effect inside the container.** This is a harness
-feature request, not a precedence bug.
+Repo-wide, `SCION_THINKING_LEVEL` is honoured by exactly two harnesses, codex and antigravity.
+Each declares a `thinking:` block in its `config.yaml` that maps the level to a native tier, and
+its `provision.py` resolves it with `scion_harness.resolve_thinking` (see [Thinking Level
+Map](/scion/reference/harness-settings/#thinking-level-map-thinking)). The gemini-cli
+`config.yaml` has no `thinking:` block, and no gemini-cli harness file reads the variable. So
+even with correct end-to-end delivery from the hub, **setting a thinking level for a gemini-cli
+agent has no effect inside the container.** This is a harness feature request, not a precedence
+bug.
 
 *(Control for that absence claim: `SCION_MODEL` **is** read by
 `harnesses/gemini-cli/provision.py`, where it resolves a `small`/`medium`/`large` alias against
-the harness `config.yaml` — so the search does find gemini-cli's environment reads when they
-exist.)*
+the harness `config.yaml`, and falls back to that file's `model` default when `SCION_MODEL` is
+empty — so the search does find gemini-cli's environment reads when they exist.)*
 
 ### `Known gap` — the gemini-cli redaction allowlist key is misspelled and inert
 
@@ -612,6 +615,13 @@ only what is still unset:
 | | the template's `scion-agent.yaml` |
 | | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
+
+For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
+(`pkg/agent/provision.go`) uses the harness-config's own `model` field (`config.yaml`) as the base
+layer, so it fills in only when nothing above it sets a model. The broker then resolves that value
+through the harness-config's `model_aliases` and injects the result as `SCION_MODEL`. The codex and
+gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
+default itself: it resolves only an explicit tier.
 
 #### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
 

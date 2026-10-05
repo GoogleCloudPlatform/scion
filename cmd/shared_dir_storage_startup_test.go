@@ -158,3 +158,93 @@ func TestSharedDirStorageStartupLogWanted(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadAndLogSharedDirStorageStartup_ProfileOverride: a gke profile
+// overriding the backend to nfs, with the export not mounted on this host,
+// logs one summary line for that profile and no warning. Startup checks
+// configuration only and never looks at the mount, so a missing mount
+// cannot affect startup or local-backend agents.
+func TestLoadAndLogSharedDirStorageStartup_ProfileOverride(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755))
+	mountRoot := filepath.Join(tmpHome, "not-mounted")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpHome, ".scion", "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  k8s:
+    type: kubernetes
+profiles:
+  local:
+    runtime: docker
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: `+mountRoot+`
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o644))
+
+	var lines []string
+	loadAndLogSharedDirStorageStartup(func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if assert.Len(t, lines, 1, "only the gke profile has an override: %v", lines) {
+		assert.Contains(t, lines[0], "profile gke")
+		assert.Contains(t, lines[0], "backend=nfs")
+		assert.Contains(t, lines[0], "profiles.gke.shared_dir_storage_backend")
+		assert.NotContains(t, lines[0], "Warning")
+	}
+	_, err := os.Stat(mountRoot)
+	assert.True(t, os.IsNotExist(err), "startup must not create the mount path")
+}
+
+// TestLogSharedDirStorageOverridesStartup_InvalidOverrideWarns: an nfs
+// override without an nfs block logs a warning naming the key, plus the
+// profile's summary line.
+func TestLogSharedDirStorageOverridesStartup_InvalidOverrideWarns(t *testing.T) {
+	gs := &config.VersionedSettings{
+		Runtimes: map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes", SharedDirStorageBackend: "nfs"}},
+		Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s"}, "local": {Runtime: "docker"}},
+	}
+	var lines []string
+	logSharedDirStorageOverridesStartup(gs, func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if assert.Len(t, lines, 2, "%v", lines) {
+		assert.Contains(t, lines[0], "Warning")
+		assert.Contains(t, lines[0], "runtimes.k8s.shared_dir_storage_backend")
+		assert.Contains(t, lines[1], "profile gke: backend=nfs (from runtimes.k8s.shared_dir_storage_backend)")
+	}
+}
+
+func TestLogHomeStorageStartup(t *testing.T) {
+	gs := &config.VersionedSettings{
+		Server: &config.V1ServerConfig{HomeStorage: &config.V1HomeStorageConfig{Leaf: "node"}},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"k8s":    {Type: "kubernetes", HomeStorageLeaf: "broker"},
+			"docker": {Type: "docker"},
+		},
+		Profiles: map[string]config.V1ProfileConfig{
+			"gke":   {Runtime: "k8s", HomeStorageBackend: "nfs"},
+			"local": {Runtime: "docker", HomeStorageBackend: "nfs"},
+			"plain": {Runtime: "k8s"},
+		},
+	}
+	var lines []string
+	logHomeStorageStartup(gs, func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if assert.Len(t, lines, 3, "%v", lines) {
+		assert.Contains(t, lines[0], "server.home_storage.leaf")
+		assert.Contains(t, lines[1], "profiles.local.home_storage_backend")
+		assert.Equal(t, "home_storage for profile gke: backend=nfs (from profiles.gke.home_storage_backend), leaf=broker", lines[2])
+	}
+}

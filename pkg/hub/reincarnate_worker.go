@@ -376,7 +376,9 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // resume=false) → complete. ctx is expected to be a detached context
 // (context.Background()-derived), independent of the HTTP request that
 // triggered this — see handleReincarnateAgent for why that matters for
-// self-migration.
+// self-migration. admittedDeletionClaim is the delete claim the handler's
+// startGate admitted; the failed-marker clear just before the completion
+// write is pinned to it.
 //
 // fresh is the new generation's AppliedConfig, already fully resolved by
 // buildFreshAppliedConfig at request time (before the 202 was returned); this
@@ -421,7 +423,7 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // carries a Phase or Activity while a migration is in flight, so the
 // worker is the sole writer of §3.9's "migrating to generation N+1" for
 // both self and non-self migrations.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int) {
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -612,6 +614,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_generation", toGeneration)
 		return
 	}
+
+	// A successful reincarnate clears a failed delete marker (design
+	// ptone/scion#2483 §2.1). The new generation is live and this worker won
+	// the record, so the start succeeded. The clear runs BEFORE the
+	// completion write below, so any caller that observes completion
+	// (reincarnation_state none) also observes the cleared marker; until
+	// then start stays blocked by the in-progress reincarnation. If the
+	// completion write then fails, the marker stays cleared: that failure
+	// is bookkeeping only. The clear bumps state_version; the completion
+	// write's re-read-and-retry absorbs it. Pinned to the claim the
+	// handler's gate admitted, so a newer delete keeps its marker. agent is
+	// the starting-step row: a marker at the admitted claim cannot appear
+	// later, because a new claim always bumps the claim epoch.
+	s.clearFailedDeletionAtClaim(ctx, agent, admittedDeletionClaim)
 
 	// generation++ and reincarnation_state clears (AC-1). Phase is
 	// deliberately left at "starting" here — exactly like a normal start

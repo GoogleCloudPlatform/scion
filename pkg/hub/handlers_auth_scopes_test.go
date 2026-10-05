@@ -425,6 +425,11 @@ func TestAuthScopes_ProjectEligibilityForMember(t *testing.T) {
 		assert.Empty(t, entry.Eligibility.Reason)
 		assert.NotEmpty(t, entry.Eligibility.Note)
 	}
+	assert.Equal(t, "checked on each target: your own agents and their descendants",
+		byID["agent:attach"].Eligibility.Note)
+	assert.Contains(t, byID["agent:port_access"].Eligibility.Note,
+		"plus agents in projects where your role grants agent.port_access",
+		"port_access note should cover the reach of roles that grant it")
 
 	deleteEntry, ok := byID["agent:delete"]
 	require.True(t, ok)

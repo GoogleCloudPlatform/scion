@@ -15,12 +15,16 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 )
 
 // TestAgentLookupUnavailable_MessageText pins the exact response produced by
@@ -92,12 +96,13 @@ func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
 		{name: "zero status falls back to 500", status: 0, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeRuntimeError},
 	}
 
+	srv := newTestServer(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			sce := &startContextError{Status: tt.status, Message: "test message"}
 
-			gotStatus := writeStartContextError(w, sce)
+			gotStatus := srv.writeStartContextError(w, sce, "test_op")
 
 			if gotStatus != tt.wantStatus {
 				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
@@ -111,6 +116,251 @@ func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
 			}
 			if resp.Error.Code != tt.wantCode {
 				t.Errorf("error code = %q, want %q", resp.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+// TestSkillResolutionFailed_StatusMapping pins the decided cause→status
+// mapping (#2546 R3, O1): each classified cause gets the status whose
+// semantics fit it, the rate-limited cause also carries a Retry-After header
+// when known, and every uncategorized or Hub-originated cause — including the
+// empty "resolve_failed" and the Hub's own per-URI codes for PreResolvedSkills
+// (storage_error, internal_error, federation_error) — stays on the existing
+// 500 path instead of being guessed at as a 4xx.
+func TestSkillResolutionFailed_StatusMapping(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		retryAfter     string
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{"not_found maps to 404", agent.SkillErrCodeNotFound, "", http.StatusNotFound, ""},
+		{"rate_limited maps to 429 with Retry-After", agent.SkillErrCodeRateLimited, "120", http.StatusTooManyRequests, "120"},
+		{"rate_limited without a known Retry-After omits the header", agent.SkillErrCodeRateLimited, "", http.StatusTooManyRequests, ""},
+		{"timeout maps to 504", agent.SkillErrCodeTimeout, "", http.StatusGatewayTimeout, ""},
+		{"upstream_unavailable maps to 502", agent.SkillErrCodeUpstreamUnavailable, "", http.StatusBadGateway, ""},
+		{"unreachable maps to 502", agent.SkillErrCodeUnreachable, "", http.StatusBadGateway, ""},
+		{"hub forbidden maps to 403", "forbidden", "", http.StatusForbidden, ""},
+		{"uncategorized resolve_failed stays 500", "resolve_failed", "", http.StatusInternalServerError, ""},
+		{"empty code stays 500", "", "", http.StatusInternalServerError, ""},
+		{"hub-originated storage_error stays 500", "storage_error", "", http.StatusInternalServerError, ""},
+		{"hub-originated internal_error stays 500", "internal_error", "", http.StatusInternalServerError, ""},
+		{"hub-originated federation_error stays 500", "federation_error", "", http.StatusInternalServerError, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			SkillResolutionFailed(w, &agent.SkillResolutionError{
+				URI: "gh://owner/repo/my-skill@main", Code: tt.code, Message: "could not resolve", RetryAfter: tt.retryAfter,
+			})
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("expected Retry-After %q, got %q", tt.wantRetryAfter, got)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if !strings.Contains(resp.Error.Message, "gh://owner/repo/my-skill@main") {
+				t.Errorf("expected message to name the skill ref, got: %s", resp.Error.Message)
+			}
+			if resp.Error.Details["skill"] != "gh://owner/repo/my-skill@main" {
+				t.Errorf("expected details.skill to name the ref, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// startContextSentinel stands in for identity-bearing detail a real
+// buildStartContext failure's error text can carry: a hydration failure's
+// own error can name a template path or a storage bucket/object name, and a
+// generic failure can carry anything a lower layer's error wraps (a
+// container ID, a node name, a namespace). None of this is something a
+// broker HTTP client is entitled to see in the response body, but it must
+// still reach the server's own log so the failure is diagnosable.
+const startContextSentinel = "gs://acme-templates-bucket/tenant-7f3/template.tar.gz"
+
+// TestWriteStartContextError_RedactsAndLogsEachFallbackBranch is the
+// RED/GREEN proof for the three branches writeStartContextError redacts: a
+// sentinel carrying identity-bearing detail must never reach the HTTP
+// response body, but must reach the server-side log first. The two branches
+// writeStartContextError does NOT redact (the Hub-connectivity 503 and the
+// 4xx client-validation passthrough) are proven unchanged by
+// TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch and
+// TestWriteStartContextError_Honors4xxStatus respectively — both continue
+// to pass unmodified by this change, so they are not duplicated here.
+func TestWriteStartContextError_RedactsAndLogsEachFallbackBranch(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "non-startContextError falls back to a redacted generic 500",
+			err:        errors.New(startContextSentinel),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
+		},
+		{
+			name: "IsHubError but not a connectivity failure redacts the template error",
+			err: &startContextError{
+				Message:     "Failed to hydrate template: " + startContextSentinel,
+				IsHubError:  true,
+				OriginalErr: errors.New(startContextSentinel),
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeTemplateError,
+		},
+		{
+			name: "a *startContextError with no 4xx Status falls back to a redacted generic 500",
+			err: &startContextError{
+				Message:     startContextSentinel,
+				OriginalErr: errors.New(startContextSentinel),
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
+		},
+	}
+
+	srv := newTestServer(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			w := httptest.NewRecorder()
+			gotStatus := srv.writeStartContextError(w, tt.err, "redact_test_op")
+
+			if gotStatus != tt.wantStatus {
+				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
+			}
+			if w.Code != tt.wantStatus {
+				t.Errorf("response status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != tt.wantCode {
+				t.Errorf("error code = %q, want %q", resp.Error.Code, tt.wantCode)
+			}
+			if strings.Contains(w.Body.String(), startContextSentinel) {
+				t.Errorf("response body must not leak the sentinel, got: %s", w.Body.String())
+			}
+			if resp.Error.Message != "Failed to redact_test_op" {
+				t.Errorf("response message = %q, want the fixed, op-labeled message", resp.Error.Message)
+			}
+			logged := logBuf.String()
+			if !strings.Contains(logged, startContextSentinel) {
+				t.Errorf("server log must contain the sentinel so the failure stays diagnosable, got: %s", logged)
+			}
+		})
+	}
+}
+
+// TestStartContextSpanText_PrefersOriginalErrOverCuratedMessage is the
+// regression test for recording the real failure on an OTEL span, not a
+// *startContextError's own curated, client-safe Message: a
+// *startContextError's Error() method returns Message verbatim (see its own
+// doc comment), so a caller that recorded err.Error() directly on a span
+// would record the SAME curated text a client already receives in the HTTP
+// response, defeating the point of a separate internal diagnostics surface.
+// startContextSpanText must instead surface OriginalErr when the two
+// differ, and must still behave like a plain err.Error() for a generic,
+// non-startContextError error (buildStartContext does return those too).
+func TestStartContextSpanText_PrefersOriginalErrOverCuratedMessage(t *testing.T) {
+	sce := &startContextError{
+		Message:     "Failed to resolve the hub endpoint",
+		OriginalErr: errors.New(startContextSentinel),
+	}
+	if got := startContextSpanText(sce); got != startContextSentinel {
+		t.Errorf("startContextSpanText(sce) = %q, want the OriginalErr text %q, not the curated Message", got, startContextSentinel)
+	}
+
+	noOriginalErr := &startContextError{Message: "image must be pinned by digest"}
+	if got := startContextSpanText(noOriginalErr); got != "image must be pinned by digest" {
+		t.Errorf("startContextSpanText(no OriginalErr) = %q, want the Message itself (nothing more specific to report)", got)
+	}
+
+	plain := errors.New("a generic, non-startContextError failure")
+	if got := startContextSpanText(plain); got != plain.Error() {
+		t.Errorf("startContextSpanText(plain error) = %q, want %q unchanged", got, plain.Error())
+	}
+}
+
+// TestMethodNotAllowed_SetsAllowHeader pins the helper itself: RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header (ptone/scion#2421).
+func TestMethodNotAllowed_SetsAllowHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		methods []string
+		want    string
+	}{
+		{"single", []string{http.MethodGet}, "GET"},
+		{"multiple", []string{http.MethodGet, http.MethodDelete}, "GET, DELETE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			MethodNotAllowed(w, tt.methods[0], tt.methods[1:]...)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+			}
+			if got := w.Header().Get("Allow"); got != tt.want {
+				t.Errorf("Allow = %q, want %q", got, tt.want)
+			}
+			if _, present := w.Header()["Allow"]; tt.want == "" && present {
+				t.Errorf("Allow header set with no methods")
+			}
+		})
+	}
+}
+
+// TestMethodNotAllowed_AllowHeaderPerRoute drives every runtimebroker route
+// that answers 405 with a method it does not accept, and asserts the Allow
+// header lists exactly the methods that route does accept. One row per
+// MethodNotAllowed call site fixed in ptone/scion#2421.
+func TestMethodNotAllowed_AllowHeaderPerRoute(t *testing.T) {
+	srv := newTestServer(t)
+	tests := []struct {
+		method, path, wantAllow string
+	}{
+		{http.MethodPost, "/healthz", "GET"},
+		{http.MethodPost, "/readyz", "GET"},
+		{http.MethodPost, "/api/v1/info", "GET"},
+		{http.MethodPost, "/api/v1/hub-connections", "GET"},
+		{http.MethodPut, "/api/v1/agents", "GET, POST"},
+		{http.MethodPut, "/api/v1/agents/test-agent-1", "GET, DELETE"},
+		{http.MethodGet, "/api/v1/agents/test-agent-1/stop", "POST"},
+		{http.MethodPost, "/api/v1/agents/test-agent-1/logs", "GET"},
+		{http.MethodGet, "/api/v1/projects/some-project", "DELETE"},
+		{http.MethodPost, "/api/v1/images/status", "GET"},
+		{http.MethodGet, "/api/v1/images/pull", "POST"},
+		{http.MethodGet, "/api/v1/images/local", "DELETE"},
+		{http.MethodGet, "/api/v1/workspace/upload", "POST"},
+		{http.MethodGet, "/api/v1/workspace/apply", "POST"},
+		{http.MethodGet, "/api/v1/workspace/project-upload", "POST"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusMethodNotAllowed, w.Body.String())
+			}
+			if got := w.Header().Get("Allow"); got != tt.wantAllow {
+				t.Errorf("Allow = %q, want %q", got, tt.wantAllow)
 			}
 		})
 	}

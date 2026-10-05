@@ -21,6 +21,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestDispatchCreateErrorResponse_BrokerNotFoundBecomes404 proves the fix for
@@ -35,7 +37,7 @@ func TestDispatchCreateErrorResponse_BrokerNotFoundBecomes404(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	dispatchCreateErrorResponse(w, err)
+	dispatchCreateErrorResponse(w, err, "")
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
@@ -53,6 +55,30 @@ func TestDispatchCreateErrorResponse_BrokerNotFoundBecomes404(t *testing.T) {
 	}
 }
 
+// TestDispatchCreateErrorResponse_DeleteInProgressBecomes409: a create whose
+// run-ID write a delete refused (store.ErrDeleteInProgress, wrapped by the
+// dispatcher) answers 409 delete_in_progress naming the agent, not 502
+// (ptone/scion#2550 P1 round 4).
+func TestDispatchCreateErrorResponse_DeleteInProgressBecomes409(t *testing.T) {
+	err := fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)
+	w := httptest.NewRecorder()
+	dispatchCreateErrorResponse(w, err, "agent-1")
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if decErr := json.NewDecoder(w.Body).Decode(&resp); decErr != nil {
+		t.Fatalf("failed to decode response: %v", decErr)
+	}
+	if resp.Error.Code != ErrCodeDeleteInProgress {
+		t.Errorf("expected code %q, got %q", ErrCodeDeleteInProgress, resp.Error.Code)
+	}
+	if got := resp.Error.Details["agentId"]; got != "agent-1" {
+		t.Errorf("expected details.agentId agent-1, got %v", got)
+	}
+}
+
 // TestDispatchCreateErrorResponse_ContainerConflictBecomes409 proves the
 // existing container-name-conflict classification survives being folded
 // into the shared helper.
@@ -60,7 +86,7 @@ func TestDispatchCreateErrorResponse_ContainerConflictBecomes409(t *testing.T) {
 	err := fmt.Errorf("container name 'my-agent' is already in use")
 
 	w := httptest.NewRecorder()
-	dispatchCreateErrorResponse(w, err)
+	dispatchCreateErrorResponse(w, err, "")
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
@@ -75,7 +101,7 @@ func TestDispatchCreateErrorResponse_OtherErrorStays502(t *testing.T) {
 	err := fmt.Errorf("connection refused")
 
 	w := httptest.NewRecorder()
-	dispatchCreateErrorResponse(w, err)
+	dispatchCreateErrorResponse(w, err, "")
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
@@ -89,9 +115,63 @@ func TestDispatchCreateErrorResponse_OtherBrokerStatusStays502(t *testing.T) {
 	err := &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}
 
 	w := httptest.NewRecorder()
-	dispatchCreateErrorResponse(w, err)
+	dispatchCreateErrorResponse(w, err, "")
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
+	}
+}
+
+// TestDispatchCreateErrorResponse_SkillResolutionRelaysStatusAndRetryAfter
+// proves the fix for #2546 R2: a broker skill-resolution failure is relayed
+// verbatim — status, message (naming the ref), and Retry-After header —
+// instead of every status but 404 collapsing into RuntimeError's 502 with the
+// ref reachable only inside an embedded raw JSON body.
+func TestDispatchCreateErrorResponse_SkillResolutionRelaysStatusAndRetryAfter(t *testing.T) {
+	tests := []struct {
+		name           string
+		statusCode     int
+		retryAfter     string
+		wantRetryAfter string
+	}{
+		{"429 rate limited carries Retry-After", http.StatusTooManyRequests, "120", "120"},
+		{"504 timeout carries no Retry-After", http.StatusGatewayTimeout, "", ""},
+		{"502 upstream_unavailable carries no Retry-After", http.StatusBadGateway, "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: boom","details":{"skill":"gh://owner/repo/my-skill@main","cause":"irrelevant-for-this-test"}}}`
+			err := &brokerStatusError{StatusCode: tt.statusCode, Body: body, RetryAfter: tt.retryAfter}
+
+			w := httptest.NewRecorder()
+			dispatchCreateErrorResponse(w, err, "")
+
+			if w.Code != tt.statusCode {
+				t.Fatalf("expected status %d, got %d: %s", tt.statusCode, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("expected Retry-After %q, got %q", tt.wantRetryAfter, got)
+			}
+
+			var resp ErrorResponse
+			if decErr := json.NewDecoder(w.Body).Decode(&resp); decErr != nil {
+				t.Fatalf("failed to decode response: %v", decErr)
+			}
+			if resp.Error.Code != skillResolutionErrorCode {
+				t.Errorf("expected code %q, got %q", skillResolutionErrorCode, resp.Error.Code)
+			}
+			if !strings.Contains(resp.Error.Message, "gh://owner/repo/my-skill@main") {
+				t.Errorf("expected message to name the unresolved skill ref as a top-level error, got: %s", resp.Error.Message)
+			}
+			// The broker message is relayed without a hub prefix (#2546 N4).
+			if want := `required skill "gh://owner/repo/my-skill@main" could not be resolved: boom`; resp.Error.Message != want {
+				t.Errorf("expected the broker message verbatim %q, got %q", want, resp.Error.Message)
+			}
+			// The broker's structured details are forwarded (#2546 N3).
+			if resp.Error.Details["skill"] != "gh://owner/repo/my-skill@main" || resp.Error.Details["cause"] != "irrelevant-for-this-test" {
+				t.Errorf("expected details {skill, cause} forwarded from the broker, got %v", resp.Error.Details)
+			}
+		})
 	}
 }

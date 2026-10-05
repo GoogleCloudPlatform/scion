@@ -24,6 +24,20 @@
 export type UserRole = 'admin' | 'member' | 'viewer';
 
 /**
+ * Personal, non-admin-controlled user preferences (tz-refactor task 11,
+ * design.md §3 A "Storage and API"). Present only on the authenticated
+ * caller's own user object — `GET /auth/me` / `GET /api/v1/auth/me` — never
+ * on a listing or another user's record.
+ */
+export interface UserPreferences {
+  /**
+   * IANA display-timezone name, or `''`/absent for Auto (follow the
+   * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
+   */
+  timezone?: string | undefined;
+}
+
+/**
  * User information
  */
 export interface User {
@@ -32,6 +46,7 @@ export interface User {
   name: string;
   avatar?: string | undefined;
   role?: UserRole | undefined;
+  preferences?: UserPreferences | undefined;
 }
 
 /**
@@ -172,6 +187,22 @@ export interface Project {
  */
 export function isSharedWorkspace(project: Project): boolean {
   return !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'shared';
+}
+
+/**
+ * Check whether a project gives each agent its own empty directory (#2703):
+ * no git remote and a hub-owned workspace-mode label of per-agent, or the
+ * raw empty-per-agent value (the hub's ResolveProjectSharingMode treats
+ * both the same on a non-git project).
+ */
+export function isEmptyPerAgentWorkspace(project?: {
+  gitRemote?: string | undefined;
+  labels?: Record<string, string> | undefined;
+}): boolean {
+  if (!project) return false;
+  if (project.gitRemote) return false;
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return mode === 'per-agent' || mode === 'empty-per-agent';
 }
 
 /**
@@ -608,6 +639,46 @@ export interface Agent {
 
   // Children agent IDs (populated by some API responses)
   childrenIds?: string[];
+
+  // Backend-driven delete lifecycle (ptone/scion#2483 §2.2). The hub always
+  // sends this key on REST agents and SSE status deltas; an explicit `null`
+  // means no delete is active and must clear any earlier value.
+  deletion?: DeletionInfo | null;
+}
+
+/** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
+export type DeletionState = 'deleting' | 'failed';
+
+/**
+ * Failure codes on a `failed` deletion (pkg/store/deletion_view.go). Kept
+ * open-ended so an unknown future code still renders its `error` text.
+ */
+export type DeletionCode =
+  | 'runtime_error'
+  | 'conflict'
+  | 'in_doubt'
+  | 'abandoned'
+  | 'revoke_failed'
+  | 'finalize_failed'
+  | 'runtime_unavailable'
+  | (string & Record<never, never>);
+
+/**
+ * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
+ * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
+ * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ */
+export interface DeletionInfo {
+  state: DeletionState;
+  code?: DeletionCode;
+  error?: string;
+  soft: boolean;
+  claim: number;
+  startedAt: string;
+  /** Set while `deleting`. */
+  leaseExpiresAt?: string;
+  /** Set on `failed`, except `in_doubt` and finalizing rows. */
+  expiresAt?: string;
 }
 
 /**
@@ -1018,6 +1089,71 @@ export interface MembershipCapabilities {
   canManageOwners: boolean;
   canTransfer: boolean;
   actions: string[];
+  /**
+   * Whether the actor may grant and remove custom project roles
+   * (ptone/scion#2529). Decided server-side by the same authority function
+   * the members PUT uses; the UI never infers it from owner authority.
+   * Optional: absent means false.
+   */
+  canManageCustomRoles?: boolean;
+}
+
+/**
+ * One project-scope role binding as returned by the project members API,
+ * enriched with role and display names.
+ */
+export interface ProjectMemberBinding {
+  id: string;
+  roleDefinitionId: string;
+  roleName: string;
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  scopeType: string;
+  scopeId: string;
+  createdAt: string;
+  notBefore?: string;
+  expiresAt?: string;
+  /** 'direct' for direct bindings, otherwise the group it is inherited through. */
+  source: string;
+  sourceGroupName?: string;
+  /** 'builtin' (owner/admin/member) or 'custom'. */
+  roleKind?: 'builtin' | 'custom';
+}
+
+/**
+ * One principal's project membership: the item type of
+ * `GET /api/v1/projects/{id}/members?groupBy=principal` and the body of
+ * `PUT /api/v1/projects/{id}/members/principals/{type}/{id}`.
+ */
+export interface ProjectMemberGroup {
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  /** The built-in membership role name, or '' when the principal holds none. */
+  builtInRoleName: string;
+  /** Built-in binding first, then custom bindings by role name. */
+  bindings: ProjectMemberBinding[];
+  /** PUT responses only. */
+  changed?: boolean;
+}
+
+/**
+ * A project-scoped role the members dialog can offer, from
+ * `GET /api/v1/projects/{id}/members/assignable-roles`. `grantable` is the
+ * members PUT's decision for newly creating the role on a principal that
+ * does not hold it (principal-agnostic, op=add).
+ */
+export interface AssignableProjectRole {
+  id: string;
+  name: string;
+  description: string;
+  roleKind: 'builtin' | 'custom';
+  grantable: boolean;
+  /** Empty when grantable; otherwise the PUT's refusal reason. */
+  reason: string;
+  denialCode?: string;
+  details?: Record<string, unknown>;
 }
 
 /**

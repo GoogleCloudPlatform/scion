@@ -61,6 +61,8 @@ import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -114,6 +116,9 @@ interface RuntimeBrokerWithProvider extends RuntimeBroker {
 
 @customElement('scion-page-project-settings')
 export class ScionPageProjectSettings extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -1672,7 +1677,7 @@ export class ScionPageProjectSettings extends LitElement {
         ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
         compact
         sectionTitle="Members"
-        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+        sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
       ></scion-project-members-editor>
       ${this.renderResourcesSection()}
       ${this.renderMessagingPolicySection()}
@@ -1858,7 +1863,7 @@ export class ScionPageProjectSettings extends LitElement {
                   ? html`
                       <div class="github-status-item">
                         <span class="field-help">Last Token Mint</span>
-                        <span>${new Date(status.last_token_mint).toLocaleString()}</span>
+                        <span>${formatInstantWithZone(status.last_token_mint)}</span>
                       </div>
                     `
                   : ''}
@@ -3056,29 +3061,8 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '\u2014';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (Number.isNaN(new Date(dateString).getTime())) return '\u2014';
+    return formatRelative(dateString);
   }
 
   private renderBrokersContent() {

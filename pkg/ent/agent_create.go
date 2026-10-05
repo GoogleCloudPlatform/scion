@@ -602,6 +602,20 @@ func (_c *AgentCreate) SetNillableLaunchID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetRunID sets the "run_id" field.
+func (_c *AgentCreate) SetRunID(v string) *AgentCreate {
+	_c.mutation.SetRunID(v)
+	return _c
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -724,6 +738,300 @@ func (_c *AgentCreate) SetLaunchError(v string) *AgentCreate {
 func (_c *AgentCreate) SetNillableLaunchError(v *string) *AgentCreate {
 	if v != nil {
 		_c.SetLaunchError(*v)
+	}
+	return _c
+}
+
+// SetDeletionState sets the "deletion_state" field.
+func (_c *AgentCreate) SetDeletionState(v string) *AgentCreate {
+	_c.mutation.SetDeletionState(v)
+	return _c
+}
+
+// SetNillableDeletionState sets the "deletion_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionState(*v)
+	}
+	return _c
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (_c *AgentCreate) SetDeletionClaim(v int64) *AgentCreate {
+	_c.mutation.SetDeletionClaim(v)
+	return _c
+}
+
+// SetNillableDeletionClaim sets the "deletion_claim" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionClaim(v *int64) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionClaim(*v)
+	}
+	return _c
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (_c *AgentCreate) SetDeletionLeaseAt(v time.Time) *AgentCreate {
+	_c.mutation.SetDeletionLeaseAt(v)
+	return _c
+}
+
+// SetNillableDeletionLeaseAt sets the "deletion_lease_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionLeaseAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionLeaseAt(*v)
+	}
+	return _c
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (_c *AgentCreate) SetDeletionStartedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetDeletionStartedAt(v)
+	return _c
+}
+
+// SetNillableDeletionStartedAt sets the "deletion_started_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionStartedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionStartedAt(*v)
+	}
+	return _c
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (_c *AgentCreate) SetDeletionFailedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetDeletionFailedAt(v)
+	return _c
+}
+
+// SetNillableDeletionFailedAt sets the "deletion_failed_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionFailedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionFailedAt(*v)
+	}
+	return _c
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (_c *AgentCreate) SetDeletionCode(v string) *AgentCreate {
+	_c.mutation.SetDeletionCode(v)
+	return _c
+}
+
+// SetNillableDeletionCode sets the "deletion_code" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionCode(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionCode(*v)
+	}
+	return _c
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (_c *AgentCreate) SetDeletionError(v string) *AgentCreate {
+	_c.mutation.SetDeletionError(v)
+	return _c
+}
+
+// SetNillableDeletionError sets the "deletion_error" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionError(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionError(*v)
+	}
+	return _c
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (_c *AgentCreate) SetDeletionPrior(v string) *AgentCreate {
+	_c.mutation.SetDeletionPrior(v)
+	return _c
+}
+
+// SetNillableDeletionPrior sets the "deletion_prior" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionPrior(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionPrior(*v)
+	}
+	return _c
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (_c *AgentCreate) SetDeletionRequest(v string) *AgentCreate {
+	_c.mutation.SetDeletionRequest(v)
+	return _c
+}
+
+// SetNillableDeletionRequest sets the "deletion_request" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletionRequest(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetDeletionRequest(*v)
+	}
+	return _c
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (_c *AgentCreate) SetRunIntent(v string) *AgentCreate {
+	_c.mutation.SetRunIntent(v)
+	return _c
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntent(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntent(*v)
+	}
+	return _c
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_c *AgentCreate) SetRunIntentAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIntentAt(v)
+	return _c
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntentAt(*v)
+	}
+	return _c
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (_c *AgentCreate) SetStartClaimID(v string) *AgentCreate {
+	_c.mutation.SetStartClaimID(v)
+	return _c
+}
+
+// SetNillableStartClaimID sets the "start_claim_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimID(*v)
+	}
+	return _c
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (_c *AgentCreate) SetStartClaimKind(v string) *AgentCreate {
+	_c.mutation.SetStartClaimKind(v)
+	return _c
+}
+
+// SetNillableStartClaimKind sets the "start_claim_kind" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimKind(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimKind(*v)
+	}
+	return _c
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (_c *AgentCreate) SetStartClaimState(v string) *AgentCreate {
+	_c.mutation.SetStartClaimState(v)
+	return _c
+}
+
+// SetNillableStartClaimState sets the "start_claim_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimState(*v)
+	}
+	return _c
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (_c *AgentCreate) SetStartClaimOwner(v string) *AgentCreate {
+	_c.mutation.SetStartClaimOwner(v)
+	return _c
+}
+
+// SetNillableStartClaimOwner sets the "start_claim_owner" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimOwner(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimOwner(*v)
+	}
+	return _c
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (_c *AgentCreate) SetStartClaimTarget(v string) *AgentCreate {
+	_c.mutation.SetStartClaimTarget(v)
+	return _c
+}
+
+// SetNillableStartClaimTarget sets the "start_claim_target" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimTarget(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimTarget(*v)
+	}
+	return _c
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (_c *AgentCreate) SetStartClaimAt(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimAt(v)
+	return _c
+}
+
+// SetNillableStartClaimAt sets the "start_claim_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimAt(*v)
+	}
+	return _c
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (_c *AgentCreate) SetStartClaimLeaseUntil(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimLeaseUntil(v)
+	return _c
+}
+
+// SetNillableStartClaimLeaseUntil sets the "start_claim_lease_until" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimLeaseUntil(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimLeaseUntil(*v)
+	}
+	return _c
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (_c *AgentCreate) SetStartClaimUnconfirmedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimUnconfirmedAt(v)
+	return _c
+}
+
+// SetNillableStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimUnconfirmedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimUnconfirmedAt(*v)
+	}
+	return _c
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (_c *AgentCreate) SetStartClaimHoldUntil(v time.Time) *AgentCreate {
+	_c.mutation.SetStartClaimHoldUntil(v)
+	return _c
+}
+
+// SetNillableStartClaimHoldUntil sets the "start_claim_hold_until" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimHoldUntil(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimHoldUntil(*v)
+	}
+	return _c
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_c *AgentCreate) SetStartClaimLaunchID(v string) *AgentCreate {
+	_c.mutation.SetStartClaimLaunchID(v)
+	return _c
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartClaimLaunchID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStartClaimLaunchID(*v)
 	}
 	return _c
 }
@@ -868,6 +1176,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchID
 		_c.mutation.SetLaunchID(v)
 	}
+	if _, ok := _c.mutation.RunID(); !ok {
+		v := agent.DefaultRunID
+		_c.mutation.SetRunID(v)
+	}
 	if _, ok := _c.mutation.LaunchState(); !ok {
 		v := agent.DefaultLaunchState
 		_c.mutation.SetLaunchState(v)
@@ -895,6 +1207,50 @@ func (_c *AgentCreate) defaults() {
 	if _, ok := _c.mutation.LaunchError(); !ok {
 		v := agent.DefaultLaunchError
 		_c.mutation.SetLaunchError(v)
+	}
+	if _, ok := _c.mutation.DeletionState(); !ok {
+		v := agent.DefaultDeletionState
+		_c.mutation.SetDeletionState(v)
+	}
+	if _, ok := _c.mutation.DeletionClaim(); !ok {
+		v := agent.DefaultDeletionClaim
+		_c.mutation.SetDeletionClaim(v)
+	}
+	if _, ok := _c.mutation.DeletionCode(); !ok {
+		v := agent.DefaultDeletionCode
+		_c.mutation.SetDeletionCode(v)
+	}
+	if _, ok := _c.mutation.DeletionError(); !ok {
+		v := agent.DefaultDeletionError
+		_c.mutation.SetDeletionError(v)
+	}
+	if _, ok := _c.mutation.DeletionPrior(); !ok {
+		v := agent.DefaultDeletionPrior
+		_c.mutation.SetDeletionPrior(v)
+	}
+	if _, ok := _c.mutation.DeletionRequest(); !ok {
+		v := agent.DefaultDeletionRequest
+		_c.mutation.SetDeletionRequest(v)
+	}
+	if _, ok := _c.mutation.StartClaimKind(); !ok {
+		v := agent.DefaultStartClaimKind
+		_c.mutation.SetStartClaimKind(v)
+	}
+	if _, ok := _c.mutation.StartClaimState(); !ok {
+		v := agent.DefaultStartClaimState
+		_c.mutation.SetStartClaimState(v)
+	}
+	if _, ok := _c.mutation.StartClaimOwner(); !ok {
+		v := agent.DefaultStartClaimOwner
+		_c.mutation.SetStartClaimOwner(v)
+	}
+	if _, ok := _c.mutation.StartClaimTarget(); !ok {
+		v := agent.DefaultStartClaimTarget
+		_c.mutation.SetStartClaimTarget(v)
+	}
+	if _, ok := _c.mutation.StartClaimLaunchID(); !ok {
+		v := agent.DefaultStartClaimLaunchID
+		_c.mutation.SetStartClaimLaunchID(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := agent.DefaultID()
@@ -971,6 +1327,9 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.LaunchSeq(); !ok {
 		return &ValidationError{Name: "launch_seq", err: errors.New(`ent: missing required field "Agent.launch_seq"`)}
+	}
+	if _, ok := _c.mutation.DeletionClaim(); !ok {
+		return &ValidationError{Name: "deletion_claim", err: errors.New(`ent: missing required field "Agent.deletion_claim"`)}
 	}
 	if len(_c.mutation.ProjectIDs()) == 0 {
 		return &ValidationError{Name: "project", err: errors.New(`ent: missing required edge "Agent.project"`)}
@@ -1187,6 +1546,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
 		_node.LaunchID = value
 	}
+	if value, ok := _c.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+		_node.RunID = value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1222,6 +1585,90 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchError(); ok {
 		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
 		_node.LaunchError = value
+	}
+	if value, ok := _c.mutation.DeletionState(); ok {
+		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
+		_node.DeletionState = value
+	}
+	if value, ok := _c.mutation.DeletionClaim(); ok {
+		_spec.SetField(agent.FieldDeletionClaim, field.TypeInt64, value)
+		_node.DeletionClaim = value
+	}
+	if value, ok := _c.mutation.DeletionLeaseAt(); ok {
+		_spec.SetField(agent.FieldDeletionLeaseAt, field.TypeTime, value)
+		_node.DeletionLeaseAt = &value
+	}
+	if value, ok := _c.mutation.DeletionStartedAt(); ok {
+		_spec.SetField(agent.FieldDeletionStartedAt, field.TypeTime, value)
+		_node.DeletionStartedAt = &value
+	}
+	if value, ok := _c.mutation.DeletionFailedAt(); ok {
+		_spec.SetField(agent.FieldDeletionFailedAt, field.TypeTime, value)
+		_node.DeletionFailedAt = &value
+	}
+	if value, ok := _c.mutation.DeletionCode(); ok {
+		_spec.SetField(agent.FieldDeletionCode, field.TypeString, value)
+		_node.DeletionCode = value
+	}
+	if value, ok := _c.mutation.DeletionError(); ok {
+		_spec.SetField(agent.FieldDeletionError, field.TypeString, value)
+		_node.DeletionError = value
+	}
+	if value, ok := _c.mutation.DeletionPrior(); ok {
+		_spec.SetField(agent.FieldDeletionPrior, field.TypeString, value)
+		_node.DeletionPrior = value
+	}
+	if value, ok := _c.mutation.DeletionRequest(); ok {
+		_spec.SetField(agent.FieldDeletionRequest, field.TypeString, value)
+		_node.DeletionRequest = value
+	}
+	if value, ok := _c.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+		_node.RunIntent = &value
+	}
+	if value, ok := _c.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+		_node.RunIntentAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimID(); ok {
+		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
+		_node.StartClaimID = &value
+	}
+	if value, ok := _c.mutation.StartClaimKind(); ok {
+		_spec.SetField(agent.FieldStartClaimKind, field.TypeString, value)
+		_node.StartClaimKind = value
+	}
+	if value, ok := _c.mutation.StartClaimState(); ok {
+		_spec.SetField(agent.FieldStartClaimState, field.TypeString, value)
+		_node.StartClaimState = value
+	}
+	if value, ok := _c.mutation.StartClaimOwner(); ok {
+		_spec.SetField(agent.FieldStartClaimOwner, field.TypeString, value)
+		_node.StartClaimOwner = value
+	}
+	if value, ok := _c.mutation.StartClaimTarget(); ok {
+		_spec.SetField(agent.FieldStartClaimTarget, field.TypeString, value)
+		_node.StartClaimTarget = value
+	}
+	if value, ok := _c.mutation.StartClaimAt(); ok {
+		_spec.SetField(agent.FieldStartClaimAt, field.TypeTime, value)
+		_node.StartClaimAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimLeaseUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimLeaseUntil, field.TypeTime, value)
+		_node.StartClaimLeaseUntil = &value
+	}
+	if value, ok := _c.mutation.StartClaimUnconfirmedAt(); ok {
+		_spec.SetField(agent.FieldStartClaimUnconfirmedAt, field.TypeTime, value)
+		_node.StartClaimUnconfirmedAt = &value
+	}
+	if value, ok := _c.mutation.StartClaimHoldUntil(); ok {
+		_spec.SetField(agent.FieldStartClaimHoldUntil, field.TypeTime, value)
+		_node.StartClaimHoldUntil = &value
+	}
+	if value, ok := _c.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+		_node.StartClaimLaunchID = value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2062,6 +2509,24 @@ func (u *AgentUpsert) ClearLaunchID() *AgentUpsert {
 	return u
 }
 
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsert) SetRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldRunID, v)
+	return u
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunID)
+	return u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsert) ClearRunID() *AgentUpsert {
+	u.SetNull(agent.FieldRunID)
+	return u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsert) SetLaunchState(v string) *AgentUpsert {
 	u.Set(agent.FieldLaunchState, v)
@@ -2221,6 +2686,384 @@ func (u *AgentUpsert) UpdateLaunchError() *AgentUpsert {
 // ClearLaunchError clears the value of the "launch_error" field.
 func (u *AgentUpsert) ClearLaunchError() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchError)
+	return u
+}
+
+// SetDeletionState sets the "deletion_state" field.
+func (u *AgentUpsert) SetDeletionState(v string) *AgentUpsert {
+	u.Set(agent.FieldDeletionState, v)
+	return u
+}
+
+// UpdateDeletionState sets the "deletion_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionState() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionState)
+	return u
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (u *AgentUpsert) ClearDeletionState() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionState)
+	return u
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (u *AgentUpsert) SetDeletionClaim(v int64) *AgentUpsert {
+	u.Set(agent.FieldDeletionClaim, v)
+	return u
+}
+
+// UpdateDeletionClaim sets the "deletion_claim" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionClaim() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionClaim)
+	return u
+}
+
+// AddDeletionClaim adds v to the "deletion_claim" field.
+func (u *AgentUpsert) AddDeletionClaim(v int64) *AgentUpsert {
+	u.Add(agent.FieldDeletionClaim, v)
+	return u
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (u *AgentUpsert) SetDeletionLeaseAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldDeletionLeaseAt, v)
+	return u
+}
+
+// UpdateDeletionLeaseAt sets the "deletion_lease_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionLeaseAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionLeaseAt)
+	return u
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (u *AgentUpsert) ClearDeletionLeaseAt() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionLeaseAt)
+	return u
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (u *AgentUpsert) SetDeletionStartedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldDeletionStartedAt, v)
+	return u
+}
+
+// UpdateDeletionStartedAt sets the "deletion_started_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionStartedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionStartedAt)
+	return u
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (u *AgentUpsert) ClearDeletionStartedAt() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionStartedAt)
+	return u
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (u *AgentUpsert) SetDeletionFailedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldDeletionFailedAt, v)
+	return u
+}
+
+// UpdateDeletionFailedAt sets the "deletion_failed_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionFailedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionFailedAt)
+	return u
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (u *AgentUpsert) ClearDeletionFailedAt() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionFailedAt)
+	return u
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (u *AgentUpsert) SetDeletionCode(v string) *AgentUpsert {
+	u.Set(agent.FieldDeletionCode, v)
+	return u
+}
+
+// UpdateDeletionCode sets the "deletion_code" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionCode() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionCode)
+	return u
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (u *AgentUpsert) ClearDeletionCode() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionCode)
+	return u
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (u *AgentUpsert) SetDeletionError(v string) *AgentUpsert {
+	u.Set(agent.FieldDeletionError, v)
+	return u
+}
+
+// UpdateDeletionError sets the "deletion_error" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionError() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionError)
+	return u
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (u *AgentUpsert) ClearDeletionError() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionError)
+	return u
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (u *AgentUpsert) SetDeletionPrior(v string) *AgentUpsert {
+	u.Set(agent.FieldDeletionPrior, v)
+	return u
+}
+
+// UpdateDeletionPrior sets the "deletion_prior" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionPrior() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionPrior)
+	return u
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (u *AgentUpsert) ClearDeletionPrior() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionPrior)
+	return u
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (u *AgentUpsert) SetDeletionRequest(v string) *AgentUpsert {
+	u.Set(agent.FieldDeletionRequest, v)
+	return u
+}
+
+// UpdateDeletionRequest sets the "deletion_request" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletionRequest() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletionRequest)
+	return u
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (u *AgentUpsert) ClearDeletionRequest() *AgentUpsert {
+	u.SetNull(agent.FieldDeletionRequest)
+	return u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsert) SetRunIntent(v string) *AgentUpsert {
+	u.Set(agent.FieldRunIntent, v)
+	return u
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntent() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntent)
+	return u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsert) ClearRunIntent() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntent)
+	return u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsert) SetRunIntentAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIntentAt, v)
+	return u
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntentAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntentAt)
+	return u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntentAt)
+	return u
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsert) SetStartClaimID(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimID, v)
+	return u
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimID() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimID)
+	return u
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsert) ClearStartClaimID() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimID)
+	return u
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsert) SetStartClaimKind(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimKind, v)
+	return u
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimKind() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimKind)
+	return u
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsert) ClearStartClaimKind() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimKind)
+	return u
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsert) SetStartClaimState(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimState, v)
+	return u
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimState() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimState)
+	return u
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsert) ClearStartClaimState() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimState)
+	return u
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsert) SetStartClaimOwner(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimOwner, v)
+	return u
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimOwner() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimOwner)
+	return u
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsert) ClearStartClaimOwner() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimOwner)
+	return u
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsert) SetStartClaimTarget(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimTarget, v)
+	return u
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimTarget() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimTarget)
+	return u
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsert) ClearStartClaimTarget() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimTarget)
+	return u
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsert) SetStartClaimAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimAt, v)
+	return u
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimAt)
+	return u
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsert) ClearStartClaimAt() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimAt)
+	return u
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsert) SetStartClaimLeaseUntil(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimLeaseUntil, v)
+	return u
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimLeaseUntil() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimLeaseUntil)
+	return u
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsert) ClearStartClaimLeaseUntil() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimLeaseUntil)
+	return u
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsert) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimUnconfirmedAt, v)
+	return u
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimUnconfirmedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimUnconfirmedAt)
+	return u
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsert) ClearStartClaimUnconfirmedAt() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimUnconfirmedAt)
+	return u
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsert) SetStartClaimHoldUntil(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartClaimHoldUntil, v)
+	return u
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimHoldUntil() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimHoldUntil)
+	return u
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsert) ClearStartClaimHoldUntil() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimHoldUntil)
+	return u
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsert) SetStartClaimLaunchID(v string) *AgentUpsert {
+	u.Set(agent.FieldStartClaimLaunchID, v)
+	return u
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartClaimLaunchID() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartClaimLaunchID)
+	return u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsert) ClearStartClaimLaunchID() *AgentUpsert {
+	u.SetNull(agent.FieldStartClaimLaunchID)
 	return u
 }
 
@@ -3136,6 +3979,27 @@ func (u *AgentUpsertOne) ClearLaunchID() *AgentUpsertOne {
 	})
 }
 
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsertOne) SetRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunID()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertOne) SetLaunchState(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -3322,6 +4186,447 @@ func (u *AgentUpsertOne) UpdateLaunchError() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchError() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetDeletionState sets the "deletion_state" field.
+func (u *AgentUpsertOne) SetDeletionState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionState(v)
+	})
+}
+
+// UpdateDeletionState sets the "deletion_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionState()
+	})
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (u *AgentUpsertOne) ClearDeletionState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionState()
+	})
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (u *AgentUpsertOne) SetDeletionClaim(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionClaim(v)
+	})
+}
+
+// AddDeletionClaim adds v to the "deletion_claim" field.
+func (u *AgentUpsertOne) AddDeletionClaim(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddDeletionClaim(v)
+	})
+}
+
+// UpdateDeletionClaim sets the "deletion_claim" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionClaim() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionClaim()
+	})
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (u *AgentUpsertOne) SetDeletionLeaseAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionLeaseAt(v)
+	})
+}
+
+// UpdateDeletionLeaseAt sets the "deletion_lease_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionLeaseAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionLeaseAt()
+	})
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (u *AgentUpsertOne) ClearDeletionLeaseAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionLeaseAt()
+	})
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (u *AgentUpsertOne) SetDeletionStartedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionStartedAt(v)
+	})
+}
+
+// UpdateDeletionStartedAt sets the "deletion_started_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionStartedAt()
+	})
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (u *AgentUpsertOne) ClearDeletionStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionStartedAt()
+	})
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (u *AgentUpsertOne) SetDeletionFailedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionFailedAt(v)
+	})
+}
+
+// UpdateDeletionFailedAt sets the "deletion_failed_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionFailedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionFailedAt()
+	})
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (u *AgentUpsertOne) ClearDeletionFailedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionFailedAt()
+	})
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (u *AgentUpsertOne) SetDeletionCode(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionCode(v)
+	})
+}
+
+// UpdateDeletionCode sets the "deletion_code" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionCode() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionCode()
+	})
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (u *AgentUpsertOne) ClearDeletionCode() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionCode()
+	})
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (u *AgentUpsertOne) SetDeletionError(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionError(v)
+	})
+}
+
+// UpdateDeletionError sets the "deletion_error" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionError() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionError()
+	})
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (u *AgentUpsertOne) ClearDeletionError() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionError()
+	})
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (u *AgentUpsertOne) SetDeletionPrior(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionPrior(v)
+	})
+}
+
+// UpdateDeletionPrior sets the "deletion_prior" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionPrior() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionPrior()
+	})
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (u *AgentUpsertOne) ClearDeletionPrior() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionPrior()
+	})
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (u *AgentUpsertOne) SetDeletionRequest(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionRequest(v)
+	})
+}
+
+// UpdateDeletionRequest sets the "deletion_request" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletionRequest() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionRequest()
+	})
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (u *AgentUpsertOne) ClearDeletionRequest() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionRequest()
+	})
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsertOne) SetRunIntent(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntent(v)
+	})
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntent()
+	})
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsertOne) ClearRunIntent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntent()
+	})
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsertOne) SetRunIntentAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentAt(v)
+	})
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntentAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentAt()
+	})
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentAt()
+	})
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsertOne) SetStartClaimID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimID(v)
+	})
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimID()
+	})
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsertOne) ClearStartClaimID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimID()
+	})
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsertOne) SetStartClaimKind(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimKind(v)
+	})
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimKind()
+	})
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsertOne) ClearStartClaimKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimKind()
+	})
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsertOne) SetStartClaimState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimState(v)
+	})
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimState()
+	})
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsertOne) ClearStartClaimState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimState()
+	})
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsertOne) SetStartClaimOwner(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimOwner(v)
+	})
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimOwner()
+	})
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsertOne) ClearStartClaimOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimOwner()
+	})
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsertOne) SetStartClaimTarget(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimTarget(v)
+	})
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimTarget() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimTarget()
+	})
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsertOne) ClearStartClaimTarget() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimTarget()
+	})
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsertOne) SetStartClaimAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimAt(v)
+	})
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimAt()
+	})
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsertOne) ClearStartClaimAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimAt()
+	})
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsertOne) SetStartClaimLeaseUntil(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLeaseUntil(v)
+	})
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimLeaseUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLeaseUntil()
+	})
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsertOne) ClearStartClaimLeaseUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLeaseUntil()
+	})
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertOne) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimUnconfirmedAt(v)
+	})
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimUnconfirmedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimUnconfirmedAt()
+	})
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertOne) ClearStartClaimUnconfirmedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimUnconfirmedAt()
+	})
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsertOne) SetStartClaimHoldUntil(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimHoldUntil(v)
+	})
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimHoldUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimHoldUntil()
+	})
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsertOne) ClearStartClaimHoldUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimHoldUntil()
+	})
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsertOne) SetStartClaimLaunchID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLaunchID(v)
+	})
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartClaimLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLaunchID()
+	})
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsertOne) ClearStartClaimLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLaunchID()
 	})
 }
 
@@ -4404,6 +5709,27 @@ func (u *AgentUpsertBulk) ClearLaunchID() *AgentUpsertBulk {
 	})
 }
 
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsertBulk) SetRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunID()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertBulk) SetLaunchState(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -4590,6 +5916,447 @@ func (u *AgentUpsertBulk) UpdateLaunchError() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchError() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetDeletionState sets the "deletion_state" field.
+func (u *AgentUpsertBulk) SetDeletionState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionState(v)
+	})
+}
+
+// UpdateDeletionState sets the "deletion_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionState()
+	})
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (u *AgentUpsertBulk) ClearDeletionState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionState()
+	})
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (u *AgentUpsertBulk) SetDeletionClaim(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionClaim(v)
+	})
+}
+
+// AddDeletionClaim adds v to the "deletion_claim" field.
+func (u *AgentUpsertBulk) AddDeletionClaim(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddDeletionClaim(v)
+	})
+}
+
+// UpdateDeletionClaim sets the "deletion_claim" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionClaim() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionClaim()
+	})
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (u *AgentUpsertBulk) SetDeletionLeaseAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionLeaseAt(v)
+	})
+}
+
+// UpdateDeletionLeaseAt sets the "deletion_lease_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionLeaseAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionLeaseAt()
+	})
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (u *AgentUpsertBulk) ClearDeletionLeaseAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionLeaseAt()
+	})
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (u *AgentUpsertBulk) SetDeletionStartedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionStartedAt(v)
+	})
+}
+
+// UpdateDeletionStartedAt sets the "deletion_started_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionStartedAt()
+	})
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (u *AgentUpsertBulk) ClearDeletionStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionStartedAt()
+	})
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (u *AgentUpsertBulk) SetDeletionFailedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionFailedAt(v)
+	})
+}
+
+// UpdateDeletionFailedAt sets the "deletion_failed_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionFailedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionFailedAt()
+	})
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (u *AgentUpsertBulk) ClearDeletionFailedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionFailedAt()
+	})
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (u *AgentUpsertBulk) SetDeletionCode(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionCode(v)
+	})
+}
+
+// UpdateDeletionCode sets the "deletion_code" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionCode() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionCode()
+	})
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (u *AgentUpsertBulk) ClearDeletionCode() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionCode()
+	})
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (u *AgentUpsertBulk) SetDeletionError(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionError(v)
+	})
+}
+
+// UpdateDeletionError sets the "deletion_error" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionError() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionError()
+	})
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (u *AgentUpsertBulk) ClearDeletionError() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionError()
+	})
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (u *AgentUpsertBulk) SetDeletionPrior(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionPrior(v)
+	})
+}
+
+// UpdateDeletionPrior sets the "deletion_prior" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionPrior() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionPrior()
+	})
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (u *AgentUpsertBulk) ClearDeletionPrior() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionPrior()
+	})
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (u *AgentUpsertBulk) SetDeletionRequest(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletionRequest(v)
+	})
+}
+
+// UpdateDeletionRequest sets the "deletion_request" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletionRequest() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletionRequest()
+	})
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (u *AgentUpsertBulk) ClearDeletionRequest() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletionRequest()
+	})
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsertBulk) SetRunIntent(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntent(v)
+	})
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntent()
+	})
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsertBulk) ClearRunIntent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntent()
+	})
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsertBulk) SetRunIntentAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentAt(v)
+	})
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntentAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentAt()
+	})
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentAt()
+	})
+}
+
+// SetStartClaimID sets the "start_claim_id" field.
+func (u *AgentUpsertBulk) SetStartClaimID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimID(v)
+	})
+}
+
+// UpdateStartClaimID sets the "start_claim_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimID()
+	})
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (u *AgentUpsertBulk) ClearStartClaimID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimID()
+	})
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (u *AgentUpsertBulk) SetStartClaimKind(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimKind(v)
+	})
+}
+
+// UpdateStartClaimKind sets the "start_claim_kind" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimKind()
+	})
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (u *AgentUpsertBulk) ClearStartClaimKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimKind()
+	})
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (u *AgentUpsertBulk) SetStartClaimState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimState(v)
+	})
+}
+
+// UpdateStartClaimState sets the "start_claim_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimState()
+	})
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (u *AgentUpsertBulk) ClearStartClaimState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimState()
+	})
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (u *AgentUpsertBulk) SetStartClaimOwner(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimOwner(v)
+	})
+}
+
+// UpdateStartClaimOwner sets the "start_claim_owner" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimOwner()
+	})
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (u *AgentUpsertBulk) ClearStartClaimOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimOwner()
+	})
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (u *AgentUpsertBulk) SetStartClaimTarget(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimTarget(v)
+	})
+}
+
+// UpdateStartClaimTarget sets the "start_claim_target" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimTarget() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimTarget()
+	})
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (u *AgentUpsertBulk) ClearStartClaimTarget() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimTarget()
+	})
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (u *AgentUpsertBulk) SetStartClaimAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimAt(v)
+	})
+}
+
+// UpdateStartClaimAt sets the "start_claim_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimAt()
+	})
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (u *AgentUpsertBulk) ClearStartClaimAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimAt()
+	})
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (u *AgentUpsertBulk) SetStartClaimLeaseUntil(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLeaseUntil(v)
+	})
+}
+
+// UpdateStartClaimLeaseUntil sets the "start_claim_lease_until" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimLeaseUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLeaseUntil()
+	})
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (u *AgentUpsertBulk) ClearStartClaimLeaseUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLeaseUntil()
+	})
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertBulk) SetStartClaimUnconfirmedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimUnconfirmedAt(v)
+	})
+}
+
+// UpdateStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimUnconfirmedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimUnconfirmedAt()
+	})
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (u *AgentUpsertBulk) ClearStartClaimUnconfirmedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimUnconfirmedAt()
+	})
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (u *AgentUpsertBulk) SetStartClaimHoldUntil(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimHoldUntil(v)
+	})
+}
+
+// UpdateStartClaimHoldUntil sets the "start_claim_hold_until" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimHoldUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimHoldUntil()
+	})
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (u *AgentUpsertBulk) ClearStartClaimHoldUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimHoldUntil()
+	})
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (u *AgentUpsertBulk) SetStartClaimLaunchID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartClaimLaunchID(v)
+	})
+}
+
+// UpdateStartClaimLaunchID sets the "start_claim_launch_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartClaimLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartClaimLaunchID()
+	})
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (u *AgentUpsertBulk) ClearStartClaimLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartClaimLaunchID()
 	})
 }
 

@@ -18,9 +18,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +37,8 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -145,6 +150,610 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 
 	return rtConfig, runtimeType, nil
+}
+
+// missingSchemaVersionWarning is emitted when a settings file is loaded as v1
+// only because its runtime entries use v1-only keys (v1RuntimeIndicatorKeys).
+var missingSchemaVersionWarning = `settings.yaml contains v1 runtime fields (` + strings.Join(v1RuntimeIndicatorKeys, ", ") + `) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`
+
+// ResolveSharedDirDefaults returns the settings-level Kubernetes shared-dir
+// PVC defaults (storage class and size) for a profile. Each field is
+// resolved independently: the profile's value wins, otherwise the value on
+// the profile's runtime entry is used. Empty means "not set in settings".
+// If profileName is empty, ActiveProfile is used. An unknown profile
+// yields empty values; a profile naming a missing runtime entry yields the
+// profile's own values only.
+//
+// These are defaults only. A template's or agent's kubernetes block
+// (api.KubernetesConfig.SharedDirStorageClass / SharedDirSize) wins over
+// both; see ApplySharedDirDefaults.
+func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (storageClass, size string) {
+	storageClass, size, _ = vs.ResolveSharedDirDefaultsWithSource(profileName)
+	return storageClass, size
+}
+
+// ResolveSharedDirDefaultsWithSource is ResolveSharedDirDefaults that also
+// returns the settings key the size came from
+// ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
+// an error about the value can name where it is set. sizeKey is empty when
+// size is empty.
+func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
+	if vs == nil {
+		return "", "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return "", "", ""
+	}
+	storageClass, size = profile.SharedDirStorageClass, profile.SharedDirSize
+	if size != "" {
+		sizeKey = "profiles." + profileName + ".shared_dir_size"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if storageClass == "" {
+			storageClass = rt.SharedDirStorageClass
+		}
+		if size == "" && rt.SharedDirSize != "" {
+			size = rt.SharedDirSize
+			sizeKey = "runtimes." + profile.Runtime + ".shared_dir_size"
+		}
+	}
+	return storageClass, size, sizeKey
+}
+
+// ResolveProfileValue returns a per-profile setting with the standard
+// precedence used by per-profile overrides: the profile's own value, else
+// the value on the profile's runtime entry. The zero value of T means
+// "not set" at that level. key is the settings key name used to build the
+// returned source ("profiles.NAME.KEY" or "runtimes.NAME.KEY"). If
+// profileName is empty, vs.ActiveProfile is used. A nil vs, an unknown
+// profile, or a profile and runtime entry that both leave the value unset
+// yield the zero value and an empty source, meaning the caller's global
+// value applies. Because the zero value means "not set", a bool or numeric
+// key cannot express an explicit false or 0 override with T = bool or
+// int; for such keys use a pointer type (for example T = *bool), so nil
+// means unset.
+//
+// Example, for a string key:
+//
+//	v, src := ResolveProfileValue(vs, profile, "shared_dir_storage_backend",
+//		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+//		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+//
+// Call it on settings whose source matches the key's scope: keys that a
+// project must not set should be read from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay, not from project-merged settings.
+func ResolveProfileValue[T comparable](vs *VersionedSettings, profileName, key string,
+	fromProfile func(V1ProfileConfig) T, fromRuntime func(V1RuntimeConfig) T) (value T, source string) {
+	var zero T
+	if vs == nil {
+		return zero, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return zero, ""
+	}
+	if v := fromProfile(profile); v != zero {
+		return v, "profiles." + profileName + "." + key
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if v := fromRuntime(rt); v != zero {
+			return v, "runtimes." + profile.Runtime + "." + key
+		}
+	}
+	return zero, ""
+}
+
+// ResolveProfileSetting is ResolveProfileValue for string settings, where
+// "" means not set.
+func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
+	fromProfile func(V1ProfileConfig) string, fromRuntime func(V1RuntimeConfig) string) (value, source string) {
+	return ResolveProfileValue(vs, profileName, key, fromProfile, fromRuntime)
+}
+
+// SharedDirStorageGlobalSource is the source key ResolveSharedDirStorage
+// returns when no profile or runtime entry overrides the backend.
+const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
+
+// ResolveSharedDirStorage returns the shared-dir storage config that
+// applies to agents using profileName: the backend comes from the
+// profile's shared_dir_storage_backend, else its runtime entry's, else
+// server.shared_dir_storage.backend. The nfs block always comes from
+// server.shared_dir_storage.nfs. source names the key the backend came
+// from. The result is nil when nothing is configured (the local layout).
+// The returned config is a copy when an override applies; the global
+// block is never modified.
+//
+// Call this only on settings from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay: like server.shared_dir_storage itself,
+// the overrides must not be settable from a project's own settings.
+//
+// A dispatch-time NFS mount check should choose the backend through this
+// method too, so it agrees with the start path.
+func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
+	if vs == nil {
+		return nil, ""
+	}
+	var global *V1SharedDirStorageConfig
+	if vs.Server != nil {
+		global = vs.Server.SharedDirStorage
+	}
+	backend, source := vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
+		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	if backend == "" {
+		if global == nil {
+			return nil, ""
+		}
+		return global, SharedDirStorageGlobalSource
+	}
+	out := &V1SharedDirStorageConfig{Backend: backend}
+	if global != nil {
+		out.NFS = global.NFS
+	}
+	return out, source
+}
+
+// SharedDirStorageNFSAnywhere reports whether the global backend or any
+// runtime or profile override selects nfs, and returns the nfs-backed
+// config to use for project-wide operations such as cleanup. It is nil
+// when no setting selects nfs. Like ResolveSharedDirStorage, call it only
+// on global settings.
+func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStorageConfig, onlyOverrides bool) {
+	if vs == nil {
+		return nil, false
+	}
+	var global *V1SharedDirStorageConfig
+	if vs.Server != nil {
+		global = vs.Server.SharedDirStorage
+	}
+	if global != nil && global.Backend == "nfs" {
+		return global, false
+	}
+	found := false
+	for _, rt := range vs.Runtimes {
+		if rt.SharedDirStorageBackend == "nfs" {
+			found = true
+		}
+	}
+	for _, p := range vs.Profiles {
+		if p.SharedDirStorageBackend == "nfs" {
+			found = true
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	out := &V1SharedDirStorageConfig{Backend: "nfs"}
+	if global != nil {
+		out.NFS = global.NFS
+	}
+	return out, true
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
+// every runtime and profile entry: the value must be empty, "local" or
+// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
+// (global may be nil). This checks configuration only; it never looks at
+// the filesystem. Each error's Path names the settings key. Results are
+// sorted by path.
+func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	var errs []ValidationError
+	check := func(path, backend string) {
+		switch backend {
+		case "", "local":
+			return
+		case "nfs":
+			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
+			if global != nil {
+				cfg.NFS = global.NFS
+			}
+			if err := cfg.Validate(); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: "selects \"nfs\", which needs a complete server.shared_dir_storage.nfs block (" + err.Error() + ")"})
+			}
+		default:
+			errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("must be \"local\" or \"nfs\" (got %q)", backend)})
+		}
+	}
+	for name, rt := range runtimes {
+		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+	}
+	for name, p := range profiles {
+		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
+// ValidateSharedDirSize checks that a shared_dir_size value parses as a
+// positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
+// valid and means "not set".
+func ValidateSharedDirSize(size string) error {
+	if size == "" {
+		return nil
+	}
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	if q.Sign() <= 0 {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ResolveKubernetesServiceAccountMapping returns the Kubernetes ServiceAccount
+// (KSA) name mapped to gsaEmail for profileName's runtime, and whether a
+// mapping was found. gsaEmail is lower-cased before lookup — GCP service
+// account emails are lowercase, and ValidateKubernetesServiceAccountMappings
+// rejects any settings entry whose key is not, so both sides of the lookup
+// are guaranteed lowercase and a caller does not need to normalize first.
+//
+// A profile-level entry for gsaEmail takes precedence over a runtime-level
+// entry for the same gsaEmail — the same profile-overrides precedence
+// ResolveImageRegistry already applies, here evaluated per map key instead of
+// as a whole-value override, since this setting is a map rather than a
+// scalar. A profile with no entry for gsaEmail (including an empty-string
+// value, treated as unset) falls through to the runtime-level entry, rather
+// than that GSA having no mapping at all. profileName "" resolves to
+// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// ResolveRuntime cannot resolve profileName's runtime (unknown profile or
+// runtime), this returns false, the same as no mapping being found — callers
+// that need to distinguish "no mapping" from "settings error" should call
+// ResolveRuntime themselves first.
+//
+// Scion never creates, annotates, or binds the returned KSA: it must already
+// exist and already be bound to gsaEmail via Workload Identity, out of band,
+// by the operator (see docs-site/.../ha/setup-gcp.md).
+//
+// This is the profileName-only convenience form: it resolves profileName's
+// own runtime entry name internally (via ResolveRuntime) before delegating
+// to ResolveKubernetesServiceAccountMappingForSelection. A caller that
+// already knows both the effective profile name AND the runtime entry name a
+// dispatch resolved to — e.g. the broker, which gets both from one shared
+// resolver so this lookup cannot use a different profile/runtime than the
+// rest of the dispatch did — should call
+// ResolveKubernetesServiceAccountMappingForSelection directly instead,
+// because a ForceRuntime-selected dispatch has a runtime entry but no
+// profile at all, which this form cannot express.
+func (vs *VersionedSettings) ResolveKubernetesServiceAccountMapping(profileName, gsaEmail string) (string, bool) {
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	runtimeEntryName := ""
+	if profile, ok := vs.Profiles[profileName]; ok {
+		runtimeEntryName = profile.Runtime
+	}
+	return vs.ResolveKubernetesServiceAccountMappingForSelection(profileName, runtimeEntryName, gsaEmail)
+}
+
+// ResolveKubernetesServiceAccountMappingForSelection resolves the KSA mapped
+// to gsaEmail for an explicit runtime selection: profileName (if non-empty)
+// is checked first, at the profile level; runtimeEntryName (if non-empty) is
+// checked next, at the runtime level (the `runtimes:` map key — not the
+// runtime type). Either may be empty independently: a ForceRuntime-selected
+// dispatch has a runtime entry but no profile at all, and this function
+// still resolves correctly from the runtime entry alone in that case.
+// Returns false if neither argument is non-empty, or if neither lookup finds
+// a non-empty entry for gsaEmail (which is lower-cased before matching, the
+// same as ResolveKubernetesServiceAccountMapping).
+//
+// An empty-string value at the profile level is treated as no entry and
+// falls through to the runtime level, rather than as a mapping to an empty
+// KSA name: the JSON schema (settings-v1.schema.json) already rejects an
+// empty value for any mapping written through a schema-validated path (the
+// Admin server-config API, `scion config validate`), so this fall-through
+// only matters for a hand-edited file written outside that path. Treating
+// it as "unset" there — instead of returning ("", true) and letting an
+// empty KSA name reach dispatch — keeps a stray blank entry from silently
+// becoming a different failure mode (an empty ServiceAccountName on the pod
+// spec) than the one an operator gets from every other malformed entry
+// (ValidateKubernetesServiceAccountMappings's actionable error at the point
+// of use).
+func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(profileName, runtimeEntryName, gsaEmail string) (string, bool) {
+	gsaEmail = strings.ToLower(gsaEmail)
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			if ksa, ok := profile.KubernetesServiceAccountMappings[gsaEmail]; ok && ksa != "" {
+				return ksa, true
+			}
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			if ksa, ok := rtConfig.KubernetesServiceAccountMappings[gsaEmail]; ok && ksa != "" {
+				return ksa, true
+			}
+		}
+	}
+	return "", false
+}
+
+// ResolveKubernetesNamespace returns the namespace configured on the
+// runtimeEntryName entry of the runtimes: map, and whether one is set.
+// Profiles carry no namespace of their own: a profile that needs a
+// different namespace selects a runtime entry that sets it. When this
+// returns false, the Kubernetes runtime's own default namespace applies.
+//
+// GCP identity mode "assign" on Kubernetes resolves the Workload Identity
+// principal as the (namespace, KSA) pair, so the namespace is read from the
+// same operator settings as the KSA mapping rather than from a request- or
+// template-supplied field.
+func (vs *VersionedSettings) ResolveKubernetesNamespace(runtimeEntryName string) (string, bool) {
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok && rtConfig.Namespace != "" {
+			return rtConfig.Namespace, true
+		}
+	}
+	return "", false
+}
+
+// ProjectSettingsHasKubernetesServiceAccountMappings reports whether a
+// project's OWN settings.yaml — read directly, never merged with the
+// broker's global settings the way LoadEffectiveSettings/LoadVersionedSettings
+// merge them for every other lookup — sets
+// kubernetes_service_account_mappings on the named profile or runtime entry.
+// This exists only to let a caller warn an operator that the setting there
+// has no effect: ResolveKubernetesServiceAccountMappingForSelection reads
+// this mapping only from the broker's own global settings, by design, and a
+// project-level entry for the same runtime/profile name is invisible to it —
+// not merely overridden. A plain LoadEffectiveSettings(projectPath) call
+// cannot detect this on its own: koanf layers the project file on top of the
+// already-loaded global one, so a key the project file never mentions still
+// reads back from the global layer underneath it, indistinguishable from the
+// project having set the same value itself.
+//
+// Best-effort: a missing or unreadable project settings file, or one in a
+// split-storage external location this does not resolve, returns false, not
+// an error — this exists only to produce an operator-facing warning, not to
+// change any dispatch outcome.
+func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntryName, profileName string) bool {
+	// projectPath may be a project root (not yet resolved to its .scion
+	// directory) — GetResolvedProjectDir is the same first step every other
+	// caller in this codebase takes before LoadEffectiveSettings/
+	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
+	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
+	// this: called with a non-empty, non-"global"/"home" path, it only
+	// applies the external-split-storage redirect (GetProjectConfigDir) on
+	// top of whatever was passed in, assuming it already points at a .scion
+	// directory.
+	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
+	if err != nil || resolvedProjectDir == "" {
+		return false
+	}
+	globalDir, _ := GetGlobalDir()
+	if resolvedProjectDir == globalDir {
+		return false
+	}
+	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
+	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
+		return false
+	}
+	settingsPath := GetSettingsPath(effectiveProjectPath)
+	if settingsPath == "" {
+		return false
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Profiles map[string]struct {
+			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
+		} `yaml:"profiles" json:"profiles"`
+		Runtimes map[string]struct {
+			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	if profileName != "" {
+		if p, ok := probe.Profiles[profileName]; ok && len(p.KubernetesServiceAccountMappings) > 0 {
+			return true
+		}
+	}
+	if runtimeEntryName != "" {
+		if rt, ok := probe.Runtimes[runtimeEntryName]; ok && len(rt.KubernetesServiceAccountMappings) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
+// account email: a non-empty local part and one or more non-empty
+// hyphen-delimited domain labels ending in "gserviceaccount.com". GCP issues
+// service account emails in lowercase only, so uppercase is rejected here
+// rather than silently accepted and then never matching a lookup (which
+// lower-cases gsaEmail — see ResolveKubernetesServiceAccountMapping). This
+// deliberately accepts every lowercase GSA shape GCP issues, not only
+// user-managed accounts:
+//
+//	name@project.iam.gserviceaccount.com   (user-managed)
+//	project@appspot.gserviceaccount.com    (App Engine default)
+//	number-compute@developer.gserviceaccount.com (Compute Engine default)
+var gsaEmailPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+gserviceaccount\.com$`)
+
+// ValidateKubernetesServiceAccountMappings checks that every key in mappings
+// is a well-formed, lowercase GCP service account email and every value is a
+// valid Kubernetes ServiceAccount name (a DNS-1123 subdomain, per the
+// Kubernetes ServiceAccount object's own name validation — up to 253
+// characters, dot-separated labels — not the shorter DNS-1123 label format
+// some other Kubernetes names use).
+//
+// This is called at the point each mapping is actually used, in
+// pkg/runtimebroker/gcp_identity_assign.go, on the single resolved (gsaEmail,
+// ksaName) pair for that dispatch — never on an empty-string ksaName,
+// because ResolveKubernetesServiceAccountMappingForSelection already treats
+// an empty value as no mapping before returning one. It is not called by the
+// JSON schema validator (ValidateSettings): the schema enforces the same two
+// patterns independently (see settings-v1.schema.json's
+// kubernetes_service_account_mappings propertyNames/additionalProperties),
+// so settings.yaml written through a schema-validated path (the Admin
+// server-config API, `scion config validate`) is already checked before
+// this function ever runs. This function exists as a second, narrower
+// check for settings loaded without going through that validator — e.g. a
+// hand-edited settings.yaml in file-only mode — so a malformed mapping is
+// still caught before it reaches dispatch, with an error naming the
+// specific mapping at fault rather than a whole-document schema failure.
+func ValidateKubernetesServiceAccountMappings(mappings map[string]string) error {
+	for gsaEmail, ksaName := range mappings {
+		if !gsaEmailPattern.MatchString(gsaEmail) {
+			return fmt.Errorf("kubernetes_service_account_mappings: %q is not a well-formed, lowercase GCP service account email", gsaEmail)
+		}
+		if errs := validation.IsDNS1123Subdomain(ksaName); len(errs) > 0 {
+			return fmt.Errorf("kubernetes_service_account_mappings[%s]: %q is not a valid Kubernetes ServiceAccount name: %s", gsaEmail, ksaName, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+// ValidateSharedDirSizes checks shared_dir_size on every runtime and
+// profile entry. Each error's Path names the settings key
+// ("runtimes.NAME.shared_dir_size" / "profiles.NAME.shared_dir_size").
+// Results are sorted by path.
+func ValidateSharedDirSizes(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	var errs []ValidationError
+	for name, rt := range runtimes {
+		if err := ValidateSharedDirSize(rt.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "runtimes." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	for name, p := range profiles {
+		if err := ValidateSharedDirSize(p.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "profiles." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
+// ApplySharedDirDefaults returns base with SharedDirStorageClass and
+// SharedDirSize filled from the given settings defaults where base leaves
+// them empty, so a template's or agent's explicit value always wins. base
+// is never modified; a copy is returned. When both defaults are empty,
+// base is returned unchanged (including nil).
+func ApplySharedDirDefaults(base *api.KubernetesConfig, storageClass, size string) *api.KubernetesConfig {
+	if storageClass == "" && size == "" {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SharedDirStorageClass == "" {
+		out.SharedDirStorageClass = storageClass
+	}
+	if out.SharedDirSize == "" {
+		out.SharedDirSize = size
+	}
+	return out
+}
+
+// ResolveSafeToEvict returns the settings-level safe_to_evict default for a
+// profile: the profile's value if set, otherwise the value on the profile's
+// runtime entry. Nil means "not set in settings". If profileName is empty,
+// ActiveProfile is used; an unknown profile yields nil.
+//
+// This is a default only. A template's or agent's kubernetes.safeToEvict
+// wins over it; see ApplySafeToEvictDefault.
+//
+// This follows the ResolveSharedDirDefaults pattern; it can move onto a
+// generic per-profile resolver once one exists.
+func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
+	v, _ := vs.ResolveSafeToEvictWithSource(profileName)
+	return v
+}
+
+// ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
+// settings key the value came from ("profiles.NAME.safe_to_evict" or
+// "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
+// The returned pointer is a fresh copy, never one held by vs.
+func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	if profile.SafeToEvict != nil {
+		v := *profile.SafeToEvict
+		return &v, "profiles." + profileName + ".safe_to_evict"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.SafeToEvict != nil {
+		v := *rt.SafeToEvict
+		return &v, "runtimes." + profile.Runtime + ".safe_to_evict"
+	}
+	return nil, ""
+}
+
+// ApplySafeToEvictDefault returns base with SafeToEvict filled from the
+// settings default when base leaves it unset, so a template's or agent's
+// explicit value (true or false) always wins. base is never modified; a
+// copy is returned. When def is nil, base is returned unchanged (including
+// nil).
+func ApplySafeToEvictDefault(base *api.KubernetesConfig, def *bool) *api.KubernetesConfig {
+	if def == nil {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SafeToEvict == nil {
+		v := *def
+		out.SafeToEvict = &v
+	}
+	return out
+}
+
+// SafeToEvictIgnoredWarnings returns a warning for every runtime entry that
+// sets safe_to_evict but is not a Kubernetes runtime, and for every profile
+// that sets it while pointing at such an entry. The setting is accepted and
+// ignored there. Results are sorted.
+func SafeToEvictIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
+	var warnings []string
+	for name, rt := range runtimes {
+		if rt.SafeToEvict != nil && !isKubernetesRuntimeEntry(name, rt) {
+			warnings = append(warnings, fmt.Sprintf("runtimes.%s.safe_to_evict is set but runtime %q is not a Kubernetes runtime; it is ignored", name, name))
+		}
+	}
+	for name, p := range profiles {
+		if p.SafeToEvict == nil {
+			continue
+		}
+		rt, ok := runtimes[p.Runtime]
+		if ok && !isKubernetesRuntimeEntry(p.Runtime, rt) {
+			warnings = append(warnings, fmt.Sprintf("profiles.%s.safe_to_evict is set but its runtime %q is not a Kubernetes runtime; it is ignored", name, p.Runtime))
+		}
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+// isKubernetesRuntimeEntry reports whether a runtime entry targets
+// Kubernetes: an explicit type of "kubernetes" (or "k8s"), or no type and
+// the entry name itself is one of those.
+func isKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
+	t := rt.Type
+	if t == "" {
+		t = name
+	}
+	// "remote" is normalised to the Kubernetes runtime by the runtime factory.
+	return t == "kubernetes" || t == "k8s" || t == "remote"
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
@@ -298,8 +907,10 @@ type VersionedSettings struct {
 	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty" yaml:"default_runtime_broker,omitempty" koanf:"default_runtime_broker"`
 
 	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
-	// "America/Los_Angeles"). Applied as TZ when neither the profile's
-	// first-class timezone field nor a raw TZ in the profile env is set.
+	// "America/Los_Angeles") for agent containers: applied as TZ when the
+	// agent has no pinned timezone and no storage-scope TZ environment
+	// variable applies. This is the settings.yaml form of
+	// agent_defaults.default_timezone.
 	DefaultTimezone string `json:"default_timezone,omitempty" yaml:"default_timezone,omitempty" koanf:"default_timezone"`
 
 	// DefaultGCPIdentityMode is the hub-level default GCP metadata mode
@@ -386,9 +997,12 @@ type V1ServerConfig struct {
 	// directories, independent of WorkspaceStorage (design
 	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
 	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
-	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// HomeStorage selects where the agent home of Kubernetes agents lives.
+	// See V1HomeStorageConfig.
+	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
+	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -623,6 +1237,18 @@ type V1ServerHubConfig struct {
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
 	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
+	// StartClaimLeaseTTL is the lease of a start claim; the holder renews it
+	// every third of this (e.g., "90s"; 30s to 5m).
+	StartClaimLeaseTTL string `json:"start_claim_lease_ttl,omitempty" yaml:"start_claim_lease_ttl,omitempty" koanf:"start_claim_lease_ttl"`
+	// StartMaxDuration is the hard deadline on any agent start, including a
+	// wait for another hub node (e.g., "12m"; minimum 11m).
+	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
+	// StartUnconfirmedHold is the longest a start whose outcome is unknown
+	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
+	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
+	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
@@ -630,8 +1256,8 @@ type V1ServerHubConfig struct {
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
-	// Today it only sets the reaper's staleness window (8x this value); it
-	// will also be sent to the broker once the async dispatch path lands.
+	// It is sent to the broker with each asynchronous create and sets the
+	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
@@ -787,6 +1413,18 @@ type V1NFSConfig struct {
 	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
+	// AutoMount lets a Runtime Broker mount each share itself, at
+	// <MountRoot>/<share.ID>, in the background at startup and again before
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
+	// read-only for /healthz and scion doctor. Mounting requires the broker
+	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
+	// reads this field; shared_dir_storage ignores it.
+	AutoMount bool `json:"auto_mount,omitempty" yaml:"auto_mount,omitempty" koanf:"auto_mount"`
+
 	// Stable, node-independent ownership for NFS-backed trees.
 	// Default 1000:1000 to converge with the K8s pod UID/GID.
 	UID int `json:"uid,omitempty" yaml:"uid,omitempty" koanf:"uid"` // default 1000
@@ -826,11 +1464,39 @@ type V1GKESharedVolumeConfig struct {
 	SubPathRoot string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"`
 }
 
+// DefaultWorkspaceSubPathRoot is the subpath_root used by every storage
+// backend (workspace_storage nfs, cloudrun_volume and gke_shared_volume, and
+// shared_dir_storage nfs) when none is configured. It is the single source of
+// that default: code that needs the effective value must call
+// SubPathRootOrDefault or ResolveSubPathRoot rather than repeat the literal.
+const DefaultWorkspaceSubPathRoot = "projects"
+
+// SubPathRootOrDefault returns subPathRoot, or DefaultWorkspaceSubPathRoot
+// when it is empty. It does not validate; see ResolveSubPathRoot.
+func SubPathRootOrDefault(subPathRoot string) string {
+	if subPathRoot == "" {
+		return DefaultWorkspaceSubPathRoot
+	}
+	return subPathRoot
+}
+
+// ResolveSubPathRoot returns the effective subpath_root (the default when
+// subPathRoot is empty) after checking it with ValidateSubPathRoot. Callers
+// that build filesystem or export paths from a subpath_root must use this, so
+// no path is ever built from an unvalidated value.
+func ResolveSubPathRoot(subPathRoot string) (string, error) {
+	root := SubPathRootOrDefault(subPathRoot)
+	if err := ValidateSubPathRoot(root); err != nil {
+		return "", fmt.Errorf("subpath_root %w", err)
+	}
+	return root, nil
+}
+
 // ApplyNFSDefaults fills default values for NFS sub-fields when Backend is "nfs".
 // When Backend is empty or "local", the NFS block is left as-is (no materialization).
 // This is idempotent and safe to call multiple times.
 func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return
 	}
 	if ws.NFS == nil {
@@ -846,19 +1512,120 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 		ws.NFS.GID = 1000
 	}
 	if ws.NFS.SubPathRoot == "" {
-		ws.NFS.SubPathRoot = "projects"
+		ws.NFS.SubPathRoot = DefaultWorkspaceSubPathRoot
 	}
 }
 
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
 // misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
 	}
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
+}
+
+// Workspace storage backend names accepted in workspace_storage.backend.
+// An empty backend means "local".
+const (
+	WorkspaceStorageBackendLocal           = "local"
+	WorkspaceStorageBackendNFS             = "nfs"
+	WorkspaceStorageBackendCloudRunVolume  = "cloudrun-volume"
+	WorkspaceStorageBackendGKESharedVolume = "gke-shared-volume"
+)
+
+// ApplyWorkspaceStorageDefaults fills default values for the block selected
+// by Backend: ApplyNFSDefaults for "nfs", and the subpath_root default for
+// "cloudrun-volume" and "gke-shared-volume" when their block is present (a
+// missing volume block is left nil for ValidateWorkspaceStorage to report).
+// Other backends, including unknown ones, are left as-is. Idempotent.
+func (ws *V1WorkspaceStorageConfig) ApplyWorkspaceStorageDefaults() {
+	if ws == nil {
+		return
+	}
+	switch ws.Backend {
+	case WorkspaceStorageBackendNFS:
+		ws.ApplyNFSDefaults()
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume != nil {
+			ws.CloudRunVolume.SubPathRoot = SubPathRootOrDefault(ws.CloudRunVolume.SubPathRoot)
+		}
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume != nil {
+			ws.GKESharedVolume.SubPathRoot = SubPathRootOrDefault(ws.GKESharedVolume.SubPathRoot)
+		}
+	}
+}
+
+// ValidateWorkspaceStorage returns an error if the workspace storage config
+// cannot be used: an unknown backend name, an "nfs" backend without shares
+// (ValidateNFS), a volume backend without its block or without a
+// volume_name, or a subpath_root that ValidateSubPathRoot rejects. A nil
+// config, an empty backend and "local" are valid. Call after
+// ApplyWorkspaceStorageDefaults.
+//
+// Backend names are matched exactly (case-sensitive), as in every consumer
+// (ApplyNFSDefaults and ValidateNFS included): a backend like "NFS" was
+// previously treated as local by the hub and the runtimes.
+func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
+	if ws == nil {
+		return nil
+	}
+
+	switch ws.Backend {
+	case "", WorkspaceStorageBackendLocal:
+		return nil
+	case WorkspaceStorageBackendNFS:
+		if err := ws.ValidateNFS(); err != nil {
+			return err
+		}
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume == nil || ws.CloudRunVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.cloudrun_volume.volume_name is not set; "+
+				"set it to the name of the volume declared in the Cloud Run service", ws.Backend)
+		}
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume == nil || ws.GKESharedVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.gke_shared_volume.volume_name is not set; "+
+				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", ws.Backend)
+		}
+	default:
+		return fmt.Errorf("workspace_storage.backend %q is not supported; use one of %q, %q, %q or %q",
+			ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
+			WorkspaceStorageBackendCloudRunVolume, WorkspaceStorageBackendGKESharedVolume)
+	}
+
+	return ws.ValidateSelectedSubPathRoot()
+}
+
+// ValidateSelectedSubPathRoot checks, with ValidateSubPathRoot, the
+// subpath_root of the block Backend selects (an empty value is the default
+// and valid). It returns nil for a backend without a subpath_root, an
+// unknown backend, or a missing block; ValidateWorkspaceStorage reports
+// those. It is the part of ValidateWorkspaceStorage a Runtime Broker also
+// runs at startup: the runtime workspace backends reject an invalid
+// subpath_root on every agent start, so the broker warns about it early.
+func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
+	if ws == nil {
+		return nil
+	}
+	var subPathRoot, block string
+	switch {
+	case ws.Backend == WorkspaceStorageBackendNFS && ws.NFS != nil:
+		subPathRoot, block = ws.NFS.SubPathRoot, "nfs"
+	case ws.Backend == WorkspaceStorageBackendCloudRunVolume && ws.CloudRunVolume != nil:
+		subPathRoot, block = ws.CloudRunVolume.SubPathRoot, "cloudrun_volume"
+	case ws.Backend == WorkspaceStorageBackendGKESharedVolume && ws.GKESharedVolume != nil:
+		subPathRoot, block = ws.GKESharedVolume.SubPathRoot, "gke_shared_volume"
+	default:
+		return nil
+	}
+	if err := ValidateSubPathRoot(SubPathRootOrDefault(subPathRoot)); err != nil {
+		return fmt.Errorf("workspace_storage.%s.subpath_root %w", block, err)
 	}
 	return nil
 }
@@ -930,16 +1697,16 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
 	}
 	if s.NFS.SubPathRoot != "" {
-		if err := validateSubPathRoot(s.NFS.SubPathRoot); err != nil {
+		if err := ValidateSubPathRoot(s.NFS.SubPathRoot); err != nil {
 			return fmt.Errorf("server.shared_dir_storage.nfs.subpath_root %w", err)
 		}
 	}
 	return nil
 }
 
-// validateSubPathRoot rejects a subpath_root that would produce a
+// ValidateSubPathRoot rejects a subpath_root that would produce a
 // confusing error or an unsafe path-component chain once joined with the
-// project ID and shared-dir name (round 6 review nit #6). An absolute
+// project ID and shared-dir name. An absolute
 // value (e.g. "/projects") produces a leading empty path component when
 // the resulting relative path is split on "/", which the component walk in
 // pkg/agent/shared_dir_storage_unix.go then reports as a confusing
@@ -949,18 +1716,41 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 // actionable message instead. "." and ".." components have no meaningful
 // interpretation here either: subpath_root exists to name one literal,
 // fixed subdirectory of the export, not to navigate the tree.
-func validateSubPathRoot(subPathRoot string) error {
-	if filepath.IsAbs(subPathRoot) {
+//
+// It is the one subpath_root validator shared by every storage backend and
+// by the runtimes that build paths from the value (see ResolveSubPathRoot).
+// The value must already be clean (path.Clean of its slash form leaves it
+// unchanged), so the configured string is exactly the path segment chain
+// that gets joined; an unclean value is reported with its clean form.
+func ValidateSubPathRoot(subPathRoot string) error {
+	slashed := filepath.ToSlash(subPathRoot)
+	if filepath.IsAbs(subPathRoot) || strings.HasPrefix(slashed, "/") {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
 	}
-	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
+	// Compared in slash form with path.Clean, not filepath.Clean: on Windows
+	// filepath.Clean("team/projects") is `team\projects`, which would reject
+	// every valid multi-segment root. Checked before the component loop so
+	// that an unclean value ("projects/", "./projects", "a//b") reports the
+	// clean value to use instead. A value with a ".." component is rejected
+	// for that first and gets no suggestion (cleaning "projects/../escape"
+	// to "escape" is not what the operator meant); nor does one that cleans
+	// to ".", which the component loop below reports.
+	comps := strings.Split(slashed, "/")
+	// ".." is reported first, whatever else is wrong with the value: it is
+	// the component that would climb out of the export ("./a/../b" must name
+	// "..", not ".").
+	if slices.Contains(comps, "..") {
+		return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
+	}
+	if cleaned := path.Clean(slashed); cleaned != slashed && cleaned != "." {
+		return fmt.Errorf("must be a clean path (got %q, use %q)", subPathRoot, cleaned)
+	}
+	for _, comp := range comps {
 		switch comp {
 		case "":
 			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
 		case ".":
 			return fmt.Errorf("must not contain a \".\" path component (got %q)", subPathRoot)
-		case "..":
-			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
 		}
 	}
 	return nil
@@ -977,10 +1767,11 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class) that are set on s but
+// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1014,10 +1805,7 @@ func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
 		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
 		pvName = s.NFS.Shares[0].PVName
 	}
-	subPathRoot := s.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := SubPathRootOrDefault(s.NFS.SubPathRoot)
 	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
 }
 
@@ -1161,6 +1949,108 @@ type V1CloudRunSandboxConfig struct {
 	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
 }
 
+// V1SubstrateConfig holds Substrate runtime settings (substrate-runtime.md
+// §2). Substrate is a Kubernetes-hosted actor
+// runtime; scion agents run as Substrate "actors". Selection is explicit
+// only — there is no auto-detect branch in factory.go.
+type V1SubstrateConfig struct {
+	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
+	// "api.ate-system.svc:443".
+	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
+	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
+	// to reach an actor's control server, e.g.
+	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
+	// required), not a bare host:port. This hop is plain HTTP: CAFile and
+	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
+	// (APIEndpoint), not to this one, and there is no separate TLS setting
+	// for it (see substrate-runtime.md §10).
+	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
+	// TokenAudience is the audience requested for the in-cluster
+	// ServiceAccount TokenRequest used to authenticate to the ateapi
+	// Control API. Defaults to "api.ate-system.svc" when empty.
+	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
+	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
+	// gRPC server certificate.
+	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
+	// holding the CA used to verify the ateapi Control gRPC server
+	// certificate. When both this and CAFile are set, the dialer prefers
+	// ClusterTrustBundle.
+	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
+	// SandboxClass selects the actor sandbox isolation technology
+	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
+	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
+	// by actor templates.
+	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
+	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
+	// pin actors to a labeled WorkerPool.
+	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
+	// SnapshotStorage is the configured bucket/prefix used for the
+	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
+	// EgressAllow lists additional hostnames allowed through the per-actor
+	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
+	// always adds. Despite the field's own shape (a bare string list), no
+	// IP addresses or CIDRs are accepted here — see below.
+	//
+	// Only public FQDNs are accepted here — no IP addresses or CIDRs at
+	// all (Substrate's own HostnameRule, which is where every entry ends
+	// up, rejects IP addresses outright), and only a hostname whose
+	// top-level domain is a real, ICANN-delegated one, with at least one
+	// label beneath its actual matched suffix (which may be a private
+	// multi-tenant-platform suffix like "googleapis.com"/"github.io", not
+	// only an ICANN one). See pkg/runtime/substrate.ValidateEgressAllow's
+	// doc comment for the exact rule set, which changes more often than
+	// this comment would otherwise be kept in sync with.
+	//
+	// Residual risk this does not close: a validly-public hostname can
+	// still be made to resolve to a private or in-cluster address (DNS
+	// rebinding, or services like nip.io/sslip.io that do this by design).
+	// Only a check by the egress proxy itself, after DNS resolution,
+	// against the address actually connected to, can close that gap.
+	//
+	// Validated by pkg/runtime/substrate.Validate, which NewSubstrateRuntime
+	// calls when the runtime is constructed, and Run calls again once at
+	// its start — not at settings-load time or by `scion config validate`
+	// (there is no generic settings-validation hook for this yet), and not
+	// a second time inside Run's egress-policy step (r.cfg is immutable for
+	// a single Run call, so one check per call is enough). Substrate's
+	// egress default-deny plus the actor's EgressPolicy is what keeps an
+	// actor off the atenet-router and other in-cluster services
+	// (substrate-runtime.md §5.2); an entry that reaches either of those
+	// would defeat it.
+	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
+	// EgressTrustBundle names a Substrate trust bundle to project into every
+	// actor as a system-info volume, so the actor can validate the egress
+	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
+	// Substrate d277088b).
+	//
+	// Required iff the cluster runs the sdsmint egress gateway
+	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
+	// the actor makes any HTTPS/TLS request: under sdsmint, the gateway
+	// terminates every TLS connection and re-originates it with a per-SNI
+	// leaf certificate chained to its own CA, which the actor otherwise has
+	// no way to validate. Setting this on a plain (non-sdsmint) install
+	// breaks every actor instead: nothing backs the named
+	// ClusterTrustBundle, so the actor fails to start (see
+	// pkg/runtime/substrate.Validate and buildActorTemplate's doc comment).
+	//
+	// Empty (the default) is off, and off is byte-identical to today: no
+	// system-info volume, no mount, no env. Validated by
+	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
+	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
+	// supports. Kept as a string validated against a one-name allowlist,
+	// not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.name, and a future additional name needs only an
+	// allowlist entry here, not a schema change.
+	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
+	// TemplateReadyTimeout bounds how long Run waits for a newly created
+	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
+	// Defaults to 10 minutes when empty.
+	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 //
 // Env is parsed and round-tripped but not applied to agent containers; no
@@ -1180,12 +2070,54 @@ type V1RuntimeConfig struct {
 	// not create one. Validated as a DNS-1123 subdomain. An explicit
 	// template/agent-config kubernetes.priorityClassName outranks this.
 	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for the ReadWriteMany PVCs backing project shared dirs. They are the
+	// lowest settings tier: a profile's values win over them, and a
+	// template's or agent's kubernetes block wins over both. See
+	// ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only default for the
+	// cluster-autoscaler.kubernetes.io/safe-to-evict pod annotation. Only an
+	// explicit false has an effect (the pod is annotated "false"); true is
+	// accepted and adds nothing. It is the lowest tier: a profile's
+	// safe_to_evict wins over it, and a template's or agent's
+	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
+	// ("local" or "nfs") for agents whose profile uses this runtime entry.
+	// A profile's own value wins over it. The nfs details always come from
+	// server.shared_dir_storage.nfs. Read from global settings only; see
+	// ResolveSharedDirStorage.
+	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents whose profile uses this runtime entry. A profile's
+	// own value wins over it. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents whose profile uses this runtime entry.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
 	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
+	// Substrate holds Substrate-specific settings when Type is "substrate".
+	Substrate *V1SubstrateConfig `json:"substrate,omitempty" yaml:"substrate,omitempty" koanf:"substrate"`
+	// KubernetesServiceAccountMappings maps a GCP service account (GSA) email
+	// to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload
+	// Identity, when Type is "kubernetes". Used by GCP identity mode "assign"
+	// dispatches on Kubernetes (ptone/scion#2328) to set the pod's
+	// spec.serviceAccountName. Scion never creates, annotates, or binds these
+	// KSAs — the operator must pre-provision each one (KSA exists, is
+	// annotated with iam.gke.io/gcp-service-account, and holds
+	// roles/iam.workloadIdentityUser for the named GSA) out of band. A
+	// same-keyed entry in the active profile's own
+	// KubernetesServiceAccountMappings overrides this one; see
+	// VersionedSettings.ResolveKubernetesServiceAccountMapping.
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
@@ -1229,6 +2161,10 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// Thinking maps the canonical 0-100 thinking level to harness-native values.
+	// Applied in-container by scion_harness.resolve_thinking.
+	Thinking *HarnessThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty" koanf:"thinking"`
+
 	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
@@ -1245,6 +2181,51 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessThinkingConfig maps the canonical 0-100 thinking level
+// (SCION_THINKING_LEVEL) to harness-native values. A level L maps to the Value
+// of the first entry in Levels whose Max >= L. Default is emitted when the
+// level is unset or invalid; when empty, nothing is emitted and the harness
+// CLI's own default applies. The mapping is resolved in-container by
+// scion_harness.resolve_thinking; Go only carries and validates it.
+type HarnessThinkingConfig struct {
+	Levels  []HarnessThinkingLevel `json:"levels" yaml:"levels" koanf:"levels"`
+	Default string                 `json:"default,omitempty" yaml:"default,omitempty" koanf:"default"`
+}
+
+// HarnessThinkingLevel is one entry of a HarnessThinkingConfig: Max is the
+// inclusive upper bound (0-100) of the level range that maps to Value.
+type HarnessThinkingLevel struct {
+	Max   int    `json:"max" yaml:"max" koanf:"max"` // no omitempty: 0 is meaningful
+	Value string `json:"value" yaml:"value" koanf:"value"`
+}
+
+// Validate checks the ordering rules the JSON schema cannot express: Levels
+// must be non-empty, each Max must be strictly greater than the previous one,
+// and the last Max must be 100 so every clamped level maps to a value.
+func (t *HarnessThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Levels) == 0 {
+		return fmt.Errorf("thinking.levels must not be empty")
+	}
+	for i, lvl := range t.Levels {
+		if lvl.Max < 0 || lvl.Max > 100 {
+			return fmt.Errorf("thinking.levels[%d].max must be between 0 and 100, got %d", i, lvl.Max)
+		}
+		if lvl.Value == "" {
+			return fmt.Errorf("thinking.levels[%d].value must not be empty", i)
+		}
+		if i > 0 && lvl.Max <= t.Levels[i-1].Max {
+			return fmt.Errorf("thinking.levels[%d].max (%d) must be greater than thinking.levels[%d].max (%d)", i, lvl.Max, i-1, t.Levels[i-1].Max)
+		}
+	}
+	if last := t.Levels[len(t.Levels)-1].Max; last != 100 {
+		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
+	}
+	return nil
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -1335,11 +2316,37 @@ type V1ProfileConfig struct {
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
 	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	// Timezone is an IANA timezone name (e.g. "America/Los_Angeles") injected
-	// as the TZ environment variable into agent containers using this profile.
-	// Validated with time.LoadLocation on write. Takes precedence over a raw
-	// TZ entry in the profile's env map and the hub-level default_timezone.
-	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for shared-dir PVCs created by agents using this profile. They win
+	// over the same keys on the profile's runtime entry and lose to a
+	// template's or agent's kubernetes block. See ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only safe-to-evict default for agents
+	// using this profile. It wins over the profile's runtime entry and
+	// loses to a template's or agent's kubernetes.safeToEvict. Only false
+	// has an effect. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
+	// ("local" or "nfs") for agents using this profile. It wins over the
+	// same key on the profile's runtime entry. The nfs details always come
+	// from server.shared_dir_storage.nfs. Read from global settings only;
+	// see ResolveSharedDirStorage.
+	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents using this profile. It wins over the same key on
+	// the profile's runtime entry. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents using this profile.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	// KubernetesServiceAccountMappings overrides, per GSA email, the
+	// runtime-level mapping of the same name for agents created under this
+	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and
+	// VersionedSettings.ResolveKubernetesServiceAccountMapping for the
+	// precedence and full contract.
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -1556,10 +2563,14 @@ func versionedEnvKeyMapper(s string) string {
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"start_create_unconfirmed_hold",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
+	"start_unconfirmed_hold",
+	"start_claim_lease_ttl",
 	"soft_delete_retention",
 	"missing_agent_grace",
+	"start_max_duration",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -1872,6 +2883,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.MissingAgentGrace = d
 			}
 		}
+		for _, f := range []struct {
+			v   string
+			dst *time.Duration
+		}{
+			{v1.Hub.StartClaimLeaseTTL, &gc.Hub.StartClaimLeaseTTL},
+			{v1.Hub.StartMaxDuration, &gc.Hub.StartMaxDuration},
+			{v1.Hub.StartUnconfirmedHold, &gc.Hub.StartUnconfirmedHold},
+			{v1.Hub.StartCreateUnconfirmedHold, &gc.Hub.StartCreateUnconfirmedHold},
+		} {
+			if f.v == "" {
+				continue
+			}
+			if d, err := time.ParseDuration(f.v); err == nil {
+				*f.dst = d
+			}
+		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
 		}
@@ -2087,7 +3114,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 
 	// Workspace storage — thread into GlobalConfig so the hub can read it.
 	if v1.WorkspaceStorage != nil {
-		v1.WorkspaceStorage.ApplyNFSDefaults()
+		v1.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
 		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 
@@ -2196,6 +3223,18 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if gc.Hub.StartClaimLeaseTTL > 0 {
+		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
+	}
+	if gc.Hub.StartMaxDuration > 0 {
+		v1Hub.StartMaxDuration = gc.Hub.StartMaxDuration.String()
+	}
+	if gc.Hub.StartUnconfirmedHold > 0 {
+		v1Hub.StartUnconfirmedHold = gc.Hub.StartUnconfirmedHold.String()
+	}
+	if gc.Hub.StartCreateUnconfirmedHold > 0 {
+		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
@@ -2720,7 +3759,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
@@ -2849,6 +3888,25 @@ func LoadGlobalSettings() (*VersionedSettings, []string, error) {
 	return loadGlobalSettingsOnly(globalDir)
 }
 
+// LoadGlobalSettingsWithOverlay is LoadGlobalSettings plus the
+// process-wide DB settings overlay (co-located hub and broker), which
+// replaces the runtimes, profiles, harness_configs and image_registry
+// sections with the hub's stored values. No project-level settings file is
+// ever merged, so a project still cannot set a value read from here. The
+// overlay is read on every call, so a change made through the hub settings
+// API applies to the next call without a restart. The returned settings
+// are a fresh copy; the overlay itself is never modified.
+func LoadGlobalSettingsWithOverlay() (*VersionedSettings, []string, error) {
+	vs, warnings, err := LoadGlobalSettings()
+	if err != nil {
+		return nil, warnings, err
+	}
+	if o := globalOverlay; o != nil && vs != nil {
+		o.Apply(vs)
+	}
+	return vs, warnings, nil
+}
+
 // GlobalSettingsMentions reports whether the RAW bytes of the global
 // settings file (read directly, without parsing) contain substr. Intended
 // for a caller that has already failed to parse the global settings file
@@ -2942,7 +4000,7 @@ func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, err
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		return vs, warnings, nil
 	}

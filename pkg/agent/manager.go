@@ -77,9 +77,10 @@ type Manager interface {
 	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// DeleteTarget terminates and removes an agent the caller has already
-	// resolved to a specific runtime entry (containerID, may be empty for a
-	// file-only agent) and project path. It never re-resolves by slug.
-	DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
+	// resolved to a specific runtime entry (ref.ID, may be empty for a
+	// file-only agent; ref.RunID is that entry's run ID) and project path.
+	// It never re-resolves by slug.
+	DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
@@ -89,22 +90,12 @@ type Manager interface {
 	// collision when agents share the same slug.
 	Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error
 
-	// MessageRaw sends literal bytes to an agent's tmux session via send-keys
-	// with no trailing Enter keypresses, allowing control sequences like
-	// arrow keys and Escape to be used directly.
-	// projectID scopes delivery to a specific project.
-	//
-	// Deprecated: MessageRaw is the primitive behind the legacy message-raw
-	// path (pending Phase 4 removal per .design/agent-keys-contract.md). It
-	// performs no "agent_id" identity binding. New callers must use SendKeys.
-	MessageRaw(ctx context.Context, agentID, projectID string, keys string) error
-
 	// SendKeys sends the exact byte-for-byte keys string to an agent's tmux
 	// session via one generated "send-keys ... -- <keys>" command, delivered
 	// on stdin to "tmux source-file -" (requires tmux ≥ 3.1) — the frozen
 	// primitive for the dedicated broker /keys route
-	// (.design/agent-keys-contract.md §4.3, §2.3). Unlike MessageRaw, it
-	// binds to the resolved container's "agent_id" label: it resolves the
+	// (.design/agent-keys-contract.md §4.3, §2.3). It binds to the
+	// resolved container's "agent_id" label: it resolves the
 	// target by (projectID, agentSlug), verifies the resolved container's
 	// "agent_id" label equals expectedAgentID, and executes on that same
 	// resolved container, all within this one call — see
@@ -144,7 +135,7 @@ type AgentManager struct {
 
 	// injectionLocks holds one *injectionMutex per resolved container ID,
 	// lazily created by injectionLock. It serializes tmux injection
-	// (message paste/interrupt, MessageRaw, and SendKeys) for the same
+	// (message paste/interrupt and SendKeys) for the same
 	// target so their byte sequences cannot interleave — see
 	// injectionLock's doc comment. Entries are never removed: each one is a
 	// small, fixed-size mutex, not a store of message content, so retaining
@@ -375,32 +366,33 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
-	var targetID string
+	var target runtime.RunRef
 	if err == nil {
 		// Resolve project name from projectPath (if provided) to scope the
 		// container lookup; refuse ambiguous matches rather than picking one.
-		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		entry, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
 		if selErr != nil {
 			return false, selErr
 		}
 		if found {
-			targetID = target.ContainerID
+			target = runtime.RunRef{ID: entry.ContainerID, RunID: entry.RunID}
 		}
 	}
-	return m.deleteResolved(ctx, agentID, targetID, deleteFiles, projectPath, removeBranch)
+	return m.deleteResolved(ctx, agentID, target, deleteFiles, projectPath, removeBranch)
 }
 
 // DeleteTarget deletes an agent that the caller has already resolved to a
 // specific runtime entry. Unlike Delete it performs no slug re-resolution, so
-// it cannot drift to a same-slug agent in another project. containerID may be
-// empty for an agent that has files but no backing container; projectPath is
-// used verbatim for file deletion.
-func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	return m.deleteResolved(ctx, agentName, containerID, deleteFiles, projectPath, removeBranch)
+// it cannot drift to a same-slug agent in another project. ref.ID may be
+// empty for an agent that has files but no backing container; ref.RunID is
+// the resolved entry's run ID and is passed through to Runtime.Delete.
+// projectPath is used verbatim for file deletion.
+func (m *AgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return m.deleteResolved(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
 }
 
-func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if targetID != "" {
+func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if targetID := ref.ID; targetID != "" {
 		// Stop the container gracefully before force-removing it. This ensures
 		// bind mounts (e.g. shared-dir volumes) are properly released before
 		// filesystem cleanup. Without this, docker rm -f / container kill sends
@@ -413,8 +405,8 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID s
 			util.Debugf("delete: stop returned error (continuing): %v", err)
 		}
 
-		util.Debugf("delete: starting runtime delete for container %s", targetID)
-		if err := m.Runtime.Delete(ctx, targetID); err != nil {
+		util.Debugf("delete: starting runtime delete for container %s (run_id=%q)", targetID, ref.RunID)
+		if err := m.Runtime.Delete(ctx, ref); err != nil {
 			return false, fmt.Errorf("failed to delete container: %w", err)
 		}
 		util.Debugf("delete: runtime delete completed for container %s", targetID)
@@ -427,6 +419,18 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID s
 		return branchDeleted, err
 	}
 	return false, nil
+}
+
+// CleanupAgentResources removes runtime objects that an agent's start
+// created beside its container (for example Kubernetes Secrets) when the
+// container itself is already gone, so deleteResolved never reaches
+// Runtime.Delete. It is a no-op for a runtime that does not implement
+// runtime.AgentResourceCleaner. See that interface for the scoping rules.
+func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+		return c.CleanupAgentResources(ctx, agentName, projectID)
+	}
+	return nil
 }
 
 func (m *AgentManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
@@ -520,53 +524,6 @@ func (m *AgentManager) RuntimeName() string {
 	return m.Runtime.Name()
 }
 
-// MessageRaw sends literal bytes to an agent's tmux session via send-keys
-// with no trailing Enter keypresses. This bypasses the paste buffer and
-// debounce buffer, sending directly via tmux send-keys so that control
-// sequences (arrow keys, Escape, etc.) are interpreted by the terminal.
-func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if projectID != "" {
-		filter["scion.project_id"] = projectID
-	}
-	agents, err := m.List(ctx, filter)
-	if err != nil {
-		return err
-	}
-
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		if matchesAgentID(a, agentID) {
-			agent = &a
-			break
-		}
-	}
-
-	if agent == nil {
-		return errNoRunningContainer(agentID)
-	}
-
-	// Serialize against a concurrent SendKeys call (or a concurrent
-	// deliverImmediate call) for the same resolved container, so their tmux
-	// byte sequences cannot interleave — see injectionLock's doc comment.
-	// MessageRaw is the legacy raw-message primitive (pending Phase 4
-	// removal per .design/agent-keys-contract.md); it did not take this
-	// lock previously, so raw keys delivered through it could interleave
-	// with a buffered paste or interrupt for the same agent.
-	lock := m.injectionLock(agent.ContainerID)
-	if err := lock.Lock(ctx); err != nil {
-		return fmt.Errorf("failed to acquire injection lock for agent '%s': %w", agent.Name, err)
-	}
-	defer lock.Unlock()
-
-	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "--", keys}
-	if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
-		return fmt.Errorf("failed to send raw keys to agent '%s': %w", agent.Name, err)
-	}
-
-	return nil
-}
-
 // keysTarget is the tmux target every injection primitive in this file
 // addresses — the single window every agent harness runs in.
 const keysTarget = "scion:0"
@@ -651,7 +608,7 @@ func (im *injectionMutex) Unlock() {
 //
 // Serialization guarantee, stated precisely because it is easy to overstate:
 // this lock only orders concurrent calls into this one AgentManager's
-// deliverImmediate/MessageRaw/SendKeys for the same resolved container. It
+// deliverImmediate/SendKeys for the same resolved container. It
 // says nothing about, and must not be relied on to order, interactive PTY
 // input (a separate code path entirely, pkg/runtimebroker/pty_handlers.go)
 // or a separate local CLI process's own manager instance (which has its own,
@@ -896,7 +853,7 @@ func (s keysScope) empty() bool {
 // that floor and returns ErrKeysUnsupported for a resolved container whose
 // tmux is provably older.
 //
-// Unlike MessageRaw, SendKeys performs the "agent_id" container-label
+// SendKeys performs the "agent_id" container-label
 // identity check described in agentkeys.BrokerRequest's doc comment
 // atomically with resolution: exactly one List-then-match resolves exactly
 // one container (resolveKeysTarget), that container's own "agent_id" label

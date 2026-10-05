@@ -113,6 +113,14 @@ runtimes:
 | `sync` | string | File sync strategy (e.g., `tar`). |
 | `gke` | bool | (Kubernetes) Enable GKE-specific features (e.g., Workload Identity, Autopilot scheduling). Default: `false`. |
 | `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. A template/agent `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
+| `list_all_namespaces` | bool | (Kubernetes) List agents across all namespaces. Default: `false`. |
+| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and a template or agent `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
+| `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
+| `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and a template or agent `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
+| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
+| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
+| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents whose profile uses this runtime. A profile's value wins over this. |
+| `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note
@@ -215,19 +223,25 @@ profiles:
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
-| `env` | map | Environment variables merged into the runtime environment. |
-| `timezone` | string | IANA timezone name (e.g., `America/Los_Angeles`) injected as `TZ` into agent containers dispatched by a Hub under this profile. Validated on write; an invalid name is rejected with `422`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+| `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
+| `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
+| `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
+| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
+| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
+| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents using this profile. Wins over the runtime entry's value. |
+| `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |
 
-**Agent timezone (Hub-dispatched agents).** The Hub sets `TZ` in the agent container from the first source that is set:
+**Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
-1. The profile's `timezone` field.
-2. A `TZ` entry in the profile's `env` map.
-3. The Hub-level `agent_defaults.default_timezone` (see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)).
-4. Otherwise `TZ` is not injected and the container uses its default (UTC).
+**Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's or template's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
 
-The web **Profile settings** page includes a **Timezone** card that edits the `timezone` field of the Hub's active runtime profile. Names are checked client-side as IANA timezones before saving; leave the field blank to clear it and fall back to the Hub default. This is a Hub-wide profile setting, not a per-user preference: the card appears only to users who can read the admin server configuration (`GET /api/v1/admin/server-config`), and saving writes the `profiles` map back through the same admin endpoint.
+**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
+
+#### Removed: profile `timezone`
+
+The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
 
 ## Telemetry Configuration (`telemetry`)
 
