@@ -100,75 +100,53 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List all projects and filter by ActionRead using batch capability check.
-	allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	// List every project as a summary: the rail needs only identity, naming,
+	// the emoji annotation and the authorization inputs, not the agent,
+	// contributor and broker counts ListProjects computes per project.
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
 	}
 
+	// Decide ActionRead only: it is the one capability this handler reads,
+	// and ComputeCapabilitiesForActions runs the same decision path
+	// ComputeCapabilitiesBatch does for that action.
 	identity := GetIdentityFromContext(ctx)
 	resources := make([]Resource, len(allProjects.Items))
 	for i := range allProjects.Items {
 		resources[i] = projectResource(&allProjects.Items[i])
 	}
-	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+	caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
 
 	// Get user prefs.
 	prefs, _ := wcs.GetUserPrefs(ctx, user.ID())
 
-	var spaces []chatSpaceEntry
-	for i, p := range allProjects.Items {
-		if !capabilityAllows(caps[i], ActionRead) {
-			continue
+	visible := make([]*store.Project, 0, len(allProjects.Items))
+	for i := range allProjects.Items {
+		if capabilityAllows(caps[i], ActionRead) {
+			visible = append(visible, &allProjects.Items[i])
 		}
+	}
 
-		// Get topics for this space to compute unread count.
-		topics, _ := wcs.ListTopics(ctx, p.ID)
-		convKeys := make([]string, 0, len(topics))
-		for _, t := range topics {
-			convKeys = append(convKeys, t.ID)
-		}
+	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible)
 
-		var unreadCount int
-		if len(convKeys) > 0 {
-			readStates, _ := wcs.GetReadStates(ctx, user.ID(), convKeys)
-			readMap := make(map[string]WebChatReadState, len(readStates))
-			for _, rs := range readStates {
-				readMap[rs.ConversationKey] = rs
-			}
-			for _, t := range topics {
-				rs, ok := readMap[t.ID]
-				// A muted thread is silent all the way up: it contributes
-				// nothing to the space badge, so muting every unread thread in
-				// a space clears the badge instead of leaving the space
-				// shouting about threads the user asked to be quiet (#1029).
-				// Mentions are covered by the same rule — the rail already
-				// hides the mention dot on a muted thread, and a rollup that
-				// disagreed with it would put two numbers on screen.
-				if ok && rs.Muted {
-					continue
-				}
-				if !ok || rs.LastReadMessageID == "" || (t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID) {
-					if t.LastMessageID != "" {
-						unreadCount++
-					}
-				}
-			}
-		}
-
-		spaces = append(spaces, chatSpaceEntry{
+	spaces := make([]chatSpaceEntry, 0, len(visible))
+	for _, p := range visible {
+		ru := rollups[p.ID]
+		entry := chatSpaceEntry{
 			ProjectID:   p.ID,
 			ProjectName: p.Name,
 			ProjectSlug: p.Slug,
 			Emoji:       p.Annotations[spaceEmojiAnnotationKey],
-			ThreadCount: len(topics),
-			UnreadCount: unreadCount,
-		})
-	}
-
-	if spaces == nil {
-		spaces = []chatSpaceEntry{}
+			ThreadCount: ru.threadCount,
+			UnreadCount: ru.unreadCount,
+		}
+		if ru.threadCount > 0 {
+			last := ru.lastActivityAt
+			entry.LastActivityAt = &last
+		}
+		spaces = append(spaces, entry)
 	}
 
 	resp := chatSpacesResponse{
@@ -183,6 +161,85 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// chatSpacesTopicBatch and chatSpacesReadStateBatch bound the number of
+// bind parameters in one rollup query, keeping each well under SQLite's
+// limit while still covering a typical hub in a single query each. They
+// are variables only so tests can exercise batch boundaries.
+var (
+	chatSpacesTopicBatch     = 200
+	chatSpacesReadStateBatch = 500
+)
+
+// chatSpaceRollup is one space's thread rollup for the spaces list.
+type chatSpaceRollup struct {
+	threadCount    int
+	unreadCount    int
+	lastActivityAt time.Time
+}
+
+// chatSpaceRollups computes the thread count, unread count and newest
+// thread activity of every project in projects for userID, fetching topics
+// and read states in batches across projects rather than per project.
+//
+// Store errors are ignored, as the per-project lookups this replaces
+// ignored them: a failed topic read leaves its projects with no threads,
+// and a failed read-state read leaves its threads with no read state.
+func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project) map[string]chatSpaceRollup {
+	out := make(map[string]chatSpaceRollup, len(projects))
+	if len(projects) == 0 {
+		return out
+	}
+
+	var topics []WebChatTopic
+	for start := 0; start < len(projects); start += chatSpacesTopicBatch {
+		end := min(start+chatSpacesTopicBatch, len(projects))
+		ids := make([]string, 0, end-start)
+		for _, p := range projects[start:end] {
+			ids = append(ids, p.ID)
+		}
+		batch, _ := wcs.ListTopicsByProjects(ctx, ids)
+		topics = append(topics, batch...)
+	}
+	if len(topics) == 0 {
+		return out
+	}
+
+	readMap := make(map[string]WebChatReadState, len(topics))
+	for start := 0; start < len(topics); start += chatSpacesReadStateBatch {
+		end := min(start+chatSpacesReadStateBatch, len(topics))
+		keys := make([]string, 0, end-start)
+		for _, t := range topics[start:end] {
+			keys = append(keys, t.ID)
+		}
+		states, _ := wcs.GetReadStates(ctx, userID, keys)
+		for _, rs := range states {
+			readMap[rs.ConversationKey] = rs
+		}
+	}
+
+	for _, t := range topics {
+		ru := out[t.ProjectID]
+		ru.threadCount++
+		if t.LastActivityAt.After(ru.lastActivityAt) {
+			ru.lastActivityAt = t.LastActivityAt
+		}
+		rs, ok := readMap[t.ID]
+		// A muted thread is silent all the way up: it contributes nothing
+		// to the space badge, so muting every unread thread in a space
+		// clears the badge instead of leaving the space shouting about
+		// threads the user asked to be quiet (#1029). Mentions are covered
+		// by the same rule — the rail already hides the mention dot on a
+		// muted thread, and a rollup that disagreed with it would put two
+		// numbers on screen.
+		if !(ok && rs.Muted) && t.LastMessageID != "" &&
+			(!ok || rs.LastReadMessageID == "" || t.LastMessageID != rs.LastReadMessageID) {
+			ru.unreadCount++
+		}
+		out[t.ProjectID] = ru
+	}
+	return out
 }
 
 // handleChatSpaceRoutes dispatches sub-routes under /api/v1/chat/spaces/.
@@ -3772,6 +3829,12 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		slog.Warn("chat members: agent list truncated at safety cap",
 			"project", project.ID, "cap", spaceMembersMaxAgents)
 	}
+	// The attach checks below are one read-only evaluation phase for one
+	// principal, so they share the request-local authorization input memo
+	// (as ComputeCapabilitiesBatch does): the caller's principals, bindings
+	// and access constraints load once instead of once per agent. Every
+	// decision still runs, and is audited, individually.
+	attachCtx := withAuthzInputMemo(ctx)
 	for _, a := range projectAgents {
 		// Each attach check reads the store and may write an audit record,
 		// so stop once the client has gone rather than finishing the list.
@@ -3793,7 +3856,7 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		// ActionAttach for a user identity, so ask the same question here
 		// rather than offering a control the server will refuse.
 		entry.CanAttach = s.authzService.CheckAccess(
-			ctx, user, agentResource(&a), ActionAttach).Allowed
+			attachCtx, user, agentResource(&a), ActionAttach).Allowed
 		if !a.LastSeen.IsZero() {
 			entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
 		}
@@ -4674,6 +4737,10 @@ type chatSpaceEntry struct {
 	Emoji       string `json:"emoji,omitempty"`
 	ThreadCount int    `json:"threadCount"`
 	UnreadCount int    `json:"unreadCount"`
+	// LastActivityAt is the newest lastActivityAt across the space's
+	// threads, in the same format as a thread's lastActivityAt. Omitted
+	// when the space has no threads.
+	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
 }
 
 type chatSpacePrefs struct {

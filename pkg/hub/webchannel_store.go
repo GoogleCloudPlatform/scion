@@ -100,6 +100,13 @@ type WebChatStore interface {
 	// created (covers pre-existing projects).
 	ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error)
 
+	// ListTopicsByProjects returns the non-deleted topics of every project
+	// in projectIDs in one query: the union of ListTopics over those
+	// projects, ordered by project_id and then last_activity_at DESC. It
+	// creates nothing. Callers bound len(projectIDs) to stay under the
+	// driver's bind-parameter limit.
+	ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error)
+
 	// UpdateTopic applies partial updates (rename, set/clear default_agent).
 	UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error
 
@@ -900,6 +907,55 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
 	}
 
+	return topics, nil
+}
+
+// ListTopicsByProjects returns non-deleted topics for several projects in
+// one query, ordered by project_id and then last_activity_at DESC.
+func (s *sqliteWebChatStore) ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(projectIDs))
+	args := make([]interface{}, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s) AND deleted_at IS NULL
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var topics []WebChatTopic
+	for rows.Next() {
+		var t WebChatTopic
+		var isGeneral int
+		var createdAtStr, activityStr string
+		var deletedAtStr *string
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+			&t.ConversationID,
+			&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr); err != nil {
+			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+		}
+		t.IsGeneral = isGeneral != 0
+		t.CreatedAt = parseSQLiteTime(createdAtStr)
+		t.LastActivityAt = parseSQLiteTime(activityStr)
+		topics = append(topics, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects rows: %w", err)
+	}
 	return topics, nil
 }
 
