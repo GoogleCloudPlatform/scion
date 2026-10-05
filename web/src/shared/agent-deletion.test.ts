@@ -23,6 +23,8 @@ import {
   isDeletionActive,
   readAcceptedDeletion,
   shouldApplyAcceptedDeletion,
+  deletionBlocksStart,
+  deletionBannerText,
 } from './agent-deletion.js';
 import type { DeletionInfo } from './types.js';
 
@@ -207,5 +209,103 @@ describe('failed-view expiry (expiresAt)', () => {
     expect(
       nextDeletionDeadline([{ deletion: failedView({ expiresAt: iso(T0 + 5_000) }) }, d], T0)
     ).toBe(T0 + 5_000);
+  });
+});
+
+// Design note D4 (phase 2): the hub marks finalizing rows with
+// stage:"finalizing"; a lapsed finalizing lease flips to the generic
+// interrupted view but never expires, because the hub never expires it.
+describe('finalizing stage (D4)', () => {
+  const lease = T0 + 60_000;
+  const finalizing = (): DeletionInfo => deleting({ stage: 'finalizing' });
+
+  it('a lapsed finalizing lease reads interrupted (abandoned) with no expiresAt', () => {
+    const view = effectiveDeletion(finalizing(), lease);
+    expect(view).toMatchObject({ state: 'failed', code: 'abandoned', stage: 'finalizing' });
+    expect(view?.expiresAt).toBeUndefined();
+    expect(deletionBadgeLabel(view!)).toBe('Delete interrupted');
+  });
+
+  it('is still shown 15 minutes (and a day) after the lease, and arms no timer', () => {
+    for (const at of [
+      lease + DELETION_DISPLAY_TTL_MS,
+      lease + DELETION_DISPLAY_TTL_MS + 1,
+      lease + 86_400_000,
+    ]) {
+      expect(effectiveDeletion(finalizing(), at)?.state).toBe('failed');
+    }
+    expect(nextDeletionDeadline([{ deletion: finalizing() }], lease + 1)).toBeNull();
+  });
+
+  it('a lapsed plain deleting lease still expires at lease + 15m', () => {
+    expect(effectiveDeletion(deleting(), lease + DELETION_DISPLAY_TTL_MS - 1)?.state).toBe(
+      'failed'
+    );
+    expect(effectiveDeletion(deleting(), lease + DELETION_DISPLAY_TTL_MS)).toBeNull();
+  });
+
+  it('a live finalizing lease is still Deleting… with no Force (not failed)', () => {
+    const view = effectiveDeletion(finalizing(), lease - 1);
+    expect(view?.state).toBe('deleting');
+    expect(deletionBlocksStart(view)).toBe(false);
+  });
+});
+
+describe('deletionBlocksStart', () => {
+  const failed = (o: Partial<DeletionInfo>): DeletionInfo =>
+    deleting({ state: 'failed', leaseExpiresAt: undefined, ...o });
+
+  it('is true for in_doubt and finalizing failures, including a client-flipped one', () => {
+    expect(deletionBlocksStart(failed({ code: 'in_doubt' }))).toBe(true);
+    expect(deletionBlocksStart(failed({ code: 'revoke_failed', stage: 'finalizing' }))).toBe(true);
+    expect(deletionBlocksStart(failed({ code: 'finalize_failed' }))).toBe(true);
+    expect(deletionBlocksStart(failed({ code: 'abandoned', stage: 'finalizing' }))).toBe(true);
+    expect(
+      deletionBlocksStart(effectiveDeletion(deleting({ stage: 'finalizing' }), T0 + 61_000))
+    ).toBe(true);
+  });
+
+  it('is false for other failures, a live delete and no delete', () => {
+    for (const code of ['runtime_error', 'conflict', 'abandoned', 'runtime_unavailable']) {
+      expect(deletionBlocksStart(failed({ code }))).toBe(false);
+    }
+    expect(deletionBlocksStart(deleting())).toBe(false);
+    expect(deletionBlocksStart(null)).toBe(false);
+  });
+});
+
+describe('deletionBannerText', () => {
+  const failed = (o: Partial<DeletionInfo>): DeletionInfo =>
+    deleting({ state: 'failed', leaseExpiresAt: undefined, ...o });
+
+  it('runtime_error: the error message, Retry/Force wording', () => {
+    const t = deletionBannerText(failed({ code: 'runtime_error', error: 'broker refused' }));
+    expect(t.title).toBe('Delete failed: broker refused');
+    expect(t.detail).toMatch(/Retry/);
+    expect(t.detail).not.toMatch(/blocked/);
+  });
+
+  it('abandoned: Delete interrupted', () => {
+    const t = deletionBannerText(failed({ code: 'abandoned' }));
+    expect(t.title).toBe('Delete interrupted');
+    expect(t.detail).not.toMatch(/blocked/);
+  });
+
+  it('in_doubt, revoke_failed, finalize_failed and a finalizing interruption say start is blocked and Force is the way out', () => {
+    const cases: Array<[Partial<DeletionInfo>, string]> = [
+      [{ code: 'in_doubt' }, 'Delete failed: outcome unknown'],
+      [
+        { code: 'revoke_failed', stage: 'finalizing' },
+        'Delete failed: could not revoke credentials',
+      ],
+      [{ code: 'finalize_failed', stage: 'finalizing' }, 'Delete failed: could not finalize'],
+      [{ code: 'abandoned', stage: 'finalizing' }, 'Delete interrupted'],
+    ];
+    for (const [o, title] of cases) {
+      const t = deletionBannerText(failed(o));
+      expect(t.title).toBe(title);
+      expect(t.detail).toMatch(/starting this agent is blocked/i);
+      expect(t.detail).toMatch(/Force delete/);
+    }
   });
 });

@@ -116,9 +116,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	explicitSlug := baseSlug != ""
 	if !explicitSlug {
 		baseSlug = api.Slugify(req.Name)
+	} else if isReservedProjectSlug(baseSlug) {
+		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
 	}
 
-	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

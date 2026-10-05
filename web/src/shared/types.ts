@@ -683,7 +683,17 @@ export interface DeletionInfo {
   leaseExpiresAt?: string;
   /** Set on `failed`, except `in_doubt` and finalizing rows. */
   expiresAt?: string;
+  /**
+   * `finalizing` when the hub row's stored state is finalizing (teardown
+   * has run; finalize is running or was interrupted), on both the deleting
+   * and the failed view; absent otherwise. Such a row never expires from
+   * view and blocks start until a retry or force (design note D4).
+   */
+  stage?: DeletionStage;
 }
+
+/** `DeletionInfo.stage` values (open-ended for forward compatibility). */
+export type DeletionStage = 'finalizing' | (string & Record<never, never>);
 
 /**
  * Template configuration embedded in template detail responses.
