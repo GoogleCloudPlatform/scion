@@ -64,6 +64,19 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
+// settings-v1.schema.json: shared dir name keys (lowercase letters, digits
+// and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
+func sharedDirStorageBackendsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"propertyNames": map[string]interface{}{
+			"pattern": config.SharedDirNamePattern,
+		},
+		"additionalProperties": map[string]interface{}{"type": "string", "enum": []string{"local", "nfs"}},
+	}
+}
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -512,7 +525,7 @@ func compileSchemas() {
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
 					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"shared_dir_storage_backends": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string", "enum": []string{"local", "nfs"}}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
 					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
 					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
@@ -555,7 +568,7 @@ func compileSchemas() {
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
 					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"shared_dir_storage_backends": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string", "enum": []string{"local", "nfs"}}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
 					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
 					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 

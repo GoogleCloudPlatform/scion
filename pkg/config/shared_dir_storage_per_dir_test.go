@@ -15,9 +15,11 @@
 package config
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -331,4 +333,56 @@ func TestDetectSettingsFormat_PerDirKeyIsV1Indicator(t *testing.T) {
 		},
 	}
 	assert.True(t, hasV1RuntimeIndicators(raw))
+}
+
+// The settings schema itself rejects per-dir keys that are not shared dir
+// names.
+func TestSettingsSchema_SharedDirStorageBackendsKeyPattern(t *testing.T) {
+	doc := func(key string) []byte {
+		return []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    shared_dir_storage_backends:
+      ` + key + `: local
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backends:
+      ` + key + `: local
+`)
+	}
+	errs, err := validateAgainstSchema(doc("build-cache"), "1", settingsSchemaFiles)
+	require.NoError(t, err)
+	assert.Empty(t, errs)
+	for _, key := range []string{"Bad_Name", "-lead", "trail-", "with.dot"} {
+		errs, err := validateAgainstSchema(doc(`"`+key+`"`), "1", settingsSchemaFiles)
+		require.NoError(t, err)
+		assert.Len(t, errs, 2, "%s: both entries are rejected by the schema: %v", key, errs)
+	}
+}
+
+func TestSharedDirNamePatternMatchesValidateSharedDirs(t *testing.T) {
+	re := regexp.MustCompile(SharedDirNamePattern)
+	for _, name := range []string{"a", "build-cache", "a1-b2", "x--y", "", "-a", "a-", "A", "a_b", "a.b", "a/b"} {
+		want := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}) == nil
+		assert.Equal(t, want, re.MatchString(name), "%q", name)
+	}
+}
+
+// The value check does not need server.shared_dir_storage: it reports names
+// and values but not a missing nfs block.
+func TestValidateSharedDirStorageBackendValues(t *testing.T) {
+	errs := ValidateSharedDirStorageBackendValues(nil, map[string]V1ProfileConfig{
+		"p": {SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"notes": "nfs"}},
+	})
+	assert.Empty(t, errs)
+
+	errs = ValidateSharedDirStorageBackendValues(
+		map[string]V1RuntimeConfig{"rt": {SharedDirStorageBackend: "disk"}},
+		map[string]V1ProfileConfig{"p": {SharedDirStorageBackends: map[string]string{"Bad_Name": "local", "notes": ""}}})
+	require.Len(t, errs, 3)
+	assert.Equal(t, "profiles.p.shared_dir_storage_backends.Bad_Name", errs[0].Path)
+	assert.Equal(t, "profiles.p.shared_dir_storage_backends.notes", errs[1].Path)
+	assert.Equal(t, "runtimes.rt.shared_dir_storage_backend", errs[2].Path)
 }

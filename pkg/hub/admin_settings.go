@@ -480,6 +480,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// cannot strand an existing nfs override. Configuration only; no mount
 	// is checked.
 	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	// Values and per-dir names do not depend on the current settings, so
+	// they are checked even when those cannot be read below.
+	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
 	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
 		runtimes, profiles := req.Runtimes, req.Profiles
 		var sdGlobal *config.V1SharedDirStorageConfig

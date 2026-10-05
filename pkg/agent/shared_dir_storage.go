@@ -393,23 +393,6 @@ func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error
 	return &rec, nil
 }
 
-// readSharedDirStorageRecord returns the recorded default shared-dir
-// storage backend for the agent whose directory is agentDir, or "" when
-// none is recorded. See loadSharedDirStorageRecord.
-func readSharedDirStorageRecord(agentDir string) (string, error) {
-	rec, err := loadSharedDirStorageRecord(agentDir)
-	if err != nil || rec == nil {
-		return "", err
-	}
-	return rec.Backend, nil
-}
-
-// writeSharedDirStorageRecord records backend for every shared dir of the
-// agent whose directory is agentDir, through writeAgentRecordFile.
-func writeSharedDirStorageRecord(agentDir, backend string) error {
-	return saveSharedDirStorageRecord(agentDir, &sharedDirStorageRecord{Backend: backend})
-}
-
 // saveSharedDirStorageRecord writes rec for the agent whose directory is
 // agentDir, through writeAgentRecordFile.
 func saveSharedDirStorageRecord(agentDir string, rec *sharedDirStorageRecord) error {

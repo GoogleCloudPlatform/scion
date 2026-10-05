@@ -2196,9 +2196,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// filesystem access to them. Mirror the same volumes/targets the main
 		// container gets (by index, so the names match what the loop below
 		// creates) so `sciontool provision` can mkdir+chown them too. Out of
-		// scope here: server.shared_dir_storage's own NFS mechanism
-		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
-		// in F-111.
+		// scope here: dirs served by server.shared_dir_storage's own NFS
+		// mechanism (SharedDirStorage.Serves below) — a separate subsystem,
+		// not implicated in F-111.
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
 		// #2670: the sentinel and the provisioning lock live in the
 		// project's provisioning state directory, mounted next to the
