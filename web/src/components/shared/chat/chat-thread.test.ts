@@ -792,6 +792,64 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
   });
 
+  // A replayed send response without dispatchState (an idempotency hit
+  // returns only id/content/sender) defaults to dispatched; it must not
+  // overwrite an SSE-delivered terminal no_recipient.
+  it('never downgrades an SSE-delivered no_recipient when the HTTP response omits dispatchState', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'thanks',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    internals.messageMap.set('server-sse-no-recipient', {
+      id: 'server-sse-no-recipient',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'thread:t1',
+      recipientId: 't1',
+      msg: 'thanks',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'no_recipient',
+    });
+
+    resolveSend({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'server-sse-no-recipient', content: 'thanks' }),
+    } as unknown as Response);
+
+    await sendPromise;
+
+    expect(internals.messageMap.get('server-sse-no-recipient')?.dispatchState).toBe('no_recipient');
+  });
+
   // Review R2: PublishUserMessage now carries dispatchFailureReason/Code on
   // the SSE event for a failed row, so a live viewer in another tab (which
   // only ever sees the SSE path, never the send response) also renders

@@ -2321,8 +2321,11 @@ export class ScionChatThread extends LitElement {
             // terminal `failed` state — skip applying this HTTP response's
             // dispatch fields if the SSE-delivered version is already failed
             // and this response would move it back to dispatched/pending.
+            // The same holds for terminal `no_recipient`: a replayed
+            // response without dispatchState defaults to dispatched above.
             const wouldDowngrade =
-              sseVersion.dispatchState === 'failed' &&
+              (sseVersion.dispatchState === 'failed' ||
+                sseVersion.dispatchState === 'no_recipient') &&
               (dispatchState === 'dispatched' || dispatchState === 'pending');
             let updatedSseVersion = sseVersion;
             if (!wouldDowngrade) {
