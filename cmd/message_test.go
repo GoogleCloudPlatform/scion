@@ -3495,10 +3495,12 @@ func captureCombinedOutput(t *testing.T, fn func()) string {
 		done <- buf.String()
 	}()
 	func() {
+		// Close the writer even if fn fails the test or panics, so the
+		// reader goroutine always sees EOF and never hangs.
+		defer func() { _ = w.Close() }()
 		defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
 		fn()
 	}()
-	_ = w.Close()
 	return <-done
 }
 
@@ -3622,4 +3624,94 @@ func TestSendOutboundMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *tes
 	require.NoError(t, err)
 	require.Contains(t, out, "Note: @bob is not an agent in this project; no agent was notified.")
 	assert.Equal(t, "Message sent to user:alice@example.com via Hub.", lastLine(out))
+}
+
+// TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary covers the
+// group path, where the CLI resolves mentions itself
+// (sendMentionMessages): a group send that names a non-agent prints the
+// note, and the group delivery summary is still the last line.
+func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-3303-group"
+	agents := []hubclient.Agent{
+		{Name: "agent-a", Slug: "agent-a", Status: "running"},
+		{Name: "agent-b", Slug: "agent-b", Status: "running"},
+	}
+	server, _ := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientAgent, Name: "agent-b"},
+	}
+
+	var sendErr error
+	out := captureCombinedOutput(t, func() {
+		sendErr = sendGroupMessageViaHub(hubCtx, recipients, "hey @not-an-agent", false)
+	})
+	require.NoError(t, sendErr, "a skipped mention must not fail the send")
+
+	note := "Note: @not-an-agent is not an agent in this project; no agent was notified."
+	require.Contains(t, out, note)
+	assert.NotContains(t, out, "Warning: @not-an-agent", "a skipped mention must not read as a failure")
+	assert.Equal(t, "Group delivery complete: 2/2 delivered.", lastLine(out))
+}
+
+// TestSendCrossProjectMessage_MentionPrintsBeforeConfirmation covers the
+// cross-project path: mention results, then the delivery confirmation.
+func TestSendCrossProjectMessage_MentionPrintsBeforeConfirmation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "target-uuid-1234", "target-agent", "proj-b-uuid", "project-b")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-a-uuid"}
+
+	out := captureCombinedOutput(t, func() {
+		err = sendCrossProjectMessage(hubCtx, "project-b", "target-agent", "hey @mentioned-agent", false, false, nil)
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "Mention notification sent to @mentioned-agent.")
+	assert.Equal(t, "Message delivered to agent 'target-agent' in project 'project-b'.", lastLine(out))
+}
+
+// TestSendMessageViaConversation_AgentRefMentionPrintsBeforeConfirmation
+// covers the agent-context @agent ref branch of sendMessageViaConversation.
+func TestSendMessageViaConversation_AgentRefMentionPrintsBeforeConfirmation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "project-msg-3303-agentref"
+	agents := []hubclient.Agent{{Name: "my-agent", Status: "running"}}
+	server, _ := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "my-agent", Raw: "@my-agent"}
+
+	out := captureCombinedOutput(t, func() {
+		err = sendMessageViaConversation(hubCtx, ref, "hey @nobody", false, false, nil)
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "Note: @nobody is not an agent in this project; no agent was notified.")
+	assert.Equal(t, "Message delivered to agent 'my-agent'.", lastLine(out))
 }

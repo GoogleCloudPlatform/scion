@@ -1301,7 +1301,8 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 // printMentionResults prints one line per mention result to stderr,
 // describing the outcome for names that were not cleanly delivered. Skipped
 // entirely under --json output, where the caller includes the results in the
-// JSON response instead.
+// JSON response instead. Callers must call it before printing the send
+// confirmation, so the confirmation stays the last line of output.
 func printMentionResults(results []messages.MentionResult) {
 	if isJSONOutput() {
 		return
