@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +51,93 @@ const (
 	// seriesIncreases looks for a series' prior point, so it can compute a
 	// delta instead of double-counting a running total (design §3.6).
 	cumulativeLookback = 24 * time.Hour
+
+	// dayKeyLayout is the calendar-day bucket key, formatted in the
+	// dashboard's resolved zone (see resolveDashboardTimeZone).
+	dayKeyLayout = "2006-01-02"
+
+	// maxTimeZoneParamLen caps the tz query parameter before it reaches
+	// time.LoadLocation. The longest IANA name is about 30 bytes.
+	maxTimeZoneParamLen = 64
+
+	// maxCachedZones bounds how many distinct non-UTC zones the dashboard
+	// cache holds at once. A viewer's zone is client-supplied, so without a
+	// bound a client cycling through every IANA name could multiply the
+	// cache by ~600. Past the cap, results for a new zone are computed but
+	// not cached until older zones' entries expire (cacheTTL).
+	maxCachedZones = 16
 )
+
+// timeZoneParamShape is the conservative shape a tz query parameter must
+// have before time.LoadLocation sees it: one to three '/'-separated segments,
+// each starting with an ASCII letter and otherwise letters, digits, '_', '+'
+// or '-' ("UTC", "Asia/Kathmandu", "Etc/GMT+5",
+// "America/Argentina/Buenos_Aires", "America/Port-au-Prince"). It rules out
+// '.', a leading '/', and '\', so a value can never name a file path:
+// time.LoadLocation opens the name under the zoneinfo directory, and it
+// also honours the ZONEINFO environment variable.
+var timeZoneParamShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z][A-Za-z0-9_+-]*){0,2}$`)
+
+// utcZoneAliases resolve to time.UTC, so they share the UTC cache entries
+// and the "(UTC)" labels. Some browsers report "Etc/UTC" for a UTC host.
+var utcZoneAliases = map[string]bool{
+	"UTC":           true,
+	"Etc/UTC":       true,
+	"Etc/Universal": true,
+	"Universal":     true,
+	"Etc/Zulu":      true,
+	"Zulu":          true,
+}
+
+// resolveDashboardTimeZone turns the dashboard's tz query parameter into the
+// zone whose calendar days the time series are bucketed by. It never fails:
+// an empty, "Local", oversized, malformed, non-portable or unknown value
+// resolves to UTC, so a bad tz degrades to the pre-existing UTC buckets
+// instead of failing the request. "Local" is rejected because it would be
+// the hub process's own zone, not the viewer's.
+func resolveDashboardTimeZone(tz string) *time.Location {
+	if tz == "" || tz == "Local" || len(tz) > maxTimeZoneParamLen {
+		return time.UTC
+	}
+	if strings.Contains(tz, "..") || strings.HasPrefix(tz, "/") || strings.ContainsRune(tz, '\\') {
+		return time.UTC
+	}
+	if !timeZoneParamShape.MatchString(tz) {
+		return time.UTC
+	}
+	if utcZoneAliases[tz] {
+		return time.UTC
+	}
+	if nonPortableTimezoneNames[tz] || strings.HasPrefix(tz, "right/") || strings.HasPrefix(tz, "posix/") {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// dayKey is the calendar day t falls on in loc.
+func dayKey(t time.Time, loc *time.Location) string {
+	return t.In(loc).Format(dayKeyLayout)
+}
+
+// startOfLocalDay returns the first instant of the calendar day (y, m, d)
+// in loc. d may be out of range; it is normalised like time.Date. In a zone
+// whose DST transition skips midnight (for example America/Santiago,
+// 00:00 -> 01:00), time.Date may resolve the missing midnight to 23:00 on
+// the previous day, so the result is advanced hour by hour until it lands on
+// the intended day.
+func startOfLocalDay(y int, m time.Month, d int, loc *time.Location) time.Time {
+	noon := time.Date(y, m, d, 12, 0, 0, 0, loc)
+	want := noon.Format(dayKeyLayout)
+	start := time.Date(noon.Year(), noon.Month(), noon.Day(), 0, 0, 0, 0, loc)
+	for i := 0; i < 3 && start.Format(dayKeyLayout) != want; i++ {
+		start = start.Add(time.Hour)
+	}
+	return start
+}
 
 // timeSeriesIterator is the subset of *monitoring.TimeSeriesIterator this
 // package needs, so tests can supply a fake without depending on the SDK's
@@ -86,6 +173,9 @@ type MetricsDashboardService struct {
 type cacheEntry struct {
 	data      interface{}
 	fetchedAt time.Time
+	// zone is the resolved bucketing zone name for zoned dashboard views,
+	// and "" for entries that do not depend on a zone.
+	zone string
 }
 
 // NewMetricsDashboardService creates a new service for querying Cloud Monitoring.
@@ -117,11 +207,14 @@ func (s *MetricsDashboardService) Close() error {
 
 // DashboardSummary contains aggregate metric counts for a period.
 type DashboardSummary struct {
-	PeriodDays    int   `json:"periodDays"`
-	TotalSessions int64 `json:"totalSessions"`
-	TotalAPICalls int64 `json:"totalApiCalls"`
-	TotalTokens   int64 `json:"totalTokens"`
-	UniqueAgents  int   `json:"uniqueAgents"`
+	PeriodDays int `json:"periodDays"`
+	// TimeZone is the resolved IANA zone whose local midnight starts the
+	// period window ("UTC" when the request named no valid zone).
+	TimeZone      string `json:"timeZone"`
+	TotalSessions int64  `json:"totalSessions"`
+	TotalAPICalls int64  `json:"totalApiCalls"`
+	TotalTokens   int64  `json:"totalTokens"`
+	UniqueAgents  int    `json:"uniqueAgents"`
 }
 
 // TimeSeriesPoint represents a single data point in a time series.
@@ -138,21 +231,28 @@ type LabeledTimeSeries struct {
 
 // SessionsView contains session count and active agent data.
 type SessionsView struct {
-	PeriodDays   int               `json:"periodDays"`
+	PeriodDays int `json:"periodDays"`
+	// TimeZone is the resolved IANA zone the day buckets are calendar days
+	// of ("UTC" when the request named no valid zone).
+	TimeZone     string            `json:"timeZone"`
 	DailyCounts  []TimeSeriesPoint `json:"dailyCounts"`
 	ActiveAgents []TimeSeriesPoint `json:"activeAgents"`
 }
 
 // ModelCallsView contains API call data grouped by model and harness.
 type ModelCallsView struct {
-	PeriodDays int                 `json:"periodDays"`
-	ByModel    []LabeledTimeSeries `json:"byModel"`
-	ByHarness  []LabeledTimeSeries `json:"byHarness"`
+	PeriodDays int `json:"periodDays"`
+	// TimeZone is the resolved IANA zone the day buckets are calendar days of.
+	TimeZone  string              `json:"timeZone"`
+	ByModel   []LabeledTimeSeries `json:"byModel"`
+	ByHarness []LabeledTimeSeries `json:"byHarness"`
 }
 
 // TokensView contains token usage data grouped by model.
 type TokensView struct {
-	PeriodDays int                 `json:"periodDays"`
+	PeriodDays int `json:"periodDays"`
+	// TimeZone is the resolved IANA zone the day buckets are calendar days of.
+	TimeZone   string              `json:"timeZone"`
 	Input      []LabeledTimeSeries `json:"input"`
 	Output     []LabeledTimeSeries `json:"output"`
 	CacheRead  []LabeledTimeSeries `json:"cacheRead"`
@@ -170,9 +270,36 @@ func (s *MetricsDashboardService) getCached(key string) (interface{}, bool) {
 }
 
 func (s *MetricsDashboardService) setCache(key string, data interface{}) {
+	s.setZonedCache(key, "", data)
+}
+
+// setZonedCache stores a view computed for the resolved zone name zone. It
+// first drops expired entries, so the map does not grow without bound. A
+// zone other than UTC is cached only while fewer than maxCachedZones
+// distinct non-UTC zones have live entries (or this zone already has one);
+// otherwise the view is returned uncached. It reports whether it cached.
+func (s *MetricsDashboardService) setZonedCache(key, zone string, data interface{}) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cache[key] = &cacheEntry{data: data, fetchedAt: time.Now()}
+	now := time.Now()
+	for k, e := range s.cache {
+		if now.Sub(e.fetchedAt) > cacheTTL {
+			delete(s.cache, k)
+		}
+	}
+	if zone != "" && zone != "UTC" {
+		zones := make(map[string]bool)
+		for _, e := range s.cache {
+			if e.zone != "" && e.zone != "UTC" {
+				zones[e.zone] = true
+			}
+		}
+		if !zones[zone] && len(zones) >= maxCachedZones {
+			return false
+		}
+	}
+	s.cache[key] = &cacheEntry{data: data, fetchedAt: now, zone: zone}
+	return true
 }
 
 // QueryOption configures optional query parameters.
@@ -180,11 +307,34 @@ type QueryOption func(*queryConfig)
 
 type queryConfig struct {
 	ProjectID string
+	// Location is the zone whose calendar days the series are bucketed by.
+	// nil means UTC.
+	Location *time.Location
 }
 
 // WithProjectID filters metrics to a specific project.
 func WithProjectID(id string) QueryOption {
 	return func(c *queryConfig) { c.ProjectID = id }
+}
+
+// WithTimeZone buckets daily series by calendar day in loc, and starts the
+// period window at local midnight in loc. Pass a zone already resolved by
+// resolveDashboardTimeZone; nil means UTC.
+func WithTimeZone(loc *time.Location) QueryOption {
+	return func(c *queryConfig) { c.Location = loc }
+}
+
+// location returns the bucketing zone, UTC when none was set.
+func (c *queryConfig) location() *time.Location {
+	if c.Location == nil {
+		return time.UTC
+	}
+	return c.Location
+}
+
+// zoneName returns the resolved bucketing zone's name ("UTC" by default).
+func (c *queryConfig) zoneName() string {
+	return c.location().String()
 }
 
 func applyQueryOptions(opts []QueryOption) *queryConfig {
@@ -195,13 +345,15 @@ func applyQueryOptions(opts []QueryOption) *queryConfig {
 	return cfg
 }
 
-// cacheKeySuffix returns a cache key suffix for the query config.
-// Returns empty string for global queries, ":projectID" for project-scoped.
-func (c *queryConfig) cacheKeySuffix() string {
+// cacheKey returns the dashboard cache key for a view: the view prefix, the
+// period, the resolved zone (bucket keys and the window start depend on it)
+// and, for project-scoped queries, the project ID.
+func (c *queryConfig) cacheKey(prefix string, periodDays int) string {
+	key := fmt.Sprintf("%s:%d:tz=%s", prefix, periodDays, c.zoneName())
 	if c.ProjectID != "" {
-		return ":" + c.ProjectID
+		key += ":" + c.ProjectID
 	}
-	return ""
+	return key
 }
 
 type metricsQueryWindow struct {
@@ -210,11 +362,21 @@ type metricsQueryWindow struct {
 	extraFilter []string
 }
 
+// metricsQueryWindowFor returns the window for "the last periodDays
+// calendar days" in the query's zone: from local midnight periodDays-1 days
+// before today (so today is the last of periodDays buckets) to now. The
+// start is computed on the local calendar, not by subtracting 24h steps, so
+// a window spanning a DST change starts at a real local midnight and its
+// transition day is 23 or 25 hours long.
 func metricsQueryWindowFor(now time.Time, periodDays int, cfg *queryConfig) metricsQueryWindow {
-	now = now.UTC()
+	if periodDays < 1 {
+		periodDays = 1
+	}
+	loc := cfg.location()
+	y, m, d := now.In(loc).Date()
 	window := metricsQueryWindow{
-		start: now.AddDate(0, 0, -periodDays),
-		end:   now,
+		start: startOfLocalDay(y, m, d-(periodDays-1), loc).UTC(),
+		end:   now.UTC(),
 	}
 	if cfg.ProjectID != "" {
 		window.extraFilter = []string{projectFilter(cfg.ProjectID)}
@@ -261,10 +423,11 @@ func queryGroupedMetricsView[T any](
 	build func([][]LabeledTimeSeries) *T,
 ) (*T, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("%s:%d%s", cachePrefix, periodDays, cfg.cacheKeySuffix())
+	cacheKey := cfg.cacheKey(cachePrefix, periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*T), nil
 	}
+	loc := cfg.location()
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 	combined := make([]groupedTimeSeriesQuery, len(queries))
@@ -273,14 +436,14 @@ func queryGroupedMetricsView[T any](
 		combined[i].extraFilter = append(append([]string{}, window.extraFilter...), q.extraFilter...)
 	}
 	series, err := queryGroupedTimeSeriesSet(combined, func(metricName, groupBy string, extraFilter []string) ([]LabeledTimeSeries, error) {
-		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, extraFilter)
+		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, extraFilter, loc)
 	})
 	view := build(series)
 	if err != nil {
 		return view, err
 	}
 
-	s.setCache(cacheKey, view)
+	s.setZonedCache(cacheKey, cfg.zoneName(), view)
 	return view, nil
 }
 
@@ -307,14 +470,14 @@ func tokenTypeFilter(tokenType string) string {
 // QuerySummary returns aggregate metric counts for the given period.
 func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("summary:%d%s", periodDays, cfg.cacheKeySuffix())
+	cacheKey := cfg.cacheKey("summary", periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*DashboardSummary), nil
 	}
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
-	summary := &DashboardSummary{PeriodDays: periodDays}
+	summary := &DashboardSummary{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
 	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
@@ -350,35 +513,36 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
-	s.setCache(cacheKey, summary)
+	s.setZonedCache(cacheKey, cfg.zoneName(), summary)
 	return summary, nil
 }
 
 // QuerySessions returns daily session counts and active agent counts.
 func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays int, opts ...QueryOption) (*SessionsView, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("sessions:%d%s", periodDays, cfg.cacheKeySuffix())
+	cacheKey := cfg.cacheKey("sessions", periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*SessionsView), nil
 	}
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
-	view := &SessionsView{PeriodDays: periodDays}
+	loc := cfg.location()
+	view := &SessionsView{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
 	var queryErrors []string
 
 	// DailyCounts is a sum of session-count deltas, so it goes through
 	// queryDailyTimeSeries -> seriesIncreases, the cumulative-math fix
 	// (design §3.6). ActiveAgents below is presence, not a sum, so it stays
 	// on queryDailyUniqueCount instead (see that function's comment).
-	dailyCounts, err := s.queryDailyTimeSeries(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
+	dailyCounts, err := s.queryDailyTimeSeries(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter, loc)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
 	} else {
 		view.DailyCounts = dailyCounts
 	}
 
-	activeAgents, err := s.queryDailyUniqueCount(ctx, telemetrycontract.MetricSessionCount, "metric.labels."+telemetrycontract.AgentLabel, window.start, window.end, window.extraFilter)
+	activeAgents, err := s.queryDailyUniqueCount(ctx, telemetrycontract.MetricSessionCount, "metric.labels."+telemetrycontract.AgentLabel, window.start, window.end, window.extraFilter, loc)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
 	} else {
@@ -389,7 +553,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
-	s.setCache(cacheKey, view)
+	s.setZonedCache(cacheKey, cfg.zoneName(), view)
 	return view, nil
 }
 
@@ -399,7 +563,7 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.model", errorLabel: "by model"},
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.harness", errorLabel: "by harness"},
 	}, func(series [][]LabeledTimeSeries) *ModelCallsView {
-		return &ModelCallsView{PeriodDays: periodDays, ByModel: series[0], ByHarness: series[1]}
+		return &ModelCallsView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), ByModel: series[0], ByHarness: series[1]}
 	})
 }
 
@@ -414,8 +578,13 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache read tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheRead)}},
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache write tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheWrite)}},
 	}, func(series [][]LabeledTimeSeries) *TokensView {
-		return &TokensView{PeriodDays: periodDays, Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
+		return &TokensView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
 	})
+}
+
+// zoneNameFor returns the resolved bucketing zone name the options select.
+func zoneNameFor(opts []QueryOption) string {
+	return applyQueryOptions(opts).zoneName()
 }
 
 // fetchTimeSeries lists every raw point for metricName within
@@ -577,8 +746,10 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 	return total, nil
 }
 
-// queryDailyTimeSeries returns daily, cumulative-corrected totals for a metric.
-func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metricName string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
+// queryDailyTimeSeries returns daily, cumulative-corrected totals for a
+// metric, keyed by the calendar day in loc that each increment's interval
+// ended on.
+func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metricName string, start, end time.Time, extraFilter []string, loc *time.Location) ([]TimeSeriesPoint, error) {
 	fetchStart := start.Add(-cumulativeLookback)
 	series, err := s.fetchTimeSeries(ctx, metricName, fetchStart, end, extraFilter)
 	if err != nil {
@@ -591,7 +762,7 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			dayTotals[increment.End.UTC().Format("2006-01-02")] += increment.Value
+			dayTotals[dayKey(increment.End, loc)] += increment.Value
 		}
 	}
 
@@ -613,8 +784,8 @@ func labelKeyFromGroupBy(groupByLabel string) string {
 }
 
 // queryGroupedTimeSeries returns daily, cumulative-corrected totals grouped
-// by a label.
-func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]LabeledTimeSeries, error) {
+// by a label, keyed by calendar day in loc.
+func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string, loc *time.Location) ([]LabeledTimeSeries, error) {
 	fetchStart := start.Add(-cumulativeLookback)
 	series, err := s.fetchTimeSeries(ctx, metricName, fetchStart, end, extraFilter)
 	if err != nil {
@@ -638,7 +809,7 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			seriesDayTotals[label][increment.End.UTC().Format("2006-01-02")] += increment.Value
+			seriesDayTotals[label][dayKey(increment.End, loc)] += increment.Value
 		}
 	}
 
@@ -688,8 +859,8 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 // doesn't need a delta": a hook-sourced stream exports only when dirty
 // (metric_streams.go), so presence already approximates "had activity" as
 // well as a delta would, without needing a baseline point before the
-// window.
-func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
+// window. Days are calendar days in loc.
+func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string, loc *time.Location) ([]TimeSeriesPoint, error) {
 	series, err := s.fetchTimeSeries(ctx, metricName, start, end, extraFilter)
 	if err != nil {
 		return nil, err
@@ -706,7 +877,15 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 			}
 		}
 		for _, p := range ts.GetPoints() {
-			day := p.GetInterval().GetEndTime().AsTime().Format("2006-01-02")
+			// A nil Interval would otherwise bucket at the Unix epoch.
+			if p.GetInterval() == nil {
+				continue
+			}
+			pointEnd := p.GetInterval().GetEndTime().AsTime()
+			if pointEnd.Before(start) || pointEnd.After(end) {
+				continue
+			}
+			day := dayKey(pointEnd, loc)
 			if dayAgents[day] == nil {
 				dayAgents[day] = make(map[string]bool)
 			}
@@ -952,6 +1131,13 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 			periodDays = p
 		}
 	}
+
+	// The viewer's zone decides which calendar day a point belongs to. It is
+	// resolved once here; an invalid value falls back to UTC rather than
+	// failing the request. The cap on opts keeps the append from writing
+	// into the caller's backing array.
+	loc := resolveDashboardTimeZone(r.URL.Query().Get("tz"))
+	opts = append(opts[:len(opts):len(opts)], WithTimeZone(loc))
 
 	ctx := r.Context()
 
