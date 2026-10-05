@@ -4651,9 +4651,9 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // the settings do not define returns errSavedProfileUnresolved instead of
 // the broker's default manager, unless the agent's recorded runtime
 // (AgentInfo.Runtime) is the default runtime, in which case the default is
-// used (savedProfileUnresolved) and logged at fallbackLevel. Without strict
-// the error is always nil
-// and those cases fall back to the default, as for a fresh start.
+// used (savedProfileUnresolved) and logged at fallbackLevel. Without
+// strict the error is always nil and those cases fall back to the
+// default, as for a fresh start.
 //
 // The returned error is sent to the client, so it names only the agent,
 // the profile and a fixed cause; it does not include file paths or
