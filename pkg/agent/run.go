@@ -1592,6 +1592,10 @@ authDone:
 	if runID == "" {
 		runID = uuid.NewString()
 	}
+	// SCION_LAUNCH_ID carries the same value as the run label, so the
+	// container's env and label cannot disagree. Any value from the
+	// request or template env is replaced.
+	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
@@ -2208,6 +2212,22 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	sortDroppedBrokerEnv(dropped)
 	return agentEnv, warnings, missingKeys, dropped
+}
+
+// envLaunchID is the container env variable carrying the run ID, which
+// sciontool presents to the hub's conduit endpoint as its launch id.
+const envLaunchID = "SCION_LAUNCH_ID"
+
+// withLaunchIDEnv returns env with every SCION_LAUNCH_ID entry replaced by
+// a single one set to runID.
+func withLaunchIDEnv(env []string, runID string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, envLaunchID+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, envLaunchID+"="+runID)
 }
 
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
