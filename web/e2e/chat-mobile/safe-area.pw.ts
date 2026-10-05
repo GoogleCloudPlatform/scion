@@ -27,7 +27,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { openChatRail, openGeneralThread } from './fixture.js';
+import { openChatRail, openGeneralThread, expandSpace } from './fixture.js';
 import { assertFramePinned, assertNoHorizontalOverflow } from './helpers.js';
 
 interface Insets {
@@ -569,3 +569,141 @@ test('in frame mode a window scroll is reset to the top', async ({ page }, testI
   expect(scrolledTo, 'the probe scroll itself landed').toBeGreaterThan(0);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
+
+test('the rail and members lists clear the home indicator', async ({ page }, testInfo) => {
+  skipUnlessChromium(testInfo.project.name);
+  await openChatRail(page);
+  const usual = await deepBoxRetrying(page, 'scion-chat-space-rail', '.rail-body');
+  expect(usual.paddingBottom, '.rail-body padding-bottom with no inset').toBe(4);
+
+  await forceSafeAreaInsets(page, PORTRAIT);
+  await expect
+    .poll(
+      async () => (await deepBoxRetrying(page, 'scion-chat-space-rail', '.rail-body')).paddingBottom
+    )
+    .toBe(PORTRAIT.bottom);
+  const members = await deepBoxRetrying(page, 'scion-chat-members', '.members-body');
+  expect(members.paddingBottom, '.members-body padding-bottom = bottom inset').toBe(
+    PORTRAIT.bottom
+  );
+
+  // Scrolled to the end, the last row of the rail sits above the inset.
+  await expandSpace(page);
+  const gap = await page.evaluate(() => {
+    const rail = document
+      .querySelector('scion-page-chat')!
+      .shadowRoot!.querySelector('scion-chat-space-rail')!;
+    const body = rail.shadowRoot!.querySelector('.rail-body') as HTMLElement;
+    body.scrollTop = body.scrollHeight;
+    const rows = [...body.querySelectorAll('*')].filter(
+      (el) => el.getBoundingClientRect().height > 0
+    );
+    const lastBottom = Math.max(...rows.map((el) => el.getBoundingClientRect().bottom));
+    return body.getBoundingClientRect().bottom - lastBottom;
+  });
+  expect(gap, 'space below the last rail row').toBeGreaterThanOrEqual(PORTRAIT.bottom - 0.5);
+});
+
+test('profile-shell content clears the home indicator', async ({ page }, testInfo) => {
+  skipUnlessChromium(testInfo.project.name);
+  await openChatRail(page); // installs the mocks the profile route also needs
+  await page.goto('/profile/settings', { waitUntil: 'domcontentloaded' });
+  const usual = testInfo.project.name === 'desktop-1440' ? 24 : 16;
+  const before = await deepBoxRetrying(page, 'scion-profile-shell', '.content');
+  expect(before.paddingBottom, '.content padding-bottom with no inset').toBe(usual);
+
+  await forceSafeAreaInsets(page, PORTRAIT);
+  await expect
+    .poll(
+      async () => (await deepBoxRetrying(page, 'scion-profile-shell', '.content')).paddingBottom
+    )
+    .toBe(PORTRAIT.bottom);
+});
+
+/*
+ * The app and profile shells in landscape: side by side, the sidebar takes
+ * the left inset and the content the right; below the breakpoint the
+ * content takes both and the drawer the left.
+ */
+for (const shell of [
+  { name: 'app shell', path: '/agents', tag: 'scion-app', nav: 'scion-nav' },
+  {
+    name: 'profile shell',
+    path: '/profile/settings',
+    tag: 'scion-profile-shell',
+    nav: 'scion-profile-nav',
+  },
+]) {
+  test.describe(`${shell.name} in touch landscape (844x390)`, () => {
+    test.use({ viewport: { width: 844, height: 390 }, isMobile: true, hasTouch: true });
+
+    test('the sidebar takes the left inset and the content the right', async ({
+      page,
+    }, testInfo) => {
+      test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
+      await openChatRail(page);
+      await page.goto(shell.path, { waitUntil: 'domcontentloaded' });
+      await deepBoxRetrying(page, shell.tag, '.content');
+      await forceSafeAreaInsets(page, LANDSCAPE);
+
+      await expect(async () => {
+        const sidebar = await deepBoxRetrying(page, shell.tag, '.sidebar');
+        expect(sidebar.left, 'sidebar at the screen edge').toBe(0);
+        expect(sidebar.paddingLeft, 'sidebar padding-left = left inset').toBe(LANDSCAPE.left);
+        const content = await deepBoxRetrying(page, shell.tag, '.content');
+        expect(content.paddingRight, 'content padding-right = right inset').toBe(LANDSCAPE.right);
+        expect(content.paddingLeft, 'content padding-left stays usual').toBe(24);
+        // The header sits right of the sidebar, which already clears the
+        // notch: the left inset is not applied a second time.
+        const header = await deepBoxRetrying(page, shell.tag, 'scion-header');
+        expect(header.paddingLeft, 'header padding-left stays usual').toBe(24);
+        expect(header.paddingRight, 'header padding-right = right inset').toBe(LANDSCAPE.right);
+      }).toPass({ timeout: 5_000 });
+      await assertDocumentStill(page);
+    });
+  });
+
+  test.describe(`${shell.name} in touch landscape (740x360)`, () => {
+    test.use({ viewport: { width: 740, height: 360 }, isMobile: true, hasTouch: true });
+
+    test('the content and the drawer clear the notch', async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
+      await openChatRail(page);
+      await page.goto(shell.path, { waitUntil: 'domcontentloaded' });
+      await deepBoxRetrying(page, shell.tag, '.content');
+      await forceSafeAreaInsets(page, LANDSCAPE);
+
+      await expect(async () => {
+        const content = await deepBoxRetrying(page, shell.tag, '.content');
+        expect(content.paddingLeft, 'content padding-left = left inset').toBe(LANDSCAPE.left);
+        expect(content.paddingRight, 'content padding-right = right inset').toBe(LANDSCAPE.right);
+        const header = await deepBoxRetrying(page, shell.tag, 'scion-header');
+        expect(header.paddingLeft, 'header padding-left = left inset').toBe(LANDSCAPE.left);
+      }).toPass({ timeout: 5_000 });
+
+      await page.getByRole('button', { name: 'Open navigation menu' }).click();
+      await expect(async () => {
+        const nav = await page.evaluate(
+          ([tag, navTag]) => {
+            const host = document.querySelector(tag)!;
+            const drawer = host.shadowRoot!.querySelector('sl-drawer')!;
+            const panel = drawer.shadowRoot!.querySelector('[part~="panel"]')!;
+            const navEl = drawer.querySelector(navTag)!;
+            return {
+              open: drawer.hasAttribute('open'),
+              panelPaddingLeft: parseFloat(getComputedStyle(panel).paddingLeft),
+              navLeft: navEl.getBoundingClientRect().left,
+              navWidth: navEl.getBoundingClientRect().width,
+            };
+          },
+          [shell.tag, shell.nav] as const
+        );
+        expect(nav.open, 'drawer open').toBe(true);
+        expect(nav.panelPaddingLeft, 'drawer padding-left = left inset').toBe(LANDSCAPE.left);
+        expect(nav.navLeft, 'nav clears the notch').toBeGreaterThanOrEqual(LANDSCAPE.left - 0.5);
+        expect(nav.navWidth, 'nav keeps its width').toBeGreaterThanOrEqual(260);
+      }).toPass({ timeout: 5_000 });
+      await assertDocumentStill(page);
+    });
+  });
+}
