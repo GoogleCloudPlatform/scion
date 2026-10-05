@@ -770,9 +770,10 @@ export class AgentStore {
       feedDropped: false,
       background: options.background === true,
     };
-    // The walk reads everything a probe would.
+    // The walk reads everything a probe would, or a walk it replaces.
     entry.probe?.abort();
     entry.probe = null;
+    entry.walk?.controller.abort();
     entry.walk = walk;
     entry.walkedAt = this.now();
     entry.followUp = false;

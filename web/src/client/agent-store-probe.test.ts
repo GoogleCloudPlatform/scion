@@ -887,6 +887,27 @@ describe('AgentStore delta probe', () => {
     expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
   });
 
+  it('aborts a walk its own merge started when it walks on overflow', async () => {
+    const h = await loaded([row('a1', 1)]);
+    const store = h.store as unknown as {
+      entries: Map<string, { walk: { controller: AbortController } | null }>;
+    };
+    const replaced: AbortController[] = [];
+    h.store.retain(HUB, (snapshot) => {
+      const walk = store.entries.get('hub')?.walk;
+      if (snapshot.status === 'loading' && walk) replaced.push(walk.controller);
+    });
+    h.server.agents.push(
+      ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) =>
+        agent(`n${i}`, { updated: t(10 + i) })
+      )
+    );
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]?.signal.aborted).toBe(true);
+  });
+
   it('does not walk for a list a reset dropped during its merge', async () => {
     const h = await loaded([row('a1', 1)]);
     h.store.retain(HUB, (snapshot) => {
