@@ -1370,6 +1370,7 @@ export class ScionPageAdminMaintenance extends LitElement {
               Maintenance mode is forced on by the server's startup configuration
               (SCION_SERVER_ADMIN_MODE or <code>admin_mode</code> in settings.yaml). Turning it off
               here is saved but has no effect until the server is restarted without that setting.
+              <code>admin_mode</code> in settings.yaml can only be cleared by editing the file.
             </p>`
           : nothing}
       </div>

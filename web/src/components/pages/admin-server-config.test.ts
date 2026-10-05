@@ -643,6 +643,37 @@ describe('scion-page-admin-server-config', () => {
       expect(server.message_broker).toEqual({ enabled: false, type: 'inprocess' });
     });
 
+    it('defaulted fields GET omitted are not sent from an untouched form', async () => {
+      // makeBaseConfig has no gcp_iam_* and no native_chat.
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        () => {}
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server).not.toHaveProperty('native_chat');
+    });
+
+    it('defaulted fields are sent when GET had them or the user changed them', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.nativeChatEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub.gcp_iam_check_mode).toBe('enforce');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server.native_chat).toEqual({ enabled: false });
+    });
+
+    it('a hosted save never sends the file-only gcp_iam keys', async () => {
+      const payload = await capturePut(makeBaseConfig({ settings_tier: 'db' }), () => {});
+      const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
     it('flag-managed workstation fields are read-only and not sent', async () => {
       const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
       const payload = await capturePut(config, () => {});

@@ -484,7 +484,13 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   harness_configs: 'Harness Configs',
 };
 
-const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
+// server.hub.gcp_iam_* have labels but are file-only on the server (not
+// Layer-1), so they are not in the fallback Layer-1 list.
+const STATIC_LAYER1_KEYS: Set<string> = new Set(
+  Object.keys(KOANF_KEY_LABELS).filter(
+    (k) => k !== 'server.hub.gcp_iam_check_mode' && k !== 'server.hub.gcp_iam_deny_unknown_policy'
+  )
+);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
@@ -673,6 +679,17 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Native Chat — default ON, matching the server's absent-means-enabled rule.
   @state() private nativeChatEnabled = true;
+  /**
+   * Values of the fields the form fills with a default when GET omits them,
+   * as loaded (undefined = GET omitted the field). A workstation save sends
+   * such a field only when GET had it or the user changed it, so saving an
+   * untouched form writes nothing.
+   */
+  private loadedDefaulted: {
+    gcpIamCheckMode?: string | undefined;
+    gcpIamDenyUnknownPolicy?: string | undefined;
+    nativeChatEnabled?: boolean | undefined;
+  } = {};
 
   // Cross-project agent messaging (from admin/messaging API, not server-config)
   @state() private crossProjectMessagingEnabled = false;
@@ -1596,6 +1613,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private populateForm(data: ServerConfigResponse): void {
+    this.loadedDefaulted = {};
     // Server build info
     this.scionVersion = data.scion_version || '';
     this.scionCommit = data.scion_commit || '';
@@ -1665,6 +1683,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
         this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
         this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
+        this.loadedDefaulted.gcpIamCheckMode = srv.hub.gcp_iam_check_mode || undefined;
+        this.loadedDefaulted.gcpIamDenyUnknownPolicy =
+          srv.hub.gcp_iam_deny_unknown_policy || undefined;
       }
 
       // Broker
@@ -1718,6 +1739,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       // Native Chat — an absent section or an absent key means enabled.
       this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
+      this.loadedDefaulted.nativeChatEnabled = srv.native_chat?.enabled;
     }
 
     // Telemetry
@@ -2011,9 +2033,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
-      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    // server.hub.gcp_iam_* are file-only, sent by buildLayer0Payload.
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2158,8 +2178,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
+    // Defaulted fields: only when GET had them or the user changed them.
+    const ld = this.loadedDefaulted;
+    if (
+      ok('server.hub.gcp_iam_check_mode') &&
+      (ld.gcpIamCheckMode !== undefined || this.hubGcpIamCheckMode !== 'off')
+    )
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
+    if (
+      ok('server.hub.gcp_iam_deny_unknown_policy') &&
+      (ld.gcpIamDenyUnknownPolicy !== undefined || this.hubGcpIamDenyUnknownPolicy !== 'fail-open')
+    )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy || '';
     if (Object.keys(hub).length > 0) server.hub = hub;
 
@@ -2205,7 +2234,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (ok('server.message_broker.type')) mb.type = this.messageBrokerType || '';
       server.message_broker = mb;
     }
-    if (ok('server.native_chat.enabled')) {
+    if (
+      ok('server.native_chat.enabled') &&
+      (ld.nativeChatEnabled !== undefined || this.nativeChatEnabled !== true)
+    ) {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
     const oauth = this.rawConfig?.server?.oauth;
@@ -2585,7 +2617,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
 
       case 'unpersisted_keys_rejected':
-      case 'unclassified_keys_rejected': {
+      case 'unclassified_keys_rejected':
+      case 'hub_owned_keys_rejected': {
         // Nothing was saved; name the offending keys, as the docs say.
         const keys = Array.isArray(body.keys) ? (body.keys as string[]) : [];
         const message = (body.message as string) || 'Some settings could not be saved.';
