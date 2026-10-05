@@ -1314,6 +1314,17 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(input(el).value).toBe('co');
   });
 
+  it("removing the element stops the host's type-ahead too", async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    const el = await mountClosed(typeahead);
+    await show(el);
+    el.remove();
+
+    expect(typeahead.isCapturing).toBe(false);
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+  });
+
   it('nothing is captured while the palette is closed', async () => {
     await mountClosed();
     expect(typeOutside('a').defaultPrevented).toBe(false);
