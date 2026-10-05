@@ -2768,10 +2768,11 @@ export class ScionPageChat extends LitElement {
       const snapshot = await agentStore.ensure(HUB_AGENTS_QUERY, {
         signal: load.controller.signal,
       });
-      // The conversation and generation checks are defence in depth: every
-      // generation bump detaches this load, whose signal then rejects it
-      // before this line, and a project conversation claims the sidebar for
-      // its space, which the owner check below catches.
+      // The generation check is defence in depth: every generation bump
+      // detaches this load, whose signal then rejects it before this line.
+      // The conversation check also covers the lag between a conversation's
+      // assignment and updated()'s bump: a DM opened from the hub view keeps
+      // the hub's claim, so in that window only this term drops the result.
       if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
       // A space claimed the sidebar meanwhile (on mobile, with no
       // conversation and no generation bump): its members stay.
@@ -2848,11 +2849,10 @@ export class ScionPageChat extends LitElement {
    * but not for a space's claim: that walk keeps paging, so a hub view
    * returning in the same generation joins it. A conversation that opened
    * and closed again within one Lit update batch never bumps the
-   * generation, but `shouldContinue`
-   * (a live field read) still stops a page fetch for the moment it was open;
-   * that walk rejects with {@link PaginationStoppedError} rather than
-   * resolving with its partial result, and this returns true so the caller
-   * walks again.
+   * generation, but `shouldContinue` (a live field read) still stops a page
+   * fetch for the moment it was open; that walk rejects with
+   * {@link PaginationStoppedError} rather than resolving with its partial
+   * result, and this returns true so the caller walks again.
    */
   private async _fetchHubUsersOnce(generation: number): Promise<boolean> {
     const shouldContinue = (): boolean =>
