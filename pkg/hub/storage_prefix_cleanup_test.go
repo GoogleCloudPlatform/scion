@@ -175,3 +175,47 @@ func TestHarnessConfigDelete_DeleteFilesKeepsSiblingPrefix(t *testing.T) {
 	assert.False(t, stor.hasObject(own), "harness config's own files must be deleted")
 	assert.True(t, stor.hasObject(sibling), "deleting harness config foo must not delete foo-bar's files")
 }
+
+// TestProjectDelete_StorageCleanupKeepsSiblingPrefix covers the broadest
+// delete in #2045: deleting a project removes each project-scoped template's
+// and harness config's storage directory (deleteStorageFiles). A key that
+// merely extends one of those paths ("<path>-bar/...") belongs to something
+// else and must survive.
+func TestProjectDelete_StorageCleanupKeepsSiblingPrefix(t *testing.T) {
+	srv, s := testServer(t)
+	stor := newCloneMockStorage("test-bucket")
+	srv.SetStorage(stor)
+	ctx := context.Background()
+
+	projectID := api.NewUUID()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Delete Me", Slug: "delete-me", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}))
+
+	tplPath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, projectID, "foo")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
+		ID: api.NewUUID(), Name: "foo", Slug: "foo", Harness: "claude",
+		Scope: store.TemplateScopeProject, ScopeID: projectID, Status: store.TemplateStatusActive,
+		StoragePath: tplPath, Created: time.Now(), Updated: time.Now(),
+	}))
+	hcPath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, projectID, "foo")
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID: api.NewUUID(), Name: "foo", Slug: "foo", Harness: "claude",
+		Scope: store.HarnessConfigScopeProject, ScopeID: projectID, Status: store.HarnessConfigStatusActive,
+		StoragePath: hcPath, Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ownTpl, siblingTpl := tplPath+"/template.yaml", tplPath+"-bar/template.yaml"
+	ownHC, siblingHC := hcPath+"/config.yaml", hcPath+"-bar/config.yaml"
+	for _, p := range []string{ownTpl, siblingTpl, ownHC, siblingHC} {
+		stor.seedObject(p, []byte("x"))
+	}
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID, nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+
+	assert.False(t, stor.hasObject(ownTpl), "project template's own files must be deleted")
+	assert.False(t, stor.hasObject(ownHC), "project harness config's own files must be deleted")
+	assert.True(t, stor.hasObject(siblingTpl), "project delete must not delete %q", siblingTpl)
+	assert.True(t, stor.hasObject(siblingHC), "project delete must not delete %q", siblingHC)
+}
