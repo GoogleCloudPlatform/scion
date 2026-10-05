@@ -45,11 +45,15 @@ func requirePython(t *testing.T) string {
 	return python
 }
 
-// runPythonUnittest runs `python3 -m unittest <module> -v` in dir.
+// runPythonUnittest runs `python3 -m unittest <module> -v` in dir. The
+// harness directories are not Python packages (most names contain a dash),
+// so each module runs from its own directory. PYTHONDONTWRITEBYTECODE keeps
+// the run from leaving __pycache__ in the source tree.
 func runPythonUnittest(t *testing.T, python, dir, module string) {
 	t.Helper()
 	cmd := exec.Command(python, "-m", "unittest", module, "-v")
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python3 -m unittest %s (in %s) failed:\n%s", module, dir, out)

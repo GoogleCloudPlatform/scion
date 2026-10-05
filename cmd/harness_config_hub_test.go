@@ -179,3 +179,136 @@ func TestSyncHarnessConfigToHub_FallsBackToHubFileAPIForLocalStorageURLs(t *test
 	require.NoError(t, err)
 	require.Contains(t, uploadedPaths, "config.yaml")
 }
+
+func TestSyncHarnessConfigToHub_SkipsBackupAndTempFiles(t *testing.T) {
+	localPath := t.TempDir()
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(localPath, name), []byte(content), 0644))
+	}
+	write("config.yaml", "harness: codex\n")
+	write("dialect.yaml", "dialect: codex\n")
+	write("config.yaml.bak.20261003T193320Z", "old\n")
+	write("provision.py.bak.20261003T193320Z", "old\n")
+	write(".provision.py.tmp-123456", "partial\n")
+
+	var uploadedPaths []string
+	server := newMockHubServerForLocalStorageHarnessConfig(t, &uploadedPaths)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+	require.ElementsMatch(t, []string{"config.yaml", "dialect.yaml"}, uploadedPaths)
+}
+
+// existingHarnessConfigCalls records which mutating calls a sync made against
+// newMockHubServerForExistingHarnessConfig.
+type existingHarnessConfigCalls struct {
+	uploadRequests int
+	finalized      *hubclient.HarnessConfigManifest
+}
+
+// newMockHubServerForExistingHarnessConfig serves an existing "codex"
+// harness-config whose stored files are remoteFiles (path -> hash).
+func newMockHubServerForExistingHarnessConfig(t *testing.T, remoteFiles map[string]string, calls *existingHarnessConfigCalls) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/api/v1/harness-configs" && r.Method == http.MethodGet:
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+				"harnessConfigs": []map[string]interface{}{{
+					"id":          "existing-hc-id",
+					"name":        "codex",
+					"harness":     "codex",
+					"status":      "active",
+					"contentHash": "sha256:old",
+				}},
+			}))
+
+		case r.URL.Path == "/api/v1/harness-configs/existing-hc-id/download" && r.Method == http.MethodGet:
+			var files []map[string]interface{}
+			for path, hash := range remoteFiles {
+				files = append(files, map[string]interface{}{
+					"path": path,
+					"hash": hash,
+					"url":  "file:///storage/harness-configs/global/codex/" + path,
+				})
+			}
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"files": files}))
+
+		case r.URL.Path == "/api/v1/harness-configs/existing-hc-id/upload" && r.Method == http.MethodPost:
+			calls.uploadRequests++
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []map[string]interface{}{}}))
+
+		case r.URL.Path == "/api/v1/harness-configs/existing-hc-id/finalize" && r.Method == http.MethodPost:
+			var req hubclient.HarnessConfigFinalizeRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			calls.finalized = req.Manifest
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":          "existing-hc-id",
+				"name":        "codex",
+				"harness":     "codex",
+				"status":      "active",
+				"contentHash": "sha256:new",
+			}))
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestSyncHarnessConfigToHub_DropsStaleBackupEntriesFromHub(t *testing.T) {
+	localPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(localPath, "config.yaml"), []byte("harness: codex\n"), 0644))
+	// The backup is still on disk locally, but excluded from sync.
+	require.NoError(t, os.WriteFile(filepath.Join(localPath, "config.yaml.bak.20261003T193320Z"), []byte("old\n"), 0644))
+
+	var calls existingHarnessConfigCalls
+	server := newMockHubServerForExistingHarnessConfig(t, map[string]string{
+		"config.yaml":                      configYAMLHashCodex,
+		"config.yaml.bak.20261003T193320Z": transfer.HashBytes([]byte("old\n")),
+	}, &calls)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+
+	require.Equal(t, 0, calls.uploadRequests, "nothing changed, so nothing should be uploaded")
+	require.NotNil(t, calls.finalized, "stale backup entry must trigger Finalize")
+	var paths []string
+	for _, f := range calls.finalized.Files {
+		paths = append(paths, f.Path)
+	}
+	require.Equal(t, []string{"config.yaml"}, paths)
+}
+
+func TestSyncHarnessConfigToHub_UpToDateDoesNotFinalize(t *testing.T) {
+	localPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(localPath, "config.yaml"), []byte("harness: codex\n"), 0644))
+
+	var calls existingHarnessConfigCalls
+	server := newMockHubServerForExistingHarnessConfig(t, map[string]string{
+		"config.yaml": configYAMLHashCodex,
+		// A remote-only non-transient file is left alone (no deletion sync).
+		"extra.yaml": transfer.HashBytes([]byte("extra\n")),
+	}, &calls)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+
+	require.Equal(t, 0, calls.uploadRequests)
+	require.Nil(t, calls.finalized, "up-to-date config must not be finalized")
+}

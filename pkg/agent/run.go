@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -136,6 +137,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// below is unaffected and keeps its existing settings.Hub.ProjectID
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
+	// The hub agent ID, snapshotted for the same reason: an NFS agent home
+	// is named after it (resolveHomeStorage), and it must come from the
+	// dispatch, never from settings or the agent name.
+	hubDispatchedAgentID := ""
+	if opts.Env != nil {
+		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
+	}
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -1282,6 +1290,10 @@ authDone:
 	// successfully loaded global settings, so a start that fell back to the
 	// local layout after a load error never records that fallback.
 	sharedDirStorageResolved := false
+	// startGlobalSettings is the global settings snapshot the shared-dir
+	// backend was chosen from, when it was loaded; the home storage below
+	// is resolved from the same snapshot.
+	var startGlobalSettings *config.VersionedSettings
 	if len(effectiveSharedDirs) > 0 {
 		recorded, recErr := readSharedDirStorageRecord(agentDir)
 		if recErr != nil {
@@ -1333,6 +1345,7 @@ authDone:
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		} else if globalSettings != nil {
+			startGlobalSettings = globalSettings
 			// The backend can be overridden per profile or runtime entry.
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
@@ -1385,6 +1398,32 @@ authDone:
 			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
 		}
 	}
+	// Home storage: local, or (Kubernetes only) an NFS home on the export of
+	// the profile's shared_dir_storage. Chosen at the agent's first start
+	// and recorded, before any pod exists; later starts use the record.
+	homeStorageProfile := opts.Profile
+	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+		homeStorageProfile = finalScionCfg.Info.Profile
+	}
+	if _, err := resolveHomeStorage(homeStorageInput{
+		AgentDir:     agentDir,
+		AgentName:    opts.Name,
+		Slug:         slug,
+		RuntimeName:  m.Runtime.Name(),
+		Profile:      homeStorageProfile,
+		AgentID:      hubDispatchedAgentID,
+		ProjectID:    hubDispatchedProjectID,
+		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
+		LoadSettings: func() (*config.VersionedSettings, error) {
+			if startGlobalSettings != nil {
+				return checkHomeStorageLoaded(startGlobalSettings)
+			}
+			return loadHomeStorageSettings()
+		},
+	}); err != nil {
+		return nil, err
+	}
+
 	if len(sharedDirVolumes) > 0 {
 		// Add SCION_VOLUMES env var for discoverability
 		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
