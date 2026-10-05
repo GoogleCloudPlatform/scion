@@ -1834,17 +1834,22 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 	// Get project agents (with cache refresh as the sender).
 	senderPrincipal, senderEmail := "", ""
+	var senderErr error
 	if tgMsg.From != nil {
 		mapping, mErr := b.store.GetUserMapping(ctx, strconv.FormatInt(tgMsg.From.ID, 10))
-		if mErr != nil {
+		switch {
+		case mErr != nil:
 			b.log.Warn("Failed to look up sender mapping", "error", mErr)
-		}
-		senderPrincipal = linkedUserPrincipal(mapping)
-		if mapping != nil {
+			senderErr = errSenderLookupFailed
+		case mapping != nil:
 			senderEmail = mapping.ScionEmail
+			senderPrincipal = linkedUserPrincipal(mapping)
+			if senderPrincipal == "" {
+				senderErr = errSenderLinkStale
+			}
 		}
 	}
-	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderPrincipal)
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderPrincipal, senderErr)
 	listUnavailable := func(replyTo string) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderEmail, link.ProjectSlug)
 	}
@@ -2015,17 +2020,24 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	hubSenderID := senderID
 	if senderID != "" {
 		mapping, err := b.store.GetUserMapping(ctx, senderID)
-		if err == nil && mapping != nil {
-			if mapping.ScionEmail != "" {
-				sender = "user:" + mapping.ScionEmail
-			}
-			if mapping.ScionUserID != "" {
-				hubSenderID = mapping.ScionUserID
-			}
-		} else if mapping == nil {
+		switch {
+		case err != nil:
+			// A lookup failure is not the same as being unlinked.
+			b.log.Warn("Failed to look up sender mapping", "sender_id", senderID, "error", err)
+			b.api.SendMessage(ctx, chatID, "Something went wrong. Please try again.", "")
+			return
+		case mapping == nil:
 			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
 			b.api.SendMessage(ctx, chatID, "Please /register first to use this bot.", "")
 			return
+		case mapping.ScionEmail == "":
+			// Linked without a Scion email: the link cannot be used.
+			b.api.SendMessage(ctx, chatID, staleLinkText, "")
+			return
+		}
+		sender = "user:" + mapping.ScionEmail
+		if mapping.ScionUserID != "" {
+			hubSenderID = mapping.ScionUserID
 		}
 	}
 
@@ -2633,14 +2645,23 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 // the message sender has no linked Scion account and no cached list exists.
 var errSenderNotLinked = errors.New("sender has no linked Scion account")
 
+// errSenderLinkStale reports that the sender's link mapping has no Scion
+// email, so the plugin cannot act as that user.
+var errSenderLinkStale = errors.New("sender's linked Scion account has no email")
+
+// errSenderLookupFailed reports that the sender's link mapping could not be
+// read from the store.
+var errSenderLookupFailed = errors.New("sender link lookup failed")
+
 // getProjectAgents returns the agent slugs of a project for routing a message.
 //
 // The cache is keyed by project and shared by all senders. When it is stale
 // the list is refreshed from the hub as the message sender (onBehalfOf).
-// When the sender is not linked (onBehalfOf == "") the hub is not called and
-// any cached list is used as is. A non-nil error means no list is available:
-// errSenderNotLinked for an unlinked sender, otherwise the hub error.
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
+// When the plugin cannot act as the sender (onBehalfOf == "") the hub is not
+// called and any cached list is used as is. A non-nil error means no list is
+// available: senderErr (or errSenderNotLinked) when the plugin cannot act as
+// the sender, otherwise the hub error.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBehalfOf string, senderErr error) ([]string, error) {
 	cached, err := b.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
@@ -2652,6 +2673,9 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBe
 	if onBehalfOf == "" {
 		if cached != nil {
 			return agentSlugs(cached.Agents), nil
+		}
+		if senderErr != nil {
+			return nil, senderErr
 		}
 		return nil, errSenderNotLinked
 	}
@@ -2682,8 +2706,11 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBe
 // addressed agent as missing.
 func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error, email, project string) {
 	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
-	if errors.Is(listErr, errSenderNotLinked) {
+	switch {
+	case errors.Is(listErr, errSenderNotLinked):
 		text = registerHint
+	case errors.Is(listErr, errSenderLinkStale):
+		text = staleLinkText
 	}
 	b.api.SendMessage(ctx, chatID, text, replyTo) //nolint:errcheck
 }

@@ -58,6 +58,8 @@ func (e *HubError) detail(key string) string {
 
 // isStaleLink reports whether the hub rejected the linked user itself
 // (unknown or not active), as opposed to denying a specific action.
+// It matches on the message text because the hub sends no distinct error
+// code for this case: both use code "forbidden".
 func (e *HubError) isStaleLink() bool {
 	return e.StatusCode == http.StatusForbidden && strings.HasPrefix(e.Message, "on-behalf-of principal")
 }

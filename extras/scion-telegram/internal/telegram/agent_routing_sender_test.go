@@ -163,3 +163,71 @@ func TestV2_AgentRefresh_FailedListFallsBackToCache(t *testing.T) {
 		t.Fatalf("message not routed; sent=%v", tgSrv.getSentMessages())
 	}
 }
+
+// mappingLookupFailingStore fails every link-mapping lookup.
+type mappingLookupFailingStore struct{ Store }
+
+func (mappingLookupFailingStore) GetUserMapping(context.Context, string) (*TelegramUserMapping, error) {
+	return nil, errors.New("database is locked")
+}
+
+func TestV2_AgentRefresh_LinkWithoutEmailGetsReregisterText(t *testing.T) {
+	b, tgSrv, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+		TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
+	}))
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	assert.Empty(t, hub.agentCalls(), "no hub read without a usable link")
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, staleLinkText, sent[0].Text)
+}
+
+func TestV2_AgentRefresh_MappingLookupFailureIsNotReportedAsUnlinked(t *testing.T) {
+	b, tgSrv, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b.store = mappingLookupFailingStore{b.store}
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	assert.Empty(t, hub.agentCalls(), "refresh is skipped when the sender cannot be looked up")
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.NotContains(t, sent[0].Text, "/register")
+	assert.Contains(t, sent[0].Text, "Couldn't fetch the agent list")
+}
+
+func TestV2_Routing_MappingLookupFailureWithCacheIsNotReportedAsUnlinked(t *testing.T) {
+	b, tgSrv, _ := newRoutingTestBroker(t)
+	saveStaleAgentCache(t, b.store, "proj-1", "coder")
+	b.store = mappingLookupFailingStore{b.store}
+	delivered := false
+	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	assert.False(t, delivered)
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.NotContains(t, sent[0].Text, "/register")
+}
+
+func TestV2_Routing_LinkWithoutEmailWithCacheGetsReregisterText(t *testing.T) {
+	b, tgSrv, _ := newRoutingTestBroker(t)
+	saveStaleAgentCache(t, b.store, "proj-1", "coder")
+	require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+		TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
+	}))
+	delivered := false
+	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	assert.False(t, delivered)
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, staleLinkText, sent[0].Text)
+}
