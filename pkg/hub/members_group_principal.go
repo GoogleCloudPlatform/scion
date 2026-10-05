@@ -89,6 +89,11 @@ func legacyMembershipDenialDetails(d *MembershipDecision) map[string]interface{}
 	return d.Details
 }
 
+// storeMembersGroupPrincipalMessage is the client-facing message for a store
+// refusal (store.ErrProjectMembersGroupPrincipal), shared by writeErrorFromErr
+// and storeMembersGroupPrincipalDecision so both routes return the same text.
+const storeMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
+
 // storeMembersGroupPrincipalDecision maps a store refusal
 // (store.ErrProjectMembersGroupPrincipal) raised inside a membership
 // transaction to a 400 decision, so it never surfaces as a 500. It returns
@@ -100,7 +105,7 @@ func storeMembersGroupPrincipalDecision(err error) *MembershipDecision {
 	return &MembershipDecision{
 		Allowed:    false,
 		DenialCode: ErrCodeInvalidRequest,
-		Reason:     store.ErrProjectMembersGroupPrincipal.Error(),
+		Reason:     storeMembersGroupPrincipalMessage,
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

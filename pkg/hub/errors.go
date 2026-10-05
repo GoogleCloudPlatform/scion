@@ -323,7 +323,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest
 		code = ErrCodeInvalidRequest
-		message = "Project members groups cannot be role-binding principals or child groups"
+		message = storeMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError

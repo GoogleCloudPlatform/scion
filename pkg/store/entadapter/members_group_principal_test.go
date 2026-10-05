@@ -165,13 +165,15 @@ func TestCreateGroup_RefusesProjectMembersGroupWithParent(t *testing.T) {
 	ctx := context.Background()
 	env := newRoleTestEnv(t)
 	groups := NewGroupStore(env.client)
-	parentID := env.createGroup(t, "mg-create-parent")
 
+	// Each subtest uses its own parent so its edge assertions see only its
+	// own create.
 	for kind, key := range map[string]string{
 		"canonical-key": store.AnnotationProjectMembersGroup,
 		"legacy-key":    store.LegacyAnnotationProjectMembersGroup,
 	} {
 		t.Run("refused/"+kind, func(t *testing.T) {
+			parentID := env.createGroup(t, "mg-create-parent-"+kind)
 			g := &store.Group{
 				ID: uuid.NewString(), Name: "mg-create-child-" + kind, Slug: "mg-create-child-" + kind,
 				GroupType: store.GroupTypeExplicit, ProjectID: env.projectID, ParentID: parentID,
@@ -182,10 +184,14 @@ func TestCreateGroup_RefusesProjectMembersGroupWithParent(t *testing.T) {
 			assert.True(t, errors.Is(err, store.ErrProjectMembersGroupPrincipal), "got: %v", err)
 			_, gErr := groups.GetGroup(ctx, g.ID)
 			assert.True(t, errors.Is(gErr, store.ErrNotFound), "the group must not be created: %v", gErr)
+			members, err := groups.GetGroupMembers(ctx, parentID)
+			require.NoError(t, err)
+			assert.Empty(t, members, "no child edge may be created")
 		})
 	}
 
 	t.Run("allowed/unmarked-with-parent", func(t *testing.T) {
+		parentID := env.createGroup(t, "mg-create-parent-unmarked")
 		g := &store.Group{
 			ID: uuid.NewString(), Name: "mg-create-plain", Slug: "mg-create-plain",
 			GroupType: store.GroupTypeExplicit, ProjectID: env.projectID, ParentID: parentID,

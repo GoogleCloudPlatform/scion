@@ -784,6 +784,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			HTTPStatus: 400,
 		}
 	}
+
 	// Governance check.
 	decision := svc.checkGovernance(ctx, req, roleDef.Name)
 	if !decision.Allowed {

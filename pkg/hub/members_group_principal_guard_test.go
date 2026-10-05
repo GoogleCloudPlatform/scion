@@ -379,6 +379,28 @@ func TestMembersGroupPrincipalGuard_ExistingBindingPatchRefused(t *testing.T) {
 	}
 }
 
+// POST /members for a principal that already holds a built-in binding takes
+// the replace branch, which creates a new binding: it is refused and the
+// existing binding is left unchanged.
+func TestMembersGroupPrincipalGuard_ExistingBindingRepostRefused(t *testing.T) {
+	for kind, key := range markerKeys() {
+		t.Run(kind+"/existing-binding-repost", func(t *testing.T) {
+			f := setupMembersGroupGuardFixture(t)
+			memberRD := projectRoleDef(t, f.s, store.ProjectRoleMember)
+			adminRD := projectRoleDef(t, f.s, store.ProjectRoleAdmin)
+			g, bindings := seedExistingMembersGroupBinding(t, f, "repost", key, memberRD)
+			rec := doRequestAsUser(t, f.srv, f.coOwner, http.MethodPost, "/api/v1/projects/"+f.y.ID+"/members",
+				map[string]interface{}{"principalType": "group", "principalId": g.ID, "roleDefinitionId": adminRD.ID})
+			requireMembersGroupRefusal(t, rec, ErrCodePrincipalIneligible, g.ID)
+			all, err := f.s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalGroup, g.ID)
+			require.NoError(t, err)
+			require.Len(t, all, 1, "no binding may be added or replaced")
+			assert.Equal(t, bindings[0].ID, all[0].ID, "the existing binding must be left in place")
+			assert.Equal(t, memberRD.ID, all[0].RoleDefinitionID, "the existing binding's role must be unchanged")
+		})
+	}
+}
+
 func TestMembersGroupPrincipalGuard_ExistingBindingDeleteAllowed(t *testing.T) {
 	for kind, key := range markerKeys() {
 		t.Run(kind+"/by-binding", func(t *testing.T) {
@@ -490,13 +512,22 @@ func TestMembersGroupPrincipalGuard_StoreErrorMapping(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeErrorFromErr(rec, wrapped, "")
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	code, _ := errorBody(t, rec)
-	assert.Equal(t, ErrCodeInvalidRequest, code)
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	assert.Equal(t, ErrCodeInvalidRequest, body.Error.Code)
+	assert.Equal(t, storeMembersGroupPrincipalMessage, body.Error.Message)
 
 	d := storeMembersGroupPrincipalDecision(wrapped)
 	require.NotNil(t, d)
 	assert.Equal(t, http.StatusBadRequest, d.HTTPStatus)
 	assert.Equal(t, ErrCodeInvalidRequest, d.DenialCode)
+	assert.Equal(t, storeMembersGroupPrincipalMessage, d.Reason,
+		"both store-refusal routes return the same message")
 	assert.Nil(t, storeMembersGroupPrincipalDecision(store.ErrInvalidInput))
 }
 
