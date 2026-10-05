@@ -100,9 +100,11 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 // newLoopbackProviders creates standard OTLP gRPC exporters fixed to loopback.
 func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
 	endpoint := loopbackEndpoint(config)
+	pinResource := loopbackResourceDialOption(res)
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithDialOption(pinResource),
 	}
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
 	if err != nil {
@@ -113,6 +115,7 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	logOpts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(endpoint),
 		otlploggrpc.WithInsecure(),
+		otlploggrpc.WithDialOption(pinResource),
 	}
 	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
@@ -124,6 +127,7 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithDialOption(pinResource),
 	}
 	// Hook commands are short lived independent writers. Export their counter
 	// additions as deltas so the receiver can accumulate them once.

@@ -512,6 +512,8 @@ func compileSchemas() {
 					"shared_dir_size":            map[string]interface{}{"type": "string"},
 					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
 					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
@@ -552,6 +554,8 @@ func compileSchemas() {
 					"shared_dir_size":            map[string]interface{}{"type": "string"},
 					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
 					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
