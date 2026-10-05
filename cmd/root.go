@@ -367,7 +367,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable extra debug output (equivalent to SCION_DEBUG=1); does not change server log levels, see 'scion server start --debug'")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
