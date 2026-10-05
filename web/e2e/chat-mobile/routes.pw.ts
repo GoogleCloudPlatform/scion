@@ -175,6 +175,7 @@ test.describe('app-shell routes fit a phone', () => {
     expect(state.buttons.map((b) => b.label)).toEqual([
       'All',
       'Running',
+      'Stopping',
       'Stopped',
       'Suspended',
       'Error',
