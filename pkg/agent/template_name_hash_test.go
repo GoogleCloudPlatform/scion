@@ -380,6 +380,17 @@ profiles:
 				t.Fatalf("create Start: %v", err)
 			}
 			check("create", "scion")
+			data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(projectScionDir, "hash-agent"), "agent-info.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var info api.AgentInfo
+			if err := json.Unmarshal(data, &info); err != nil {
+				t.Fatal(err)
+			}
+			if info.Template != tt.want || info.TemplateHash != testContentHash {
+				t.Errorf("agent-info.json template = %q, templateHash = %q; want %q, %q", info.Template, info.TemplateHash, tt.want, testContentHash)
+			}
 
 			captured = runtime.RunConfig{}
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
