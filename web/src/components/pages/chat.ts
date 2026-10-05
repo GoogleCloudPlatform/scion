@@ -402,8 +402,16 @@ export class ScionPageChat extends LitElement {
    * Cleared when a space view claims the sidebar, and on disconnect.
    */
   private _hubAgentsLive = false;
-  /** The hub list rows last published into the sidebar, so an unchanged snapshot does no work. */
-  private _hubAgentsPublished: readonly Agent[] | null = null;
+  /**
+   * The hub list rows last published into the sidebar and the members built
+   * from them. A snapshot with the same rows does no work while the sidebar
+   * still shows those members; once anything else has written
+   * `v2AgentMembers`, the rows are published again.
+   */
+  private _hubAgentsPublished: {
+    rows: readonly Agent[];
+    members: import('../shared/chat/chat-members.js').ChatAgentMember[];
+  } | null = null;
   /**
    * Where `v2AgentMembers` came from: the store's hub list, or the space
    * members endpoint (or SSE onto it). Hub-list rows may be compact and
@@ -2672,10 +2680,12 @@ export class ScionPageChat extends LitElement {
   /** Show the store's hub list as the sidebar's agents. Never seeds the global agent map. */
   private _publishHubAgents(snapshot: AgentListSnapshot): void {
     this._hubAgentsLive = true;
-    if (snapshot.agents === this._hubAgentsPublished) return;
-    this._hubAgentsPublished = snapshot.agents;
+    const shown = this._hubAgentsPublished;
+    if (shown && shown.rows === snapshot.agents && shown.members === this.v2AgentMembers) return;
+    const members = snapshot.agents.map(hubAgentMember);
+    this._hubAgentsPublished = { rows: snapshot.agents, members };
     this._agentMembersSource = 'hub';
-    this.v2AgentMembers = snapshot.agents.map(hubAgentMember);
+    this.v2AgentMembers = members;
     this._rebuildHubRoster();
   }
 
@@ -2899,7 +2909,6 @@ export class ScionPageChat extends LitElement {
     const seq = ++this._membersViewSeq;
     // The sidebar is this project's now: the hub list stops updating it.
     this._hubAgentsLive = false;
-    this._hubAgentsPublished = null;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
       if (res.ok) {

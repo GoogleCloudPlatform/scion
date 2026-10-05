@@ -96,6 +96,7 @@ interface ChatPage extends HTMLElement {
   _hubAgentsLoad: unknown;
   _hubMembersGeneration: number;
   _loadHubAgents(generation: number): Promise<void>;
+  _handleAgentsUpdated(): void;
 }
 
 beforeAll(async () => {
@@ -431,6 +432,20 @@ describe('hub members: live updates from the store', () => {
       page.v2Conversation = null;
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('an unchanged hub list leaves the sidebar members as they are (no rebuild)', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const shown = page.v2AgentMembers;
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      page.loadHubMembers();
+      await settle();
+      expect(page.v2AgentMembers).toBe(shown);
     } finally {
       unmount(page);
     }
@@ -962,6 +977,57 @@ describe('hub members: reconnect and disconnect', () => {
     await settle();
     expect(page._hubAgentsLoad).toBeNull();
     expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+  });
+
+  it('a reconnect into a DM whose agents-updated merges global rows, then /chat, shows the hub list again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    document.body.removeChild(page);
+
+    // Back on a DM route (not opened from a live hub view): agents-updated
+    // takes the global-map path and merges a row only that map holds.
+    page.v2Conversation = {
+      conversationKey: 'dm:user:u9',
+      projectId: '',
+      isDM: true,
+    };
+    globalMap.agents.set('scope-only', agent('scope-only', { projectId: 'p7' }));
+    page._handleAgentsUpdated();
+    expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2', 'scope-only']);
+
+    page.v2Conversation = null;
+    document.body.appendChild(page);
+    await settle();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a project opened and left before its members load: the hub list replaces the merged rows', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = {
+        conversationKey: 'p1',
+        projectId: 'p1',
+        isDM: false,
+      };
+      await settle();
+      globalMap.agents.set('scope-only', agent('scope-only', { projectId: 'p1' }));
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2', 'scope-only']);
+
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
   });
 
   it('stops requesting users pages once the element disconnects mid-walk', async () => {
