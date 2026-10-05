@@ -481,6 +481,7 @@ var structParityBases = []structParityBase{
 	{name: "binary-key-nested", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  !!binary ZW5kcG9pbnQ=: https://own\n"},
 	{name: "binary-key-root", file: "settings.yaml", content: "schema_version: \"1\"\n!!binary aHVi:\n  endpoint: https://own\n"},
 	{name: "tagged-str-key", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  !!str endpoint: https://own\n"},
+	{name: "null-keys", file: "settings.yaml", content: "# top\nschema_version: \"1\"\n~: x\nnull: y\nhub:\n  ~: z\n  endpoint: https://own # c\n"},
 }
 
 // runStructParity checks, for every key and a spread of values, that the
@@ -1112,6 +1113,16 @@ func TestSplitLastPathElem(t *testing.T) {
 // as before instead of failing.
 func TestNewSettingsFilePath_UnwritableDanglingYML(t *testing.T) {
 	layouts := map[string]func(t *testing.T, dir string){
+		"read-only directory": func(t *testing.T, dir string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
+			ro := filepath.Join(dir, "ro")
+			require.NoError(t, os.Mkdir(ro, 0755))
+			require.NoError(t, os.Chmod(ro, 0555))
+			t.Cleanup(func() { _ = os.Chmod(ro, 0755) })
+			require.NoError(t, os.Symlink(filepath.Join("ro", "settings.yml"), filepath.Join(dir, "settings.yml")))
+		},
 		"missing directory": func(t *testing.T, dir string) {
 			require.NoError(t, os.Symlink(filepath.Join("gone", "settings.yml"), filepath.Join(dir, "settings.yml")))
 		},
@@ -1147,4 +1158,17 @@ func TestNewSettingsFilePath_UnwritableDanglingYML(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestUpdateVersionedSetting_NullKeysEditedInPlace checks that null keys
+// on the edited path do not force the struct fallback, so comments survive.
+func TestUpdateVersionedSetting_NullKeysEditedInPlace(t *testing.T) {
+	const src = "# top\nschema_version: \"1\"\n~: x\nnull: y\nhub:\n  ~: z\n  endpoint: https://own # c\n"
+	dir := writeSettingsFixture(t, src)
+	require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", "https://new"))
+	assert.Equal(t, strings.Replace(src, "https://own # c", "https://new # c", 1), readSettingsFile(t, dir))
+
+	doc, err := parseYAMLMappingDocument([]byte(src))
+	require.NoError(t, err)
+	assert.False(t, hasYAMLOpaqueKey(doc.Content[0]))
 }

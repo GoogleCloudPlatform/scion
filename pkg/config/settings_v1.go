@@ -4223,7 +4223,7 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 	}
 	// Generic data equality is weaker than loadability (an alias key can
 	// duplicate a struct field without a duplicate map key), so the output
-	// must also decode into VersionedSettings exactly as the input did.
+	// must also decode into VersionedSettings without error, as the input did.
 	if err := decodeVersionedSettingsYAML(out); err != nil {
 		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
 	}
@@ -4247,10 +4247,11 @@ var encodeSettingsYAML = encodeYAMLDocument
 // newSettingsFilePath returns the YAML file a settings write in dir targets
 // when there is no readable settings file to write back to: settings.yaml if
 // anything exists at that name (a file, or a link, possibly dangling, which
-// the write follows), else a dangling settings.yml link whose target can be
-// created (written through, keeping the link), else settings.yaml. A .yml
-// link that loops or points into a missing directory is skipped, as the
-// loaders skip it.
+// the write follows), else a dangling settings.yml link whose target
+// resolves (no loop, see resolveSettingsWriteTarget) into an existing
+// directory the current user may write to (written through, keeping the
+// link), else settings.yaml. Any other dangling .yml link is skipped, as
+// the loaders skip it, and settings.yaml is written as before.
 func newSettingsFilePath(dir string) string {
 	yamlPath := filepath.Join(dir, "settings.yaml")
 	if _, err := os.Lstat(yamlPath); err == nil {
@@ -4259,7 +4260,7 @@ func newSettingsFilePath(dir string) string {
 	ymlPath := filepath.Join(dir, "settings.yml")
 	if fi, err := os.Lstat(ymlPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if _, err := os.Stat(ymlPath); err != nil {
-			if _, err := resolveSettingsWriteTarget(ymlPath); err == nil {
+			if target, err := resolveSettingsWriteTarget(ymlPath); err == nil && dirWritable(filepath.Dir(target)) {
 				return ymlPath
 			}
 		}

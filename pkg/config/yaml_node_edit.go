@@ -36,11 +36,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// errYAMLEditThroughAlias is returned when an edit would have to write
-// through a YAML alias or into an anchored node. Writing into an anchored
-// node would silently change every alias that references it, so callers fall
-// back to a full decode/encode that expands the aliases instead.
-var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias or anchor")
+// errYAMLEditThroughAlias is returned when a node on an edit path is shared
+// in the isYAMLShared sense: an alias, an anchored node (editing it would
+// change every alias of it), or a mapping with a key the edit cannot match
+// by name (see hasYAMLOpaqueKey). Callers fall back to a full decode/encode,
+// which expands aliases and merges and decodes keys the way the loaders do.
+var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias, anchor or key that cannot be matched by name")
 
 // isYAMLShared reports whether n cannot be edited in place without
 // diverging from a decode/encode of the document: n is an alias, carries an
@@ -55,7 +56,9 @@ func isYAMLShared(n *yaml.Node) bool {
 // merged keys a node edit cannot see or remove), an alias key (`*k :`,
 // whose Value is the anchor name, not the key it expands to), any other
 // non-scalar key, or a scalar key that does not decode to its own text
-// (`!!binary ZW5kcG9pbnQ=` is `endpoint` to every loader).
+// (`!!binary ZW5kcG9pbnQ=` is `endpoint` to every loader). Null keys (`~:`,
+// `null:`) decode to "" but can never match a settings path element, so they
+// do not count.
 func hasYAMLOpaqueKey(n *yaml.Node) bool {
 	if n.Kind != yaml.MappingNode {
 		return false
@@ -69,6 +72,9 @@ func hasYAMLOpaqueKey(n *yaml.Node) bool {
 		// check is a defensive duplicate of the tag check.
 		if k.Tag == "!!merge" || (k.Value == "<<" && k.Style == 0) {
 			return true
+		}
+		if isYAMLNull(k) {
+			continue
 		}
 		var s string
 		if err := k.Decode(&s); err != nil || s != k.Value {
@@ -252,8 +258,8 @@ func replacementScalar(old, value *yaml.Node) *yaml.Node {
 
 // checkYAMLPathUnshared returns errYAMLEditThroughAlias if root or any
 // existing node along path (the target value included) is shared in the
-// isYAMLShared sense: an alias, anchored, or a mapping with a merge, alias
-// or other non-scalar key.
+// isYAMLShared sense: an alias, anchored, or a mapping with a key the edit
+// cannot match by name (see hasYAMLOpaqueKey).
 func checkYAMLPathUnshared(root *yaml.Node, path []string) error {
 	m := root
 	if isYAMLShared(m) {
