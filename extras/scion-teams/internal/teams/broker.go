@@ -89,6 +89,10 @@ type TeamsBroker struct {
 
 	mu sync.Mutex
 
+	// lastAskCleanup is when expired ask-user requests were last deleted.
+	// Guarded by mu.
+	lastAskCleanup time.Time
+
 	// Subscription tracking.
 	subscriptions map[string]bool
 	serverRunning bool
@@ -474,12 +478,13 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		if store == nil {
 			storeErr = fmt.Errorf("store not initialized")
 		} else {
+			b.cleanupExpiredAskUsers(ctx, store)
 			storeErr = b.storePendingAskUser(ctx, store, msg, projectID, agentSlug, targets[0].conversationID)
 		}
 		if storeErr != nil {
 			b.log.Error("Failed to store pending ask-user request, sending question without buttons",
 				"request_id", msg.Metadata["request_id"], "error", storeErr)
-			activity = askUserWithoutButtons(msg)
+			activity = askUserWithoutButtons(msg, askAgentSlug(msg, agentSlug))
 		}
 	}
 
@@ -526,32 +531,68 @@ func newAskRequestID() string {
 	return "ask-" + hex.EncodeToString(b)
 }
 
+// askUserCleanupInterval is the minimum time between deletions of expired
+// ask-user requests.
+const askUserCleanupInterval = time.Hour
+
+// cleanupExpiredAskUsers deletes expired ask-user requests, at most once per
+// askUserCleanupInterval.
+func (b *TeamsBroker) cleanupExpiredAskUsers(ctx context.Context, store Store) {
+	b.mu.Lock()
+	due := time.Since(b.lastAskCleanup) >= askUserCleanupInterval
+	if due {
+		b.lastAskCleanup = time.Now()
+	}
+	b.mu.Unlock()
+	if !due {
+		return
+	}
+	if n, err := store.DeleteExpiredAskUsers(ctx); err != nil {
+		b.log.Warn("Failed to delete expired ask-user requests", "error", err)
+	} else if n > 0 {
+		b.log.Debug("Deleted expired ask-user requests", "count", n)
+	}
+}
+
+// askAgentSlug returns the agent asking the question: the "agent:<slug>"
+// sender, or the agent from the topic.
+func askAgentSlug(msg *messages.StructuredMessage, topicAgentSlug string) string {
+	if strings.HasPrefix(msg.Sender, "agent:") {
+		return strings.TrimPrefix(msg.Sender, "agent:")
+	}
+	return topicAgentSlug
+}
+
 // askUserNoButtonsNote is appended when an ask-user question is sent
 // without buttons.
-const askUserNoButtonsNote = "_Buttons are unavailable for this question. To answer, reply with a message._"
+func askUserNoButtonsNote(agentSlug string) string {
+	if agentSlug == "" {
+		return "_Buttons are unavailable for this question. To answer, reply in a linked channel._"
+	}
+	return fmt.Sprintf("_Buttons are unavailable for this question. To answer, @-mention %s in a linked channel._", agentSlug)
+}
 
 // askUserWithoutButtons returns a plain-text activity for an ask-user
-// question, listing the choices and asking for a reply message.
-func askUserWithoutButtons(msg *messages.StructuredMessage) *Activity {
+// question from agentSlug, listing the choices and how to answer.
+func askUserWithoutButtons(msg *messages.StructuredMessage, agentSlug string) *Activity {
 	var sb strings.Builder
-	if slug := deriveAgentSlug(msg.Sender); slug != "" {
-		fmt.Fprintf(&sb, "[%s] ", slug)
+	if agentSlug != "" {
+		fmt.Fprintf(&sb, "[%s] ", agentSlug)
 	}
 	sb.WriteString(msg.Msg)
 	if choices := askUserMetadataChoices(msg); len(choices) > 0 {
 		fmt.Fprintf(&sb, "\n\nChoices: %s", strings.Join(choices, ", "))
 	}
-	sb.WriteString("\n\n" + askUserNoButtonsNote)
+	sb.WriteString("\n\n" + askUserNoButtonsNote(agentSlug))
 	return &Activity{Type: "message", Text: sb.String()}
 }
 
 // storePendingAskUser records an ask-user request posted to conversationID.
-// An existing request with the same ID is left unchanged.
+// An existing request with the same ID is left unchanged. It returns an
+// error when the project or agent is unknown, because the answer could not
+// be delivered.
 func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg *messages.StructuredMessage, projectID, topicAgentSlug, conversationID string) error {
-	agentSlug := topicAgentSlug
-	if strings.HasPrefix(msg.Sender, "agent:") {
-		agentSlug = strings.TrimPrefix(msg.Sender, "agent:")
-	}
+	agentSlug := askAgentSlug(msg, topicAgentSlug)
 	if projectID == "" {
 		projectID = msg.Metadata["project_id"]
 	}
@@ -564,8 +605,7 @@ func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg 
 		ExpiresAt:      time.Now().Add(askUserTTL),
 	}
 	if pending.ProjectID == "" || pending.AgentSlug == "" {
-		b.log.Warn("Ask-user message without project or agent, buttons cannot be answered",
-			"request_id", pending.RequestID, "project_id", pending.ProjectID, "agent_slug", pending.AgentSlug)
+		return fmt.Errorf("ask-user message without project (%q) or agent (%q)", pending.ProjectID, pending.AgentSlug)
 	}
 	return store.CreatePendingAskUser(ctx, pending)
 }
@@ -952,7 +992,10 @@ const linkCheckFailedText = "Couldn't check your account link. Please try again.
 // returns (nil, nil) when there is no link and an error when the link could
 // not be read. Use linkProblem to check that the mapping is usable.
 func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string) (*TeamsUserMapping, error) {
-	if store == nil || teamsUserID == "" {
+	if store == nil {
+		return nil, fmt.Errorf("store not initialized")
+	}
+	if teamsUserID == "" {
 		return nil, nil
 	}
 	mapping, err := store.GetUserMapping(ctx, teamsUserID)

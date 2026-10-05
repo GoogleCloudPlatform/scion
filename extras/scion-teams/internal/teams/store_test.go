@@ -16,7 +16,9 @@ package teams
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -942,4 +944,25 @@ func TestAdvisoryLock_SQLiteAlwaysAcquired(t *testing.T) {
 func TestStore_OpenInvalidPath(t *testing.T) {
 	_, err := NewSQLiteStore("/nonexistent/dir/test.db")
 	assert.Error(t, err)
+}
+
+func TestNewSQLiteStore_InMemorySharedAcrossGoroutines(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("req-%d", i)
+			assert.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{RequestID: id, ExpiresAt: time.Now().Add(time.Hour)}))
+			got, err := store.GetPendingAskUser(ctx, id)
+			assert.NoError(t, err)
+			assert.NotNil(t, got, "every goroutine sees the same in-memory database")
+		}(i)
+	}
+	wg.Wait()
 }

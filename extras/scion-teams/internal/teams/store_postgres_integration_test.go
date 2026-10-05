@@ -191,6 +191,17 @@ func TestPostgresPendingAskUser_CreateIfAbsentAndClaimOnce(t *testing.T) {
 
 	ctx := context.Background()
 	requestID := "it-req-" + time.Now().Format("150405.000000000")
+	t.Cleanup(func() {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Logf("cleanup: %v", err)
+			return
+		}
+		defer db.Close()
+		if _, err := db.Exec(`DELETE FROM teams_pending_ask_users WHERE request_id = $1`, requestID); err != nil {
+			t.Logf("cleanup: %v", err)
+		}
+	})
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 
 	require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{

@@ -906,3 +906,51 @@ func TestCallbackHandler_AskInput_SendReplyHasVerb(t *testing.T) {
 	assert.Contains(t, string(raw), `"type":"Action.Execute"`)
 	assert.Contains(t, string(raw), `"verb":"ask_response"`)
 }
+
+func TestCallbackHandler_AskResponse_CancelledContextStillReopensRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		// The click's context is cancelled while the answer is being delivered.
+		cancel()
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	linkTestUser(t, broker)
+	pendingAsk(t, broker.store, "conv-1")
+
+	resp, err := broker.callbackHandler.HandleInvoke(ctx, askResponse("approve"))
+	require.NoError(t, err)
+	assertKeepsCard(t, resp, "Failed to deliver your response. Please try again.")
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-1")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.False(t, pending.Responded, "request is reopened so it can be answered again")
+}
+
+func TestCallbackHandler_ProjectSlugFor_RequiresMatchingProject(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, nil)
+	linkTestChannel(t, broker) // conv-1 -> proj-1 (test-project)
+	ctx := context.Background()
+
+	assert.Equal(t, "test-project", broker.callbackHandler.projectSlugFor(ctx, "conv-1;messageid=9", "proj-1"))
+	assert.Equal(t, "", broker.callbackHandler.projectSlugFor(ctx, "conv-1", "proj-other"))
+	assert.Equal(t, "", broker.callbackHandler.projectSlugFor(ctx, "conv-unlinked", "proj-1"))
+}
+
+func TestCallbackHandler_AskResponse_DenialInOtherProjectChannelNamesHub(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(messageDeniedBody))
+	})
+	linkTestUser(t, broker)
+	linkTestChannel(t, broker) // conv-1 is linked to proj-1
+	require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+		RequestID: "req-1", ConversationID: "conv-1", AgentSlug: "dev-1", ProjectID: "proj-other",
+		Choices: []string{"approve"}, ExpiresAt: time.Now().Add(10 * time.Minute),
+	}))
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), askResponse("approve"))
+	require.NoError(t, err)
+	assertKeepsCard(t, resp, "Your Scion account (user@example.com) doesn't have permission to message agents in this hub. Ask a project owner.")
+}

@@ -185,11 +185,15 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 	// the card so the answer can be retried.
 	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, conversationID, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		if resetErr := store.ResetAskUserResponded(ctx, requestID); resetErr != nil {
+		// Reopen even if the click's context has been cancelled.
+		resetCtx, resetCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		resetErr := store.ResetAskUserResponded(resetCtx, requestID)
+		resetCancel()
+		if resetErr != nil {
 			h.log.Error("Failed to reopen ask-user request", "request_id", requestID, "error", resetErr)
 		}
 		return h.respondWithMessage(
-			hubErrorText(err, mapping, h.projectSlugFor(ctx, conversationID), "Failed to deliver your response. Please try again.")), nil
+			hubErrorText(err, mapping, h.projectSlugFor(ctx, conversationID, pending.ProjectID), "Failed to deliver your response. Please try again.")), nil
 	}
 
 	// Build updated card showing the response.
@@ -470,15 +474,15 @@ func (h *CallbackHandler) respondWithUpdatedCard(activity *Activity, text string
 	}
 }
 
-// projectSlugFor returns the slug of the project linked to conversationID,
-// or "" when it is not known.
-func (h *CallbackHandler) projectSlugFor(ctx context.Context, conversationID string) string {
+// projectSlugFor returns the slug of the project linked to conversationID
+// when that is projectID, or "" otherwise.
+func (h *CallbackHandler) projectSlugFor(ctx context.Context, conversationID, projectID string) string {
 	store := h.getStore()
 	if store == nil {
 		return ""
 	}
 	link, err := store.GetChannelLink(ctx, stripThreadSuffix(conversationID))
-	if err != nil || link == nil {
+	if err != nil || link == nil || link.ProjectID != projectID {
 		return ""
 	}
 	return link.ProjectSlug

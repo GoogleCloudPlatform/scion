@@ -120,17 +120,15 @@ func NewSQLiteStore(dbPath string) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	// Each connection to ":memory:" is a separate database, so use one.
+	if dbPath == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
 
 	// Enable WAL mode for concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
-	}
-
-	// Set busy timeout to avoid SQLITE_BUSY errors under contention.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	s := &sqliteStore{db: db}

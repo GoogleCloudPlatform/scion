@@ -1251,7 +1251,7 @@ func TestBroker_Publish_AskUserStoreFailureSendsWithoutButtons(t *testing.T) {
 	assert.Empty(t, a.Attachments, "no buttons when the request could not be stored")
 	assert.Contains(t, a.Text, "[dev-1] Deploy to production?")
 	assert.Contains(t, a.Text, "Choices: Yes, No")
-	assert.Contains(t, a.Text, "reply with a message")
+	assert.Contains(t, a.Text, "_Buttons are unavailable for this question. To answer, @-mention dev-1 in a linked channel._")
 }
 
 func TestBroker_Publish_PlainAskUserIsNotStored(t *testing.T) {
@@ -1265,4 +1265,91 @@ func TestBroker_Publish_PlainAskUserIsNotStored(t *testing.T) {
 	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-plain")
 	require.NoError(t, err)
 	assert.Nil(t, pending, "plain-text questions have no buttons to answer")
+}
+
+func TestAskUserNoButtonsNote(t *testing.T) {
+	assert.Equal(t, "_Buttons are unavailable for this question. To answer, @-mention dev-1 in a linked channel._", askUserNoButtonsNote("dev-1"))
+	assert.Equal(t, "_Buttons are unavailable for this question. To answer, reply in a linked channel._", askUserNoButtonsNote(""))
+}
+
+func TestBroker_StorePendingAskUser_RequiresProjectAndAgent(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, nil)
+	ctx := context.Background()
+	for _, tt := range []struct{ name, project, sender string }{
+		{"no project", "", "agent:dev-1"},
+		{"no agent", "proj-1", "user:someone@example.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := askUserMessage(map[string]string{"request_id": "req-" + tt.name})
+			msg.Sender = tt.sender
+			err := broker.storePendingAskUser(ctx, broker.store, msg, tt.project, "", "conv-1")
+			require.Error(t, err)
+			pending, err := broker.store.GetPendingAskUser(ctx, "req-"+tt.name)
+			require.NoError(t, err)
+			assert.Nil(t, pending)
+		})
+	}
+}
+
+func TestBroker_Publish_AskUserWithoutAgentSendsWithoutButtons(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	msg := askUserMessage(map[string]string{"request_id": "req-noagent"})
+	msg.Sender = ""
+
+	require.NoError(t, broker.Publish(context.Background(), projectkeys.BroadcastTopic("proj-1"), msg))
+	require.Eventually(t, func() bool { return len(sent()) >= 1 }, 5*time.Second, 10*time.Millisecond)
+
+	a := sent()[0]
+	assert.Empty(t, a.Attachments)
+	assert.Contains(t, a.Text, "To answer, reply in a linked channel.")
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-noagent")
+	require.NoError(t, err)
+	assert.Nil(t, pending)
+}
+
+func TestBroker_Publish_AskUserDeletesExpiredRequestsAtMostHourly(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	ctx := context.Background()
+	expired := func(id string) {
+		require.NoError(t, broker.store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID: id, ProjectID: "proj-1", AgentSlug: "dev-1", ExpiresAt: time.Now().Add(-time.Hour),
+		}))
+	}
+
+	expired("old-1")
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-a"}), 1)
+	got, err := broker.store.GetPendingAskUser(ctx, "old-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "expired request is deleted when a question is posted")
+
+	// Within the interval, expired requests are not deleted again.
+	expired("old-2")
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-b"}), 2)
+	got, err = broker.store.GetPendingAskUser(ctx, "old-2")
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+
+	// Once the interval has passed, they are deleted again.
+	broker.mu.Lock()
+	broker.lastAskCleanup = time.Now().Add(-askUserCleanupInterval)
+	broker.mu.Unlock()
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-c"}), 3)
+	got, err = broker.store.GetPendingAskUser(ctx, "old-2")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestLinkedUserByTeamsID_NilStoreIsLinkCheckFailure(t *testing.T) {
+	mapping, err := linkedUserByTeamsID(context.Background(), nil, "aad-user-1")
+	assert.Nil(t, mapping)
+	require.Error(t, err)
+	assert.Equal(t, linkCheckFailedText, linkProblem(mapping, err, registerHint))
+
+	broker, ms := testBrokerWithStore(t, nil)
+	broker.store = nil
+	handled, cmdErr := broker.commandHandler.Handle(context.Background(), testActivity("setup"))
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
 }
