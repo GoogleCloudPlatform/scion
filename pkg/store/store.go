@@ -291,6 +291,11 @@ type AgentStore interface {
 	// The returned map is keyed by agent ID.
 	GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*Agent, error)
 
+	// GetAgentsByIDsIncludingDeleted is GetAgentsByIDs without the
+	// soft-delete filter: like GetAgent, it also returns agents whose
+	// DeletedAt is set. Missing or malformed IDs are silently skipped.
+	GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*Agent, error)
+
 	// UpdateAgent updates an existing agent.
 	// Uses optimistic locking via StateVersion.
 	// Returns ErrNotFound if agent doesn't exist.
@@ -1321,6 +1326,11 @@ type UserStore interface {
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUser(ctx context.Context, id string) (*User, error)
 
+	// GetUsersByIDs retrieves users by a list of IDs in one lookup.
+	// Returns only users that exist; missing or malformed IDs are silently
+	// skipped. The returned map is keyed by user ID.
+	GetUsersByIDs(ctx context.Context, ids []string) (map[string]*User, error)
+
 	// GetUserByEmail retrieves a user by email.
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
@@ -2066,6 +2076,18 @@ type MessageStore interface {
 	// Results are ordered by created_at DESC.
 	ListMessages(ctx context.Context, filter MessageFilter, opts ListOptions) (*ListResult[Message], error)
 
+	// LatestMessagesByThreadIDs returns, for each thread ID, the newest
+	// message with that thread_id matching opts, using the ListMessages
+	// order (created DESC, then id DESC). It answers the same question as
+	// ListMessages with a ThreadID filter and Limit 1, for many threads in
+	// one lookup. Threads with no matching message are absent from the map.
+	LatestMessagesByThreadIDs(ctx context.Context, threadIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
+
+	// LatestMessagesByConversationIDs is LatestMessagesByThreadIDs keyed
+	// by conversation_id instead of thread_id. Malformed conversation IDs
+	// are rejected with an error, as ListMessages rejects them.
+	LatestMessagesByConversationIDs(ctx context.Context, conversationIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
+
 	// MarkMessageRead marks a message as read.
 	// Returns ErrNotFound if the message doesn't exist.
 	MarkMessageRead(ctx context.Context, id string) error
@@ -2467,6 +2489,12 @@ type ConversationStore interface {
 	// Returns ErrNotFound if no matching active (non-deleted) conversation exists.
 	// This is the read-only counterpart of UpsertConversationByExternalRef.
 	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*Conversation, error)
+
+	// GetConversationsByExternalRefs is GetConversationByExternalRef for
+	// many external refs on one surface in one lookup. Only active
+	// (non-deleted) conversations are returned; refs with no match are
+	// absent. The returned map is keyed by external ref.
+	GetConversationsByExternalRefs(ctx context.Context, surface string, externalRefs []string) (map[string]*Conversation, error)
 
 	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
 	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).

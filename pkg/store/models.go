@@ -2276,6 +2276,15 @@ type MessageFilter struct {
 	After          time.Time // Lower bound for created_at (exclusive)
 }
 
+// LatestMessageOptions narrows the per-key latest-message lookups
+// (LatestMessagesByThreadIDs, LatestMessagesByConversationIDs). Each field
+// has the meaning of the MessageFilter field of the same name; empty fields
+// do not filter.
+type LatestMessageOptions struct {
+	Channel     string // Only messages on this channel
+	ExcludeType string // Ignore messages of this type
+}
+
 // =============================================================================
 // Conversations (Multi-Party Messaging)
 // =============================================================================
