@@ -3201,6 +3201,20 @@ const (
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
 )
 
+// ValidEdgeDeactivationCause reports whether c is a cause that may be
+// recorded on a delegation edge.
+func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationDelegatorDeleted,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationReincarnateReplaced:
+		return true
+	}
+	return false
+}
+
 // Deactivation is the deactivation record of an edge or assignment.
 type Deactivation struct {
 	Cause EdgeDeactivationCause `json:"-"`

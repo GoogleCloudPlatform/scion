@@ -2683,9 +2683,24 @@ type DelegationEdgeStore interface {
 	// the given principal is the delegator (granting authority).
 	GetDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string) ([]*DelegationEdge, error)
 
-	// DeactivateDelegationEdge marks an edge as inactive.
-	// Returns ErrNotFound if the edge doesn't exist.
-	DeactivateDelegationEdge(ctx context.Context, edgeID string) error
+	// DeactivateDelegationEdgesForDelegate deactivates every active edge
+	// whose delegate is (delegateType, delegateID) and records d on each.
+	// d.Cause and d.OpID are required; a zero d.At is set to the current
+	// time. Returns the number of edges deactivated.
+	DeactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, d Deactivation) (int, error)
+
+	// DeactivateDelegationEdgesForDelegator deactivates every active edge
+	// whose delegator is (delegatorType, delegatorID) and records d on each,
+	// with the same rules as DeactivateDelegationEdgesForDelegate.
+	DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d Deactivation) (int, error)
+
+	// ReactivateDelegationEdgesForDelegate reactivates exactly the inactive
+	// edges of the delegate whose recorded deactivation cause equals cause
+	// and whose operation ID equals opID, and clears their deactivation
+	// record. A reactivation that would give the delegate a second active
+	// edge in the same scope returns ErrAlreadyExists. Returns the number of
+	// edges reactivated.
+	ReactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) (int, error)
 }
 
 // =============================================================================
