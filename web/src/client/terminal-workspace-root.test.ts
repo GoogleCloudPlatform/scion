@@ -2579,14 +2579,50 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
   }
 
   /**
-   * Enter or Space on the focused rail button: the browser's activation
-   * behavior turns either key into a click with detail 0.
+   * Enter or Space on the focused rail button. The rail item is a native
+   * `<button>` and the workspace adds no Enter or Space handler of its own
+   * (the rail's keydown handler takes only arrows, Home and End), so the
+   * browser's activation behavior is what turns either key into a click
+   * with detail 0. jsdom has no activation behavior, so the click is
+   * dispatched here; the keydown is real and must pass through the
+   * workspace untouched. Browsers activate a button on Enter keypress and
+   * on Space keyup, and the terminal only gets focus during that click, so
+   * the key itself never reaches the terminal.
    */
   function activateRailByKey(agentId: string, key: 'Enter' | ' '): void {
     const btn = railButton(agentId);
     btn.focus();
-    btn.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    const keydown = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    btn.dispatchEvent(keydown);
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(btn);
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+  }
+
+  /** Stops the nav-click stand-in from calling select() for `agentId`. */
+  function navigationSelectsNothing(agentId: string): ReturnType<TerminalWorkspaceRoot['create']> {
+    const session = sessions.get(agentId)!;
+    sessions.delete(agentId);
+    return session;
+  }
+
+  /**
+   * Leaves a pending rail target for A whose pane stays hidden: the
+   * navigation does nothing, B stays in front, and focus stays on A's rail
+   * button.
+   */
+  async function pendingTargetForHiddenA(): Promise<{
+    inputA: HTMLTextAreaElement;
+    sessionA: ReturnType<TerminalWorkspaceRoot['create']>;
+  }> {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const sessionA = navigationSelectsNothing(AGENT_A);
+    clickRail(AGENT_A);
+    await flush();
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+    expect(document.activeElement).toBe(railButton(AGENT_A));
+    return { inputA, sessionA };
   }
 
   it('a click brings a hidden pane to the front and focuses its terminal input', async () => {
@@ -2608,6 +2644,23 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
     clickRail(AGENT_B);
 
     await vi.waitFor(() => expect(hasFocus(inputB)).toBe(true));
+  });
+
+  it('a click on a pane already visible in a two-pane layout focuses its terminal input, with no re-render', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(paneFor(root, AGENT_B).hidden).toBe(false);
+    // Navigating to a pane already on screen re-renders nothing here, so
+    // only the rail selection itself can move focus.
+    navigationSelectsNothing(AGENT_A);
+
+    clickRail(AGENT_A);
+
+    expect(hasFocus(inputA)).toBe(true);
+    await flush();
+    expect(hasFocus(inputA)).toBe(true);
   });
 
   it.each([
@@ -2687,5 +2740,87 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
     expect(hasFocus(inputA)).toBe(false);
     expect(document.activeElement).toBe(other);
     other.remove();
+  });
+  it("focus landing in another agent's pane drops the pending rail focus", async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const inputB = await terminalInput(AGENT_B);
+
+    inputB.focus();
+    expect(hasFocus(inputB)).toBe(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('opening the palette drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const btn = railButton(AGENT_A);
+
+    // The shortcut from the rail button, so focus has not moved yet.
+    btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(btn);
+    root.select(sessionA);
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('hiding the workspace drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+
+    root.show(false);
+    root.show(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('closing the agent from the rail drops the pending rail focus', async () => {
+    await pendingTargetForHiddenA();
+    const closeId = `${root.findSessionKeyByAgentId(AGENT_A)}:close`;
+    const close = [
+      ...root.element.querySelectorAll<HTMLButtonElement>('.terminal-icon-action'),
+    ].find((el) => el.dataset.railFocusId === closeId)!;
+
+    // A mouse click on the close button keeps focus inside the rail.
+    close.focus();
+    close.click();
+    await flush();
+    expect(root.findSessionKeyByAgentId(AGENT_A)).toBeFalsy();
+
+    // The agent is opened again later and brought to the front.
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+
+  it("removing the agent's entry elsewhere drops the pending rail focus", async () => {
+    const { sessionA } = await pendingTargetForHiddenA();
+
+    sessionA.close();
+    await flush();
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
   });
 });

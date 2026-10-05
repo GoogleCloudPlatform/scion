@@ -149,8 +149,10 @@ export class TerminalWorkspaceRoot {
    * pane is visible — see {@link focusRailTarget}. Only a rail selection
    * sets it, so reconnects, restores and other ways of opening a pane never
    * move focus. Cleared once used, when focus lands somewhere other than
-   * the rail or that pane, when the palette opens, and when the workspace
-   * is hidden, so a pane that turns up much later cannot take focus.
+   * the rail or that pane, when the palette opens, when the workspace is
+   * hidden, and when that agent's entry is removed (the rail close button
+   * removes it at once), so a pane that turns up much later cannot take
+   * focus.
    */
   private railFocusAgentId: string | null = null;
   /**
@@ -609,22 +611,13 @@ export class TerminalWorkspaceRoot {
    * land in the pane the palette was opened from, which is not a user move.
    */
   private readonly handleGlobalFocusIn = (e: FocusEvent): void => {
-    // Focus moving anywhere outside the rail and the panes (another control,
-    // a dialog) means the user has moved on: drop a pending rail target.
-    if (
-      this.railFocusAgentId !== null &&
-      !e
-        .composedPath()
-        .some(
-          (node) =>
-            node === this.railList ||
-            (node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE')
-        )
-    ) {
-      this.railFocusAgentId = null;
-    }
+    // One pass over the path: note whether focus is in the rail list or in
+    // a pane, and handle the pane it landed in.
+    let inRailOrPane = false;
     for (const node of e.composedPath()) {
+      if (node === this.railList) inRailOrPane = true;
       if (!(node instanceof Element) || node.tagName !== 'SCION-TERMINAL-PANE') continue;
+      inRailOrPane = true;
       for (const [key, pane] of this.panes) {
         if (pane === node) {
           this.lastFocusedPaneSessionKey = key;
@@ -645,6 +638,9 @@ export class TerminalWorkspaceRoot {
         }
       }
     }
+    // Focus moving anywhere outside the rail and the panes (another control,
+    // a dialog) means the user has moved on: drop a pending rail target.
+    if (!inRailOrPane) this.railFocusAgentId = null;
   };
 
   /**
@@ -836,6 +832,9 @@ export class TerminalWorkspaceRoot {
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
+      // Closed from the rail, or removed elsewhere: a pane opened later for
+      // the same agent must not take focus from this old selection.
+      if (this.railFocusAgentId === entry.state.agentId) this.railFocusAgentId = null;
     }
     for (const session of sessions) {
       if (this.entries.has(session.state.key)) continue;
