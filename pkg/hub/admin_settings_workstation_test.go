@@ -622,3 +622,72 @@ func TestMaintenanceBreakGlass_MessagePutKeepsRowAdminMode(t *testing.T) {
 		t.Errorf("live state = %v %q, want still in maintenance with the new message", srv.maintenance.IsEnabled(), srv.maintenance.Message())
 	}
 }
+
+const hostedLayer0Fixture = `schema_version: "1"
+server:
+  hub:
+    port: 9810
+  auth:
+    dev_mode: true
+`
+
+// On a hosted hub a Layer-0 leaf present in the body is checked against the
+// GET view: a change, including an explicit zero over a stored true, is
+// rejected with 422 layer0_rejected naming the leaf.
+func TestHosted_PutServerConfig_Layer0ExplicitZeroRejected(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte(hostedLayer0Fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, st, _ := newSQLiteHubInMode(t, false, nil)
+	rowsBefore := hubSettingRevisions(t, st)
+
+	rr := putServerConfig(t, srv, `{"server":{"auth":{"dev_mode":false}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	code, keys := rejectedKeys(t, rr)
+	if code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.auth.dev_mode"}) {
+		t.Errorf("got %q %v, want layer0_rejected [server.auth.dev_mode]", code, keys)
+	}
+	if got := yamlAt(readYAMLMap(t, settingsPath), "server", "auth", "dev_mode"); got != true {
+		t.Errorf("settings.yaml dev_mode = %v, want unchanged true", got)
+	}
+	if after := hubSettingRevisions(t, st); !reflect.DeepEqual(after, rowsBefore) {
+		t.Errorf("DB changed on a rejected PUT")
+	}
+}
+
+// Echoes are ignored on a hosted hub: zero-valued Layer-0 blocks (what a
+// client sends for unset fields) and Layer-0 values equal to the GET view
+// return 200 and write nothing.
+func TestHosted_PutServerConfig_Layer0EchoIgnored(t *testing.T) {
+	for _, body := range []string{
+		`{"server":{"database":{"driver":"","url":""},"broker":{"enabled":false,"port":0},"storage":{},"log_format":""}}`,
+		`{"server":{"hub":{"port":9810},"auth":{"dev_mode":true}}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			settingsPath := tempSettingsHome(t)
+			if err := os.WriteFile(settingsPath, []byte(hostedLayer0Fixture), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			srv, st, _ := newSQLiteHubInMode(t, false, nil)
+			before := readFileString(t, settingsPath)
+			rowsBefore := hubSettingRevisions(t, st)
+
+			rr := putServerConfig(t, srv, body)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if resp := decodePut(t, rr); len(resp.Reload.Applied) != 0 || len(resp.FileKeys) != 0 {
+				t.Errorf("echo applied %v / file_keys %v, want nothing", resp.Reload.Applied, resp.FileKeys)
+			}
+			if after := readFileString(t, settingsPath); after != before {
+				t.Errorf("settings.yaml changed:\n%s", after)
+			}
+			if after := hubSettingRevisions(t, st); !reflect.DeepEqual(after, rowsBefore) {
+				t.Errorf("DB changed on an echo")
+			}
+		})
+	}
+}

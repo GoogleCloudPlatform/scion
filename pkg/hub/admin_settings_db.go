@@ -706,6 +706,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	fileKeys := leafKeys(fileLeaves)
 
+	// Hosted: the Layer-0 check also works on body presence, so an explicit
+	// zero (dev_mode:false over a stored true) is rejected instead of being
+	// dropped by the non-zero koanf-key extraction, and an unchanged echo of
+	// the GET view, zero-valued blocks included, is ignored.
+	if !workstation {
+		changed, err := s.hostedLayer0Changes(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for Layer-0 check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		layer0Keys = changed
+	}
+
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
 		sort.Strings(layer0Keys)

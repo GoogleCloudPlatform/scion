@@ -59,6 +59,7 @@ package hub
 // they echo the GET view: there is nowhere to persist them.
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"reflect"
@@ -91,6 +92,7 @@ type bodyLeaf struct {
 	index     []int // field index path from ServerConfigUpdateDBRequest
 	omitempty bool
 	null      bool
+	raw       json.RawMessage
 }
 
 type jsonFieldInfo struct {
@@ -161,7 +163,7 @@ func presentBodyLeaves(obj map[string]json.RawMessage, t reflect.Type, prefix []
 		path := append(append([]string{}, prefix...), name)
 		index := append(append([]int{}, prefixIndex...), fi.index...)
 		if strings.TrimSpace(string(raw)) == "null" {
-			out = append(out, bodyLeaf{path: path, index: index, omitempty: fi.omitempty, null: true})
+			out = append(out, bodyLeaf{path: path, index: index, omitempty: fi.omitempty, null: true, raw: raw})
 			continue
 		}
 		ft := fi.typ
@@ -175,9 +177,55 @@ func presentBodyLeaves(obj map[string]json.RawMessage, t reflect.Type, prefix []
 				continue
 			}
 		}
-		out = append(out, bodyLeaf{path: path, index: index, omitempty: fi.omitempty})
+		out = append(out, bodyLeaf{path: path, index: index, omitempty: fi.omitempty, raw: raw})
 	}
 	return out
+}
+
+// hostedLayer0Changes returns, for a hosted hub, the Layer-0 leaves present
+// in the body whose value differs from what GET reports. Equal leaves are
+// echoes and are ignored; anything else, an explicit zero such as
+// dev_mode:false over a stored true included, is a change the hub will not
+// make, so the PUT must reject it rather than report "saved". Leaves under
+// the unpersisted lists are left to rejectUnpersistedKeys.
+func (s *Server) hostedLayer0Changes(ctx context.Context, ops *OperationalSettings, rawBody []byte) ([]string, error) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(rawBody, &top) != nil {
+		return nil, nil
+	}
+	var leaves []bodyLeaf
+	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
+		if underUnpersistedList(l.path) {
+			continue
+		}
+		if _, l0, _ := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)}); len(l0) > 0 {
+			leaves = append(leaves, l)
+		}
+	}
+	if len(leaves) == 0 {
+		return nil, nil
+	}
+	view, err := s.serverConfigDBView(ctx, ops)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, l := range leaves {
+		if !isEchoOfView(rawPath{path: l.path, value: l.raw}, view) {
+			changed = append(changed, strings.Join(l.path, "."))
+		}
+	}
+	sort.Strings(changed)
+	return changed, nil
+}
+
+func underUnpersistedList(path []string) bool {
+	for _, p := range dbUnpersistedRequestPaths {
+		if pathHasPrefixPath(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // requestPathKoanfKey maps a request JSON path to the koanf key the

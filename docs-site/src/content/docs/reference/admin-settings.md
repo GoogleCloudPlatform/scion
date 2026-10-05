@@ -39,7 +39,7 @@ The database always wins for Layer-1 keys. Bootstrap values are used as initial 
 
 Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config` depends on the deployment mode, not on the database driver. `GET` reports it as `layer0_editable`.
 
-- **Hosted Hubs** (started with `--hosted`, or `server.mode: hosted` in `settings.yaml` / `SCION_SERVER_MODE=hosted`): Layer-1 keys are written to the database. Layer-0 keys are rejected with `422 layer0_rejected`, and keys with no database home (such as `active_profile`, `workspace_path` or `auto_inject_gcloud_adc`) with `422`. Deployment tooling owns `settings.yaml`.
+- **Hosted Hubs** (started with `--hosted`, or `server.mode: hosted` in `settings.yaml` / `SCION_SERVER_MODE=hosted`): Layer-1 keys are written to the database. A Layer-0 field the body carries is rejected with `422 layer0_rejected` when its value differs from what `GET` returns, an explicit `false`, `""` or `0` included; an unchanged value is ignored. Keys with no database home (such as `active_profile`, `workspace_path` or `auto_inject_gcloud_adc`) with `422`. Deployment tooling owns `settings.yaml`.
 - **Workstation Hubs** (the default mode): Layer-1 keys are written to the database. Layer-0 keys and keys with no database home are written to `settings.yaml`. `log_level` is applied immediately and the co-located broker reloads its runtime. Every other key that changed in the file is listed in the response's `reload.requires_restart`, and `file_keys` lists every key that changed in the file.
 
 `server.mode` must be empty (workstation), `workstation`, `hosted` or `production` (the legacy name for hosted). The server refuses to start with any other value; a typo used to mean workstation.
