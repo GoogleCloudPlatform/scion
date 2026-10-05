@@ -1171,12 +1171,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+ssErr.Error())
 			return
 		}
-		defer ss.finish()
-		// Tracked as a start in flight until Manager.Start and Run's
-		// deferred cleanup have returned (deferred after ss.finish, so it
-		// runs first).
+		// Tracked as a start in flight until Manager.Start, Run's deferred
+		// cleanup and ss.finish have all returned: finishTracked is
+		// deferred first, so it runs last.
 		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
 		defer finishTracked()
+		defer ss.finish()
 		ctx = trackCtx
 	}
 
