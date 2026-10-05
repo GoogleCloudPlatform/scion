@@ -33,13 +33,15 @@ import (
 
 // Decision audit records are persisted by a bounded, buffered writer so that
 // transient database contention delays records instead of losing them.
-// EmitDecisionAudit never blocks on the store: it appends to a fixed-size
-// in-memory queue under a short mutex and returns. A small fixed pool of
-// workers drains the queue, retrying transient store errors with capped,
-// jittered exponential backoff. When the queue is full, allow records are
-// shed before deny records. Every lost record is counted (by reason and
-// decision) and summarised in a rate-limited log line. Close drains the
-// queue on shutdown, bounded by a deadline.
+// EmitDecisionAudit never blocks on the store and never logs: it appends to
+// one of two fixed-capacity in-memory FIFOs (deny/unknown records and allow
+// records) under a short mutex and returns. A small fixed pool of workers,
+// started on the first record, drains the deny FIFO first, retrying
+// transient store errors with capped, jittered exponential backoff. When the
+// queue is full, allow records are shed before deny records. Every lost
+// record is counted (by reason and decision); a writer-owned goroutine logs
+// a summary of new drops once per dropLogEvery. Close drains the queue on
+// shutdown, bounded by a deadline.
 //
 // Nothing here feeds back into the authorization decision: a record that
 // cannot be written is counted and dropped, never surfaced to the caller.
@@ -51,11 +53,13 @@ const (
 	decisionAuditAttemptTimeout = 2 * time.Second
 	decisionAuditBackoffBase    = 100 * time.Millisecond
 	decisionAuditBackoffMax     = 2 * time.Second
-	decisionAuditDrainTimeout   = 5 * time.Second
-	decisionAuditDropLogEvery   = 30 * time.Second
-	// decisionAuditAbortGrace bounds how long Close waits for workers to
-	// return after the drain deadline cancels their in-flight writes.
-	decisionAuditAbortGrace = time.Second
+	// decisionAuditDrainTimeout and decisionAuditAbortGrace together bound
+	// Close at 5s: the drain runs for up to decisionAuditDrainTimeout, then
+	// in-flight writes are cancelled and Close waits up to
+	// decisionAuditAbortGrace for the workers to return.
+	decisionAuditDrainTimeout = 4 * time.Second
+	decisionAuditAbortGrace   = time.Second
+	decisionAuditDropLogEvery = 30 * time.Second
 )
 
 // DecisionAuditDropReason is the closed set of "reason" labels on the
@@ -75,19 +79,36 @@ const (
 	DecisionAuditDropShutdown DecisionAuditDropReason = "shutdown"
 )
 
-// DecisionAuditMetricsRecorder receives decision audit writer metrics. The
-// "decision" label is "allow", "deny" or "unknown".
+// DecisionAuditWriteOutcome is the closed set of "outcome" labels on the
+// decision audit write duration histogram.
+type DecisionAuditWriteOutcome string
+
+const (
+	// DecisionAuditWriteOK: the attempt wrote the record.
+	DecisionAuditWriteOK DecisionAuditWriteOutcome = "ok"
+	// DecisionAuditWriteDuplicate: a retry found the record already
+	// written by an earlier attempt that committed but timed out. The
+	// record counts as written.
+	DecisionAuditWriteDuplicate DecisionAuditWriteOutcome = "duplicate"
+	// DecisionAuditWriteError: the attempt failed.
+	DecisionAuditWriteError DecisionAuditWriteOutcome = "error"
+)
+
+// DecisionAuditMetricsRecorder receives decision audit writer events. The
+// "decision" label is "allow", "deny" or "unknown"; "unknown" is defensive
+// only, as BuildDecisionAuditRecord produces only allow and deny records.
+// Queue depth is not pushed through this interface: it is read on demand
+// from StoreDecisionAuditEmitter.QueueDepth.
 type DecisionAuditMetricsRecorder interface {
 	RecordDecisionAuditDrop(reason DecisionAuditDropReason, decision string)
-	SetDecisionAuditQueueDepth(depth int64)
-	RecordDecisionAuditWrite(latency time.Duration, success bool)
+	RecordDecisionAuditWrite(latency time.Duration, outcome DecisionAuditWriteOutcome)
 }
 
 type noopDecisionAuditMetrics struct{}
 
 func (noopDecisionAuditMetrics) RecordDecisionAuditDrop(DecisionAuditDropReason, string) {}
-func (noopDecisionAuditMetrics) SetDecisionAuditQueueDepth(int64)                        {}
-func (noopDecisionAuditMetrics) RecordDecisionAuditWrite(time.Duration, bool)            {}
+func (noopDecisionAuditMetrics) RecordDecisionAuditWrite(time.Duration, DecisionAuditWriteOutcome) {
+}
 
 type decisionAuditWriterConfig struct {
 	queueSize      int
@@ -97,6 +118,7 @@ type decisionAuditWriterConfig struct {
 	backoffBase    time.Duration
 	backoffMax     time.Duration
 	drainTimeout   time.Duration
+	abortGrace     time.Duration
 	dropLogEvery   time.Duration
 }
 
@@ -109,6 +131,7 @@ func defaultDecisionAuditWriterConfig() decisionAuditWriterConfig {
 		backoffBase:    decisionAuditBackoffBase,
 		backoffMax:     decisionAuditBackoffMax,
 		drainTimeout:   decisionAuditDrainTimeout,
+		abortGrace:     decisionAuditAbortGrace,
 		dropLogEvery:   decisionAuditDropLogEvery,
 	}
 }
@@ -120,6 +143,24 @@ type decisionAuditDropKey struct {
 
 type decisionAuditMetricsBox struct{ r DecisionAuditMetricsRecorder }
 
+// decisionAuditFIFO is a slice-backed FIFO. push and pop are amortised
+// O(1); the backing array is released when the FIFO empties.
+type decisionAuditFIFO struct{ items []*store.DecisionAuditRecord }
+
+func (q *decisionAuditFIFO) len() int { return len(q.items) }
+
+func (q *decisionAuditFIFO) push(r *store.DecisionAuditRecord) { q.items = append(q.items, r) }
+
+func (q *decisionAuditFIFO) pop() *store.DecisionAuditRecord {
+	r := q.items[0]
+	q.items[0] = nil
+	q.items = q.items[1:]
+	if len(q.items) == 0 {
+		q.items = nil
+	}
+	return r
+}
+
 // StoreDecisionAuditEmitter implements DecisionAuditEmitter using the store,
 // through a bounded buffered writer (see the comment at the top of this
 // file). Call Close to drain pending records on shutdown.
@@ -129,10 +170,11 @@ type StoreDecisionAuditEmitter struct {
 	cfg     decisionAuditWriterConfig
 	metrics atomic.Pointer[decisionAuditMetricsBox]
 
-	mu         sync.Mutex
-	queue      []*store.DecisionAuditRecord
-	allowCount int // allow records currently in queue
-	closed     bool
+	mu      sync.Mutex
+	denies  decisionAuditFIFO // deny and unknown records; written first
+	allows  decisionAuditFIFO // allow records; shed first when full
+	started bool              // workers running; set on the first record
+	closed  bool
 
 	wake      chan struct{}
 	stop      chan struct{}
@@ -145,11 +187,10 @@ type StoreDecisionAuditEmitter struct {
 	drops   map[decisionAuditDropKey]int64
 	pending map[decisionAuditDropKey]int64 // since the last drop log
 	lastErr error
-	lastLog time.Time
 }
 
-// NewStoreDecisionAuditEmitter creates a store-backed decision audit emitter
-// and starts its writer workers.
+// NewStoreDecisionAuditEmitter creates a store-backed decision audit
+// emitter. Its workers start with the first record.
 func NewStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger) *StoreDecisionAuditEmitter {
 	return newStoreDecisionAuditEmitter(s, logger, defaultDecisionAuditWriterConfig())
 }
@@ -162,18 +203,25 @@ func newStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger, cfg decisi
 		store:   s,
 		logger:  logger,
 		cfg:     cfg,
-		queue:   make([]*store.DecisionAuditRecord, 0, cfg.queueSize),
 		wake:    make(chan struct{}, 1),
 		stop:    make(chan struct{}),
 		drops:   map[decisionAuditDropKey]int64{},
 		pending: map[decisionAuditDropKey]int64{},
 	}
 	e.abortCtx, e.abort = context.WithCancel(context.Background())
-	for i := 0; i < cfg.workers; i++ {
-		e.wg.Add(1)
+	return e
+}
+
+// startLocked starts the workers and the drop log goroutine. The caller
+// holds e.mu and has checked that the emitter is neither started nor
+// closed, so every wg.Add happens before Close's wg.Wait.
+func (e *StoreDecisionAuditEmitter) startLocked() {
+	e.started = true
+	e.wg.Add(e.cfg.workers + 1)
+	for i := 0; i < e.cfg.workers; i++ {
 		go e.worker()
 	}
-	return e
+	go e.dropLogLoop()
 }
 
 // SetMetrics swaps in a metrics recorder. A nil recorder disables metrics.
@@ -201,6 +249,14 @@ func decisionAuditLabel(record *store.DecisionAuditRecord) string {
 	}
 }
 
+// QueueDepth reports the number of records waiting to be written. It reads
+// the queue under the lock, so a metric observing it is never stale.
+func (e *StoreDecisionAuditEmitter) QueueDepth() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.denies.len() + e.allows.len()
+}
+
 // EmitDecisionAudit enqueues a decision audit record without blocking. If
 // the queue is full, a non-allow record evicts the oldest queued allow
 // record; otherwise the incoming record is dropped and counted.
@@ -217,29 +273,25 @@ func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(_ context.Context, record 
 		e.recordDrop(DecisionAuditDropShutdown, decision, nil)
 		return
 	}
-	if len(e.queue) >= e.cfg.queueSize {
-		if decision == "allow" || e.allowCount == 0 {
+	if !e.started {
+		e.startLocked()
+	}
+	if e.denies.len()+e.allows.len() >= e.cfg.queueSize {
+		if decision == "allow" || e.allows.len() == 0 {
 			e.mu.Unlock()
 			e.recordDrop(DecisionAuditDropQueueFull, decision, nil)
 			return
 		}
-		for i, r := range e.queue {
-			if decisionAuditLabel(r) == "allow" {
-				e.queue = append(e.queue[:i], e.queue[i+1:]...)
-				e.allowCount--
-				shed = true
-				break
-			}
-		}
+		e.allows.pop()
+		shed = true
 	}
-	e.queue = append(e.queue, record)
 	if decision == "allow" {
-		e.allowCount++
+		e.allows.push(record)
+	} else {
+		e.denies.push(record)
 	}
-	depth := len(e.queue)
 	e.mu.Unlock()
 
-	e.recorder().SetDecisionAuditQueueDepth(int64(depth))
 	e.signal()
 	if shed {
 		e.recordDrop(DecisionAuditDropQueueFull, "allow", nil)
@@ -264,9 +316,10 @@ func (e *StoreDecisionAuditEmitter) worker() {
 	}
 }
 
-// next pops the oldest queued record, waiting for one if the queue is
-// empty. It reports false once the emitter is closed and the queue is
-// empty, or once the drain deadline has passed.
+// next pops the oldest queued deny/unknown record, or failing that the
+// oldest allow record, waiting for one if the queue is empty. It reports
+// false once the emitter is closed and the queue is empty, or once the
+// drain deadline has passed.
 func (e *StoreDecisionAuditEmitter) next() (*store.DecisionAuditRecord, bool) {
 	for {
 		e.mu.Lock()
@@ -274,16 +327,17 @@ func (e *StoreDecisionAuditEmitter) next() (*store.DecisionAuditRecord, bool) {
 			e.mu.Unlock()
 			return nil, false
 		}
-		if n := len(e.queue); n > 0 {
-			record := e.queue[0]
-			e.queue[0] = nil
-			e.queue = e.queue[1:]
-			if decisionAuditLabel(record) == "allow" {
-				e.allowCount--
-			}
+		var record *store.DecisionAuditRecord
+		switch {
+		case e.denies.len() > 0:
+			record = e.denies.pop()
+		case e.allows.len() > 0:
+			record = e.allows.pop()
+		}
+		if record != nil {
+			more := e.denies.len()+e.allows.len() > 0
 			e.mu.Unlock()
-			e.recorder().SetDecisionAuditQueueDepth(int64(n - 1))
-			if n > 1 {
+			if more {
 				e.signal() // hand the wake-up on to another idle worker
 			}
 			return record, true
@@ -313,8 +367,15 @@ func (e *StoreDecisionAuditEmitter) write(record *store.DecisionAuditRecord) {
 	for attempt := 1; attempt <= e.cfg.maxAttempts; attempt++ {
 		start := time.Now()
 		err = e.attempt(record)
-		e.recorder().RecordDecisionAuditWrite(time.Since(start), err == nil)
-		if err == nil || (attempt > 1 && errors.Is(err, store.ErrAlreadyExists)) {
+		outcome := DecisionAuditWriteError
+		switch {
+		case err == nil:
+			outcome = DecisionAuditWriteOK
+		case attempt > 1 && errors.Is(err, store.ErrAlreadyExists):
+			outcome = DecisionAuditWriteDuplicate
+		}
+		e.recorder().RecordDecisionAuditWrite(time.Since(start), outcome)
+		if outcome != DecisionAuditWriteError {
 			return
 		}
 		if !decisionAuditRetryable(err) || attempt == e.cfg.maxAttempts || !e.sleep(backoff) {
@@ -362,30 +423,42 @@ func decisionAuditRetryable(err error) bool {
 	return !errors.Is(err, store.ErrInvalidInput) && !errors.Is(err, store.ErrAlreadyExists)
 }
 
-// recordDrop counts a lost record and logs a summary at most once per
-// dropLogEvery.
+// recordDrop counts a lost record. It never logs, so it is safe on the
+// decision path; dropLogLoop and Close report the counts.
 func (e *StoreDecisionAuditEmitter) recordDrop(reason DecisionAuditDropReason, decision string, err error) {
 	e.recorder().RecordDecisionAuditDrop(reason, decision)
 	e.dropMu.Lock()
+	defer e.dropMu.Unlock()
 	k := decisionAuditDropKey{reason: reason, decision: decision}
 	e.drops[k]++
 	e.pending[k]++
 	if err != nil {
 		e.lastErr = err
 	}
-	if time.Since(e.lastLog) < e.cfg.dropLogEvery {
-		e.dropMu.Unlock()
-		return
-	}
-	e.dropMu.Unlock()
-	e.logDrops()
 }
 
-// logDrops emits one WARN summarising drops since the previous summary.
+// dropLogLoop logs a summary of new drops once per dropLogEvery until
+// Close, which logs the final summary itself.
+func (e *StoreDecisionAuditEmitter) dropLogLoop() {
+	defer e.wg.Done()
+	t := time.NewTicker(e.cfg.dropLogEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			e.logDrops()
+		case <-e.stop:
+			return
+		}
+	}
+}
+
+// logDrops emits one WARN summarising drops since the previous summary. It
+// logs nothing if there were none.
 func (e *StoreDecisionAuditEmitter) logDrops() {
 	e.dropMu.Lock()
 	pending, lastErr := e.pending, e.lastErr
-	e.pending, e.lastErr, e.lastLog = map[decisionAuditDropKey]int64{}, nil, time.Now()
+	e.pending, e.lastErr = map[decisionAuditDropKey]int64{}, nil
 	e.dropMu.Unlock()
 	if len(pending) == 0 {
 		return
@@ -411,10 +484,14 @@ func (e *StoreDecisionAuditEmitter) droppedCount(reason DecisionAuditDropReason,
 	return e.drops[decisionAuditDropKey{reason: reason, decision: decision}]
 }
 
-// Close stops accepting records and drains the queue, waiting at most until
-// ctx is done or the drain timeout passes, whichever is first. Records still
-// pending at the deadline are counted as shutdown drops. Records emitted
-// after Close are counted as shutdown drops. Safe to call more than once.
+// Close stops accepting records and drains the queue. The drain runs until
+// the drain timeout passes or ctx is done, whichever is first; then
+// in-flight writes are cancelled and Close waits up to the abort grace for
+// the workers to return (5s in total by default). Records still pending
+// then are counted as shutdown drops, as are records emitted after Close
+// (those are counted in the metric and drop totals, not logged). Close
+// logs a final drop summary. It is safe to call more than once and
+// concurrently; other calls wait for the first to finish.
 func (e *StoreDecisionAuditEmitter) Close(ctx context.Context) {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -429,25 +506,36 @@ func (e *StoreDecisionAuditEmitter) Close(ctx context.Context) {
 			e.wg.Wait()
 			close(done)
 		}()
+		stuck := false
 		select {
 		case <-done:
 		case <-drainCtx.Done():
 			e.abort()
 			select {
 			case <-done:
-			case <-time.After(decisionAuditAbortGrace):
+			case <-time.After(e.cfg.abortGrace):
+				stuck = true
 			}
 		}
 		e.abort()
 
 		e.mu.Lock()
-		rest := e.queue
-		e.queue, e.allowCount = nil, 0
+		rest := make([]*store.DecisionAuditRecord, 0, e.denies.len()+e.allows.len())
+		rest = append(rest, e.denies.items...)
+		rest = append(rest, e.allows.items...)
+		e.denies, e.allows = decisionAuditFIFO{}, decisionAuditFIFO{}
 		e.mu.Unlock()
 		for _, r := range rest {
 			e.recordDrop(DecisionAuditDropShutdown, decisionAuditLabel(r), nil)
 		}
-		e.recorder().SetDecisionAuditQueueDepth(0)
 		e.logDrops()
+		if stuck {
+			// A worker is stuck in a store call that ignores ctx. Its
+			// record is counted when the call returns; log it then.
+			go func() {
+				<-done
+				e.logDrops()
+			}()
+		}
 	})
 }

@@ -27,20 +27,29 @@ import (
 // instruments under the shared hub instrumentationScope, following
 // OTelMetricsRecorder's registration convention.
 type OTelDecisionAuditMetrics struct {
-	dropped      metric.Int64Counter
-	queueDepth   metric.Int64Gauge
-	writeLatency metric.Float64Histogram
+	dropped       metric.Int64Counter
+	writeDuration metric.Float64Histogram
+	queueDepth    metric.Int64ObservableGauge
 }
 
 var _ DecisionAuditMetricsRecorder = (*OTelDecisionAuditMetrics)(nil)
 
 // NewOTelDecisionAuditMetrics registers the decision audit writer
-// instruments: scion.hub.decision_audit.dropped (counter; reason, decision),
-// scion.hub.decision_audit.queue_depth (gauge) and
-// scion.hub.decision_audit.write_latency (histogram, ms; outcome).
-func NewOTelDecisionAuditMetrics(mp metric.MeterProvider) (*OTelDecisionAuditMetrics, error) {
+// instruments:
+//   - scion.hub.decision_audit.dropped (counter; reason, decision). The
+//     decision label is allow or deny; "unknown" is defensive only and is
+//     not produced by the current record builder.
+//   - scion.hub.decision_audit.write.duration (histogram, ms; outcome =
+//     ok, duplicate or error), one sample per write attempt.
+//   - scion.hub.decision_audit.queue_depth (observable gauge). queueDepth
+//     is called at each collection, so the value is current even when the
+//     hub is idle. Pass Server.DecisionAuditQueueDepth.
+func NewOTelDecisionAuditMetrics(mp metric.MeterProvider, queueDepth func() int64) (*OTelDecisionAuditMetrics, error) {
 	if mp == nil {
 		return nil, fmt.Errorf("otel decision audit metrics: nil MeterProvider")
+	}
+	if queueDepth == nil {
+		return nil, fmt.Errorf("otel decision audit metrics: nil queue depth source")
 	}
 	m := mp.Meter(instrumentationScope)
 	r := &OTelDecisionAuditMetrics{}
@@ -50,15 +59,19 @@ func NewOTelDecisionAuditMetrics(mp metric.MeterProvider) (*OTelDecisionAuditMet
 	); err != nil {
 		return nil, fmt.Errorf("creating decision_audit.dropped counter: %w", err)
 	}
-	if r.queueDepth, err = m.Int64Gauge("scion.hub.decision_audit.queue_depth",
-		metric.WithUnit("{record}"),
-	); err != nil {
-		return nil, fmt.Errorf("creating decision_audit.queue_depth gauge: %w", err)
-	}
-	if r.writeLatency, err = m.Float64Histogram("scion.hub.decision_audit.write_latency",
+	if r.writeDuration, err = m.Float64Histogram("scion.hub.decision_audit.write.duration",
 		metric.WithUnit("ms"),
 	); err != nil {
-		return nil, fmt.Errorf("creating decision_audit.write_latency histogram: %w", err)
+		return nil, fmt.Errorf("creating decision_audit.write.duration histogram: %w", err)
+	}
+	if r.queueDepth, err = m.Int64ObservableGauge("scion.hub.decision_audit.queue_depth",
+		metric.WithUnit("{record}"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(queueDepth())
+			return nil
+		}),
+	); err != nil {
+		return nil, fmt.Errorf("creating decision_audit.queue_depth gauge: %w", err)
 	}
 	return r, nil
 }
@@ -71,17 +84,8 @@ func (r *OTelDecisionAuditMetrics) RecordDecisionAuditDrop(reason DecisionAuditD
 	))
 }
 
-// SetDecisionAuditQueueDepth implements DecisionAuditMetricsRecorder.
-func (r *OTelDecisionAuditMetrics) SetDecisionAuditQueueDepth(depth int64) {
-	r.queueDepth.Record(context.Background(), depth)
-}
-
 // RecordDecisionAuditWrite implements DecisionAuditMetricsRecorder.
-func (r *OTelDecisionAuditMetrics) RecordDecisionAuditWrite(latency time.Duration, success bool) {
-	outcome := "ok"
-	if !success {
-		outcome = "error"
-	}
-	r.writeLatency.Record(context.Background(), float64(latency)/float64(time.Millisecond),
-		metric.WithAttributes(attribute.String("outcome", outcome)))
+func (r *OTelDecisionAuditMetrics) RecordDecisionAuditWrite(latency time.Duration, outcome DecisionAuditWriteOutcome) {
+	r.writeDuration.Record(context.Background(), float64(latency)/float64(time.Millisecond),
+		metric.WithAttributes(attribute.String("outcome", string(outcome))))
 }

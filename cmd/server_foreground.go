@@ -365,6 +365,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// The Hub handler may be served by two listeners (its own and the
+		// WebServer's), so neither listener's Shutdown closes the decision
+		// audit writer. This deferred call runs after wg.Wait (both
+		// listeners have drained) and before the store closer deferred
+		// above, so records from requests served during the drain are
+		// written.
+		hubSrv.DeferDecisionAuditClose()
+		defer hubSrv.CloseDecisionAudit(context.Background())
+
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
 		// the same condition startRuntimeBroker registers it, so gates that
@@ -1963,7 +1972,7 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
-	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp)
+	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp, hubSrv.DecisionAuditQueueDepth)
 	if auditErr != nil {
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
 	} else {

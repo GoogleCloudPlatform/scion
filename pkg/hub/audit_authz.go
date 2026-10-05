@@ -38,9 +38,6 @@ import (
 // reference.
 const auditWriteTimeout = 1 * time.Second
 
-// StoreDecisionAuditEmitter, the store-backed DecisionAuditEmitter, lives in
-// decision_audit_writer.go.
-
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
 	// Sampling: always audit deny decisions; sample allow decisions, unless
