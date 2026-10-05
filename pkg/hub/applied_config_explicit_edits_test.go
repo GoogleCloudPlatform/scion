@@ -520,15 +520,13 @@ func configureUntouchedBody(t *testing.T) map[string]interface{} {
 }
 
 // configureRowEditBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's "R5-1" vitest case: the exact body
-// the real, fixed buildConfig emits when the user edits (adds) one custom
-// env row (FOO) on an agent whose AppliedConfig.Env has an unrelated
-// template key (TEMPLATE_KEY) and whose InlineConfig.Env-only auto-expose
-// stamp (SCION_AUTO_EXPOSE_PORTS) must be re-sent verbatim alongside it
-// (R2-1's "re-send the loaded auto-expose keys" rule, R4-2's per-key read).
-// Loading the SAME file in both places means a future buildConfig change
-// that stops matching it breaks the vitest case directly (ptone/scion#2493
-// R5-1 / round 6 completeness requirement).
+// agent-configure-build-config.test.ts's row-edit vitest case: the exact body
+// the real buildConfig emits when the user adds one custom env row (FOO) on
+// an agent whose AppliedConfig.Env has an unrelated template key
+// (TEMPLATE_KEY) and whose auto-expose control is untouched, so no
+// SCION_AUTO_EXPOSE_* key is sent. Loading the SAME file in both places means
+// a future buildConfig change that stops matching it breaks the vitest case
+// directly.
 func configureRowEditBody(t *testing.T) map[string]interface{} {
 	t.Helper()
 	return loadTestdataJSONBody(t, "configure-row-edit-body.json")
@@ -762,22 +760,10 @@ func TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEn
 }
 
 // TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue
-// is R2-1 facet (b)'s dedicated regression: an agent whose live env DOES
-// have an explicit auto-expose key (true) must keep it true across an
-// untouched Save (step 1) followed by an unrelated custom-row edit (step 2,
-// sent as the FIXED buildConfig would after re-loading and reading the real
-// value back). Before the R2-1 fix, step 2 would have sent the global
-// default (false) instead of the real live value (true), silently flipping
-// the live setting off and recording the flip into CreateInputs.
-//
-// Since R4-1, InlineConfig.Env no longer goes nil after step 1 either (the
-// carryForwardAbsentPageOwnedFields carve-out keeps it equal to the live
-// AppliedConfig.Env), so this scenario is now doubly protected: the hub
-// carve-out keeps InlineConfig.Env correct, and the web-side R2-1 fix
-// (reading ac.env, not ic.env alone) means populateForm would get this
-// right even if some OTHER bug ever reintroduced the ic.env-goes-nil
-// behavior. The sanity check below asserts the (now correct) non-nil state,
-// where an earlier version of this test asserted the opposite.
+// pins that an explicit auto-expose value (true, in all three maps) survives
+// an untouched Save (step 1, no env key) followed by an unrelated custom-row
+// edit (step 2, env without auto-expose keys, as buildConfig sends it when
+// the control is untouched): live, InlineConfig and CreateInputs all keep it.
 func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -813,11 +799,10 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	require.NotNil(t, mid.AppliedConfig.InlineConfig.Env, "InlineConfig.Env must survive the untouched save")
 	assert.Equal(t, "true", mid.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
 
-	// Step 2: the FIXED page reloads, reads SCION_AUTO_EXPOSE_PORTS=true back
-	// from the live env, and re-sends that same value while the user edits
-	// the unrelated K row.
+	// Step 2: the page reloads and the user edits the unrelated K row; the
+	// untouched auto-expose control sends nothing.
 	rec2 := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
-		"env": map[string]interface{}{"K": "v2", "SCION_AUTO_EXPOSE_PORTS": "true"},
+		"env": map[string]interface{}{"K": "v2"},
 	})
 	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
 
@@ -829,7 +814,7 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	require.NotNil(t, final.AppliedConfig.CreateInputs.InlineConfig)
 	assert.Equal(t, "v2", final.AppliedConfig.CreateInputs.InlineConfig.Env["K"], "the real edit must still be recorded")
 	assert.Equal(t, "true", final.AppliedConfig.CreateInputs.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
-		"re-sending the unchanged real value must not be misrecorded or lost")
+		"an untouched explicit auto-expose value must not be lost")
 }
 
 // TestApplyAgentUpdate_ImageCompareCanonicalizesBothSides is R1-2: old.Image
@@ -976,206 +961,8 @@ func TestApplyAgentUpdate_PresenceDetectionIsCaseInsensitive(t *testing.T) {
 }
 
 // ============================================================================
-// Review round 5 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-5.md)
-// ============================================================================
-
-// TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp is R5-1's exact
-// repro: resolveDerivedConfig (handlers_agent_create_helpers.go) stamps the
-// project/hub SCION_AUTO_EXPOSE_PORTS default into InlineConfig.Env ONLY,
-// never into AppliedConfig.Env, when the create request had no explicit env.
-// agent-configure.ts's R4-2 per-key merge correctly displays that stamp
-// (reads InlineConfig.Env for it), and R2-1's "re-send the loaded auto-expose
-// keys" rule means ANY unrelated env-row edit re-sends it verbatim. Before
-// this fix, diffExplicitEnvKeys compared only against old.Env (which lacks
-// the key), so the echoed stamp was misread as an "added" key and frozen
-// into CreateInputs -- even though the user never touched auto-expose and
-// its live value never changed.
-func TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp(t *testing.T) {
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	ctx := context.Background()
-
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Model = "golden-model"
-		// AppliedConfig.Env has a template-derived key but NOT the
-		// auto-expose stamp -- it lives only in InlineConfig.Env, exactly as
-		// resolveDerivedConfig's project/hub auto-expose default leaves it
-		// when the create request had no explicit env of its own.
-		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x"}
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{
-			Model: "golden-model",
-			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
-		}
-		// CI already exists (e.g. from an earlier edit) but has never
-		// recorded any env at all.
-		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
-			InlineConfig: &api.ScionConfig{Model: "golden-model"},
-		}
-	})
-
-	// The page-shaped body: shared with agent-configure-build-config.test.ts's
-	// matching R5-1 vitest case, so the two cannot drift apart. It contains
-	// the golden untouched fields, plus env with the template key
-	// (unchanged), a genuinely new custom key (FOO), and the auto-expose
-	// stamp re-sent verbatim per R2-1/R4-2 -- exactly what a real row edit
-	// on this agent would send.
-	rec := patchAgentConfig(t, srv, agent.ID, configureRowEditBody(t))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	updated, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	ci := updated.AppliedConfig.CreateInputs
-	require.NotNil(t, ci)
-	require.NotNil(t, ci.InlineConfig)
-	assert.Equal(t, map[string]string{"FOO": "bar"}, ci.InlineConfig.Env,
-		"only the genuinely new key must be recorded; the unchanged auto-expose stamp and the unchanged template key must not be")
-	// The live value is untouched either way (it was already true, re-sent
-	// as true), and must certainly not be lost as a side effect of this fix.
-	require.NotNil(t, updated.AppliedConfig.InlineConfig)
-	assert.Equal(t, "true", updated.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
-}
-
-// TestApplyAgentUpdate_EnvDiffStillRecordsActualAutoExposeToggle is R5-1's
-// guard, requested by the review: the fix above must not make a GENUINE
-// auto-expose toggle invisible to CreateInputs. When the user actually
-// changes the value (not just re-sending the loaded one), it must still be
-// recorded -- the fallback to old.InlineConfig.Env only suppresses an
-// EQUAL echo, never a real change.
-func TestApplyAgentUpdate_EnvDiffStillRecordsActualAutoExposeToggle(t *testing.T) {
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	ctx := context.Background()
-
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Model = "golden-model"
-		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x"}
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{
-			Model: "golden-model",
-			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
-		}
-		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
-			InlineConfig: &api.ScionConfig{Model: "golden-model"},
-		}
-	})
-
-	// The user toggles auto-expose OFF this time, so the request's value
-	// (false) differs from both old.Env (absent) and old.InlineConfig.Env
-	// (true) -- a real edit, which must be recorded regardless of the R5-1
-	// fallback.
-	body := configureUntouchedBody(t)
-	body["env"] = map[string]interface{}{
-		"TEMPLATE_KEY":            "x",
-		"SCION_AUTO_EXPOSE_PORTS": "false",
-	}
-	rec := patchAgentConfig(t, srv, agent.ID, body)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	updated, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	ci := updated.AppliedConfig.CreateInputs
-	require.NotNil(t, ci)
-	require.NotNil(t, ci.InlineConfig)
-	assert.Equal(t, "false", ci.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
-		"an actual toggle (not a re-send of the loaded value) must still be recorded into CreateInputs")
-}
-
-// ============================================================================
 // Review round 6 (FINAL) (gs://scion-xproject-exchange/tz-refactor/out/2493/review-6.md)
 // ============================================================================
-
-// TestApplyAgentUpdate_EnvDiffAutoExposeKeyPrefersInlineConfigWhenBothMapsDiffer
-// is R6-1: the page reads the four SCION_AUTO_EXPOSE_* keys per key with
-// InlineConfig.Env taking precedence (R4-2), but R5-1's fallback checked
-// AppliedConfig.Env FIRST for every key, auto-expose included. When BOTH
-// maps hold an auto-expose key with DIFFERENT values -- a template's own env
-// setting it in AppliedConfig.Env (merged by resolveDerivedConfig), and a
-// project/hub default stamping a different value into InlineConfig.Env only
-// -- the page shows and re-sends the InlineConfig value, but R5-1's fix
-// still compared against the AppliedConfig value first and misread the
-// unrelated row edit as an auto-expose change. pageVisibleEnvValue now
-// mirrors the page's own precedence per key, closing this.
-func TestApplyAgentUpdate_EnvDiffAutoExposeKeyPrefersInlineConfigWhenBothMapsDiffer(t *testing.T) {
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	ctx := context.Background()
-
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Model = "golden-model"
-		// The template's own env set this key in AppliedConfig.Env...
-		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x", "SCION_AUTO_EXPOSE_PORTS": "false"}
-		// ...but a project/hub default stamped a DIFFERENT value into
-		// InlineConfig.Env only -- the value the page actually shows.
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{
-			Model: "golden-model",
-			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
-		}
-		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
-			InlineConfig: &api.ScionConfig{Model: "golden-model"},
-		}
-	})
-
-	// The shared fixture: the real buildConfig output for an unrelated row
-	// edit, which re-sends the auto-expose stamp at the page-visible
-	// (InlineConfig) value, "true" -- not the AppliedConfig value, "false".
-	rec := patchAgentConfig(t, srv, agent.ID, configureRowEditBody(t))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	updated, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	ci := updated.AppliedConfig.CreateInputs
-	require.NotNil(t, ci)
-	require.NotNil(t, ci.InlineConfig)
-	assert.Equal(t, map[string]string{"FOO": "bar"}, ci.InlineConfig.Env,
-		"the re-sent auto-expose value matches what the page showed (InlineConfig.Env), so it must not be recorded -- only the genuinely new key")
-}
-
-// TestApplyAgentUpdate_EnvDiffAutoExposeKeyChangeFromInlineValueIsRecorded is
-// R6-1's guard: when both maps hold the auto-expose key with different
-// values, a request value equal to the OLD AppliedConfig.Env value (but
-// different from what the page showed, InlineConfig.Env) is still a real
-// edit relative to the page -- the user genuinely unticked the control --
-// and must still be recorded.
-func TestApplyAgentUpdate_EnvDiffAutoExposeKeyChangeFromInlineValueIsRecorded(t *testing.T) {
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	ctx := context.Background()
-
-	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Model = "golden-model"
-		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x", "SCION_AUTO_EXPOSE_PORTS": "false"}
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{
-			Model: "golden-model",
-			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
-		}
-		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
-			InlineConfig: &api.ScionConfig{Model: "golden-model"},
-		}
-	})
-
-	// The user unticks the control: the page showed "true" (InlineConfig),
-	// and now sends "false". That value happens to equal old.Env's value,
-	// but it differs from what the page actually displayed, so it is a real
-	// edit and must be recorded regardless.
-	body := configureUntouchedBody(t)
-	body["env"] = map[string]interface{}{
-		"TEMPLATE_KEY":            "x",
-		"SCION_AUTO_EXPOSE_PORTS": "false",
-	}
-	rec := patchAgentConfig(t, srv, agent.ID, body)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	updated, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	ci := updated.AppliedConfig.CreateInputs
-	require.NotNil(t, ci)
-	require.NotNil(t, ci.InlineConfig)
-	assert.Equal(t, "false", ci.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
-		"a real edit away from the page-visible value must be recorded, even though it happens to equal the AppliedConfig value")
-}
 
 // TestApplyAgentUpdate_ModelAliasComparedAfterResolution is R6-2: the
 // enumeration's Model row states the compare runs after alias resolution

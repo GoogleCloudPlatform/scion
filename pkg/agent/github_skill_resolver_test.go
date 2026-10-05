@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -967,7 +968,7 @@ func TestGitHubSkillResolver_ResolutionCacheHit(t *testing.T) {
 	})
 
 	resolver := newTestGitHubResolver(server)
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1347,7 +1348,7 @@ func TestGitHubSkillResolver_CacheHitCredentialCheck(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1455,7 +1456,7 @@ func TestGitHubSkillResolver_CrossCredentialCacheIsolation(t *testing.T) {
 	})
 
 	// Use a shared cache to demonstrate isolation.
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1868,7 +1869,7 @@ func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
 	})
 
 	// Create a shared cache
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -2687,7 +2688,7 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 
 	// A single shared cache, exactly as the broker wires it (one
 	// GitHubResolutionCache singleton serving every project).
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -2804,7 +2805,7 @@ func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *test
 	})
 
 	// A single shared cache, exactly as the broker wires it.
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -2956,7 +2957,7 @@ func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testi
 				_, _ = w.Write([]byte("SECRET"))
 			})
 
-			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 			if err != nil {
 				t.Fatalf("NewGitHubResolutionCache: %v", err)
 			}
@@ -3114,7 +3115,7 @@ func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
 				_, _ = w.Write([]byte("CONTENT"))
 			})
 
-			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 			if err != nil {
 				t.Fatalf("NewGitHubResolutionCache: %v", err)
 			}
@@ -3224,7 +3225,7 @@ func TestGitHubSkillResolver_FullSHARefNeverServedStale(t *testing.T) {
 		_, _ = w.Write([]byte(content.Load().(string)))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), -time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), -time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3281,15 +3282,15 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 		_, _ = w.Write([]byte("CONTENT"))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
 	r := newTestGitHubResolver(server)
 	r.resolutionCache = cache
 
-	refA := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-a"}
-	refB := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-b"}
+	refA := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-a", Scope: "project"}
+	refB := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-b", Scope: "user", Optional: true}
 
 	var joinCount int32
 	bothJoined := make(chan struct{})
@@ -3336,6 +3337,66 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 	if len(resB.Resolved) != 1 || resB.Resolved[0].As != "alias-b" {
 		t.Fatalf("caller B: expected As %q, got result %+v (errors: %+v)", "alias-b", resB.Resolved, resB.Errors)
 	}
+	// Scope and Optional are per caller too.
+	if a := resA.Resolved[0]; a.Scope != "project" || a.Optional {
+		t.Errorf("caller A: Scope=%q Optional=%v, want project/false", a.Scope, a.Optional)
+	}
+	if b := resB.Resolved[0]; b.Scope != "user" || !b.Optional {
+		t.Errorf("caller B: Scope=%q Optional=%v, want user/true", b.Scope, b.Optional)
+	}
+}
+
+// TestGitHubSkillResolver_CacheHitKeepsOwnScopeAndOptional checks that refs
+// sharing one URI and credential, served from one cache entry, each keep
+// their own Scope and Optional, both within one Resolve call and across
+// calls.
+func TestGitHubSkillResolver_CacheHitKeepsOwnScopeAndOptional(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	var commitCalls atomic.Int32
+	mux.HandleFunc("/repos/acme/shared/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		commitCalls.Add(1)
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 7},
+		})
+	})
+	mux.HandleFunc("/raw/acme/shared/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("CONTENT"))
+	})
+
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestGitHubResolver(server)
+	r.resolutionCache = cache
+
+	const uri = "gh://acme/shared/s@main"
+	// Fill the cache from a ref with yet another Scope and Optional.
+	if res, _ := r.Resolve(context.Background(), []api.SkillReference{{URI: uri, Scope: "global", Optional: true}}, ResolveOpts{}); len(res.Resolved) != 1 {
+		t.Fatalf("first resolve: %+v", res)
+	}
+
+	refs := []api.SkillReference{
+		{URI: uri, As: "p", Scope: "project"},
+		{URI: uri, As: "u", Scope: "user", Optional: true},
+	}
+	res, err := r.Resolve(context.Background(), refs, ResolveOpts{})
+	if err != nil || len(res.Resolved) != 2 {
+		t.Fatalf("Resolve: err=%v result=%+v", err, res)
+	}
+	if n := commitCalls.Load(); n != 1 {
+		t.Fatalf("GitHub commit lookups = %d, want 1 (later refs served from the cache)", n)
+	}
+	for i, got := range res.Resolved {
+		want := refs[i]
+		if got.As != want.As || got.Scope != want.Scope || got.Optional != want.Optional {
+			t.Errorf("result %d: As=%q Scope=%q Optional=%v, want %q/%q/%v",
+				i, got.As, got.Scope, got.Optional, want.As, want.Scope, want.Optional)
+		}
+	}
 }
 
 // TestCredentialFingerprint_FullWidth pins the full-width requirement on
@@ -3368,7 +3429,7 @@ func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing
 		}
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3404,7 +3465,7 @@ func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing
 // matches context.DeadlineExceeded; plain cancellation returns exactly
 // context.Canceled.
 func TestGitHubResolutionCache_WaiterDeadline_WrapsTypedAndContextError(t *testing.T) {
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3618,5 +3679,80 @@ func TestGitHubSkillResolver_CancelledBeforeRetry_ReturnsCanceled(t *testing.T) 
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Errorf("expected exactly 1 attempt, got %d", got)
+	}
+}
+
+// TestRetryAfter_HugeValueDoesNotOverflow checks that a Retry-After far too
+// large for time.Duration is capped (or saturated) rather than wrapping into
+// a negative or short duration, at each place the header is converted.
+func TestRetryAfter_HugeValueDoesNotOverflow(t *testing.T) {
+	// 99999999999 seconds wraps to a large positive duration; 9223372037
+	// wraps to a negative one and 18446744074 to under a second, so a cap
+	// applied after the multiplication would not catch the last two.
+	// 99999999999999999999 does not fit in int64 at all and must still read
+	// as huge, not as absent.
+	for _, huge := range []string{"99999999999", "9223372037", "18446744074", "99999999999999999999"} {
+		t.Run(huge, func(t *testing.T) {
+			newResp := func(status int) *http.Response {
+				resp := &http.Response{StatusCode: status, Header: make(http.Header)}
+				resp.Header.Set("Retry-After", huge)
+				return resp
+			}
+
+			if got := githubCooldownFor(newResp(http.StatusTooManyRequests), time.Now()); got != GitHubCooldownMax {
+				t.Errorf("githubCooldownFor = %v, want GitHubCooldownMax (%v)", got, GitHubCooldownMax)
+			}
+			if got := retryDelay(newResp(http.StatusServiceUnavailable), 1); got != githubMaxBackoff {
+				t.Errorf("retryDelay = %v, want githubMaxBackoff (%v)", got, githubMaxBackoff)
+			}
+			got, ok := retryAfterDuration(newResp(http.StatusServiceUnavailable))
+			if !ok || got <= githubMaxBackoff {
+				t.Errorf("retryAfterDuration = %v, %v; want ok and longer than githubMaxBackoff", got, ok)
+			}
+		})
+	}
+}
+
+func TestParseRetryAfterSeconds(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"0", 0, true},
+		{"30", 30, true},
+		{"99999999999999999999", math.MaxInt64, true},
+		{"-99999999999999999999", 0, false},
+		{"+99999999999999999999", 0, false},
+		{"1.5", 0, false},
+		{"Wed, 21 Oct 2015 07:28:00 GMT", 0, false},
+		{"", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := parseRetryAfterSeconds(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseRetryAfterSeconds(%q) = %d, %v; want %d, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestSecondsUpTo(t *testing.T) {
+	cases := []struct {
+		secs int64
+		max  time.Duration
+		want time.Duration
+	}{
+		{0, time.Minute, 0},
+		{-5, time.Minute, 0},
+		{30, time.Minute, 30 * time.Second},
+		{60, time.Minute, time.Minute},
+		{61, time.Minute, time.Minute},
+		{math.MaxInt64, time.Minute, time.Minute},
+		{99999999999, time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)},
+	}
+	for _, tc := range cases {
+		if got := secondsUpTo(tc.secs, tc.max); got != tc.want {
+			t.Errorf("secondsUpTo(%d, %v) = %v, want %v", tc.secs, tc.max, got, tc.want)
+		}
 	}
 }

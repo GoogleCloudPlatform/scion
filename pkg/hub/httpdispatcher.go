@@ -1095,10 +1095,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
 			}
+			req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -2990,10 +2996,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -3417,50 +3426,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	return err
 }
 
-// ErrRawDispatchRefused is returned by DispatchAgentMessage when the
-// message being dispatched carries Raw == true. This is a documented
-// contract invariant every AgentDispatcher.DispatchAgentMessage
-// implementation must uphold (today exactly this one production
-// implementation exists, per contract §6.1(a)); nothing in the Go type
-// system enforces it on a future second implementation, so a reviewer
-// adding one must apply the same check at its own chokepoint.
-//
-// From task 2.3 onward (contract .design/agent-keys-contract.md §6.1 "(a)
-// Dispatch-layer backstop"), legacy raw keystroke delivery through the
-// message/broadcast/DM dispatch path is refused unconditionally at this
-// chokepoint -- zero broker calls, never mgr.MessageRaw -- regardless of
-// which call site reached it (direct dispatch, dispatchWithBrokerRetry, or
-// any broker-proxy-published message). A correctly operating Hub never
-// produces a Raw==true structuredMsg at this layer: the message-handler
-// bridge (task 2.3, agent_keys_message_bridge.go) and ptone/scion#2218's
-// (task 0.2's) ingress guards both intercept raw before persistence or
-// dispatch on every production ingress. Reaching this point therefore
-// signals an implementation defect in one of those layers, not a normal
-// caller error (contract's AK-55).
-//
-// This layer cannot undo a persisted store.Message row or an already-
-// published SSE/observer event: on every call site, those side effects (if
-// any) already happened before dispatch runs. Returning this error is
-// deliberately just an ordinary dispatch error to the caller -- every
-// existing caller already marks a persisted row failed through its own
-// existing failure path (e.g. ExecuteAgentDM's markFailed) and returns a
-// generic, non-keys-specific failure to any synchronous caller -- so this
-// chokepoint requires no new error-handling code path anywhere else.
-var ErrRawDispatchRefused = errors.New("agent dispatch: raw message delivery refused (post-2.3 backstop)")
-
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	// A nil agent has no broker to deliver to; reject it before the raw
-	// backstop log below dereferences agent.ID.
-	if agent == nil {
-		return requireRuntimeBrokerAssigned(agent)
-	}
-	if structuredMsg != nil && structuredMsg.Raw {
-		slog.Error("agent dispatch: raw message delivery refused at the backstop",
-			"agent_id", agent.ID, "defect", "raw_reached_dispatch_layer")
-		return ErrRawDispatchRefused
-	}
-
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
