@@ -962,9 +962,11 @@ export class AgentStore {
       entry.walk = null;
       if (isAbortError(err) && signal.aborted) return;
       const error = err instanceof Error ? err : new Error(String(err));
-      // A resync or a feed drop during the walk means events were missed:
-      // its failure leaves the list behind, so it fails as any walk does.
-      const missed = entry.followUp;
+      // A list marked stale (a resync, including one that lands while the
+      // walk waits for the feed, or an earlier walk that ran disconnected or
+      // failed) or a feed drop during the walk is behind on events: its
+      // failure leaves the list behind, so it fails as any walk does.
+      const missed = entry.followUp || entry.stale;
       entry.followUp = false;
       if (walk.background && !missed) {
         // The snapshot is as current as before the walk; the probe goes on.

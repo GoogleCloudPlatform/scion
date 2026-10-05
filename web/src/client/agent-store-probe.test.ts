@@ -808,6 +808,29 @@ describe('AgentStore delta probe', () => {
       expect(ids(snapshot)).toEqual(['a1']);
     });
 
+    it('shows its failure when the reconnect resync lands while it waits for the feed', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const h = await loaded([row('a1', 1)], HUB, { connectTimeoutMs: 60_000 });
+      await tick(9 * AGENT_PROBE_INTERVAL_MS);
+      h.stream().drop();
+      await settle();
+      // The periodic walk falls due while the feed is down, and waits for it.
+      await tick();
+      const walks = h.server.walks();
+      let resyncs = 0;
+      h.feeds[0]?.addEventListener('agents-resync', () => resyncs++);
+      h.server.status = 500;
+      await vi.advanceTimersByTimeAsync(1_200);
+      await h.connect();
+      await settle();
+      expect(resyncs).toBe(1);
+      expect(h.server.walks()).toBe(walks + 1);
+      const snapshot = h.store.peek(HUB);
+      expect(snapshot?.status).toBe('error');
+      expect(snapshot?.complete).toBe(false);
+      expect(ids(snapshot)).toEqual(['a1']);
+    });
+
     it('does not walk a list nobody retains', async () => {
       const h = createHarness([row('a1', 1)]);
       const release = h.store.retain(HUB, () => {});
