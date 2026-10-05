@@ -388,7 +388,7 @@ const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
  * `deletion` is not in the set: a row without it comes from a hub that does
  * not send it, so the held value stays.
  */
-const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
+export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'id',
   'slug',
   'name',
@@ -410,7 +410,10 @@ const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** The keys of a compact row from the hub's agent list, which adds messageability. */
-const HUB_COMPACT_KEYS: ReadonlySet<string> = new Set([...PROJECT_COMPACT_KEYS, '_messageability']);
+export const HUB_COMPACT_KEYS: ReadonlySet<string> = new Set([
+  ...PROJECT_COMPACT_KEYS,
+  '_messageability',
+]);
 
 /** The compact keys of the endpoint that lists `q`. */
 function compactKeysOf(q: AgentQuery): ReadonlySet<string> {

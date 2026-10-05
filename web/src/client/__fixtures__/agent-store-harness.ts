@@ -177,7 +177,7 @@ function ms(value: string | undefined): number {
 }
 
 /** The keys of a `view=compact` list item, as the hub's compact view emits them. */
-const COMPACT_KEYS = [
+export const COMPACT_KEYS = [
   'id',
   'slug',
   'name',

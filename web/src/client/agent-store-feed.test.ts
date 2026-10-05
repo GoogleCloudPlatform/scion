@@ -23,11 +23,13 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { agent, createHarness, settle } from './__fixtures__/agent-store-harness.js';
+import { agent, COMPACT_KEYS, createHarness, settle } from './__fixtures__/agent-store-harness.js';
 import {
   AGENT_READ_BURST_LIMIT,
   AGENT_READ_CONCURRENCY,
   AGENT_READ_TIMEOUT_MS,
+  HUB_COMPACT_KEYS,
+  PROJECT_COMPACT_KEYS,
   type AgentListSnapshot,
 } from './agent-store.js';
 import type { Agent } from '../shared/types.js';
@@ -966,6 +968,93 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
     expect(row?.phase).toBe('running');
     expect(row?.harnessConfig).toBe('claude');
     expect(find(h.store.peek(HUB), 'a1')).toBe(row);
+  });
+
+  // The harness's compact keys, as the hub list sends them. The clear cases
+  // below come from these, so a key missing from the store's set fails its
+  // own case too.
+  const HARNESS_HUB_KEYS: string[] = [...COMPACT_KEYS, 'creatorName'];
+
+  it("matches the hub's compact keys: the harness's, with the creator name, and messageability only for the hub list", () => {
+    expect([...HUB_COMPACT_KEYS].sort()).toEqual([...HARNESS_HUB_KEYS].sort());
+    expect([...PROJECT_COMPACT_KEYS].sort()).toEqual(
+      HARNESS_HUB_KEYS.filter((key) => key !== '_messageability').sort()
+    );
+  });
+
+  /** A row with a value the compact view emits for every compact key. */
+  const filled = (): Agent =>
+    agent('a1', {
+      slug: 'a1-slug',
+      template: 'reviewer',
+      project: 'Main',
+      labels: { team: 'red' },
+      phase: 'running',
+      activity: 'working',
+      containerStatus: 'Up 1 minute',
+      messageMode: 'lineage',
+      ancestry: ['root'],
+      createdBy: 'u1',
+      created: '2026-01-01T00:00:00Z',
+      updated: '2026-01-01T00:00:01Z',
+      lastActivityEvent: '2026-01-01T00:00:02Z',
+      _capabilities: { actions: ['read'] },
+      _messageability: { canMessage: true },
+      appliedConfig: { creatorName: 'Ada' },
+    } as unknown as Partial<Agent>);
+
+  /** `filled()` as the server lists it once `key` is cleared. */
+  const cleared = (key: string): Agent => {
+    const row = filled() as unknown as Record<string, unknown>;
+    if (key === 'creatorName') row.appliedConfig = {};
+    else delete row[key];
+    return row as unknown as Agent;
+  };
+
+  const has = (row: Agent | undefined, key: string): boolean => row !== undefined && key in row;
+
+  it.each(HARNESS_HUB_KEYS.filter((key) => key !== 'id'))(
+    'a hub walk clears `%s` when the row lacks it',
+    async (key) => {
+      const h = createHarness([filled()]);
+      h.store.retain(HUB, () => {});
+      const first = h.store.ensure(HUB);
+      await h.connect();
+      await first;
+      expect(has(h.feeds[0]?.getAgent('a1'), key)).toBe(true);
+
+      h.server.agents = [cleared(key)];
+      h.store.invalidate('manual');
+      await settle();
+
+      expect(h.server.walks()).toBe(2);
+      expect(has(h.feeds[0]?.getAgent('a1'), key)).toBe(false);
+    }
+  );
+
+  // A project list holds only the project's agents, so `projectId` stays.
+  it.each(
+    HARNESS_HUB_KEYS.filter(
+      (key) => key !== 'id' && key !== 'projectId' && key !== '_messageability'
+    )
+  )('a project walk clears `%s` when the row lacks it, and keeps messageability', async (key) => {
+    const h = createHarness([filled()]);
+    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row as Agent;
+    h.store.retain(HUB, () => {});
+    h.store.retain(P1, () => {});
+    const hub = h.store.ensure(HUB);
+    await h.connect();
+    await hub;
+    await h.store.ensure(P1);
+    expect(has(h.feeds[0]?.getAgent('a1'), key)).toBe(true);
+
+    h.server.agents = [cleared(key)];
+    h.store.invalidate('manual', (k) => k === 'project:p1');
+    await settle();
+
+    const row = h.feeds[0]?.getAgent('a1');
+    expect(has(row, key)).toBe(false);
+    expect(row?._messageability).toEqual({ canMessage: true });
   });
 
   it('a walk clears labels the server removed', async () => {
