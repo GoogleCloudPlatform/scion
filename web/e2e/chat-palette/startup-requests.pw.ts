@@ -56,6 +56,7 @@ const THREADS_BY_PROJECT_ID = Object.fromEntries(
 );
 
 const LIST_DELAY_MS = 300;
+/** Long enough that a rail gated on thread lists would be visibly late. */
 const THREAD_DELAY_MS = 1500;
 
 function delay(ms: number): Promise<void> {
@@ -73,13 +74,20 @@ interface SlowListOptions {
   omitSpaceActivity?: boolean;
   /** Most thread requests the browser had open at once, updated as they run. */
   concurrency?: { current: number; max: number };
+  /** Thread responses wait for this as well as the delay (a test-held gate). */
+  threadGate?: Promise<void>;
 }
 
 async function routeSlowChatLists(
   page: Page,
   options: SlowListOptions = {}
 ): Promise<TrackedRequest[]> {
-  const { threadDelayMs = THREAD_DELAY_MS, omitSpaceActivity = false, concurrency } = options;
+  const {
+    threadDelayMs = THREAD_DELAY_MS,
+    omitSpaceActivity = false,
+    concurrency,
+    threadGate,
+  } = options;
   const spaces = omitSpaceActivity
     ? SPACES.map(({ lastActivityAt: _omitted, ...rest }) => rest)
     : SPACES;
@@ -106,7 +114,7 @@ async function routeSlowChatLists(
       concurrency.current++;
       concurrency.max = Math.max(concurrency.max, concurrency.current);
     }
-    await delay(threadDelayMs);
+    await Promise.all([delay(threadDelayMs), threadGate]);
     if (concurrency) concurrency.current--;
     await route.fulfill({ json: { threads: THREADS_BY_PROJECT_ID[projectId] ?? [] } });
   });
@@ -162,10 +170,12 @@ test('a cold /chat startup makes one spaces and one DMs request and no collapsed
   const requests = await routeSlowChatLists(page);
   await page.goto('/e2e/chat-palette/fixture.html?unread=1', { waitUntil: 'domcontentloaded' });
 
+  // Recorded for the report, not asserted: it includes the fixture's own
+  // module loading and varies with machine load. That the rail does not
+  // wait for thread lists is asserted below (none is requested) and,
+  // deterministically, in the deep-link test.
   const railAt = await waitForRailNames(page);
   record('rail-names-ms', railAt.toFixed(0));
-  // The rail renders well before a single thread response could have landed.
-  expect.soft(railAt).toBeLessThan(THREAD_DELAY_MS);
   // The rollup badge is shown with the names.
   await expect(page.locator('scion-chat-space-rail .unread-badge')).toHaveText('3');
 
@@ -218,7 +228,13 @@ test('a thread deep link loads only the selected space threads and expands it', 
   page,
 }) => {
   await setupApiMocks(page);
-  const requests = await routeSlowChatLists(page);
+  // Held until the rail shows its names: names that render while the only
+  // thread request is still unanswered prove the rail does not wait for it.
+  let releaseThreads: () => void = () => {};
+  const threadGate = new Promise<void>((resolve) => {
+    releaseThreads = resolve;
+  });
+  const requests = await routeSlowChatLists(page, { threadDelayMs: 0, threadGate });
   const route = encodeURIComponent('/chat/space/project-5/thread/thread-5-design');
   await page.goto(`/e2e/chat-palette/fixture.html?unread=1&route=${route}`, {
     waitUntil: 'domcontentloaded',
@@ -226,7 +242,9 @@ test('a thread deep link loads only the selected space threads and expands it', 
 
   const railAt = await waitForRailNames(page);
   record('rail-names-ms', railAt.toFixed(0));
-  expect.soft(railAt).toBeLessThan(THREAD_DELAY_MS);
+  await expect(page.locator('scion-chat-space-rail .threads-loading')).toHaveCount(1);
+  await expect.poll(() => threadCalls(requests)).toEqual(['project-5']);
+  releaseThreads();
 
   await expect(page.locator('scion-chat-space-rail .thread-item.selected .thread-name')).toHaveText(
     'design-5'
