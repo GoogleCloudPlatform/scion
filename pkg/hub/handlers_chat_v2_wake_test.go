@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -452,4 +453,51 @@ func TestChatV2Wake_IdempotencyKeyReleasedAfterFailedWake(t *testing.T) {
 
 	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-failed")
 	assert.Equal(t, IdempotencyNew, begin, "the key must be free after a send without a message")
+}
+
+// A replay of a send whose dispatch failed reports that failure, not a
+// delivery.
+func TestChatV2Wake_IdempotencyReplay_ReportsFailedDispatch(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	f.disp.msgReturnErr = assert.AnError
+	payload := map[string]any{"content": "hello", "idempotency_key": "key-failed-dispatch"}
+	first := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusCreated, first.Code, "body=%s", first.Body.String())
+	firstResp := decodeWakeResp(t, first)
+	require.Equal(t, "failed", firstResp["dispatchState"])
+
+	retry := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusOK, retry.Code, "body=%s", retry.Body.String())
+	resp := decodeWakeResp(t, retry)
+	assert.Equal(t, firstResp["id"], resp["id"])
+	assert.Equal(t, "failed", resp["dispatchState"])
+	assert.Equal(t, firstResp["dispatchFailureReason"], resp["dispatchFailureReason"])
+	assert.Len(t, f.disp.getMessageCalls(), 1, "the replay must not dispatch again")
+}
+
+// keyProbeDispatcher reads the idempotency cache from inside dispatch.
+type keyProbeDispatcher struct {
+	*wakeTrackingDispatcher
+	srv      *Server
+	key      string
+	duringID string
+	during   IdempotencyBeginResult
+}
+
+func (d *keyProbeDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.duringID, d.during = d.srv.chatIdempotency.Begin(DevUserID, d.key)
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+}
+
+// The key is recorded as soon as the row is stored, before dispatch, so a
+// panic or dropped request during dispatch cannot release it.
+func TestChatV2Wake_IdempotencyRecordedBeforeDispatch(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	disp := &keyProbeDispatcher{wakeTrackingDispatcher: f.disp, srv: f.srv, key: "key-early"}
+	f.srv.SetDispatcher(disp)
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "idempotency_key": "key-early"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+	assert.Equal(t, IdempotencyDone, disp.during, "key must be recorded before dispatch")
+	assert.Equal(t, decodeWakeResp(t, rec)["id"], disp.duringID)
 }

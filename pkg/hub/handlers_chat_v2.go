@@ -1040,7 +1040,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 		if begin == IdempotencyDone {
 			// Idempotency hit: return the existing message ID with the
-			// stored row's dispatch outcome. The client may never have seen
+			// stored row's dispatch outcome. Not replayed: mentionResults
+			// and attachment refs of the original response (the client
+			// picks those up from history). The client may never have seen
 			// the original 201 (a retry after a dropped connection), so it
 			// must learn whether the message was delivered or failed. The
 			// lookup is best-effort: without the row the response stays
@@ -1193,11 +1195,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
 		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata,
-			chatSendOptions{Interrupt: body.Interrupt, Wake: body.Wake, OfferWake: body.OfferWake})
+			chatSendOptions{Interrupt: body.Interrupt, Wake: body.Wake, OfferWake: body.OfferWake,
+				OnPersisted: recordIdempotency})
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
-		recordIdempotency(msgID)
+		recordIdempotency(msgID) // already recorded via OnPersisted; harmless
 		// DM registration now happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return
@@ -1396,6 +1399,11 @@ type chatSendOptions struct {
 	// then asks the user and resends with Wake. Without the permission the
 	// failed row is kept, so the user sees the ordinary non-wake error.
 	OfferWake bool
+	// OnPersisted, when set, is called with the message ID right after the
+	// row is stored and before any dispatch, so the idempotency key is
+	// recorded even if dispatch panics or the request dies mid-dispatch
+	// (a released key would let a retry send a duplicate).
+	OnPersisted func(messageID string)
 }
 
 const (
@@ -1772,6 +1780,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
 		return ""
+	}
+	if opts.OnPersisted != nil {
+		opts.OnPersisted(storeMsg.ID)
 	}
 
 	// Phase-3: Store reply-to reference if provided.

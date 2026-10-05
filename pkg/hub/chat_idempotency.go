@@ -55,8 +55,16 @@ const (
 )
 
 // ChatIdempotencyCache is a lightweight in-memory cache keyed by
-// (senderID, idempotencyKey). Entries expire after 5 minutes.
-// It is safe for concurrent use.
+// (senderID, idempotencyKey): keys are scoped per user, not per
+// conversation. Entries expire after 5 minutes. It is safe for concurrent
+// use.
+//
+// Limit: the cache lives in one hub process. With several hub replicas,
+// or after a hub restart, a retry with the same key is not recognised and
+// sends again; and an entry (in flight or finished) is forgotten after
+// chatIdempotencyTTL. Deduplication is therefore "at most once per hub
+// process within the TTL", not durable; a store-backed key would be the
+// durable fix.
 type ChatIdempotencyCache struct {
 	mu          sync.Mutex
 	entries     map[idempotencyCacheKey]chatIdempotencyEntry
@@ -68,35 +76,6 @@ func NewChatIdempotencyCache() *ChatIdempotencyCache {
 	return &ChatIdempotencyCache{
 		entries: make(map[idempotencyCacheKey]chatIdempotencyEntry),
 	}
-}
-
-// Check returns the existing message ID if the (senderID, idempotencyKey)
-// pair was seen within the TTL window.
-func (c *ChatIdempotencyCache) Check(senderID, idempotencyKey string) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	now := time.Now()
-	// Rate-limited amortized cleanup: only sweep when cache grows beyond
-	// threshold AND enough time has passed since the last sweep.
-	if len(c.entries) > idempotencyCacheCleanupThreshold && now.After(c.nextCleanup) {
-		c.cleanExpiredLocked(now)
-		c.nextCleanup = now.Add(chatIdempotencyTTL)
-	}
-
-	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
-	entry, ok := c.entries[key]
-	if !ok {
-		return "", false
-	}
-	if now.After(entry.expiresAt) {
-		delete(c.entries, key)
-		return "", false
-	}
-	if entry.messageID == "" {
-		return "", false // admitted by Begin, not finished
-	}
-	return entry.messageID, true
 }
 
 // Begin admits a send for (senderID, idempotencyKey). It returns the
@@ -155,7 +134,7 @@ func (c *ChatIdempotencyCache) Record(senderID, idempotencyKey, messageID string
 
 	now := time.Now()
 	// Rate-limited amortized cleanup in Record too, so entries never
-	// accumulate unboundedly even if Check() is rarely called.
+	// accumulate unboundedly even if Begin() is rarely called.
 	if len(c.entries) > idempotencyCacheCleanupThreshold && now.After(c.nextCleanup) {
 		c.cleanExpiredLocked(now)
 		c.nextCleanup = now.Add(chatIdempotencyTTL)
