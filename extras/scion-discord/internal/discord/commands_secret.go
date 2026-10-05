@@ -230,7 +230,7 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 		return
 	}
 
-	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID)
+	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID, principalForMapping(mapping))
 	if err != nil {
 		h.log.Error("Failed to list secrets", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to list secrets. Please try again later.")
@@ -304,7 +304,7 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 
-	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID)
+	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID, principalForMapping(mapping))
 	if err != nil {
 		h.log.Error("Failed to get secret", "error", err, "key", key, "project_id", link.ProjectID)
 		h.followup(s, i, fmt.Sprintf("Failed to get secret **%s**: %s", key, err))

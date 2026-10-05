@@ -142,15 +142,18 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
+// ListProjectsForUser lists the projects the linked user is a member of by
+// calling GET /projects with the linked-user header set.
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
+	url := c.hubURL + "/api/v1/projects"
 
-	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
+	slog.Debug("Listing projects for user from hub", "url", url, "on_behalf_of", onBehalfOf)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -178,13 +181,14 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -225,7 +229,7 @@ type hubTemplate struct {
 	Status      string `json:"status"`
 }
 
-func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]Template, error) {
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf string) ([]Template, error) {
 	// Fetch global templates.
 	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
 
@@ -235,6 +239,7 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("create list global templates request: %w", err)
 	}
+	setOnBehalfOf(globalReq, onBehalfOf)
 	if err := c.signRequest(globalReq); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -273,6 +278,7 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 		if err != nil {
 			return nil, fmt.Errorf("create list project templates request: %w", err)
 		}
+		setOnBehalfOf(projectReq, onBehalfOf)
 		if err := c.signRequest(projectReq); err != nil {
 			return nil, fmt.Errorf("sign request: %w", err)
 		}
@@ -339,10 +345,7 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 
 	// Set the delegated identity header so the hub attributes the agent to the
 	// invoking user rather than leaving it ownerless.
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 
 	if err := c.signRequest(httpReq); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -422,7 +425,7 @@ type hubListSecretsResponse struct {
 	Secrets []SecretInfo `json:"secrets"`
 }
 
-func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) ([]SecretInfo, error) {
+func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID, onBehalfOf string) ([]SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets?scope=%s&scopeId=%s",
 		c.hubURL, url.QueryEscape(scope), url.QueryEscape(scopeID))
 
@@ -430,6 +433,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	if err != nil {
 		return nil, fmt.Errorf("create list secrets request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -452,7 +456,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	return result.Secrets, nil
 }
 
-func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID string) (*SecretInfo, error) {
+func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) (*SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
 		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
 
@@ -460,6 +464,7 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID strin
 	if err != nil {
 		return nil, fmt.Errorf("create get secret request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -504,10 +509,7 @@ func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeI
 		return fmt.Errorf("create set secret request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 	if err := c.signRequest(httpReq); err != nil {
 		return fmt.Errorf("sign request: %w", err)
 	}
@@ -533,10 +535,7 @@ func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, o
 	if err != nil {
 		return fmt.Errorf("create delete secret request: %w", err)
 	}
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 	if err := c.signRequest(httpReq); err != nil {
 		return fmt.Errorf("sign request: %w", err)
 	}
@@ -552,6 +551,17 @@ func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, o
 		return fmt.Errorf("delete secret returned status %d: %s", resp.StatusCode, he.Message)
 	}
 	return nil
+}
+
+// setOnBehalfOf sets the linked-user header, and lists it in the signed
+// headers, when onBehalfOf is a non-empty namespaced principal such as
+// "user:alice@example.com". Call it before signRequest.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+	req.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

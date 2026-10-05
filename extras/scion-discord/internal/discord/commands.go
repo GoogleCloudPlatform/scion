@@ -64,9 +64,15 @@ type CreateAgentResponse struct {
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
-	ListTemplates(ctx context.Context, projectID string) ([]Template, error)
+
+	// The read methods below take onBehalfOf, a namespaced principal (e.g.
+	// "user:alice@example.com") sent as X-Scion-On-Behalf-Of. An empty value
+	// omits the header.
+
+	// ListProjectsForUser lists the projects the linked user is a member of.
+	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
+	ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error)
+	ListTemplates(ctx context.Context, projectID, onBehalfOf string) ([]Template, error)
 
 	// CreateAgent POSTs /api/v1/projects/{projectId}/agents.
 	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
@@ -77,10 +83,10 @@ type HubClient interface {
 	HubBaseURL() string
 
 	// ListSecrets returns metadata for all secrets in the given scope.
-	ListSecrets(ctx context.Context, scope, scopeID string) ([]SecretInfo, error)
+	ListSecrets(ctx context.Context, scope, scopeID, onBehalfOf string) ([]SecretInfo, error)
 
 	// GetSecret returns metadata for a single secret.
-	GetSecret(ctx context.Context, key, scope, scopeID string) (*SecretInfo, error)
+	GetSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) (*SecretInfo, error)
 
 	// SetSecret creates or updates a secret value. onBehalfOf is a namespaced
 	// principal (e.g. "user:alice@example.com") sent as X-Scion-On-Behalf-Of.
@@ -543,12 +549,14 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 		return
 	}
 
+	onBehalfOf := linkedPrincipal(ctx, h.store, interactionUserID(i))
+
 	var choices []*discordgo.ApplicationCommandOptionChoice
 	switch focused.Name {
 	case "agent":
-		choices = h.completeAgents(ctx, link.ProjectID, focused.StringValue())
+		choices = h.completeAgents(ctx, link.ProjectID, focused.StringValue(), onBehalfOf)
 	case "template":
-		choices = h.completeTemplates(ctx, link.ProjectID, focused.StringValue())
+		choices = h.completeTemplates(ctx, link.ProjectID, focused.StringValue(), onBehalfOf)
 	default:
 		// Unknown option — return empty choices.
 	}
@@ -576,8 +584,8 @@ func focusedOption(sub *discordgo.ApplicationCommandInteractionDataOption) *disc
 
 // completeAgents returns autocomplete choices for the "agent" option, filtered
 // by the typed prefix.
-func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
-	agents, err := h.getAgents(ctx, projectID)
+func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed, onBehalfOf string) []*discordgo.ApplicationCommandOptionChoice {
+	agents, err := h.getAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		h.log.Debug("Failed to get agents for autocomplete", "error", err)
 		return nil
@@ -601,8 +609,8 @@ func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed st
 
 // completeTemplates returns autocomplete choices for the "template" option,
 // filtered by the typed prefix.
-func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
-	templates, err := h.hubClient.ListTemplates(ctx, projectID)
+func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed, onBehalfOf string) []*discordgo.ApplicationCommandOptionChoice {
+	templates, err := h.hubClient.ListTemplates(ctx, projectID, onBehalfOf)
 	if err != nil {
 		h.log.Debug("Failed to get templates for autocomplete", "error", err)
 		return nil
@@ -755,10 +763,10 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 		}
 	}
 
-	// Get user's projects.
+	// Get the projects the linked user is a member of.
 	var projects []ProjectOption
-	if mapping.ScionUserID != "" {
-		projects, err = h.hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
+	if onBehalfOf := principalForMapping(mapping); onBehalfOf != "" {
+		projects, err = h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
 		if err != nil {
 			h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
 		}
@@ -854,7 +862,7 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -967,7 +975,7 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
 	if err != nil {
 		h.followup(s, i, "Failed to fetch agent status. Please try again.")
 		return
@@ -1066,7 +1074,7 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	// Verify the agent exists.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principalForMapping(mapping))
 	if err != nil {
 		h.followup(s, i, "Failed to verify agent. Please try again.")
 		return
@@ -1162,7 +1170,7 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	agents, err := h.getAgents(ctx, link.ProjectID)
+	agents, err := h.getAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -1391,7 +1399,7 @@ func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -1488,7 +1496,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	}
 
 	// Step 0.5: Check for slug conflicts.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principalForMapping(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for slug conflict check", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to verify agent name availability. Please try again.")
@@ -1504,7 +1512,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// Step 0.6: Validate template (if provided).
 	templateName := getSubcommandOption(i, "template")
 	if templateName != "" {
-		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID)
+		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID, principalForMapping(mapping))
 		if err != nil {
 			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
 			h.followup(s, i, "Failed to verify template. Please try again.")
@@ -1843,9 +1851,32 @@ func settingsPanel(link *ChannelLink) (string, []discordgo.MessageComponent) {
 	return content, components
 }
 
+// principalForMapping returns the namespaced principal ("user:<email>") for a
+// linked Discord user, or "" when there is no link or no email on it.
+func principalForMapping(mapping *DiscordUserMapping) string {
+	if mapping == nil || mapping.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + mapping.ScionEmail
+}
+
+// linkedPrincipal looks up the Discord user's link and returns the namespaced
+// principal sent as X-Scion-On-Behalf-Of on hub calls made for that user. It
+// returns "" when the user is unknown, unlinked, or the lookup fails.
+func linkedPrincipal(ctx context.Context, store Store, discordUserID string) string {
+	if store == nil || discordUserID == "" {
+		return ""
+	}
+	mapping, err := store.GetUserMapping(ctx, discordUserID)
+	if err != nil {
+		return ""
+	}
+	return principalForMapping(mapping)
+}
+
 // getAgents returns agent slugs for a project, using the store cache with
-// a fallback to the hub API.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]string, error) {
+// a fallback to the hub API. onBehalfOf is the invoking user's principal.
+func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
@@ -1854,7 +1885,7 @@ func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]str
 		return cached.AgentSlugs, nil
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
+	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		if cached != nil {
 			return cached.AgentSlugs, nil

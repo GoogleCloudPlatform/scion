@@ -1984,3 +1984,22 @@ func TestParseTopicComponents(t *testing.T) {
 		})
 	}
 }
+
+func TestGetProjectAgents_RefreshCarriesLinkedUser(t *testing.T) {
+	rec := &headerRecorder{}
+	hub := httptest.NewServer(rec)
+	defer hub.Close()
+
+	b := testBroker(nil)
+	b.store = newTestStore(t)
+	b.hubClient = NewHTTPHubClient(hub.URL, "", "", nil)
+	b.agentCacheTTL = 0
+
+	slugs := b.getProjectAgents(context.Background(), "p1", "user:alice@example.com")
+	assert.Equal(t, []string{"worker"}, slugs)
+
+	calls := rec.snapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "/api/v1/projects/p1/agents", calls[0].Path)
+	assert.Equal(t, "user:alice@example.com", calls[0].OnBehalfOf)
+}

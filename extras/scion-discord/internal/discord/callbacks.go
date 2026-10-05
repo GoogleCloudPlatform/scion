@@ -94,8 +94,8 @@ func (h *CallbackHandler) handleSetupProject(s *discordgo.Session, i *discordgo.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Fetch agents for the selected project.
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
+	// Fetch agents for the selected project as the invoking user.
+	agents, err := h.hubClient.ListAgents(ctx, projectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
 	if err != nil {
 		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
 		h.respondUpdate(s, i, "Failed to fetch agents. Please try `/scion setup` again.", nil)
