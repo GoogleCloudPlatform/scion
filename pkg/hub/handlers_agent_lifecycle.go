@@ -523,6 +523,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If a dispatcher is available, dispatch the operation to the runtime broker
 	dispatcher := s.GetDispatcher()
 
+	// sd holds the broker slot across a start or restart's start leg
+	// (beginStartDispatch); the final status write below settles it.
+	var sd *startDispatch
+
 	switch action {
 	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
@@ -553,8 +557,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// up front rather than after the container is already running
 			// (ptone/scion#1963). Idempotent: a no-op when the agent already
 			// holds an active reservation (e.g. start called again on an
-			// already-running agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			// already-running agent). An uncounted agent is marked starting
+			// for the dispatch, so the quota reconcile keeps the slot
+			// (ptone/scion#2014).
+			var ok bool
+			sd, ok = s.beginStartDispatchHTTP(ctx, w, agent)
 			if !ok {
 				return
 			}
@@ -562,7 +569,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// start is still a start the user asked for (pod recovery
 			// design, run intent semantics).
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				sd.rollback(ctx)
 				writeRunIntentError(w, err, agent.ID)
 				return
 			}
@@ -575,10 +582,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if dispatchErr != nil {
 				// Roll back a reservation this call took speculatively, so a
 				// failed start doesn't strand one with no container behind
-				// it. A reservation that already existed (start on a
-				// running agent) is kept: that agent is still counted
-				// (ptone/scion#1978).
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				// it, and restore the phase. A reservation that already
+				// existed (start on a running agent) is kept: that agent is
+				// still counted (ptone/scion#1978).
+				sd.rollback(ctx)
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
@@ -631,7 +638,6 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
-		reserved := false
 		if hasBroker {
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
@@ -648,16 +654,18 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// re-reserving before the start leg would let another start
 			// take the slot in between. This reserve is a no-op for an
 			// agent that already holds one, and applies the cap to an
-			// agent that does not (for example, a stopped agent).
+			// agent that does not (for example, a stopped agent), which
+			// is also marked starting until the start leg settles, so the
+			// quota reconcile keeps the slot (ptone/scion#2014).
 			var ok bool
-			ok, reserved = s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			sd, ok = s.beginStartDispatchHTTP(ctx, w, agent)
 			if !ok {
 				return
 			}
 		}
 		// A restart leaves the agent running: record that before the stop leg.
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
+			sd.rollback(ctx)
 			writeRunIntentError(w, err, agent.ID)
 			return
 		}
@@ -675,7 +683,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
 				slog.Warn("Restart: agent's runtime not available on broker, not starting",
 					"agent_id", id, "runtime", agent.Runtime)
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				sd.rollback(ctx)
 				return
 			}
 			if stopErr != nil {
@@ -695,20 +703,24 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// (ptone/scion#2550, round 5 N3). The delete engine
 					// owns the row now: leave its phase and the
 					// reservation it held to the engine, and undo only a
-					// reservation this call created.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
+					// reservation this call created. The phase restore
+					// is conditional on the row still reading starting,
+					// so it leaves the engine's phase alone.
+					sd.rollback(ctx)
 				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
 					// release the slot and record the stopped state as an
 					// explicit stop would, so the agent does not keep
 					// showing its pre-restart phase until the next
 					// heartbeat.
+					sd.settle()
 					s.releaseBrokerQuota(ctx, agent)
 					s.recordRestartStopped(ctx, agent.ID)
 				} else {
 					// The container may still be running: keep a
-					// reservation this call did not create.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
+					// reservation this call did not create, and
+					// restore the phase.
+					sd.rollback(ctx)
 				}
 			}
 		}
@@ -774,7 +786,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			statusUpdate.ContainerStatus = agent.ContainerStatus
 		}
 		statusUpdate.ClearExit = true
+		statusUpdate.ClearMessageIf = sd.clearMessageIf()
 	}
+	sd.settle()
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")
 		return

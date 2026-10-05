@@ -842,6 +842,13 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	if err == nil {
 		return true, created
 	}
+	writeQuotaReserveError(w, limitName, err)
+	return false, false
+}
+
+// writeQuotaReserveError writes the response for a failed quota reservation
+// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
@@ -852,7 +859,6 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 	}
-	return false, false
 }
 
 // releaseAgentQuotas releases resourceID's create-time quota reservations:

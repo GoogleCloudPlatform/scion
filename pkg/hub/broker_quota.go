@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -26,16 +25,21 @@ import (
 
 // reconcileMinReservationAge is the minimum age a reservation must reach
 // before ReconcileStaleBrokerQuotaReservations will release it on the basis
-// of the agent's stored phase. Start (HTTP) and DM wake both reserve the
-// broker slot before dispatch but only write the counted phase (e.g.
-// "starting") after dispatch returns, so a reconcile pass — the periodic
-// tick or a startup sweep — that lands in that window would otherwise see an
-// uncounted stored phase and release a reservation for a dispatch that is
-// still in flight (ptone/scion#2011). The threshold must clear the
-// worst-case dispatch latency, including a cold image pull, with margin;
-// 15 minutes is chosen for that reason and is not meant to be tuned per
-// deployment. This grace period does not apply to reservations whose agent
-// is missing or soft-deleted — those are always released regardless of age.
+// of the agent's stored phase. It is a secondary safeguard. The primary one
+// is that every start-type dispatch (HTTP start and restart, create of an
+// existing agent, DM wake) goes through beginStartDispatch, which writes the
+// counted phase "starting" before dispatching, so the reconcile sees a
+// counted phase for the whole dispatch leg however old the reservation is or
+// however long the dispatch takes (ptone/scion#2014). The age gate still
+// covers what that does not: a reservation taken by a path that does not
+// write a counted phase first, a heartbeat from another hub replica that
+// moves the row off "starting" mid-dispatch (heartbeatPhaseGuarded is a
+// per-replica hint), and the window between the reserve and the starting
+// write (ptone/scion#2011). 15 minutes clears the worst-case dispatch
+// latency, including a cold image pull, with margin, and is not meant to be
+// tuned per deployment. This grace period does not apply to reservations
+// whose agent is missing or soft-deleted: those are always released
+// regardless of age.
 const reconcileMinReservationAge = 15 * time.Minute
 
 // isBrokerQuotaCountedPhase reports whether phase currently counts toward an
@@ -65,7 +69,7 @@ func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
 	s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 }
 
-// rollbackBrokerQuota undoes a checkAndReserveBrokerQuota(HTTP) reservation
+// rollbackBrokerQuota undoes a checkAndReserveBrokerQuota reservation
 // after a failed dispatch, but only if that call created it
 // (ptone/scion#1978). When the reservation already existed (for example,
 // start called on an agent that is already running), the agent is still
@@ -77,28 +81,9 @@ func (s *Server) rollbackBrokerQuota(ctx context.Context, agent *store.Agent, cr
 	s.releaseBrokerQuota(ctx, agent)
 }
 
-// checkAndReserveBrokerQuotaHTTP re-reserves agent's max_agents_per_broker
-// slot before an HTTP-triggered start/resume/restart dispatch, using the same
-// helper — and therefore the same error/status shape — createAgentInProject
-// uses. Returns true if the caller may proceed with dispatch; on false it has
-// already written the error response to w.
-//
-// Safe to call unconditionally regardless of the agent's current phase:
-// QuotaService.CheckAndReserve is idempotent per resource, so calling this on
-// an agent that already holds an active reservation (e.g. a fresh create, or
-// "start" called again on an already-running agent) is a no-op rather than a
-// duplicate reservation. created reports whether this call made a new
-// reservation; pass it to rollbackBrokerQuota if dispatch then fails.
-func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.ResponseWriter, agent *store.Agent) (ok, created bool) {
-	if agent == nil || agent.RuntimeBrokerID == "" {
-		return true, false
-	}
-	return s.reserveQuotaHTTP(ctx, w, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
-}
-
-// checkAndReserveBrokerQuota is the non-HTTP counterpart of
-// checkAndReserveBrokerQuotaHTTP, for paths that cannot write an HTTP
-// response directly (e.g. agent DM wake). Returns nil if the reservation
+// checkAndReserveBrokerQuota reserves agent's max_agents_per_broker slot with
+// the cap check. Start-type dispatch sites call it through
+// beginStartDispatch. Returns nil if the reservation
 // succeeded, was already held (idempotent), or no limit is configured;
 // returns store.ErrQuotaExceeded or ErrQuotaLockContention otherwise.
 // created reports whether this call made a new reservation; pass it to
@@ -155,9 +140,10 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //     fixing rows left behind from before stop/suspend/crash released the
 //     reservation, or from a delete path that missed the release call. The
 //     phase-based case is skipped for a reservation younger than
-//     reconcileMinReservationAge, since dispatch reserves before it writes
-//     the counted phase (ptone/scion#2011); the missing/soft-deleted case is
-//     never subject to that grace period.
+//     reconcileMinReservationAge, a secondary safeguard behind
+//     beginStartDispatch's pre-dispatch "starting" write (ptone/scion#2011,
+//     ptone/scion#2014); the missing/soft-deleted case is never subject to
+//     that grace period.
 //   - Backfill: an agent in a counted phase on this broker with no active
 //     reservation gets one recorded directly (no cap check — this is
 //     accounting for an agent that already exists and is already running,
