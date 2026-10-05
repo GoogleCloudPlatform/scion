@@ -876,7 +876,15 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
 		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
-		if hasWorkspaceContent(nfsPath) {
+		has, err := probeWorkspaceContent(nfsPath)
+		if has {
+			return nfsPath, nil
+		}
+		if errors.Is(err, errWorkspaceContentTimeout) {
+			// The durable mount did not answer. Do not fall back to the
+			// local path: content there would route this request to
+			// ephemeral storage and split the project between two places.
+			// The durable path is where the project belongs.
 			return nfsPath, nil
 		}
 		// Fallback: check legacy local path for backward compatibility
@@ -929,22 +937,77 @@ func localProjectPath(slug string) (string, error) {
 	return filepath.Join(globalDir, "projects", slug), nil
 }
 
-// hasWorkspaceContent returns true if dir exists and contains meaningful
+// workspaceContentTimeout bounds the directory read in probeWorkspaceContent.
+// It mirrors the 2s mount check in checkWorkspaceStorageHealth. It is a
+// package-level var so tests can shorten it.
+var workspaceContentTimeout = 2 * time.Second
+
+// workspaceReadDir is the directory read used by probeWorkspaceContent. It is
+// a package-level var so tests can inject a read that hangs.
+var workspaceReadDir = os.ReadDir
+
+// errWorkspaceContentTimeout is returned by probeWorkspaceContent when the
+// directory read does not finish within workspaceContentTimeout.
+var errWorkspaceContentTimeout = errors.New("workspace content check timed out")
+
+// probeWorkspaceContent reports whether dir exists and contains meaningful
 // workspace files beyond just infrastructure directories.
-func hasWorkspaceContent(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
+//
+// dir may be on a network-backed mount (NFS, Filestore, a Cloud Run or GKE
+// volume). A hung mount would block a bare os.ReadDir indefinitely, and this
+// runs on the request path, so the read runs in a goroutine bounded by
+// workspaceContentTimeout. This is the same guard checkWorkspaceStorageHealth
+// applies to os.Stat on the same mount.
+//
+// On timeout it logs a warning with the path and returns
+// (false, errWorkspaceContentTimeout). The goroutine stays blocked until the
+// read returns. The buffered channel lets it exit then without a receiver.
+// A read error (missing dir, permission) is not an error here. It means
+// "no content" and returns (false, nil).
+func probeWorkspaceContent(dir string) (bool, error) {
+	type readResult struct {
+		entries []os.DirEntry
+		err     error
 	}
-	for _, e := range entries {
+	ch := make(chan readResult, 1)
+	readDir := workspaceReadDir
+	go func() {
+		entries, err := readDir(dir)
+		ch <- readResult{entries: entries, err: err}
+	}()
+
+	timeout := workspaceContentTimeout
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var res readResult
+	select {
+	case res = <-ch:
+	case <-timer.C:
+		slog.Warn("Workspace content check timed out; the storage mount may be hung",
+			"path", dir, "timeout", timeout)
+		return false, errWorkspaceContentTimeout
+	}
+	if res.err != nil {
+		return false, nil
+	}
+	for _, e := range res.entries {
 		switch e.Name() {
 		case "shared-dirs", ".scion":
 			continue
 		default:
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// hasWorkspaceContent returns true if dir exists and contains meaningful
+// workspace files beyond just infrastructure directories. A timed-out read
+// (see probeWorkspaceContent) counts as no content.
+func hasWorkspaceContent(dir string) bool {
+	has, _ := probeWorkspaceContent(dir)
+	return has
 }
 
 // initHubManagedProject initializes the filesystem workspace for a hub-managed project.

@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -178,7 +179,13 @@ func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig,
 	subPathRoot = config.SubPathRootOrDefault(subPathRoot)
 
 	volPath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-	if hasWorkspaceContent(volPath) {
+	has, err := probeWorkspaceContent(volPath)
+	if has {
+		return volPath, true
+	}
+	if errors.Is(err, errWorkspaceContentTimeout) {
+		// The volume did not answer. Do not fall back to the ephemeral
+		// local path. See the NFS branch of hubManagedProjectPath.
 		return volPath, true
 	}
 	// Fallback: check legacy local path. Worth saying out loud: on Cloud Run
