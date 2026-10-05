@@ -289,10 +289,6 @@ func (m *mockManager) Message(ctx context.Context, agentID, projectID string, me
 	return m.messageErr
 }
 
-func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return m.messageErr
-}
-
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	if m.sendKeysFunc != nil {
 		return m.sendKeysFunc(ctx, projectID, agentSlug, expectedAgentID, keys)

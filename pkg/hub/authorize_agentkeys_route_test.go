@@ -449,7 +449,6 @@ var keysDenialFixedMessage = map[string]string{
 	"cross_project_keys_unsupported": "Cross-project keys access is not supported for agent callers",
 	"not_found":                      "Agent not found",
 	"keys_unavailable":               "Keys dispatch is currently unavailable",
-	"raw_combination_unsupported":    "This legacy request combination is not supported for keys delivery",
 }
 
 // assertKeysDenialOutcome asserts rec matches (wantStatus, wantCode), that
