@@ -1332,10 +1332,11 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 // fail-open for real rows: any other store error, for an agent that does
 // have a row, still fails the dispatch.
 //
-// It returns the minted ID and the value the row held immediately before
+// It returns the minted ID, the value the row held immediately before
 // the write (read from the database, not from the caller's possibly stale
-// struct), for revertRun.
-func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, err error) {
+// struct), for revertRun, and whether the row recorded the run (false for
+// the no-row exception above), for settleLandedRun.
+func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, recorded bool, err error) {
 	previous = agent.RunID
 	runID = uuid.NewString()
 	if d.store != nil && agent.ID != "" {
@@ -1343,17 +1344,18 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) 
 		switch {
 		case err == nil:
 			previous = prior
+			recorded = true
 		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
 				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
 		default:
-			return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
+			return "", "", false, fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
 		}
 	}
 	agent.RunID = runID
 	d.log.Debug("Dispatcher: minted run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "previous_run_id", previous)
-	return runID, previous, nil
+	return runID, previous, recorded, nil
 }
 
 // adoptBrokerRunID records the run ID the broker reports for the entry it
@@ -1532,7 +1534,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}()
 
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -1559,7 +1561,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 
 	d.applyBrokerResponse(ctx, agent, resp)
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil, nil
 }
 
@@ -1793,7 +1795,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// The first pass creates the agent when no env is missing, so it
 	// carries a run ID like any create. A cross-node hand-off re-dispatches
 	// on the owning node, which mints its own.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1841,7 +1843,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	} else if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 
 	// Second pass: if the broker reported needed keys, check whether any can
@@ -1965,7 +1967,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	// finalize_env is the pass that creates the agent after a gather, so it
 	// mints the run ID the new entry carries.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -2044,7 +2046,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
-				d.adoptBrokerRunID(ctx, agent, runID, resp2)
+				d.settleLandedRun(ctx, agent, runID, recorded, resp2)
 			}
 			return nil, nil
 		}
@@ -2053,7 +2055,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 	return nil, nil
 }
@@ -3191,7 +3193,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -3246,7 +3248,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	} else {
 		// The broker accepted the start without a parseable body; the
 		// recorded target is stale all the same.
@@ -3324,7 +3326,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	// A restart replaces the runtime entry, so the new one gets a new run.
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -3343,7 +3345,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	d.forgetRuntimeTarget(ctx, agent)
 	// A restart whose stop failed can find the entry still running and
 	// keep it, reporting that entry's (older) run ID.
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil
 }
 

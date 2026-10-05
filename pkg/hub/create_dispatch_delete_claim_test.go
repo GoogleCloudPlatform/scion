@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,6 +55,7 @@ func syncRunningAnswer(req *RemoteCreateAgentRequest) *RemoteAgentResponse {
 		Agent: &RemoteAgentInfo{
 			ID: "container-" + req.Slug, Slug: req.Slug, Name: req.Name,
 			Phase: string(state.PhaseRunning), ContainerStatus: "Up 1 second",
+			RunID: req.RunID,
 		},
 		Created: true,
 	}
@@ -79,6 +81,7 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 			var sent *RemoteCreateAgentRequest
 			var atClaim *store.Agent
 			var delCh <-chan deleteResult
+			var compensating atomic.Int32
 			release := make(chan struct{})
 			client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 				sent = req
@@ -86,7 +89,14 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 				entered := make(chan struct{})
 				var once sync.Once
 				client.setDeleteFn(func(ctx context.Context) error {
-					once.Do(func() { close(entered) })
+					first := false
+					once.Do(func() { first = true; close(entered) })
+					if !first {
+						// The create's compensating delete (the engine's
+						// own is the blocked first call).
+						compensating.Add(1)
+						return nil
+					}
 					select {
 					case <-release:
 						return nil
@@ -114,6 +124,8 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 			assert.Equal(t, atClaim.RuntimeBrokerID, after.RuntimeBrokerID, "the broker the engine targets is kept")
 			assert.Equal(t, atClaim.RunID, after.RunID, "the run the engine deletes is kept")
 			assert.Zero(t, pub.count("created"), "no created while the delete holds the row: %v", pub.kinds())
+			assert.Equal(t, int32(1), compensating.Load(),
+				"the run that landed under a delete claim is deleted again (ptone/scion#3055)")
 
 			close(release)
 			r := waitDelete(t, delCh, 10*time.Second)
