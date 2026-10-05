@@ -140,7 +140,9 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	// set ambiently in its real environment, so a bare assertion that they're
 	// present wouldn't by itself prove metricAttrs() is what stamped them.
 	t.Setenv("SCION_HARNESS", "antigravity")
-	t.Setenv("SCION_MODEL", "gemini-3.1-pro-low")
+	// Deliberately different from the fixture's modelName: the payload's
+	// own model must win over SCION_MODEL (design §3.2, ptone/scion#2242).
+	t.Setenv("SCION_MODEL", "configured-model-should-lose")
 	t.Setenv("SCION_AGENT_ID", "agent-1")
 	t.Setenv("SCION_PROJECT_ID", "project-1")
 	_, events := loadAntigravityFixture(t)
@@ -169,10 +171,11 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	// Pin the exact producer label set (design §3.2, §7.4): all three calls
 	// share identical attributes, so a correct implementation merges them
 	// into one data point with value 3. A regression that leaked a payload
-	// attribute onto gen_ai.api.calls (for example conversationId or the
-	// per-invocation modelName -- see the model-label note in
-	// harnesses/antigravity/README.md) would either add an unexpected key
-	// here or split this into more than one data point.
+	// attribute onto gen_ai.api.calls (for example conversationId) would
+	// either add an unexpected key here or split this into more than one
+	// data point. modelName is the one payload value that is used: it is
+	// the model label (see the model-label note in
+	// harnesses/antigravity/README.md).
 	callPoints := int64CounterDataPoints(rm, telemetrycontract.MetricAPICalls)
 	if len(callPoints) != 1 {
 		t.Fatalf("gen_ai.api.calls data point count = %d, want 1 (identical attributes across all 3 calls)", len(callPoints))
@@ -211,6 +214,28 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	if gotToolCalls != 1 {
 		t.Errorf("agent.tool.calls = %d, want 1 (the one real PreToolUse/PostToolUse pair)", gotToolCalls)
 	}
+	// gen_ai.api.duration is recorded on the paired path (this one handler
+	// sees each PreInvocation before its PostInvocation) and carries the same
+	// payload model label as gen_ai.api.calls.
+	durationPoints := float64HistogramDataPoints(rm, "gen_ai.api.duration")
+	if len(durationPoints) == 0 {
+		t.Fatal("gen_ai.api.duration has no data points; expected one per paired invocation")
+	}
+	for _, p := range durationPoints {
+		got, _ := p.Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+		if got.AsString() != "gemini-3.1-pro-low" {
+			t.Errorf("gen_ai.api.duration model label = %q, want gemini-3.1-pro-low (payload over SCION_MODEL)", got.AsString())
+		}
+	}
+
+	// ptone/scion#2243: the tool-end metric is labelled with the real tool
+	// name from PostToolUse's toolCall.name, not left empty.
+	for _, p := range int64CounterDataPoints(rm, "agent.tool.calls") {
+		got, _ := p.Attributes.Value(attribute.Key("tool_name"))
+		if got.AsString() != "run_command" {
+			t.Errorf("agent.tool.calls tool_name = %q, want run_command", got.AsString())
+		}
+	}
 
 	totals := usageTokenTotals(rm)
 	for tokenType, n := range totals {
@@ -220,6 +245,96 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	}
 	if hasUsageTokenPoints(rm) {
 		t.Error("expected zero scion.usage.tokens data points from a fixture with no token fields anywhere, got at least one")
+	}
+}
+
+// TestAntigravityFixture_PostToolUseMapsToolName is ptone/scion#2243: agy
+// 1.2.12's PostToolUse payload carries toolCall.name (the earlier dialect
+// comment claimed it did not), and the tool-end event's ToolName matches
+// its tool-start's.
+func TestAntigravityFixture_PostToolUseMapsToolName(t *testing.T) {
+	_, events := loadAntigravityFixture(t)
+	start, end := events[1], events[2]
+	if start.Name != hooks.EventToolStart || end.Name != hooks.EventToolEnd {
+		t.Fatalf("events[1..2] = (%s, %s), want (tool-start, tool-end)", start.Name, end.Name)
+	}
+	if end.Data.ToolName != "run_command" {
+		t.Errorf("PostToolUse ToolName = %q, want run_command", end.Data.ToolName)
+	}
+	if end.Data.ToolName != start.Data.ToolName {
+		t.Errorf("PostToolUse ToolName = %q, PreToolUse ToolName = %q; want equal", end.Data.ToolName, start.Data.ToolName)
+	}
+	if end.Data.Error != "" {
+		t.Errorf("PostToolUse Error = %q, want empty (the captured call succeeded)", end.Data.Error)
+	}
+}
+
+// TestAntigravityFixture_ModelFromPayload is ptone/scion#2242: every
+// Pre/PostInvocation event carries the payload's modelName as its Model.
+func TestAntigravityFixture_ModelFromPayload(t *testing.T) {
+	_, events := loadAntigravityFixture(t)
+	for i, e := range events {
+		if e.Name != hooks.EventModelStart && e.Name != hooks.EventModelEnd {
+			continue
+		}
+		if e.Data.Model != "gemini-3.1-pro-low" {
+			t.Errorf("events[%d] (%s) Model = %q, want gemini-3.1-pro-low", i, e.Name, e.Data.Model)
+		}
+	}
+}
+
+// TestAntigravityDialect_ModelLabelFallsBackToUnknown pins the rest of
+// design §3.2's precedence for a payload without modelName: SCION_MODEL
+// when set, otherwise "unknown" -- never an absent label -- on both
+// gen_ai.api.calls and gen_ai.api.duration. A PreInvocation is handled
+// first so the PostInvocation pairs with it and the duration histogram is
+// recorded (the unpaired path records calls only).
+func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
+	md, _ := loadAntigravityFixture(t)
+	for _, tc := range []struct{ envModel, want string }{
+		{"configured-model", "configured-model"},
+		{"", telemetrycontract.UnknownModel},
+	} {
+		t.Run("SCION_MODEL="+tc.envModel, func(t *testing.T) {
+			t.Setenv("SCION_USAGE_SOURCE", "hooks")
+			t.Setenv("SCION_MODEL", tc.envModel)
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+			h := NewTelemetryHandler(nil, nil, nil, mp)
+			for _, name := range []string{"PreInvocation", "PostInvocation"} {
+				event, err := md.Parse(map[string]interface{}{
+					"hook_event_name": name,
+					"conversationId":  "c",
+				})
+				if err != nil {
+					t.Fatalf("Parse(%s): %v", name, err)
+				}
+				if err := h.Handle(event); err != nil {
+					t.Fatalf("Handle(%s): %v", name, err)
+				}
+			}
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			points := int64CounterDataPoints(rm, telemetrycontract.MetricAPICalls)
+			if len(points) != 1 {
+				t.Fatalf("gen_ai.api.calls points = %d, want 1", len(points))
+			}
+			got, ok := points[0].Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+			if !ok || got.AsString() != tc.want {
+				t.Errorf("gen_ai.api.calls model label = %q (present=%t), want %q", got.AsString(), ok, tc.want)
+			}
+			durations := float64HistogramDataPoints(rm, "gen_ai.api.duration")
+			if len(durations) != 1 {
+				t.Fatalf("gen_ai.api.duration points = %d, want 1", len(durations))
+			}
+			got, ok = durations[0].Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+			if !ok || got.AsString() != tc.want {
+				t.Errorf("gen_ai.api.duration model label = %q (present=%t), want %q", got.AsString(), ok, tc.want)
+			}
+		})
 	}
 }
 
@@ -351,6 +466,23 @@ func int64CounterDataPoints(rm metricdata.ResourceMetrics, name string) []metric
 			}
 			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
 				points = append(points, sum.DataPoints...)
+			}
+		}
+	}
+	return points
+}
+
+// float64HistogramDataPoints returns every data point of the named
+// Histogram[float64] metric across all scope metrics in rm.
+func float64HistogramDataPoints(rm metricdata.ResourceMetrics, name string) []metricdata.HistogramDataPoint[float64] {
+	var points []metricdata.HistogramDataPoint[float64]
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			if h, ok := m.Data.(metricdata.Histogram[float64]); ok {
+				points = append(points, h.DataPoints...)
 			}
 		}
 	}

@@ -217,7 +217,11 @@ func (s *wsStream) Read(p []byte) (int, error) {
 		}
 		s.mu.Unlock()
 		if inc > 0 {
-			_ = s.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: inc}}})
+			// The peer cannot send more without this credit, so a failed
+			// send ends the stream as a lost link, as a failed Write does.
+			if err := s.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: inc}}}); err != nil {
+				s.end(errLinkLost, false)
+			}
 		}
 		return n, nil
 	}

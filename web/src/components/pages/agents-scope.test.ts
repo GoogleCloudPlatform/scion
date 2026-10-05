@@ -58,7 +58,7 @@ describe('scion-page-agents loadedScope tracking', () => {
     vi.spyOn(stateManager, 'setScope').mockImplementation(() => {});
     vi.spyOn(stateManager, 'getAgents').mockReturnValue([]);
     vi.spyOn(stateManager, 'getScopeCapabilities').mockReturnValue(undefined);
-    vi.spyOn(stateManager, 'getDeletedAgentIds').mockReturnValue([]);
+    vi.spyOn(stateManager, 'getDeletedAgentIds').mockReturnValue(new Set());
     vi.spyOn(stateManager, 'seedAgents').mockImplementation(() => {});
     vi.spyOn(stateManager, 'seedScopeCapabilities').mockImplementation(() => {});
 
@@ -112,5 +112,7 @@ describe('scion-page-agents loadedScope tracking', () => {
     await el.updateComplete;
 
     expect(loadedScope()).toBe('mine');
+    expect((el as unknown as { error: string | null }).error).toBeNull();
+    expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['a2']);
   });
 });
