@@ -584,10 +584,6 @@ func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Sto
 		if !ok {
 			return
 		}
-		if hubClient == nil {
-			postEphemeral(client, channelID, userID, "Failed to fetch your projects. Please try again later.")
-			return
-		}
 		projects, err := hubClient.ListUserProjects(ctx, "user:"+email)
 		if err != nil {
 			log.Warn("Failed to list user projects", "error", err)
