@@ -166,3 +166,30 @@ func TestTranslateScionToA2AStateChange(t *testing.T) {
 		t.Errorf("Artifacts = %d, want 0 for state-change messages", len(artifacts))
 	}
 }
+
+// TestTranslateExplicitReplyProducesArtifact pins the message types an
+// explicit agent reply (`scion message user:<caller> ...`) arrives as. Each
+// must yield a task artifact on both translation paths, independent of any
+// harness-specific turn output.
+func TestTranslateExplicitReplyProducesArtifact(t *testing.T) {
+	for _, typ := range []string{messages.TypeInstruction, ""} {
+		t.Run("type="+typ, func(t *testing.T) {
+			reply := &messages.StructuredMessage{
+				Version: 1,
+				Sender:  "agent:agent-a",
+				Msg:     "explicit reply",
+				Type:    typ,
+			}
+
+			_, artifacts := TranslateScionToA2A(reply)
+			if len(artifacts) != 1 || artifacts[0].Parts[0].Text != "explicit reply" {
+				t.Errorf("TranslateScionToA2A artifacts = %+v, want one with the reply", artifacts)
+			}
+
+			_, sdkArtifacts := TranslateScionToA2AParts(reply)
+			if len(sdkArtifacts) != 1 || sdkArtifacts[0].Parts[0].Text() != "explicit reply" {
+				t.Errorf("TranslateScionToA2AParts artifacts = %+v, want one with the reply", sdkArtifacts)
+			}
+		})
+	}
+}

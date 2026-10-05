@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
@@ -122,7 +124,7 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Here is my progress update",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -201,7 +203,7 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Please provide more details",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -247,7 +249,7 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "I need more information",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -301,7 +303,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 			Sender:    "agent:agent-a",
 			Recipient: "user:test-user",
 			Msg:       fmt.Sprintf("progress update %d", i),
-			Type:      messages.TypeAssistantReply,
+			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
 		if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", msg); err != nil {
@@ -362,7 +364,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Working on it...",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -637,7 +639,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 			Sender:    "agent:agent-a",
 			Recipient: "user:test-user",
 			Msg:       text,
-			Type:      messages.TypeAssistantReply,
+			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
 		if err := b.HandleBrokerMessage(context.Background(), topic, msg); err != nil {
@@ -757,7 +759,7 @@ func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Response via slug fallback",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		// No a2aTaskId in metadata.
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -797,7 +799,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Just a content msg",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -855,7 +857,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Late message after completion",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, lateContent); err != nil {
@@ -920,7 +922,7 @@ func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Working on your request",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
@@ -991,7 +993,7 @@ func TestMultipleAgentTasksContentDoesNotClose(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Broadcast content",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
@@ -1199,7 +1201,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
 		Msg:       "Still working...",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
 	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
@@ -1235,5 +1237,84 @@ func drainLoop(ch <-chan StreamEvent, out *[]StreamEvent) {
 		default:
 			return
 		}
+	}
+}
+
+// --- Explicit agent replies form the task response ---
+
+// TestExplicitReplyBecomesTaskResponse covers the harness-independent
+// response path: the agent runs `scion message user:<caller> ...`, and the
+// hub publishes it on the caller's user topic as an "instruction" message
+// with Sender agent:<slug> and no a2aTaskId. That reply must become the A2A
+// task artifact and the response returned to the caller.
+func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "explicit-reply-1"
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
+
+	reply := &messages.StructuredMessage{
+		Version:     1,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Sender:      "agent:agent-a",
+		Recipient:   "user:test-user",
+		Msg:         "Here is the answer",
+		Type:        messages.TypeInstruction,
+		Attachments: []string{"https://example.com/answer.txt"},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", reply); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+
+	var artifacts []Artifact
+	var replyMessages int
+	for _, ev := range readStreamEvents(t, store, taskID) {
+		if ev.ArtifactUpdate != nil {
+			artifacts = append(artifacts, ev.ArtifactUpdate.Artifact)
+		}
+		if ev.StatusUpdate != nil && ev.StatusUpdate.Status.Message != nil {
+			replyMessages++
+		}
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %d, want 1 from the explicit reply", len(artifacts))
+	}
+	parts := artifacts[0].Parts
+	if len(parts) != 2 || parts[0].Text != "Here is the answer" || parts[1].URL != "https://example.com/answer.txt" {
+		t.Errorf("artifact parts = %+v, want reply text and attachment", parts)
+	}
+	if replyMessages != 1 {
+		t.Errorf("status messages = %d, want 1 carrying the reply", replyMessages)
+	}
+
+	// The blocking caller is answered by the explicit reply.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second)
+	if err != nil {
+		t.Fatalf("waitForTaskEvent: %v", err)
+	}
+	result, err := b.taskEventToTaskResult(taskID, "ctx-1", ev)
+	if err != nil {
+		t.Fatalf("taskEventToTaskResult: %v", err)
+	}
+	if len(result.Artifacts) != 1 || result.Artifacts[0].Parts[0].Text != "Here is the answer" {
+		t.Errorf("result artifacts = %+v, want the explicit reply", result.Artifacts)
+	}
+
+	// The SDK executor completes the task with the reply as its message.
+	sdkEv, err := taskEventToSDKEvent(&a2asrv.ExecutorContext{TaskID: a2a.TaskID(taskID)}, ev)
+	if err != nil {
+		t.Fatalf("taskEventToSDKEvent: %v", err)
+	}
+	statusEv, ok := sdkEv.(*a2a.TaskStatusUpdateEvent)
+	if !ok {
+		t.Fatalf("SDK event = %T, want *a2a.TaskStatusUpdateEvent", sdkEv)
+	}
+	if statusEv.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("SDK state = %v, want %v", statusEv.Status.State, a2a.TaskStateCompleted)
+	}
+	if statusEv.Status.Message == nil || len(statusEv.Status.Message.Parts) == 0 ||
+		statusEv.Status.Message.Parts[0].Text() != "Here is the answer" {
+		t.Errorf("SDK status message = %+v, want the explicit reply", statusEv.Status.Message)
 	}
 }
