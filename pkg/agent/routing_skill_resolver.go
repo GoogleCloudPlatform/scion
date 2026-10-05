@@ -212,7 +212,16 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				if len(directRefs) > 0 {
 					dr, err := fb.Resolve(ctx, directRefs, opts)
 					if err != nil {
-						return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
+						// Only the direct refs failed: report each of them and
+						// still resolve the refs routed to the primary and the
+						// other scheme groups.
+						slog.Warn("fallback skill resolver failed for directly routed refs",
+							"scheme", scheme,
+							"fallback", resolverNameOf(fb),
+							"refs", len(directRefs),
+							"error", err)
+						dr = &ResolveResult{Errors: perRefErrors(directRefs,
+							fmt.Sprintf("fallback resolver for scheme %q failed: %v", scheme, err))}
 					}
 					result.Resolved = append(result.Resolved, dr.Resolved...)
 					result.Errors = append(result.Errors, dr.Errors...)
@@ -334,6 +343,16 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 	merged.Resolved = append(merged.Resolved, fr.Resolved...)
 	merged.Errors = append(merged.Errors, fr.Errors...)
 	return merged
+}
+
+// perRefErrors returns a resolve_failed ResolveError with msg for each of
+// refs.
+func perRefErrors(refs []api.SkillReference, msg string) []ResolveError {
+	errs := make([]ResolveError, len(refs))
+	for i, ref := range refs {
+		errs[i] = ResolveError{URI: ref.URI, Code: SkillErrCodeResolveFailed, Message: msg}
+	}
+	return errs
 }
 
 // refKey builds a map key identifying a skill reference by URI and alias. The

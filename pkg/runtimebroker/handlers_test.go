@@ -289,10 +289,6 @@ func (m *mockManager) Message(ctx context.Context, agentID, projectID string, me
 	return m.messageErr
 }
 
-func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return m.messageErr
-}
-
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	if m.sendKeysFunc != nil {
 		return m.sendKeysFunc(ctx, projectID, agentSlug, expectedAgentID, keys)
@@ -2472,6 +2468,130 @@ func TestStartAgentEndpoint(t *testing.T) {
 	// Created should be false for a start (not a create)
 	if resp.Created {
 		t.Error("expected Created to be false for start operation")
+	}
+}
+
+// TestStartAgentEndpoint_SkillResolutionError checks that a required skill
+// that cannot be resolved while starting gets the typed skill response
+// (status from the cause, {skill, cause} details, Retry-After) instead of a
+// generic 500.
+func TestStartAgentEndpoint_SkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		retryAfter     string
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{"not found", agent.SkillErrCodeNotFound, "", http.StatusNotFound, ""},
+		{"rate limited", agent.SkillErrCodeRateLimited, "42", http.StatusTooManyRequests, "42"},
+		{"forbidden", "forbidden", "", http.StatusForbidden, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = fmt.Errorf("provision: %w", &agent.SkillResolutionError{
+				URI:        "gh://example-org/example-skills/my-skill@main",
+				Code:       tt.code,
+				Message:    "could not resolve",
+				RetryAfter: tt.retryAfter,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("expected Retry-After %q, got %q", tt.wantRetryAfter, got)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeSkillResolution {
+				t.Errorf("expected code %q, got %q", ErrCodeSkillResolution, resp.Error.Code)
+			}
+			if resp.Error.Details["skill"] != "gh://example-org/example-skills/my-skill@main" {
+				t.Errorf("expected details.skill to name the ref, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
+			}
+			// The failure came from inside Manager.Start, so the hub must
+			// also see the start marker it uses to settle the run ID.
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// TestRestartAgentEndpoint_SkillResolutionError checks that a restart whose
+// start fails on a required skill gets the typed skill response with the
+// start run details, the same as start. A not_found cause must not be
+// reported as a missing agent.
+func TestRestartAgentEndpoint_SkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		message    string
+		wantStatus int
+	}{
+		{"not found cause", agent.SkillErrCodeNotFound, "skill not found", http.StatusNotFound},
+		{"forbidden", agent.SkillErrCodeForbidden, "could not resolve", http.StatusForbidden},
+		{"timeout", agent.SkillErrCodeTimeout, "could not resolve", http.StatusGatewayTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = fmt.Errorf("provision: %w", &agent.SkillResolutionError{
+				URI:     "gh://example-org/example-skills/my-skill@main",
+				Code:    tt.code,
+				Message: tt.message,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeSkillResolution {
+				t.Errorf("expected code %q, got %q (%s)", ErrCodeSkillResolution, resp.Error.Code, resp.Error.Message)
+			}
+			if resp.Error.Details["skill"] != "gh://example-org/example-skills/my-skill@main" || resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details {skill, cause}, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// TestStartAgentEndpoint_OtherErrorStays500 checks that a start failure that
+// is not a skill resolution failure keeps the generic 500.
+func TestStartAgentEndpoint_OtherErrorStays500(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = errors.New("container runtime unavailable")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
 	}
 }
 
