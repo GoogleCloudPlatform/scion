@@ -151,6 +151,42 @@ func TestTemplateDelete_DeleteFilesKeepsSiblingPrefix(t *testing.T) {
 	assert.True(t, stor.hasObject(sibling), "deleting template foo must not delete foo-bar's files")
 }
 
+// TestUserTemplateDelete_DeleteFilesKeepsSiblingPrefix is the user-template
+// counterpart (DELETE /api/v1/users/me/templates/{id}?deleteFiles=true): the
+// owner's template "foo" must not take "foo-bar"'s files with it.
+func TestUserTemplateDelete_DeleteFilesKeepsSiblingPrefix(t *testing.T) {
+	srv, s := testServer(t)
+	stor := newCloneMockStorage("test-bucket")
+	srv.SetStorage(stor)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: api.NewUUID(), Email: "user-tpl-owner@test.com", DisplayName: "Owner",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	tplPath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeUser, owner.ID, "foo")
+	tpl := &store.Template{
+		ID: api.NewUUID(), Name: "foo", Slug: "foo", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: owner.ID, OwnerID: owner.ID,
+		Status: store.TemplateStatusActive, StoragePath: tplPath,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateTemplate(ctx, tpl))
+	own := tplPath + "/template.yaml"
+	sibling := tplPath + "-bar/template.yaml" // user template "foo-bar"'s files
+	stor.seedObject(own, []byte("foo"))
+	stor.seedObject(sibling, []byte("foo-bar"))
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodDelete,
+		"/api/v1/users/me/templates/"+tpl.ID+"?deleteFiles=true", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+
+	assert.False(t, stor.hasObject(own), "user template's own files must be deleted")
+	assert.True(t, stor.hasObject(sibling), "deleting user template foo must not delete foo-bar's files")
+}
+
 func TestHarnessConfigDelete_DeleteFilesKeepsSiblingPrefix(t *testing.T) {
 	srv, s := testServer(t)
 	stor := newCloneMockStorage("test-bucket")
