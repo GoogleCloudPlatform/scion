@@ -979,6 +979,21 @@ describe('hub members: reconnect and disconnect', () => {
     expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
   });
 
+  it('a store result for a generation that moved on is dropped even without a detach', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const release = harness.server.pause();
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+
+    void page._loadHubAgents(0);
+    page._hubMembersGeneration = 1;
+    release();
+    await settle();
+
+    expect(page.v2AgentMembers).toEqual([]);
+  });
+
   it('a reconnect into a DM whose agents-updated merges global rows, then /chat, shows the hub list again', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
