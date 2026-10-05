@@ -92,6 +92,9 @@ allowed_paths=(
   # Runtime broker handlers: filters by scion.io/plugin label.
   "^pkg/hub/handlers_runtime_brokers.go$"
 
+  # Reincarnate move target resolution: excludes scion.io/plugin-labelled brokers.
+  "^pkg/hub/reincarnate_move.go$"
+
   # Agent creation helpers: references scion.io/default-harness-config in
   # design comment.
   "^pkg/hub/handlers_agent_create_helpers.go$"

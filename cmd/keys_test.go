@@ -80,7 +80,7 @@ func TestKeysCmd_IsRegistered(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Hub-aware keys: sendKeysViaHub must POST {"keys": ...} to the dedicated
-// /keys route (never /message, never a Raw StructuredMessage) for both agent
+// /keys route (never /message) for both agent
 // and human senders, and must never retry or fall back on failure.
 // ---------------------------------------------------------------------------
 
@@ -762,7 +762,7 @@ func TestSendKeysLocalWithManager_UnlinkedProject_ExactDelivery(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// An empty --raw/keys body must be rejected locally before any network call
+// An empty keys body must be rejected locally before any network call
 // (Hub) or List call (local), not sent through to be rejected server-side.
 // ---------------------------------------------------------------------------
 
@@ -848,6 +848,105 @@ func TestSendKeysViaHub_BareHTML5xx_IsUnknownNeverRejected(t *testing.T) {
 				"a bare HTML 5xx with no contract body must classify as unknown, never a definite rejection")
 			assert.NotContains(t, err.Error(), "keys rejected",
 				"must never be reported as safe to retry")
+		})
+	}
+}
+
+// TestSendKeysViaHub_Bodyless502_ClearErrorNeverEmptyCode proves a 502
+// with no body at all (a proxy or load balancer in front of the Hub) gives
+// a clear "unknown" error, a failing command (and therefore a non-zero
+// exit code from Execute), and a non-empty outcome code in both text and
+// JSON mode.
+func TestSendKeysViaHub_Bodyless502_ClearErrorNeverEmptyCode(t *testing.T) {
+	for _, format := range []string{"", "json"} {
+		t.Run("format="+format, func(t *testing.T) {
+			origFormat := outputFormat
+			defer func() { outputFormat = origFormat }()
+			outputFormat = format
+
+			server := newKeysMockHubServerFailing(t, "", http.StatusBadGateway, "")
+			defer server.Close()
+
+			client, err := hubclient.New(server.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-bodyless-502"}
+
+			var cmdErr error
+			stdout := captureStdout(t, func() {
+				cmdErr = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+			})
+			require.Error(t, cmdErr, "a bodyless 502 must fail the command so Execute exits non-zero")
+			assert.Contains(t, cmdErr.Error(), "keys unknown for agent 'target-agent'")
+			assert.Contains(t, cmdErr.Error(), "502")
+			assert.Contains(t, cmdErr.Error(), "check before resending")
+			assert.NotContains(t, cmdErr.Error(), ": :", "no empty fields in the error text")
+			// apiclient fills a bodyless 502 with the generic internal_error
+			// code; the CLI must replace it with the keys outcome.
+			assert.Contains(t, cmdErr.Error(), "no keys outcome from the Hub")
+
+			if format == "json" {
+				var result ActionResult
+				require.NoError(t, json.Unmarshal([]byte(stdout), &result))
+				assert.Equal(t, "error", result.Status)
+				assert.Equal(t, "unknown", result.Details["outcome"])
+				assert.Equal(t, string(agentkeys.OutcomeKeysOutcomeUnknown), result.Details["code"],
+					"a bodyless 502 must report keys_outcome_unknown, not the client's generic internal_error")
+				assert.Contains(t, result.Message, "HTTP 502 Bad Gateway")
+			}
+		})
+	}
+}
+
+// TestClassifyHubKeysError_EmptyCodeNeverSurfaces covers an API error that
+// carries no code and no message at all, the shape a proxy can produce:
+// the classified result always has a non-empty code and message.
+func TestClassifyHubKeysError_EmptyCodeNeverSurfaces(t *testing.T) {
+	cases := []struct {
+		status      int
+		wantOutcome keysOutcomeStatus
+		wantCode    string
+	}{
+		{http.StatusBadGateway, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusGatewayTimeout, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusServiceUnavailable, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusBadRequest, keysOutcomeRejected, "http_400"},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			res := classifyHubKeysError(&apiclient.APIError{StatusCode: tc.status})
+			assert.Equal(t, tc.wantOutcome, res.Outcome)
+			assert.Equal(t, tc.wantCode, res.Code)
+			assert.NotEmpty(t, res.Message)
+		})
+	}
+}
+
+// TestClassifyHubKeysError_GenericCodeWithoutOperationID covers the shapes
+// apiclient.ParseErrorResponse really produces for a response that did not
+// come from the keys handler: a generic status-derived or proxy code and no
+// operation_id. An ambiguous status maps to keys_outcome_unknown; a keys
+// outcome code, or a response carrying an operation_id, keeps its code.
+func TestClassifyHubKeysError_GenericCodeWithoutOperationID(t *testing.T) {
+	withOp := map[string]interface{}{"operation_id": "op-1"}
+	cases := []struct {
+		name        string
+		err         *apiclient.APIError
+		wantOutcome keysOutcomeStatus
+		wantCode    string
+	}{
+		{"bodyless 502", &apiclient.APIError{StatusCode: 502, Code: "internal_error", Message: "Bad Gateway"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"bodyless 504", &apiclient.APIError{StatusCode: 504, Code: "internal_error", Message: "Gateway Timeout"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"proxy 503", &apiclient.APIError{StatusCode: 503, Code: "service_unavailable", Message: "upstream unhealthy"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"hub 500 with operation_id", &apiclient.APIError{StatusCode: 500, Code: "internal_error", Message: "unexpected", Details: withOp}, keysOutcomeUnknown, "internal_error"},
+		{"hub keys_outcome_unknown", &apiclient.APIError{StatusCode: 502, Code: "keys_outcome_unknown", Message: "broker failed", Details: withOp}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"definite 400 keeps generic code", &apiclient.APIError{StatusCode: 400, Code: "invalid_request", Message: "Bad Request"}, keysOutcomeRejected, "invalid_request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := classifyHubKeysError(tc.err)
+			assert.Equal(t, tc.wantOutcome, res.Outcome)
+			assert.Equal(t, tc.wantCode, res.Code)
+			assert.NotEmpty(t, res.Message)
 		})
 	}
 }
