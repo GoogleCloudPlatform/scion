@@ -20,12 +20,15 @@ DEPLOY_SH="${TIER_DIR}/deploy.sh"
 # from deploy.sh, plus the globals they read, with a fast retry budget.
 _load_hub_health_fns() {
   eval "$(sed -n '/^hub_health_status() {/,/^}/p; /^wait_for_hub_health() {/,/^}/p' "$DEPLOY_SH")"
-  INSTANCE_NAME="scion-hub-healthhub"
-  ZONE="us-central1-a"
-  PROJECT_ID="demo-project"
-  HEALTH_CHECK_MAX_ATTEMPTS=3
-  HEALTH_CHECK_RETRY_SECS=0
-  GREEN="" RESET=""
+  # shellcheck disable=SC2034 # read by the eval'd deploy.sh wait_for_hub_health
+  {
+    INSTANCE_NAME="scion-hub-healthhub"
+    ZONE="us-central1-a"
+    PROJECT_ID="demo-project"
+    HEALTH_CHECK_MAX_ATTEMPTS=3
+    HEALTH_CHECK_RETRY_SECS=0
+    GREEN="" RESET=""
+  }
   fresh_gcloud_state
   export GCLOUD_STUB_SSH_SUCCEEDS=true
 }
