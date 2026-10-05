@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -42,10 +41,6 @@ type HubClient interface {
 	// linkedUser ("user:<email>") is the Slack user's linked Scion account,
 	// sent with the request. Use this for every user-facing project picker.
 	ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error)
-	// ListProjectsFresh lists every project the plugin serves. It is for
-	// refreshing the project slug map only; never offer its result to a
-	// Slack user.
-	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	// ListAgents lists the agents of a project. linkedUser ("user:<email>")
 	// is the Slack user's linked Scion account, sent with the request; the
 	// hub denies a project agent list without it.
@@ -100,42 +95,6 @@ type hubAgentsResponse struct {
 type hubAgent struct {
 	Slug     string `json:"slug"`
 	Activity string `json:"activity"`
-}
-
-func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/broker/projects"
-
-	slog.Debug("Listing fresh projects from hub broker endpoint", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list fresh projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list fresh projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list fresh projects: %w", parseHubError(resp))
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list fresh projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
 }
 
 func (c *httpHubClient) ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error) {
