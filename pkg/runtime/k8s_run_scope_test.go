@@ -838,6 +838,22 @@ func TestK8sRunScope_InvalidRunID_Refused(t *testing.T) {
 	}
 }
 
+// With the pod gone, Delete's selector would be built from the run ID
+// alone: a malformed one must be refused before any list or delete.
+func TestK8sDeleteRun_PodGone_InvalidRunID_Refused(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	rsSeedSecret(t, rt, rsAgentSecret, "sec-a", rsLabels(rsRunA, ""))
+	rsSeedSecret(t, rt, rsAuthSecret, "auth-a", rsLabels(rsRunA, ""))
+	rsSeedSPC(t, rt, "spc-a", rsLabels(rsRunA, ""))
+	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: rsRunA + ",scion.agent"}); err == nil {
+		t.Error("Delete accepted a malformed run ID")
+	}
+	rsExpect(t, rt, rsState{agentSecret: true, authSecret: true, spc: true})
+	if n := enf.count(); n != 0 {
+		t.Errorf("issued %d deletes for a malformed run ID", n)
+	}
+}
+
 // A pre-clean pod delete that fails for any reason other than NotFound or
 // Conflict (here Forbidden) fails the start.
 func TestK8sPreCleanForRun_PodDeleteError_FailsStart(t *testing.T) {
