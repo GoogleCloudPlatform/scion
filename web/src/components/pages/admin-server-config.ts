@@ -1859,6 +1859,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
   }
 
+  /**
+   * Service account value to save. The account only applies in "assign"
+   * mode, so it is cleared when the admin picks another mode in the form.
+   * When the mode itself is read-only (env-pinned or deployment-managed),
+   * the form mode is not the effective mode and the page cannot see the
+   * effective one, so the account is sent as loaded instead of being
+   * cleared (ptone/scion#2720).
+   */
+  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string {
+    if (!ok('default_gcp_identity_mode')) return this.defaultGCPIdentitySAID || '';
+    return this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+  }
+
   private buildLayer1Payload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
@@ -1926,8 +1939,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      payload.default_gcp_identity_service_account_id = this.gcpIdentitySAIDForPayload(ok);
     }
 
     const server: Record<string, unknown> = {};
@@ -2135,8 +2147,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      payload.default_gcp_identity_service_account_id = this.gcpIdentitySAIDForPayload(ok);
     }
 
     // Server
