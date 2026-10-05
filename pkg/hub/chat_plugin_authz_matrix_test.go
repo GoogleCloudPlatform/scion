@@ -330,11 +330,17 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		// The linked owner writes, reads and lists in that order.
 		t.Run("put with the linked owner stores the secret", func(t *testing.T) {
 			w := env.do(t, http.MethodPut, putPath, env.ownerEmail, putBody)
-			assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, w.Code, w.Body.String())
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var resp SetSecretResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), w.Body.String())
+			assert.True(t, resp.Created, w.Body.String())
 		})
 		t.Run("get with the linked owner returns the secret", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, getPath, env.ownerEmail, nil)
-			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var got store.Secret
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), w.Body.String())
+			assert.Equal(t, "CHAT_MATRIX_KEY", got.Key)
 		})
 		t.Run("list with the linked owner includes the secret", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, listPath, env.ownerEmail, nil)
@@ -352,14 +358,18 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			{"get", http.MethodGet, getPath, nil},
 			{"put", http.MethodPut, putPath, putBody},
 		}
+		// Secret denials currently carry no resource_type / denied_action
+		// details, so clients can only show a generic permission message.
 		for _, c := range calls {
 			t.Run(c.name+" without the linked user is denied", func(t *testing.T) {
 				w := env.do(t, c.method, c.path, noUser, c.body)
-				assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+				resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+				assert.Empty(t, resp.Error.Details, w.Body.String())
 			})
 			t.Run(c.name+" with a linked outsider is denied", func(t *testing.T) {
 				w := env.do(t, c.method, c.path, env.outsiderEmail, c.body)
-				assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+				resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+				assert.Empty(t, resp.Error.Details, w.Body.String())
 			})
 		}
 	})
@@ -377,11 +387,13 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		})
 		t.Run("discord link status", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, "/api/v1/discord/link/status?discord_user_id=d-123", noUser, nil)
-			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
 		})
 		t.Run("telegram link status", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, "/api/v1/telegram/link/status?telegram_user_id=t-123", noUser, nil)
-			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
 		})
 	})
 
@@ -426,7 +438,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		t.Run("owner sender passes the sender check", func(t *testing.T) {
 			w := send(t, "user:"+env.ownerEmail)
 			// The agent is stopped, so an allowed sender gets 409.
-			assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+			assertChatMatrixError(t, w, http.StatusConflict, ErrCodeAgentNotRunning, "")
 		})
 		t.Run("outsider sender is denied", func(t *testing.T) {
 			w := send(t, "user:"+env.outsiderEmail)
