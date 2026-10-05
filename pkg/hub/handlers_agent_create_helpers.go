@@ -1152,6 +1152,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
@@ -1247,6 +1249,8 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+				case relaySkillResolutionError(w, err):
+					// Required-skill resolution failure relayed with the broker's status.
 				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
@@ -1374,6 +1378,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}

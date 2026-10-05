@@ -86,6 +86,15 @@ const (
 	SkillErrCodeTimeout             = "timeout"
 	SkillErrCodeUpstreamUnavailable = "upstream_unavailable"
 	SkillErrCodeUnreachable         = "unreachable"
+	// SkillErrCodeForbidden is the per-URI code the Hub's batch skill
+	// resolve returns for a gh:// ref when the caller may not resolve GitHub
+	// skills for the project. It reaches the broker as a
+	// SkillResolutionError.Code through PreResolvedSkills.
+	SkillErrCodeForbidden = "forbidden"
+	// SkillErrCodeResolveFailed is the uncategorized per-ref resolution
+	// failure: the ref could not be resolved for a reason none of the codes
+	// above describes. The create path keeps it on the 5xx path.
+	SkillErrCodeResolveFailed = "resolve_failed"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
