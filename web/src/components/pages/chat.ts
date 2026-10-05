@@ -307,6 +307,17 @@ interface SpaceMember {
   kind: 'user' | 'agent';
 }
 
+/** Input types that take typed text, where a line-editing key has a native meaning. */
+const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'search',
+  'email',
+  'url',
+  'tel',
+  'password',
+  'number',
+]);
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -3864,14 +3875,18 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * True when the event originated in a text field: an input, a textarea, or
-   * contenteditable content. Reads `composedPath()[0]`, since a document
+   * True when the event originated in an editable text field: a text-taking
+   * input, a textarea, or contenteditable content. Read-only and disabled
+   * fields are not editable. Reads `composedPath()[0]`, since a document
    * listener sees the composer's native textarea retargeted to its shadow host.
    */
   private _eventFromTextField(e: KeyboardEvent): boolean {
     const origin = e.composedPath()[0];
-    if (!(origin instanceof HTMLElement)) return false;
-    return origin.tagName === 'INPUT' || origin.tagName === 'TEXTAREA' || origin.isContentEditable;
+    if (origin instanceof HTMLInputElement) {
+      return TEXT_INPUT_TYPES.has(origin.type) && !origin.readOnly && !origin.disabled;
+    }
+    if (origin instanceof HTMLTextAreaElement) return !origin.readOnly && !origin.disabled;
+    return origin instanceof HTMLElement && origin.isContentEditable;
   }
 
   /** Is the current URL (relative to BASE_URL) `/chat` or a route below it? */

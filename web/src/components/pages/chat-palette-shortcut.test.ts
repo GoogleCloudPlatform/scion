@@ -270,6 +270,50 @@ describe('_handleGlobalKeydown: macOS Ctrl+K in a text field keeps its native me
     }
   });
 
+  it('on a Mac, counts every text-taking input type as a text field', () => {
+    platform.mac = true;
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const input = document.createElement('input');
+      input.type = type;
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [input] }));
+      expect(togglePalette, type).not.toHaveBeenCalled();
+    }
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field opens the palette', () => {
+    platform.mac = true;
+    const fields: Array<[string, Element]> = [];
+    for (const type of ['checkbox', 'button', 'range']) {
+      const input = document.createElement('input');
+      input.type = type;
+      fields.push([`input ${type}`, input]);
+    }
+    const readOnlyInput = document.createElement('input');
+    readOnlyInput.readOnly = true;
+    const disabledInput = document.createElement('input');
+    disabledInput.disabled = true;
+    const readOnlyTextarea = document.createElement('textarea');
+    readOnlyTextarea.readOnly = true;
+    const disabledTextarea = document.createElement('textarea');
+    disabledTextarea.disabled = true;
+    fields.push(
+      ['read-only input', readOnlyInput],
+      ['disabled input', disabledInput],
+      ['read-only textarea', readOnlyTextarea],
+      ['disabled textarea', disabledTextarea]
+    );
+    for (const [name, field] of fields) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
   it('on a Mac, Cmd+K typed in a text field still opens the palette', () => {
     platform.mac = true;
     for (const [name, field] of editableTargets()) {
