@@ -615,6 +615,17 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// Image is the user's explicit image (explicitDispatchImage), already
+	// registry-rewritten; empty when the user chose none. The broker applies
+	// it as the top-tier image (opts.Image), the same as create's
+	// Config.Image, so a start or restart ranks the image exactly as the
+	// create did (ptone/scion#1799). A template-derived image is never sent.
+	Image string
+	// SharedWorkspace is set on a restart (the start request already
+	// carries it as its own field) so the broker reads and writes a
+	// shared-workspace agent's state under the same broker-side agents root
+	// as its start (ptone/scion#1799).
+	SharedWorkspace bool
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -649,6 +660,12 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.Image != "" {
+		payload["image"] = extras.Image
+	}
+	if extras.SharedWorkspace {
+		payload["sharedWorkspace"] = true
 	}
 }
 
@@ -1056,6 +1073,11 @@ type RemoteAgentInfo struct {
 	// the runtime entry the broker created or found (ptone/scion#2550).
 	// Older brokers omit it.
 	RunID string `json:"runId,omitempty"`
+	// HarnessConfigSource mirrors runtimebroker.AgentResponse.HarnessConfigSource:
+	// which resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620). Older brokers omit it.
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 }
 
 // Server is the Hub API HTTP server.

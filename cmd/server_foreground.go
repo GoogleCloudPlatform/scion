@@ -1449,7 +1449,9 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // per-resource OverwritePolicy checks, secretmigration.MigratePluginSecrets
 // checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
-// here and will see the completed state on their next access.
+// here and will see the completed state on their next access. Exception:
+// the workstation resource bootstrap imports per-replica disk content; see
+// bootstrapWorkstationResources.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
 	if s == nil {
 		fn()
@@ -1474,6 +1476,42 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 	}
 	defer func() { _ = release() }()
 	fn()
+}
+
+// workstationResourceBootstrapper is the subset of *hub.Server used by the
+// workstation (non-hosted) resource bootstrap; an interface so the lock
+// routing can be unit-tested without a full hub.
+type workstationResourceBootstrapper interface {
+	BootstrapTemplatesFromDir(ctx context.Context, dir string) error
+	BootstrapHarnessConfigsFromDir(ctx context.Context, dir string) error
+}
+
+// bootstrapWorkstationResources imports templates and harness-configs from
+// the local ~/.scion directories into the hub (non-hosted mode). Both imports
+// run under one advisory lock (ptone/scion#1079): ResourceStore.Bootstrap is
+// GetBySlug-then-Create with no ErrAlreadyExists recovery, so two replicas
+// sharing a Postgres store would race. The key is shared with the hosted
+// bundled-resource bootstrap; the two branches are mutually exclusive.
+//
+// Caveats:
+//   - In non-hosted mode each replica imports its OWN ~/.scion, so when the
+//     lock is held the loser skips and the winner's disk content defines the
+//     hub records.
+//   - A lock-acquire error (Postgres only, e.g. pool exhaustion) skips the
+//     import for this boot, logged at ERROR by runWithAdvisoryLock. Before
+//     the lock the import always ran; this matches the hosted branch.
+//   - On SQLite the lock is a no-op and both imports always run.
+func bootstrapWorkstationResources(ctx context.Context, s store.Store, b workstationResourceBootstrapper, globalDir string) {
+	runWithAdvisoryLock(ctx, s, store.LockBundledResources, "workstation resource bootstrap", func() {
+		globalTemplatesDir := filepath.Join(globalDir, "templates")
+		if err := b.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
+			log.Printf("Warning: template bootstrap failed: %v", err)
+		}
+		globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
+		if err := b.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
+			log.Printf("Warning: harness config bootstrap failed: %v", err)
+		}
+	})
 }
 
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
@@ -2180,14 +2218,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	} else {
 		// Workstation mode: import from local ~/.scion directories. These were
 		// refreshed from embeds earlier in the startup sequence.
-		globalTemplatesDir := filepath.Join(globalDir, "templates")
-		if err := hubSrv.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
-			log.Printf("Warning: template bootstrap failed: %v", err)
-		}
-		globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
-		if err := hubSrv.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
-			log.Printf("Warning: harness config bootstrap failed: %v", err)
-		}
+		bootstrapWorkstationResources(ctx, s, hubSrv, globalDir)
 	}
 
 	// On first boot with hub-namespaced paths, copy legacy GCS objects to

@@ -500,9 +500,30 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 // already expired (DeadlineExceeded) takes precedence: that is ctx', so it
 // means the launch ran out of its budget, which is launch_timeout regardless
 // of the error Start happened to return when it unwound.
+// Async launch failure codes reported to the hub (alongside
+// ErrCodeHarnessConfigUnusable and ErrCodeSkillResolution).
+const (
+	// LaunchErrCodeHarnessConfigPolicy: the harness-config policy refused
+	// the launch (the synchronous paths answer 403 forbidden).
+	LaunchErrCodeHarnessConfigPolicy = "harness_config_policy"
+	// LaunchErrCodeAgentStateUnavailable: the agent's broker-side state
+	// directory is unavailable (config.ErrAgentStateDirUnavailable).
+	LaunchErrCodeAgentStateUnavailable = "agent_state_unavailable"
+	// LaunchErrCodeAgentStateConflict: the agent's broker-side state exists
+	// but cannot be used as recorded, e.g. an unusable image provenance
+	// record (config.ErrAgentStateConflict).
+	LaunchErrCodeAgentStateConflict = "agent_state_conflict"
+)
+
 func classifyStartError(ctx context.Context, err error) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
+	}
+	if d, ok := harnessPolicyRefusalFrom(err); ok {
+		return LaunchErrCodeHarnessConfigPolicy, d.Message
+	}
+	if ue, ok := unusableProvisionerFrom(err); ok {
+		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {
@@ -515,6 +536,10 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 		return ErrCodeSkillResolution, err.Error()
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		return "template_not_found", err.Error()
+	case errors.Is(err, config.ErrAgentStateDirUnavailable):
+		return LaunchErrCodeAgentStateUnavailable, err.Error()
+	case errors.Is(err, config.ErrAgentStateConflict):
+		return LaunchErrCodeAgentStateConflict, err.Error()
 	default:
 		return "runtime_error", err.Error()
 	}

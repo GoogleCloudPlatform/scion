@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -4981,6 +4982,120 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 				require.False(t, want.NoAuth,
 					"precondition: the assigned GCPIdentity must satisfy the harness config's auth type, so create must NOT have taken the auto-no-auth fallback")
 			}
+		})
+	}
+}
+
+// TestReincarnateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig pins
+// ptone/scion#601 item 2 on the reincarnate path, which re-derives the
+// harness config through deriveAgentConfig: a harness-type-only template
+// leaves the slot to the hub default (and, with none, empty).
+func TestReincarnateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hubDefault string
+		want       string
+	}{
+		{name: "NoHubDefault", hubDefault: "", want: ""},
+		{name: "HubDefaultWins", hubDefault: "hub-hc", want: "hub-hc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			if tc.hubDefault != "" {
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: tc.hubDefault})
+			}
+
+			template := &store.Template{
+				ID:          tid("tmpl-harness-type-" + t.Name()),
+				Name:        "team-claude-reviewer",
+				Slug:        "reincarnate-harness-type-" + tidSlugSafe(t.Name()),
+				Harness:     "claude",
+				Scope:       store.TemplateScopeGlobal,
+				Status:      store.TemplateStatusActive,
+				ContentHash: "tmpl-hash",
+			}
+			require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Template = template.Slug
+			})
+
+			fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+			require.NoError(t, err)
+			require.NotNil(t, fresh)
+			assert.Equal(t, tc.want, fresh.HarnessConfig,
+				"the template's harness type must not be used as a harness-config name on reincarnate")
+		})
+	}
+}
+
+// TestReincarnateAgent_PlanExplicitProfileOverrideImageBeatsTemplate pins
+// ptone/scion#1799 on the reincarnate plan: an EXPLICIT
+// profiles.<p>.harness_overrides.<hc>.image outranks the template image (as
+// the broker's Start now does), while the user's explicit request image
+// still outranks the profile override.
+func TestReincarnateAgent_PlanExplicitProfileOverrideImageBeatsTemplate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // isolate LoadEffectiveSettings from any ambient config
+	hcSlug := "profile-image-hc-" + tidSlugSafe(t.Name())
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(`schema_version: "1"
+active_profile: pinned
+profiles:
+  pinned:
+    runtime: docker
+    harness_overrides:
+      `+hcSlug+`:
+        image: profile-image:v4
+harness_configs:
+  `+hcSlug+`:
+    harness: claude
+    image: settings-image:v1
+`), 0644))
+
+	for _, tc := range []struct {
+		name          string
+		explicitImage string
+		want          string
+	}{
+		{name: "profile override beats template", want: "profile-image:v4"},
+		{name: "explicit request image beats profile override", explicitImage: "explicit-image:v9", want: "explicit-image:v9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+			template := &store.Template{
+				ID:          tid("tmpl-profile-" + t.Name()),
+				Name:        "t",
+				Slug:        "reincarnate-template-profile-" + tidSlugSafe(t.Name()),
+				Harness:     "claude",
+				Scope:       store.TemplateScopeGlobal,
+				Status:      store.TemplateStatusActive,
+				ContentHash: "new-template-hash",
+				Config:      &store.TemplateConfig{Image: "template-image:v2"},
+			}
+			require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Template = template.Slug
+				a.AppliedConfig.HarnessConfig = hcSlug
+				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hcSlug}
+				if tc.explicitImage != "" {
+					a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: tc.explicitImage}
+				}
+			})
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, req, agent.ID)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			var resp ReincarnateAgentResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.want, resp.Plan.Image.New)
 		})
 	}
 }

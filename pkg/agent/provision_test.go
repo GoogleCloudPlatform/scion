@@ -228,6 +228,20 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantImage:             "example.com/profile-pinned:v3",
 			wantPolicy:            "Always",
 		},
+		{
+			// ptone/scion#1799: the explicit profile override wins at Start
+			// (and in the provision-only response, withProvisionedImage), but
+			// is never baked into the persisted scion-agent.json, which a
+			// later Start falls back to; see
+			// TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot.
+			name:                 "explicit profile harness_overrides image is not baked into the persisted config",
+			settingsImage:        "example.com/settings-pinned:v1",
+			profileOverrideImage: "example.com/profile-pinned:v3",
+			templateImage:        "example.com/template-pinned:v2",
+			templatePolicy:       "Never",
+			wantImage:            "example.com/template-pinned:v2",
+			wantPolicy:           "Never",
+		},
 	}
 
 	for _, tt := range tests {

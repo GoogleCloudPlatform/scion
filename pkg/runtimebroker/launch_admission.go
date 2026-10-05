@@ -64,8 +64,17 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		}
 	}
 
+	// With the harness-config policy able to refuse, buildStartContext has
+	// already run the same resolution (PolicyPreflight); this Preflight
+	// repeats it as the async path's admission step, which also surfaces
+	// template/harness-config not-found errors synchronously.
 	if err := mgr.Preflight(ctx, opts); err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if d, ok := harnessPolicyRefusalFrom(err); ok {
+			markAttemptFailed(d.HTTPStatus, d.detail())
+			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID, nil)
+			return
+		}
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)

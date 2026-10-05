@@ -3334,6 +3334,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// actually touched that field) always wins via cfg as already
 		// decoded; this only fills in a field the request left absent.
 		carryForwardAbsentPageOwnedFields(cfg, &old, presentConfigKeys)
+		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
 		agent.AppliedConfig.InlineConfig = cfg
 	}
 
