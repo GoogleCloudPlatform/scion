@@ -14,9 +14,20 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { render, type TemplateResult } from 'lit';
+
+import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
+
+// chat-thread (imported by agent-detail) pulls in the app entry point,
+// which bootstraps the SPA on load; stub it as the header tests do.
+vi.mock('../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  stateManager: new EventTarget(),
+}));
 
 const pageSource = readFileSync(join(__dirname, 'agent-detail.ts'), 'utf-8');
 
@@ -51,7 +62,7 @@ describe('agent detail layout', () => {
       styles: { cssText: string };
     };
     rules = styleRules(ctor.styles.cssText);
-  });
+  }, 30_000);
 
   it('wraps a long agent name with its badges instead of floating them beside it', () => {
     const text = rules.get('.header-title-text') ?? '';
@@ -68,5 +79,77 @@ describe('agent detail layout', () => {
     expect(rules.get('.messaging-mode sl-select') ?? '').toMatch(/width:\s*100%/);
     // The select used to force itself wider than its grid column.
     expect(pageSource).not.toMatch(/min-width:\s*280px;\s*max-width:\s*360px/);
+  });
+
+  /** Render the page header for `agent`. */
+  function renderHeader(agent: Agent): HTMLElement {
+    const el = document.createElement('scion-page-agent-detail');
+    (el as unknown as { agentId: string }).agentId = agent.id;
+    (el as unknown as { agent: Agent }).agent = agent;
+    const tpl = (el as unknown as { renderHeader(): TemplateResult }).renderHeader();
+    const host = document.createElement('div');
+    render(tpl, host);
+    return host;
+  }
+
+  function makeAgent(overrides: Partial<Agent>): Agent {
+    return {
+      id: 'a-1',
+      name: 'a-very-long-agent-name-that-will-not-fit-on-one-line-beside-its-badges',
+      projectId: 'p-1',
+      template: 't',
+      phase: 'running',
+      created: '2026-01-01T00:00:00Z',
+      updated: '2026-01-01T00:00:00Z',
+      messageMode: 'project',
+      _capabilities: { actions: ['read'] },
+      ...overrides,
+    } as Agent;
+  }
+
+  // Every header badge state, including the provisioned-not-started label
+  // from ptone/scion#2929, must sit in the wrapping row after the name.
+  const states: Array<[string, Partial<Agent>]> = [
+    ['running', { phase: 'running', activity: 'thinking' }],
+    ['provisioned, not started', { phase: 'created', provisionedOnly: true }],
+    ['stopped', { phase: 'stopped' }],
+    [
+      'deleting',
+      {
+        phase: 'running',
+        deletion: {
+          state: 'deleting',
+          soft: false,
+          claim: 1,
+          startedAt: '2026-01-01T00:00:00Z',
+          leaseExpiresAt: '2999-01-01T00:00:00Z',
+        },
+      },
+    ],
+  ];
+
+  it.each(states)('puts the name and every badge in the wrapping row (%s)', (_label, overrides) => {
+    const host = renderHeader(makeAgent(overrides));
+    const title = host.querySelector('.header-title');
+    expect(title).not.toBeNull();
+    // The title row holds only the icon and the wrapping text row, so no
+    // badge can float beside a multi-line name.
+    expect(
+      Array.from(title!.children).map((c) => c.tagName.toLowerCase() + '.' + c.className)
+    ).toEqual(['sl-icon.', 'div.header-title-text']);
+    const row = title!.querySelector(':scope > .header-title-text')!;
+    const tags = Array.from(row.children).map((c) => c.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'h1',
+      'scion-status-badge',
+      'scion-deletion-badge',
+      'scion-message-mode-badge',
+    ]);
+  });
+
+  it('keeps the provisioned-not-started label in the wrapping row', () => {
+    const host = renderHeader(makeAgent({ phase: 'created', provisionedOnly: true }));
+    const badge = host.querySelector('.header-title-text > scion-status-badge');
+    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
   });
 });
