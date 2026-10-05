@@ -177,6 +177,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
 	// not stored.
 	"ProvisionedOnly": true,
+	// Start claim columns are written only through the start-claim store
+	// methods (never by CreateAgent/UpdateAgent).
+	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
+	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
+	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
+	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

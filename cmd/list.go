@@ -1119,11 +1119,6 @@ func provisionedPhaseLabel(phase string, provisionedOnly bool) string {
 	return phase
 }
 
-// provisionedStartHint is the next step printed for a provisioned agent.
-func provisionedStartHint(name string) string {
-	return fmt.Sprintf("Agent '%s' is provisioned but not started. Start it with: scion start %s", name, name)
-}
-
 // hubAgentPhaseActivity returns the phase and activity for a Hub agent,
 // preferring the structured Phase/Activity fields from the API response
 // and falling back to deriving them from the legacy Status field.

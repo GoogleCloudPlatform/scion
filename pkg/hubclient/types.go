@@ -336,6 +336,9 @@ type BrokerCapabilities struct {
 	// empty-per-agent workspace sharing mode (design #2703;
 	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates the broker can take part in a cross-broker agent
+	// move (store.BrokerCapabilities.AgentMove is its counterpart).
+	AgentMove bool `json:"agentMove"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

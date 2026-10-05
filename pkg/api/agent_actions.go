@@ -81,6 +81,12 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	}
 }
 
+// ProvisionFailedWarningPrefix starts the warning a Hub adds to a
+// provision-only create when the runtime broker could not provision the
+// agent. Clients use it to tell that the agent record exists but was not
+// provisioned.
+const ProvisionFailedWarningPrefix = "Failed to provision on runtime broker: "
+
 // RecordedRuntimeQueryParam is the query parameter the hub sets on runtime
 // broker requests for an existing agent (every action except start, plus the
 // bare GET and DELETE) to the runtime type it recorded for that agent

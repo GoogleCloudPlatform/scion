@@ -190,11 +190,13 @@ export class ScionHeader extends LitElement {
          or status bar. The top inset is padding on top of the content
          height (content-box, stated explicitly so the header never loses
          its 60px row to the inset), and the side insets (landscape) widen
-         the inline padding. Every inset is 0 on devices without one. */
+         the inline padding. Every inset is 0 on devices without one. A shell
+         that already clears the left inset beside the header (a sidebar)
+         sets --scion-header-inset-left to 0px so it is not applied twice. */
       box-sizing: content-box;
       height: var(--scion-header-height, 60px);
       padding: env(safe-area-inset-top, 0px) max(1.5rem, env(safe-area-inset-right, 0px)) 0
-        max(1.5rem, env(safe-area-inset-left, 0px));
+        max(1.5rem, var(--scion-header-inset-left, env(safe-area-inset-left, 0px)));
       background: var(--scion-surface, #ffffff);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }

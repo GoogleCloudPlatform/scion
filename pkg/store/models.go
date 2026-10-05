@@ -155,6 +155,23 @@ type Agent struct {
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
 
+	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
+	// held. Internal bookkeeping, untagged like the launch columns.
+	// UpdateAgent and CreateAgent never write them; the only writers are the
+	// AgentStore start-claim methods and a launch's terminal write.
+	StartClaimID            string          `json:"-"`
+	StartClaimKind          StartClaimKind  `json:"-"`
+	StartClaimState         StartClaimState `json:"-"`
+	StartClaimOwner         string          `json:"-"`
+	StartClaimTarget        string          `json:"-"`
+	StartClaimAt            *time.Time      `json:"-"`
+	StartClaimLeaseUntil    *time.Time      `json:"-"`
+	StartClaimUnconfirmedAt *time.Time      `json:"-"`
+	StartClaimHoldUntil     *time.Time      `json:"-"`
+	// StartClaimLaunchID is the launch a create claim is linked to ("" when
+	// none): only that launch's end settles the claim.
+	StartClaimLaunchID string `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
@@ -872,6 +889,12 @@ type RuntimeBroker struct {
 	// existed) or the hub has not yet learned it.
 	DefaultProfile string `json:"defaultProfile,omitempty"`
 
+	// WorkspaceStorage describes where the broker places agent workspaces,
+	// reported at registration and refreshed on every heartbeat (stored as
+	// JSON). Nil means the broker has never reported it (an older broker);
+	// the hub refuses a cross-broker move involving such a broker.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -923,6 +946,11 @@ type BrokerCapabilities struct {
 	// agent on non-git projects). The hub refuses to dispatch such agents to
 	// brokers without it, returning 412 (fail closed; design #2703 D3).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates the broker can take part in moving an agent
+	// between brokers that share a workspace export (`scion reincarnate
+	// --broker`). The hub refuses a move unless both the source and the
+	// target broker report it (412).
+	AgentMove bool `json:"agentMove"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

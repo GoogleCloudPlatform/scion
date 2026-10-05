@@ -15,12 +15,9 @@
 package cmd
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"bytes"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -28,85 +25,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newProvisionCreateHub serves a create that answers with an agent in
-// phase created and the given provisionedOnly value.
-func newProvisionCreateHub(t *testing.T, provisionedOnly bool) *HubContext {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/agents") {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"agent": map[string]interface{}{
-				"id":              "agent-1",
-				"slug":            "po-agent",
-				"name":            "po-agent",
-				"phase":           "created",
-				"provisionedOnly": provisionedOnly,
-				"created":         time.Now().UTC().Format(time.RFC3339),
-			},
-		})
-	}))
-	t.Cleanup(server.Close)
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-	return &HubContext{
-		Client:      client,
-		Endpoint:    server.URL,
-		ProjectID:   "project-1",
-		ProjectPath: t.TempDir(),
+// scion create labels the phase of a provision-only agent the same way
+// scion list does (ptone/scion#2929).
+func TestCreateOutput_HubProvisionedOnlyPhase(t *testing.T) {
+	for _, tc := range []struct {
+		provisionedOnly bool
+		want            string
+	}{
+		{true, "Phase: created (not started)\n"},
+		{false, "Phase: created\n"},
+	} {
+		var buf bytes.Buffer
+		writeHubCreateText(&buf, "po-agent", &hubclient.CreateAgentResponse{
+			Agent: &hubclient.Agent{Slug: "po-agent", Phase: "created", ProvisionedOnly: tc.provisionedOnly},
+		}, "")
+		assert.Contains(t, buf.String(), tc.want)
 	}
-}
-
-func TestCreateViaHub_ProvisionedOnlyPrintsStartHint(t *testing.T) {
-	prev := outputFormat
-	outputFormat = ""
-	t.Cleanup(func() { outputFormat = prev })
-
-	hubCtx := newProvisionCreateHub(t, true)
-	var err error
-	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = createAgentViaHub(hubCtx, "po-agent", "") })
-	})
-	require.NoError(t, err)
-	assert.Contains(t, stderr, "Phase: created (not started)")
-	assert.Contains(t, stderr, "provisioned but not started")
-	assert.Contains(t, stderr, "scion start po-agent")
-}
-
-func TestCreateViaHub_NotProvisionedOnlyHasNoHint(t *testing.T) {
-	prev := outputFormat
-	outputFormat = ""
-	t.Cleanup(func() { outputFormat = prev })
-
-	hubCtx := newProvisionCreateHub(t, false)
-	var err error
-	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { err = createAgentViaHub(hubCtx, "po-agent", "") })
-	})
-	require.NoError(t, err)
-	assert.Contains(t, stderr, "Phase: created\n")
-	assert.NotContains(t, stderr, "scion start")
-}
-
-func TestCreateViaHub_ProvisionedOnlyJSON(t *testing.T) {
-	prev := outputFormat
-	outputFormat = "json"
-	t.Cleanup(func() { outputFormat = prev })
-
-	hubCtx := newProvisionCreateHub(t, true)
-	var err error
-	stdout := captureStdout(t, func() {
-		_ = captureStderr(t, func() { err = createAgentViaHub(hubCtx, "po-agent", "") })
-	})
-	require.NoError(t, err)
-	var result ActionResult
-	require.NoError(t, json.Unmarshal([]byte(stdout), &result), stdout)
-	assert.Equal(t, false, result.Details["started"])
-	assert.Contains(t, result.Details["hint"], "scion start po-agent")
 }
 
 func TestHubAgentToAgentInfo_ProvisionedOnly(t *testing.T) {
