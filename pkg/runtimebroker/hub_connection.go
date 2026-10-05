@@ -132,6 +132,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 			hb.workspaceStorage = server.workspaceStorageDescriptor
 			hb.profileAttach = server.heartbeatProfileAttach
 			hb.startsInFlight = server.startsInFlightSnapshot
+			hb.defaultProfile = server.defaultProfile
 			hb.SetVersion(server.version)
 			hb.SetDefaultRuntime(server.runtime)
 			hc.mu.Lock()

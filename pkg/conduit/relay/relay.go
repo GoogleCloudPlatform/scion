@@ -160,6 +160,12 @@ type Config struct {
 	// planned closes: the window the dialer draws its redial delay from
 	// (default DefaultReconnectWindow; negative: 0).
 	ReconnectWindow time.Duration
+	// Revalidate, when set, runs once a session is admitted and
+	// registered locally (so a concurrent CloseSessionsOf either sees the
+	// session or happened before this check). A non-nil error closes the
+	// session with CloseUnauthenticated. It covers a principal removed
+	// between the caller's pre-admission check and registration.
+	Revalidate func(ctx context.Context, p Principal) error
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -496,6 +502,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	case state != stateServing:
 		// Drain or supersede began while this session was admitted.
 		r.goAway(e, conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
+	default:
+		r.revalidate(ctx, e)
 	}
 
 	<-ls.Done()
@@ -510,6 +518,21 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.deleteRow(context.Background(), rec.SessionID, rec.RelayGeneration)
 	}
 	return ls.Err()
+}
+
+// revalidate runs Config.Revalidate for a newly registered session and
+// closes it with CloseUnauthenticated when the check fails.
+func (r *Relay) revalidate(ctx context.Context, e *entry) {
+	if r.cfg.Revalidate == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, r.cfg.RPCTimeout)
+	defer cancel()
+	if err := r.cfg.Revalidate(rctx, e.principal); err != nil {
+		r.log.Info("conduit relay: session closed after admission: principal no longer valid",
+			"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID, "error", err)
+		_ = e.sess.CloseWithCode(conduit.CloseUnauthenticated, ReasonUnauthenticated)
+	}
 }
 
 // trackServe registers a Serve call with serves unless the relay has

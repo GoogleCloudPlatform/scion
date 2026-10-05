@@ -660,6 +660,10 @@ type brokerHeartbeatRequest struct {
 	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
 	// only when Capabilities.StartsInFlight is set.
 	StartsInFlight []brokerStartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's stored default profile name
+	// (see hubclient.BrokerHeartbeat.DefaultProfile). Omitted by an older
+	// broker, in which case the stored value is left unchanged.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -813,9 +817,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// --force re-registration. An old broker sends no Capabilities field at
 	// all, and the store keeps whatever it already had (nil-safe: a missing
 	// field, not an empty struct, is the "don't touch" signal).
-	// WorkspaceStorage follows the same rule, so the hub sees share health
-	// changes within one heartbeat. Both are persisted in a single update,
-	// and only when something changed.
+	// WorkspaceStorage and DefaultProfile follow the same rule, so the hub
+	// sees share health and default-profile changes within one heartbeat.
+	// All are persisted in a single update, and only when something
+	// changed.
 	//
 	// Keeping an omitted descriptor means a broker downgraded to a version
 	// that does not report one keeps its last descriptor, Healthy included,
@@ -825,7 +830,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// and the target health check also probes live reachability.
 	// ProfileAttach follows the same rule: only profiles the heartbeat
 	// names are updated, and only when their stored Attach differs.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || len(heartbeat.ProfileAttach) > 0 {
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -837,6 +842,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
 				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
+				changed = true
+			}
+			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
+				broker.DefaultProfile = *heartbeat.DefaultProfile
 				changed = true
 			}
 			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
