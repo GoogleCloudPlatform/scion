@@ -105,11 +105,15 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     narrow residual window, accepted).
 //   - settle only marks the handle. If the final write fails, the row stays
 //     starting with the reservation held, and only a heartbeat corrects it.
-//   - A restart calls reassertReservation after its stop leg: the dying
-//     container's own status report (phase stopped, through the agent status
-//     endpoint, not the heartbeat) releases the slot while the stop leg runs,
-//     and the guard below does not cover that path. The re-assert puts it
-//     back without the cap check.
+//   - A restart re-asserts its reservation twice, without the cap check: the
+//     dying container's own status report (phase stopped, through the agent
+//     status endpoint, not the heartbeat) releases the slot while the stop
+//     leg runs, and the guard below does not cover that path. It calls
+//     reassertReservation after the stop leg, and reassertBrokerReservation
+//     again after its final write, for a report (a late POST, or a
+//     heartbeat on another replica) that lands during the start leg. A
+//     report after the final write heals itself: the next running heartbeat
+//     re-reserves on stopped -> running.
 //   - rollback restores priorPhase with one conditional write (IfPhase
 //     starting), so a phase written meanwhile (a heartbeat from another
 //     replica, a launch reaper) is kept. Under a live delete claim the

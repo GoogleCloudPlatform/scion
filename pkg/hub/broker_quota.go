@@ -101,8 +101,12 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 // a slot the caller already held, not a new admission decision. A restart
 // calls it after its stop leg, because the dying container's own status
 // report (phase stopped) releases the reservation through
-// reconcileBrokerQuotaOnPhaseChange while the stop leg runs. Reports whether
-// it created a reservation. Best-effort: failures are logged.
+// reconcileBrokerQuotaOnPhaseChange while the stop leg runs (and again
+// after its final write). Because it skips the cap check, a racing start
+// that took the freed slot in between can leave the broker one over its cap
+// until a slot frees; that is accepted, rather than refusing a restart whose
+// container is already stopped. Reports whether it created a reservation.
+// Best-effort: failures are logged.
 func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Agent) bool {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return false
@@ -110,7 +114,7 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("quota: re-assert after stop leg: limit lookup failed",
+			s.agentLifecycleLog.Warn("quota: restart re-assert: limit lookup failed",
 				"agent_id", agent.ID, "error", err)
 		}
 		return false
@@ -118,24 +122,34 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 	has, err := s.store.HasActiveReservation(ctx, def.ID, agent.ID)
 	if err != nil || has {
 		if err != nil {
-			s.agentLifecycleLog.Warn("quota: re-assert after stop leg: reservation check failed",
+			s.agentLifecycleLog.Warn("quota: restart re-assert: reservation check failed",
 				"agent_id", agent.ID, "error", err)
 		}
 		return false
 	}
-	if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
-		LimitDefinitionID: def.ID,
-		SubjectID:         agent.RuntimeBrokerID,
-		ScopeType:         store.QuotaScopeBroker,
-		ScopeID:           agent.RuntimeBrokerID,
-		ResourceID:        agent.ID,
-		Reserved:          1,
-	}); err != nil {
-		s.agentLifecycleLog.Warn("quota: re-assert after stop leg failed",
+	if err := s.recordBrokerReservationUnchecked(ctx, def.ID, agent.RuntimeBrokerID, agent.ID); err != nil {
+		s.agentLifecycleLog.Warn("quota: restart re-assert failed",
 			"agent_id", agent.ID, "error", err)
 		return false
 	}
 	return true
+}
+
+// recordBrokerReservationUnchecked records agentID's max_agents_per_broker
+// reservation on brokerID directly, with no cap check. It is the shared write
+// of the reconcile backfill and the restart's re-assert
+// (reassertBrokerReservation): accounting for a slot that is already in
+// use, not an admission decision.
+func (s *Server) recordBrokerReservationUnchecked(ctx context.Context, limitDefID, brokerID, agentID string) error {
+	_, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
+		LimitDefinitionID: limitDefID,
+		SubjectID:         brokerID,
+		ScopeType:         store.QuotaScopeBroker,
+		ScopeID:           brokerID,
+		ResourceID:        agentID,
+		Reserved:          1,
+	})
+	return err
 }
 
 // reconcileBrokerQuotaOnPhaseChange updates agent's max_agents_per_broker
@@ -277,14 +291,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 			if reservedIDs[agent.ID] || !isBrokerQuotaCountedPhase(agent.Phase) {
 				continue
 			}
-			if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
-				LimitDefinitionID: limitDef.ID,
-				SubjectID:         broker.ID,
-				ScopeType:         store.QuotaScopeBroker,
-				ScopeID:           broker.ID,
-				ResourceID:        agent.ID,
-				Reserved:          1,
-			}); err != nil {
+			if err := s.recordBrokerReservationUnchecked(ctx, limitDef.ID, broker.ID, agent.ID); err != nil {
 				s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
 					"agent_id", agent.ID, "broker_id", broker.ID, "error", err)
 				continue

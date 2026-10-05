@@ -550,8 +550,8 @@ func TestStartDispatch_FinalWriteClearsTerminalRemnants(t *testing.T) {
 	})
 }
 
-// The reviewer's reproduction (F1): restart of a running and of a stopped
-// agent with a stopped heartbeat guarded mid-dispatch ends with message "".
+// ptone/scion#2014: restart of a running and of a stopped agent with a
+// stopped heartbeat guarded mid-dispatch ends with message "".
 func TestStartDispatch_RestartGuardedHeartbeatLeavesNoStaleMessage(t *testing.T) {
 	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseStopped} {
 		t.Run(string(phase), func(t *testing.T) {
@@ -1128,16 +1128,29 @@ func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 // ptone/scion#2010, ptone/scion#2014: when the restart's start leg then
 // fails, the re-asserted reservation is released exactly once, whichever
 // failure branch runs (stop leg succeeded: release and record stopped; both
-// legs failed: rollback), and another agent's slot is untouched.
+// legs failed: rollback; a delete claimed the row: rollback, answered
+// delete_in_progress), and another agent's slot is untouched.
 func TestRestart_DyingContainerStoppedReportFailedStartReleasesOnce(t *testing.T) {
-	for _, stopFails := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stopFails=%v", stopFails), func(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stopFails     bool
+		deleteClaimed bool
+	}{
+		{name: "stop-ok"},
+		{name: "stop-failed", stopFails: true},
+		{name: "delete-in-progress", deleteClaimed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stopFails := tc.stopFails
 			srv, s := testServer(t)
 			disp := &hookedStartDispatcher{failStart: true}
+			if tc.deleteClaimed {
+				disp.startErr = fmt.Errorf("start refused: %w", store.ErrDeleteInProgress)
+			}
 			srv.SetDispatcher(disp)
 			setBrokerAgentCeiling(t, s, 3)
 			ctx := context.Background()
-			sfx := fmt.Sprintf("rs-dying-fail-%v", stopFails)
+			sfx := "rs-dying-fail-" + tc.name
 			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
 			a := newQuotaTestAgent(t, s, broker, project, sfx, state.PhaseRunning)
 			reserveBrokerSlot(t, s, broker, a.ID)
@@ -1149,7 +1162,12 @@ func TestRestart_DyingContainerStoppedReportFailedStartReleasesOnce(t *testing.T
 			}
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
-			require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			if tc.deleteClaimed {
+				require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), ErrCodeDeleteInProgress)
+			} else {
+				require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			}
 			assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
 			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, other.ID))
 			assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
@@ -1185,4 +1203,32 @@ func TestMergeDispatchedAgent_RunningCarriesClearedMessageAndStalled(t *testing.
 	assert.Equal(t, string(state.PhaseRunning), dst.Phase)
 	assert.Empty(t, dst.Message)
 	assert.Empty(t, dst.StalledFromActivity)
+}
+
+// ptone/scion#2010, ptone/scion#2014: a stopped report about the old
+// container that lands during the start leg (after the post-stop re-assert)
+// releases the slot; the restart re-asserts once more after its final write,
+// so it ends running with the slot held.
+func TestRestart_StoppedReportDuringStartLegKeepsReservation(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rs-startleg")
+	a := newQuotaTestAgent(t, s, broker, project, "rs-startleg", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	var releasedDuringStart bool
+	disp.onStart = func(*store.Agent) {
+		postDyingStoppedReport(t, srv, a)
+		releasedDuringStart = !hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID)
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, releasedDuringStart, "precondition: the report released the slot")
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the restart keeps its slot")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
 }
