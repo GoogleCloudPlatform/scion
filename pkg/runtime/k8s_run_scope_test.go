@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -826,11 +827,13 @@ func TestK8sRunScope_InvalidRunID_Refused(t *testing.T) {
 	rt, _, _, enf := newRunScopeRuntime(t)
 	rsSeedRun(t, rt, rsLabels(rsRunB, "start-b"), corev1.PodSucceeded, "b")
 	bad := rsRunA + ",scion.agent"
-	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: bad}); err == nil {
-		t.Error("Delete accepted a malformed run ID")
+	// The seeded pod is run B's, so without validation Delete would still
+	// fail (ErrRunMismatch): assert the validation error itself.
+	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: bad}); !errors.Is(err, errInvalidRunID) || errors.Is(err, ErrRunMismatch) {
+		t.Errorf("Delete error = %v, want the invalid run ID error", err)
 	}
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, bad); err == nil {
-		t.Error("preCleanForRun accepted a malformed run ID")
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, bad); !errors.Is(err, errInvalidRunID) {
+		t.Errorf("preCleanForRun error = %v, want the invalid run ID error", err)
 	}
 	rsExpect(t, rt, rsAllPresent)
 	if n := enf.count(); n != 0 {
@@ -868,5 +871,91 @@ func TestK8sPreCleanForRun_PodDeleteError_FailsStart(t *testing.T) {
 	}
 	if errors.Is(err, ErrRunConflict) {
 		t.Errorf("a delete failure is not a run conflict: %v", err)
+	}
+}
+
+// Start errors this runtime adds can reach the hub verbatim (an async
+// launch's runtime_error), so their text carries no namespace, pod or
+// object name, or run ID; the cause is still reachable with errors.Is/As.
+func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
+	const ns = "leak-namespace"
+	leaks := []string{ns, rsAgent, rsRunA, rsRunB, "scion-agent-"}
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		for _, l := range leaks {
+			if strings.Contains(err.Error(), l) {
+				t.Errorf("error text %q carries %q", err.Error(), l)
+			}
+		}
+	}
+	forbidden := func(res string) k8stesting.ReactionFunc {
+		return func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: res}, rsAgent, fmt.Errorf("rbac for %s in %s", rsAgent, ns))
+		}
+	}
+	seedPodIn := func(t *testing.T, rt *KubernetesRuntime) {
+		t.Helper()
+		if _, err := rt.Client.Clientset.CoreV1().Pods(ns).Create(context.Background(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: ns, UID: "pod-b", Labels: rsLabels(rsRunB, "")},
+			Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("pod read error", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		cs.PrependReactor("get", "pods", forbidden("pods"))
+		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA)
+		check(t, err)
+		if !k8serrors.IsForbidden(err) {
+			t.Errorf("cause lost: %v", err)
+		}
+	})
+	t.Run("pod delete error", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		seedPodIn(t, rt)
+		cs.PrependReactor("delete", "pods", forbidden("pods"))
+		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA)
+		check(t, err)
+		if !k8serrors.IsForbidden(err) {
+			t.Errorf("cause lost: %v", err)
+		}
+	})
+	t.Run("invalid run ID", func(t *testing.T) {
+		rt, _, _, _ := newRunScopeRuntime(t)
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA+",x"))
+	})
+	t.Run("AlreadyExists list error", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		cs.PrependReactor("list", "secrets", forbidden("secrets"))
+		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+	})
+	t.Run("AlreadyExists delete error", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		if _, err := cs.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: rsAgentSecret, Namespace: ns, UID: "sec-a", Labels: rsLabels(rsRunA, "")},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		cs.PrependReactor("delete", "secrets", forbidden("secrets"))
+		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+	})
+}
+
+func TestValidateRunID(t *testing.T) {
+	if err := ValidateRunID(rsRunA); err != nil {
+		t.Errorf("a UUID run ID was refused: %v", err)
+	}
+	for _, bad := range []string{rsRunA + ",scion.agent", "!x", "a b", strings.Repeat("a", 64)} {
+		err := ValidateRunID(bad)
+		if !errors.Is(err, errInvalidRunID) {
+			t.Errorf("ValidateRunID(%q) = %v, want errInvalidRunID", bad, err)
+		} else if strings.Contains(err.Error(), bad) {
+			t.Errorf("error text carries the run ID: %v", err)
+		}
 	}
 }

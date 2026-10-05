@@ -1831,6 +1831,13 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// agent recreated under the same name.
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	if runID != "" && scionrt.ValidateRunID(runID) != nil {
+		// A run ID is a label value on the runtime entry; anything else
+		// is a malformed request, not a runtime failure to retry.
+		span.SetStatus(codes.Error, "invalid runId")
+		ValidationError(w, "invalid runId", nil)
+		return
+	}
 
 	// Cancel any in-flight start of this agent on this broker first, before
 	// resolving the delete target: a start still blocked in provisioning
@@ -1975,9 +1982,13 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 	if err != nil {
-		// Nothing was confirmed deleted, so undo a soft-delete mark here
-		// too: the hub will retry or report the failure.
-		s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
+		// The runtime delete call itself failed, so the entry may still be
+		// there: undo a soft-delete mark (the hub retries or reports the
+		// failure). A file-cleanup failure after a successful runtime
+		// delete keeps the mark, since the pod is gone.
+		if errors.Is(err, agent.ErrRuntimeDelete) {
+			s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
+		}
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}

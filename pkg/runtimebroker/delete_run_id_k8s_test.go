@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -373,4 +374,61 @@ func TestRestart_NameInUse_409(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status %d, want 409: %s", w.Code, w.Body.String())
 	}
+}
+
+// filesFailManager deletes the runtime entry successfully and then fails
+// file cleanup before removing anything, as DeleteAgentFiles does on a
+// registry error.
+type filesFailManager struct{ k8sStyleManager }
+
+func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, ref, false, projectPath, removeBranch); err != nil {
+		return false, err
+	}
+	return false, errors.New("delete: FindBranchForAgent for dev: registry I/O error")
+}
+
+// Regression (P2 review round 3, B1): when the runtime delete succeeded and
+// only file cleanup failed, the soft-delete mark stays: the pod is gone.
+func TestDeleteAgent_FilesFailureAfterRuntimeDelete_KeepsMark(t *testing.T) {
+	rt := newNameHeldRuntime("run-old")
+	mgr := &filesFailManager{k8sStyleManager{real: agent.NewManager(rt)}}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&deleteFiles=true&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code < 500 {
+		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rt.stillPresent() {
+		t.Fatal("runtime entry not deleted; the test premise does not hold")
+	}
+	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "deleted" {
+		t.Errorf("runtime delete succeeded but the soft-delete mark was undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	}
+}
+
+// A malformed runId is a 400 validation error at the broker boundary, with
+// fixed text, and nothing is resolved or deleted.
+func TestDeleteAgent_InvalidRunID_400(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionB, infoB := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid", scopeProjB, scionB), "run-new")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-new,scion.agent&deleteFiles=true&softDelete=true")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), ErrCodeValidationError) {
+		t.Errorf("body lacks %q: %s", ErrCodeValidationError, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "scion.agent") {
+		t.Errorf("body echoes the run ID: %s", rec.Body.String())
+	}
+	if mgr.DeleteCalls() != 0 {
+		t.Errorf("DeleteTarget called %d times", mgr.DeleteCalls())
+	}
+	assertUntouched(t, scionB, "dev", infoB)
 }

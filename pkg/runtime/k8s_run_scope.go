@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -54,14 +55,46 @@ func k8sRunMatches(objRun, runID string) bool {
 	return objRun == "" || objRun == runID
 }
 
-// validateRunIDLabel checks that runID is a valid label value before it is
-// put into a label selector, so a malformed ID cannot change the
-// selector's meaning (a "," or "!" would add or negate terms).
-func validateRunIDLabel(runID string) error {
-	if errs := k8svalidation.IsValidLabelValue(runID); len(errs) > 0 {
-		return fmt.Errorf("invalid run ID %q for a label selector: %s", runID, strings.Join(errs, "; "))
+// errInvalidRunID is returned for a run ID that is not a valid label value.
+var errInvalidRunID = errors.New("invalid run ID")
+
+// ValidateRunID reports whether runID can be used as the scion.run_id label
+// value (and so in a label selector, where a "," or "!" would add or negate
+// terms). The error text is fixed and carries no part of runID.
+func ValidateRunID(runID string) error {
+	if len(k8svalidation.IsValidLabelValue(runID)) > 0 {
+		return errInvalidRunID
 	}
 	return nil
+}
+
+// validateRunIDLabel is ValidateRunID with the offending value logged.
+func validateRunIDLabel(runID string) error {
+	if err := ValidateRunID(runID); err != nil {
+		runtimeLog.Warn("Refusing a run ID that is not a valid label value",
+			"run_id", runID, "errors", strings.Join(k8svalidation.IsValidLabelValue(runID), "; "))
+		return err
+	}
+	return nil
+}
+
+// opaqueRunScopeError is a start error whose text is fixed (no namespace,
+// object name or run ID: start errors can reach the hub verbatim, see
+// classifyStartError) while errors.Is/As still reach the cause. The
+// details are logged where it is built.
+type opaqueRunScopeError struct {
+	msg   string
+	cause error
+}
+
+func (e *opaqueRunScopeError) Error() string { return e.msg }
+func (e *opaqueRunScopeError) Unwrap() error { return e.cause }
+
+// opaqueStartError logs msg with the identifying details and the cause,
+// and returns an error with only msg as its text.
+func opaqueStartError(msg string, cause error, logArgs ...any) error {
+	runtimeLog.Warn(msg, append(logArgs, "error", cause)...)
+	return &opaqueRunScopeError{msg: msg, cause: cause}
 }
 
 // k8sPodIsLive reports whether pod is Pending or Running and is not already
@@ -260,7 +293,8 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	case k8serrors.IsNotFound(err):
 		pod = nil
 	case err != nil:
-		return fmt.Errorf("failed to read existing pod %s/%s before start: %w", namespace, podName, err)
+		return opaqueStartError("failed to read the existing agent pod before start", err,
+			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
 	if pod != nil {
 		if podRun := pod.Labels[api.LabelRunID]; podRun != "" && podRun != runID && k8sPodIsLive(pod) {
@@ -308,7 +342,8 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 		// Fail the start (retryable) rather than go on to a pod create
 		// that would only report the old pod as still there; a Forbidden
 		// or API error is surfaced as itself.
-		return fmt.Errorf("failed to delete stale pod %s/%s before start: %w", namespace, podName, err)
+		return opaqueStartError("failed to delete the stale agent pod before start", err,
+			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
 }
 
@@ -350,7 +385,7 @@ func (r *KubernetesRuntime) replaceExistingAgentObject(ctx context.Context, kind
 		}
 		list, err := secrets.List(ctx, listOpts)
 		if err != nil {
-			return fmt.Errorf("failed to list existing Secret %s/%s: %w", namespace, name, err)
+			return opaqueStartError("failed to list the existing agent Secret", err, "name", name, "namespace", namespace, "run_id", runID)
 		}
 		for _, s := range list.Items {
 			if s.Name == name {
@@ -366,7 +401,7 @@ func (r *KubernetesRuntime) replaceExistingAgentObject(ctx context.Context, kind
 		}
 		list, err := spcs.List(ctx, listOpts)
 		if err != nil {
-			return fmt.Errorf("failed to list existing SecretProviderClass %s/%s: %w", namespace, name, err)
+			return opaqueStartError("failed to list the existing agent SecretProviderClass", err, "name", name, "namespace", namespace, "run_id", runID)
 		}
 		for _, spc := range list.Items {
 			if spc.GetName() == name {
@@ -387,7 +422,7 @@ func (r *KubernetesRuntime) replaceExistingAgentObject(ctx context.Context, kind
 		case k8serrors.IsConflict(err):
 			return fmt.Errorf("%w: %s %s/%s was recreated by another start", ErrRunConflict, kind, namespace, name)
 		default:
-			return fmt.Errorf("failed to delete existing %s %s/%s: %w", kind, namespace, name, err)
+			return opaqueStartError("failed to delete the existing agent "+kind, err, "name", name, "namespace", namespace, "run_id", runID)
 		}
 	}
 	return nil
