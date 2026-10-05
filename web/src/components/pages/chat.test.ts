@@ -1830,4 +1830,70 @@ describe('chat page — startup after the page is removed', () => {
       el.remove();
     }
   });
+
+  describe('when a lazy import fails', () => {
+    const chunkError = new Error('Failed to fetch dynamically imported module');
+    let unhandled: unknown[];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+
+    beforeEach(() => {
+      unhandled = [];
+      process.on('unhandledRejection', onUnhandled);
+      // A deploy purged the old chunk: the members import rejects.
+      vi.doMock('../shared/chat/chat-members.js', () => {
+        throw chunkError;
+      });
+    });
+
+    afterEach(() => {
+      vi.doUnmock('../shared/chat/chat-members.js');
+      process.off('unhandledRejection', onUnhandled);
+    });
+
+    it('logs the error, starts nothing, and flags the rail as failed', async () => {
+      vi.mocked(apiFetch).mockClear();
+      const intervals = trackIntervals();
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+
+        await flush();
+
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          expect.anything()
+        );
+        expect(el.v2SpaceRailLoaded).toBe(false);
+        expect(el.v2SpaceRailLoadFailed).toBe(true);
+        expect(dmListLoads()).toBe(0);
+        expect(el._fallbackPollInterval).toBeNull();
+        expect(intervals.live()).toEqual([]);
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('on a page removed meanwhile, logs the error and changes nothing', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      document.body.appendChild(el);
+      el.remove();
+
+      await flush();
+
+      expect(unhandled).toEqual([]);
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Chat page failed to load its components:',
+        expect.anything()
+      );
+      expect(el.v2SpaceRailLoadFailed).toBe(false);
+      expect(el.v2SpaceRailLoaded).toBe(false);
+      errorSpy.mockRestore();
+    });
+  });
 });

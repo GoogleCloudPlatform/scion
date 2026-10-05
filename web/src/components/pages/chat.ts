@@ -325,6 +325,11 @@ export class ScionPageChat extends LitElement {
   /** Width of the members panel in px. Persisted per browser. */
   @state() private membersWidth = MEMBERS_WIDTH_DEFAULT;
   @state() private v2SpaceRailLoaded = false;
+  /**
+   * Set when initV2's lazy imports fail (for example, a deploy removed the
+   * old chunks). The rail then asks for a reload instead of spinning.
+   */
+  @state() private v2SpaceRailLoadFailed = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
   /** Agent members for the members sidebar. */
@@ -1492,10 +1497,22 @@ export class ScionPageChat extends LitElement {
   private async initV2(): Promise<void> {
     const generation = ++this._initV2Generation;
     // Lazy-load the space rail and members components
-    await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    try {
+      await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    } catch (err) {
+      // initV2 is not awaited, so a failure not caught here would surface
+      // as an unhandled rejection. Log it, and stop: without its
+      // components the page cannot run the rest of startup.
+      console.error('Chat page failed to load its components:', err);
+      if (this.isConnected && generation === this._initV2Generation) {
+        this.v2SpaceRailLoadFailed = true;
+      }
+      return;
+    }
     // Removed (or removed and re-connected) while the imports were in
     // flight; disconnectedCallback already cleaned up.
     if (!this.isConnected || generation !== this._initV2Generation) return;
+    this.v2SpaceRailLoadFailed = false;
     this.v2SpaceRailLoaded = true;
 
     // Parse initial route
@@ -4941,7 +4958,11 @@ export class ScionPageChat extends LitElement {
                   @reset-view=${this.handleResetView}
                 ></scion-chat-space-rail>
               `
-            : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
+            : this.v2SpaceRailLoadFailed
+              ? html`<div class="loading-rail" role="alert">
+                  Chat failed to load. Reload the page to try again.
+                </div>`
+              : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
 
         <div
