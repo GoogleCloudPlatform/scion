@@ -56,6 +56,10 @@ class FakeStateManager extends EventTarget {
     return undefined;
   }
   setScope(): void {}
+  /** The quick message dialog reads this to build the agent DM link. */
+  getCurrentUserId(): string {
+    return '';
+  }
   seedAgents(agents: Array<{ id: string }>): void {
     for (const a of agents) {
       if (!this.deletedIds.has(a.id)) this.agentsById.set(a.id, a);
