@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1661,5 +1662,112 @@ default_gcp_identity_mode: block
 		if gc.DefaultGCPIdentityMode != "block" {
 			t.Errorf("%s: DefaultGCPIdentityMode = %q, want block", name, gc.DefaultGCPIdentityMode)
 		}
+	}
+}
+
+// writeGlobalFiles creates a temp HOME and writes the given files into its
+// ~/.scion directory, skipping empty contents.
+func writeGlobalFiles(t *testing.T, files map[string]string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if content == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings checks that
+// SCION_SERVER_TELEMETRYENABLED beats settings.yaml telemetry.enabled on both
+// load paths, so the legacy fallback added for ptone/scion#2284 keeps the
+// same file < env precedence as the settings.yaml "server" path.
+func TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings(t *testing.T) {
+	const tel = "telemetry:\n  enabled: false\n"
+	for name, settings := range map[string]string{
+		"with server":    "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + tel,
+		"without server": "schema_version: \"1\"\n" + tel,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, map[string]string{"settings.yaml": settings})
+
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
+				t.Errorf("file only: TelemetryEnabled = %v, want false", gc.TelemetryEnabled)
+			}
+
+			t.Setenv("SCION_SERVER_TELEMETRYENABLED", "true")
+			gc, err = LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+				t.Errorf("with env: TelemetryEnabled = %v, want true (env beats file)", gc.TelemetryEnabled)
+			}
+		})
+	}
+}
+
+// TestLoadGlobalConfig_ServerYAMLWithServerlessSettings covers the
+// server.yaml interplay of ptone/scion#2284: Layer-0 values still come from
+// server.yaml, top-level sections come from the server-less settings.yaml,
+// and settings.yaml telemetry.enabled beats server.yaml telemetryEnabled (as
+// the boot-time opsettings snapshot already does).
+func TestLoadGlobalConfig_ServerYAMLWithServerlessSettings(t *testing.T) {
+	writeGlobalFiles(t, map[string]string{
+		"server.yaml":   "hub:\n  port: 7777\ntelemetryEnabled: true\n",
+		"settings.yaml": "schema_version: \"1\"\nquotas:\n  enforce_broker_quotas: false\ndefault_timezone: Europe/Paris\ntelemetry:\n  enabled: false\n",
+	})
+	gc, err := LoadGlobalConfig(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gc.Hub.Port != 7777 {
+		t.Errorf("Hub.Port = %d, want 7777 from server.yaml", gc.Hub.Port)
+	}
+	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+		t.Errorf("EnforceBrokerQuotas = %v, want false from settings.yaml", gc.EnforceBrokerQuotas)
+	}
+	if gc.DefaultTimezone != "Europe/Paris" {
+		t.Errorf("DefaultTimezone = %q, want Europe/Paris from settings.yaml", gc.DefaultTimezone)
+	}
+	if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
+		t.Errorf("TelemetryEnabled = %v, want false (settings.yaml beats server.yaml)", gc.TelemetryEnabled)
+	}
+}
+
+// TestLoadGlobalConfig_ServerYAMLOnlyUnchanged checks that a server.yaml-only
+// deployment loads exactly as the legacy loader did before ptone/scion#2284.
+func TestLoadGlobalConfig_ServerYAMLOnlyUnchanged(t *testing.T) {
+	writeGlobalFiles(t, map[string]string{
+		"server.yaml": "hub:\n  port: 7777\ntelemetryEnabled: true\n",
+	})
+	configDir := t.TempDir()
+	gc, err := LoadGlobalConfig(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := loadGlobalConfigLegacy(configDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gc, legacy) {
+		t.Errorf("LoadGlobalConfig differs from the plain legacy load:\n got  %+v\n want %+v", gc, legacy)
+	}
+	if gc.Hub.Port != 7777 || gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+		t.Errorf("server.yaml values lost: port=%d telemetry=%v", gc.Hub.Port, gc.TelemetryEnabled)
+	}
+	if gc.EnforceBrokerQuotas != nil || gc.DefaultTimezone != "" {
+		t.Errorf("top-level sections set without a settings.yaml: quotas=%v tz=%q", gc.EnforceBrokerQuotas, gc.DefaultTimezone)
 	}
 }

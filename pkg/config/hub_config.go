@@ -1026,12 +1026,7 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// key, but a settings.yaml may still carry top-level hub sections
 	// (quotas, agent_secrets, default_timezone, ...); honour them so a
 	// file-mode reload does not reset those live values (ptone/scion#2284).
-	gc, err := loadGlobalConfigLegacy(configPath)
-	if err != nil {
-		return nil, err
-	}
-	applyTopLevelSettingsSectionsFromFiles(gc, configPath)
-	return gc, nil
+	return loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
 }
 
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
@@ -1146,7 +1141,10 @@ func serverConfigSources(configPath string) []string {
 }
 
 // loadGlobalConfigLegacy loads global configuration from server.yaml files using the legacy path.
-func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
+// topLevel, when non-nil, is a parsed settings.yaml without a "server" key
+// whose top-level hub sections are applied on top of server.yaml and below
+// SCION_SERVER_* env vars, matching the precedence of the settings.yaml path.
+func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) (*GlobalConfig, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults
@@ -1248,10 +1246,18 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
 
+	// 3b. settings.yaml top-level telemetry.enabled. Of the top-level
+	// sections only telemetryEnabled is env-overridable (the rest are
+	// koanf:"-"), so it is merged here, above server.yaml's telemetryEnabled
+	// and below env. The remaining sections are applied after Unmarshal.
+	if enabled := topLevelTelemetryEnabled(topLevel); enabled != nil {
+		_ = k.Set("telemetryEnabled", *enabled)
+	}
+
 	// 4. Load environment variables (SCION_SERVER_ prefix)
 	// Maps: SCION_SERVER_HUB_PORT -> hub.port
 	//       SCION_SERVER_DATABASE_DRIVER -> database.driver
-	//       SCION_SERVER_LOG_LEVEL -> logLevel
+	//       SCION_SERVER_LOGLEVEL -> logLevel
 	//       SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
 	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
 		key := strings.TrimPrefix(s, "SCION_SERVER_")
@@ -1276,6 +1282,14 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 
 	if err := k.Unmarshal("", config); err != nil {
 		return nil, err
+	}
+
+	if topLevel != nil {
+		// TelemetryEnabled already holds server.yaml < settings.yaml < env
+		// (step 3b); keep it rather than let the file value win over env.
+		telemetryEnabled := config.TelemetryEnabled
+		applyTopLevelSettingsSections(config, topLevel)
+		config.TelemetryEnabled = telemetryEnabled
 	}
 
 	// Apply defaults for database path if not set
@@ -1915,14 +1929,14 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 	return raw, true
 }
 
-// applyTopLevelSettingsSectionsFromFiles applies the top-level hub sections
-// (see applyTopLevelSettingsSections) of the first settings.yaml found, in
-// the same search order loadGlobalConfigFromSettings uses for the server
-// key: the global dir, then the configPath directory. It is used when no
-// settings.yaml has a "server" key and config therefore comes from the
-// legacy server.yaml path, so a server-less settings.yaml still contributes
-// quotas, agent_secrets, default_timezone, etc. (ptone/scion#2284).
-func applyTopLevelSettingsSectionsFromFiles(gc *GlobalConfig, configPath string) {
+// findTopLevelSettingsRaw returns the parsed contents of the first
+// settings.yaml found, in the same search order loadGlobalConfigFromSettings
+// uses for the server key: the global dir, then the configPath directory, or
+// nil if there is none. It is used when no settings.yaml has a "server" key
+// and config therefore comes from the legacy server.yaml path, so a
+// server-less settings.yaml still contributes its top-level hub sections
+// (quotas, agent_secrets, default_timezone, ...; ptone/scion#2284).
+func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
 	var dirs []string
 	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
 		dirs = append(dirs, globalDir)
@@ -1938,10 +1952,24 @@ func applyTopLevelSettingsSectionsFromFiles(gc *GlobalConfig, configPath string)
 	}
 	for _, dir := range dirs {
 		if raw, ok := readSettingsFileRaw(dir); ok {
-			applyTopLevelSettingsSections(gc, raw)
-			return
+			return raw
 		}
 	}
+	return nil
+}
+
+// topLevelTelemetryEnabled returns settings.yaml's top-level
+// telemetry.enabled, or nil when unset.
+func topLevelTelemetryEnabled(raw map[string]interface{}) *bool {
+	tel, ok := raw["telemetry"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	b, ok := tel["enabled"].(bool)
+	if !ok {
+		return nil
+	}
+	return &b
 }
 
 // applyTopLevelSettingsSections copies the hub-level settings that live at
@@ -2024,7 +2052,6 @@ func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{})
 	if v, ok := raw["default_gcp_identity_service_account_id"].(string); ok {
 		gc.DefaultGCPIdentityServiceAccountID = v
 	}
-
 }
 
 // hasServerYAML checks if a directory has a server.yaml or server.yml file.
