@@ -240,3 +240,15 @@ func TestStartClaimReaper_StaleInventoryKeepsClaim(t *testing.T) {
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState,
 		"an inventory older than two heartbeat intervals does not release the claim")
 }
+
+// A phase of running left from before the claim (no report since the claim
+// became unconfirmed) is not a success: a restart's ambiguous start leg
+// leaves the old phase in place.
+func TestStartClaimReaper_StaleRunningPhaseIsNotSuccess(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("restarting", "running", "working") // last seen an hour ago
+	unconfirmedClaim(t, f, a, store.StartClaimRestart, time.Hour)
+	f.srv.reapStartClaims(context.Background())
+	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState,
+		"running without a report after the claim became unconfirmed does not release it")
+}
