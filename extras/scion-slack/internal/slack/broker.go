@@ -28,9 +28,8 @@ import (
 )
 
 const (
-	defaultAgentCacheTTL = 5 * time.Minute
-	defaultDBPath        = "slack.db"
-	dedupTTL             = 5 * time.Minute
+	defaultDBPath = "slack.db"
+	dedupTTL      = 5 * time.Minute
 )
 
 // SlackConfig holds Slack-specific configuration parsed from the plugin config map.
@@ -166,7 +165,6 @@ type SlackBroker struct {
 
 	events *eventServer
 
-	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string
 
 	config *SlackConfig
@@ -180,12 +178,11 @@ func NewBroker(log *slog.Logger) *SlackBroker {
 		log = slog.Default()
 	}
 	return &SlackBroker{
-		subs:          make(map[string]bool),
-		sentIDs:       make(map[string]time.Time),
-		log:           log,
-		pluginName:    "slack",
-		httpClient:    &http.Client{Timeout: 10 * time.Second},
-		agentCacheTTL: defaultAgentCacheTTL,
+		subs:       make(map[string]bool),
+		sentIDs:    make(map[string]time.Time),
+		log:        log,
+		pluginName: "slack",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -262,14 +259,6 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 				return fmt.Errorf("init sqlite store: %w", err)
 			}
 			b.store = store
-		}
-
-		if v, ok := config["agent_cache_ttl"]; ok && v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("invalid agent_cache_ttl: %w", err)
-			}
-			b.agentCacheTTL = d
 		}
 
 		if v, ok := config["routed_inbound_enabled"]; ok {
@@ -851,57 +840,6 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	return &result, nil
 }
 
-// --- Agent cache ---
-
-func (b *SlackBroker) getProjectAgents(ctx context.Context, projectID string) []string {
-	b.mu.RLock()
-	store := b.store
-	hubClient := b.hubClient
-	ttl := b.agentCacheTTL
-	b.mu.RUnlock()
-
-	if store == nil {
-		return nil
-	}
-
-	cached, err := store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
-	}
-	if cached != nil && time.Since(cached.RefreshedAt) < ttl {
-		return cached.AgentSlugs
-	}
-
-	if hubClient == nil {
-		if cached != nil {
-			return cached.AgentSlugs
-		}
-		return nil
-	}
-
-	// Not tied to a Slack user: request without the linked user.
-	agents, err := hubClient.ListAgents(ctx, projectID, "")
-	if err != nil {
-		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
-		if cached != nil {
-			return cached.AgentSlugs
-		}
-		return nil
-	}
-
-	slugs := agentSlugs(agents)
-	saveErr := store.SetProjectAgents(ctx, &ProjectAgents{
-		ProjectID:   projectID,
-		AgentSlugs:  slugs,
-		RefreshedAt: time.Now(),
-	})
-	if saveErr != nil {
-		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
-	}
-
-	return slugs
-}
-
 // --- Routing helpers ---
 
 func (b *SlackBroker) resolveRecipientChannels(ctx context.Context, recipient, projectID, agentSlug string) ([]string, []string) {
@@ -1077,12 +1015,4 @@ func generateRequestID() string {
 	b := make([]byte, 12)
 	crand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-func agentSlugs(agents []AgentInfo) []string {
-	slugs := make([]string, len(agents))
-	for i, a := range agents {
-		slugs[i] = a.Slug
-	}
-	return slugs
 }
