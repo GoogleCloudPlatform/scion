@@ -415,11 +415,6 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	projectID, agentSlug := parseTopicComponents(topic)
 
-	if msg.Type == messages.TypeAssistantReply {
-		b.log.Debug("Filtering assistant-reply message")
-		return nil
-	}
-
 	var channelIDs []string
 	var threadTSs []string
 

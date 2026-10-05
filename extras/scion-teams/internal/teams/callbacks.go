@@ -289,14 +289,13 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	}
 
 	link := &ChannelLink{
-		ConversationID:     convID,
-		TeamID:             teamID,
-		ProjectID:          projectID,
-		ProjectSlug:        projectSlug,
-		LinkedBy:           linkedBy,
-		LinkedAt:           time.Now(),
-		Active:             true,
-		ShowAssistantReply: true,
+		ConversationID: convID,
+		TeamID:         teamID,
+		ProjectID:      projectID,
+		ProjectSlug:    projectSlug,
+		LinkedBy:       linkedBy,
+		LinkedAt:       time.Now(),
+		Active:         true,
 	}
 
 	if err := store.CreateChannelLink(ctx, link); err != nil {

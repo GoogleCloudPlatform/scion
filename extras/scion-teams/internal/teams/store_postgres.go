@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS teams_channel_links (
 	linked_at TIMESTAMPTZ NOT NULL,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	show_agent_to_agent BOOLEAN NOT NULL DEFAULT FALSE,
-	show_assistant_reply BOOLEAN NOT NULL DEFAULT TRUE,
 	show_state_changes BOOLEAN NOT NULL DEFAULT FALSE,
 	chat_only BOOLEAN NOT NULL DEFAULT FALSE
 );
@@ -143,33 +142,33 @@ func (s *postgresStore) Close() error {
 
 func (s *postgresStore) CreateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
-INSERT INTO teams_channel_links (conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+INSERT INTO teams_channel_links (conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT(conversation_id) DO UPDATE SET
 	team_id=EXCLUDED.team_id, team_name=EXCLUDED.team_name, channel_name=EXCLUDED.channel_name,
 	project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
 	default_agent=EXCLUDED.default_agent, linked_by=EXCLUDED.linked_by, linked_at=EXCLUDED.linked_at,
 	active=EXCLUDED.active, show_agent_to_agent=EXCLUDED.show_agent_to_agent,
-	show_assistant_reply=EXCLUDED.show_assistant_reply, show_state_changes=EXCLUDED.show_state_changes,
+	show_state_changes=EXCLUDED.show_state_changes,
 	chat_only=EXCLUDED.chat_only`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ConversationID, link.TeamID, link.TeamName, link.ChannelName,
 		link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
-		link.ShowAssistantReply, link.ShowStateChanges,
+		link.ShowStateChanges,
 		link.ChatOnly)
 	return err
 }
 
 func (s *postgresStore) GetChannelLink(ctx context.Context, conversationID string) (*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM teams_channel_links WHERE conversation_id = $1`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM teams_channel_links WHERE conversation_id = $1`
 	row := s.db.QueryRowContext(ctx, q, conversationID)
 	return pgScanChannelLink(row)
 }
 
 func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM teams_channel_links WHERE (project_id = $1 OR project_slug = $1) AND active = true`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM teams_channel_links WHERE (project_id = $1 OR project_slug = $1) AND active = true`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -179,7 +178,7 @@ func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID
 }
 
 func (s *postgresStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM teams_channel_links`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM teams_channel_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -192,14 +191,14 @@ func (s *postgresStore) UpdateChannelLink(ctx context.Context, link *ChannelLink
 	const q = `
 UPDATE teams_channel_links SET
 	team_id=$1, team_name=$2, channel_name=$3, project_id=$4, project_slug=$5, default_agent=$6, linked_by=$7, linked_at=$8,
-	active=$9, show_agent_to_agent=$10, show_assistant_reply=$11, show_state_changes=$12,
-	chat_only=$13
-WHERE conversation_id=$14`
+	active=$9, show_agent_to_agent=$10, show_state_changes=$11,
+	chat_only=$12
+WHERE conversation_id=$13`
 	_, err := s.db.ExecContext(ctx, q,
 		link.TeamID, link.TeamName, link.ChannelName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
-		link.ShowAssistantReply, link.ShowStateChanges,
+		link.ShowStateChanges,
 		link.ChatOnly,
 		link.ConversationID)
 	return err
@@ -477,7 +476,7 @@ func pgScanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	err := row.Scan(&link.ConversationID, &link.TeamID, &link.TeamName, &link.ChannelName,
 		&link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-		&link.ShowAssistantReply, &link.ShowStateChanges, &link.ChatOnly)
+		&link.ShowStateChanges, &link.ChatOnly)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -494,7 +493,7 @@ func pgScanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 		err := rows.Scan(&link.ConversationID, &link.TeamID, &link.TeamName, &link.ChannelName,
 			&link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-			&link.ShowAssistantReply, &link.ShowStateChanges, &link.ChatOnly)
+			&link.ShowStateChanges, &link.ChatOnly)
 		if err != nil {
 			return nil, err
 		}

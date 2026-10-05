@@ -628,12 +628,6 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Always suppress commentary messages — Discord has no user toggle for this.
-	if msg != nil && msg.Type == messages.TypeAssistantReply {
-		b.log.Debug("Filtering assistant-reply message (commentary always suppressed in Discord)")
-		return nil
-	}
-
 	// Determine whether this message should be sent via webhook (agent identity)
 	// or via the bot API. Webhook routing applies when:
 	//   - Sender is an agent (starts with "agent:")

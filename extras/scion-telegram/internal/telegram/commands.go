@@ -512,7 +512,7 @@ func (h *CommandHandler) handleSettings(msg *TGMessage) {
 		return
 	}
 
-	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup, link.ShowAssistantReply)
+	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup)
 	h.replyWithKeyboard(chatID, "Group settings:", kb)
 }
 

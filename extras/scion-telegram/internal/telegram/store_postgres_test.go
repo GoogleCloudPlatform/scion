@@ -75,17 +75,16 @@ func TestPostgres_GroupLink_SaveAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	link := &GroupLink{
-		ChatID:             -100123,
-		ChatTitle:          "Test Group",
-		ProjectID:          "proj-1",
-		ProjectSlug:        "my-project",
-		DefaultAgent:       "coder",
-		LinkedBy:           "456",
-		LinkedAt:           time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
-		Active:             true,
-		ShowAgentToAgent:   false,
-		NotifyInGroup:      true,
-		ShowAssistantReply: true,
+		ChatID:           -100123,
+		ChatTitle:        "Test Group",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		DefaultAgent:     "coder",
+		LinkedBy:         "456",
+		LinkedAt:         time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		Active:           true,
+		ShowAgentToAgent: false,
+		NotifyInGroup:    true,
 	}
 
 	require.NoError(t, store.SaveGroupLink(ctx, link))
@@ -102,7 +101,6 @@ func TestPostgres_GroupLink_SaveAndGet(t *testing.T) {
 	assert.True(t, got.Active)
 	assert.False(t, got.ShowAgentToAgent)
 	assert.True(t, got.NotifyInGroup)
-	assert.True(t, got.ShowAssistantReply)
 }
 
 func TestPostgres_GroupLink_GetNotFound(t *testing.T) {

@@ -245,11 +245,7 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		return nil
 	}
 
-	if msg.Type == messages.TypeAssistantReply {
-		if len(msg.Msg) > 500 {
-			msg.Msg = msg.Msg[:500] + fmt.Sprintf("\n[%d chars truncated]", len(msg.Msg)-500)
-		}
-	} else if msg.Type != messages.TypeInstruction {
+	if msg.Type != messages.TypeInstruction {
 		n.log.Debug("routing non-instruction user message to notification path",
 			"type", msg.Type,
 			"sender", msg.Sender,

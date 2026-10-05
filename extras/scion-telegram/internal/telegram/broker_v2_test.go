@@ -1127,7 +1127,7 @@ func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 		Sender:    "agent:coder",
 		Recipient: "user:alice@example.com",
 		Msg:       "reply to alice",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 
 	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
@@ -1252,7 +1252,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		Version: messages.Version,
 		Sender:  "agent:coder",
 		Msg:     "reply message",
-		Type:    messages.TypeAssistantReply,
+		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"telegram_chat_id":    "-200",
 			"telegram_message_id": "42",
@@ -1329,6 +1329,35 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.True(t, pending.Responded)
+}
+
+// A Commentary button on a settings card sent before the setting was
+// retired must be answered as a no-op, not fail, and the card refreshed.
+func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2WithHub(t, tgSrv, newFakeHubClient())
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -200, ProjectID: "proj-1", LinkedAt: time.Now().UTC(),
+		Active: true, ShowAgentToAgent: true,
+	}))
+
+	b.handleCallbackQuery(ctx, &CallbackQuery{
+		ID:      "cb-com",
+		From:    &TGUser{ID: 456, Username: "alice"},
+		Message: &TGMessage{MessageID: 51, Chat: TGChat{ID: -200, Type: "group"}},
+		Data:    "settings:commentary:off",
+	})
+
+	callbacks := tgSrv.getAnsweredCallbacks()
+	require.Len(t, callbacks, 1)
+	assert.Equal(t, "cb-com", callbacks[0].CallbackQueryID)
+	assert.Contains(t, callbacks[0].Text, "removed")
+
+	link, err := b.store.GetGroupLink(ctx, -200)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.True(t, link.ShowAgentToAgent, "other settings must be unchanged")
 }
 
 func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
@@ -1702,7 +1731,7 @@ func TestFormatMessageV2(t *testing.T) {
 			name: "assistant reply",
 			msg: &messages.StructuredMessage{
 				Msg:  "here is the result",
-				Type: messages.TypeAssistantReply,
+				Type: messages.TypeInstruction,
 			},
 			agentSlug: "",
 			contains:  []string{"here is the result"},

@@ -103,7 +103,7 @@ func formatStructuredMessage(msg *messages.StructuredMessage) (*Activity, error)
 }
 
 // buildAgentResponseCard creates an Adaptive Card for agent response messages
-// (state-change, assistant-reply, instruction, etc.). The card includes a
+// (state-change, instruction, etc.). The card includes a
 // ColumnSet header with the agent name (bold, accent) and project slug (subtle).
 func buildAgentResponseCard(msg *messages.StructuredMessage, agentSlug, projectSlug string) *AdaptiveCard {
 	card := NewAdaptiveCard()
