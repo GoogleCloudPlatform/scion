@@ -1025,6 +1025,22 @@ func TestInteragentView_LegacyViewParticipantGate(t *testing.T) {
 	participant := newMsg("pg-msg-participant", agentB2, participantConv, "participant row")
 	sameProj := newMsg("pg-msg-same", agentA2, sameProjConv, "same-project row")
 
+	// Rows without a conversation ID whose stamps do not name two
+	// different projects keep the previous behaviour: body shown.
+	newUnpairedMsg := func(id string, senderProj *string, body string) *store.Message {
+		m := &store.Message{
+			ID: tid(id), ProjectID: agentB.ProjectID,
+			Sender: "agent:" + agentA.Slug, SenderID: agentA.ID,
+			Recipient: "agent:" + agentB.Slug, RecipientID: agentB.ID,
+			Msg: body, Type: "instruction", AgentID: agentA.ID,
+			SenderProjectID: senderProj, CreatedAt: time.Now(),
+		}
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return m
+	}
+	oneStamp := newUnpairedMsg("pg-msg-one-stamp", &agentA.ProjectID, "one-stamp row")
+	noStamp := newUnpairedMsg("pg-msg-no-stamp", nil, "unstamped row")
+
 	enableCPM(t, srv, s)
 
 	userDMKey, err := messages.DMConversationKey("user", DevUserID, "agent", agentA.ID)
@@ -1045,6 +1061,8 @@ func TestInteragentView_LegacyViewParticipantGate(t *testing.T) {
 		nonParticipant.ID: "", // viewer not a participant: cleared
 		participant.ID:    "participant row",
 		sameProj.ID:       "same-project row",
+		oneStamp.ID:       "one-stamp row",
+		noStamp.ID:        "unstamped row",
 	}
 	for id, body := range want {
 		gotBody, ok := got[id]

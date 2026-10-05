@@ -2776,6 +2776,8 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// returned only when the viewer is a conversation participant. For
 	// canonical (cross-project) rows, strip the body if the viewer has
 	// no participant relationship with the message's conversation.
+	// A row whose provenance stamps name different projects but which has
+	// no conversation ID cannot be checked, so its body is stripped too.
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	viewerID := user.ID()
@@ -2787,24 +2789,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 			return
 		}
 		seen[m.ID] = true
-		if isCrossProjectRow(&m) {
-			// Participation is checked against the row's conversation. A
-			// cross-project row with no conversation ID cannot be checked,
-			// so its body is cleared (fail closed).
-			if m.ConversationID == "" {
-				m.Msg = ""
-			} else if decision := s.AuthorizeCrossProjectContentAccess(
-				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
-			); !decision.Allowed {
-				// Strip body — viewer is not a participant.
-				m.Msg = ""
-			}
-		} else if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
+		switch {
+		case isCrossProjectRow(&m) && m.ConversationID == "":
+			// No conversation to check participation against: fail closed.
+			m.Msg = ""
+		case ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "":
 			decision := s.AuthorizeCrossProjectContentAccess(
 				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
 			)
 			if !decision.Allowed {
-				// Strip body — viewer is not a participant.
+				// Strip body — participation not verified.
 				m.Msg = ""
 			}
 		}
