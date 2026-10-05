@@ -379,18 +379,29 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 	assert.Equal(t, ref.CanDelegateReason, rec.CanDelegateReason)
 }
 
-// inMemoryReservationStore wraps a store and keeps usage reservations in
-// memory, with advisory locks that always succeed. The SQLite test store
-// cannot hold a reservation for a group scope yet (ptone/scion#3082), so the
-// tests that need a parent group to actually reach its member limit, or need
-// to observe a reservation being released, use this wrapper as the quota
-// service's store.
+// inMemoryReservationStore is a test-only store wrapper that keeps usage
+// reservations in memory, with advisory locks that always succeed. The SQLite
+// test store cannot hold a reservation for a group scope yet
+// (ptone/scion#3082), so the tests that need a parent group to actually reach
+// its member limit, or need to observe a reservation being released, use this
+// wrapper as the quota service's store.
+//
+// It models the reservation methods of entadapter.QuotaStore for any number
+// of limits: an active reservation is identified by its limit definition ID
+// and resource ID, HasActiveReservation and ReleaseReservation match on both,
+// and CountActiveReservations filters on limit definition ID, subject ID,
+// scope type and scope ID. Every other store method goes to the wrapped store.
 type inMemoryReservationStore struct {
 	store.Store
 	mu       sync.Mutex
-	active   map[string]string // resource ID -> scope ID
-	created  []string
-	released []string
+	active   map[string]store.UsageReservation // reservationKey -> reservation
+	created  []string                          // resource IDs, in order
+	released []string                          // resource IDs, in order
+}
+
+// reservationKey identifies an active reservation by limit and resource.
+func reservationKey(limitDefinitionID, resourceID string) string {
+	return limitDefinitionID + "\x00" + resourceID
 }
 
 func (m *inMemoryReservationStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
@@ -404,7 +415,7 @@ func (m *inMemoryReservationStore) TryAdvisoryLockObject(ctx context.Context, cl
 func (m *inMemoryReservationStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.active[r.ResourceID] = r.ScopeID
+	m.active[reservationKey(r.LimitDefinitionID, r.ResourceID)] = *r
 	m.created = append(m.created, r.ResourceID)
 	return r, nil
 }
@@ -413,8 +424,9 @@ func (m *inMemoryReservationStore) CountActiveReservations(ctx context.Context, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
-	for _, s := range m.active {
-		if s == scopeID {
+	for _, r := range m.active {
+		if r.LimitDefinitionID == limitDefinitionID && r.SubjectID == subjectID &&
+			r.ScopeType == scopeType && r.ScopeID == scopeID {
 			n++
 		}
 	}
@@ -424,7 +436,7 @@ func (m *inMemoryReservationStore) CountActiveReservations(ctx context.Context, 
 func (m *inMemoryReservationStore) HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.active[resourceID]
+	_, ok := m.active[reservationKey(limitDefinitionID, resourceID)]
 	return ok, nil
 }
 
@@ -432,20 +444,21 @@ func (m *inMemoryReservationStore) ReleaseReservation(ctx context.Context, limit
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.released = append(m.released, resourceID)
-	if _, ok := m.active[resourceID]; !ok {
+	key := reservationKey(limitDefinitionID, resourceID)
+	if _, ok := m.active[key]; !ok {
 		return store.ErrNotFound
 	}
-	delete(m.active, resourceID)
+	delete(m.active, key)
 	return nil
 }
 
-// snapshot returns copies of the active, created and released reservations.
-func (m *inMemoryReservationStore) snapshot() (active map[string]string, created, released []string) {
+// snapshot returns copies of the active reservations and of the resource IDs
+// of the created and released reservations.
+func (m *inMemoryReservationStore) snapshot() (active []store.UsageReservation, created, released []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	active = make(map[string]string, len(m.active))
-	for k, v := range m.active {
-		active[k] = v
+	for _, r := range m.active {
+		active = append(active, r)
 	}
 	return active, append([]string(nil), m.created...), append([]string(nil), m.released...)
 }
@@ -455,7 +468,7 @@ func (m *inMemoryReservationStore) snapshot() (active map[string]string, created
 func (f *parentGroupFixture) useInMemoryReservations(t *testing.T, limit int64) *inMemoryReservationStore {
 	t.Helper()
 	f.setMaxMembersPerGroup(t, limit)
-	mem := &inMemoryReservationStore{Store: f.store, active: map[string]string{}}
+	mem := &inMemoryReservationStore{Store: f.store, active: map[string]store.UsageReservation{}}
 	f.srv.quotaService = &QuotaService{store: mem, logger: slog.Default()}
 	return mem
 }
@@ -494,9 +507,9 @@ func TestCreateGroup_ParentID_EnforcesParentMemberLimit(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	active, _, _ := mem.snapshot()
-	assert.Equal(t, map[string]string{
-		groupMembershipQuotaID(f.parent.ID, store.GroupMemberTypeGroup, f.spare.ID): f.parent.ID,
-	}, active, "only the filling member holds a reservation")
+	require.Len(t, active, 1, "only the filling member holds a reservation")
+	assert.Equal(t, groupMembershipQuotaID(f.parent.ID, store.GroupMemberTypeGroup, f.spare.ID), active[0].ResourceID)
+	assert.Equal(t, f.parent.ID, active[0].ScopeID)
 }
 
 // TestCreateGroup_ParentID_MemberLimitCheckMatchesAddMember: with the default
