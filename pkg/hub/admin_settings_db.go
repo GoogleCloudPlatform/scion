@@ -430,7 +430,8 @@ func bootstrapAppliesWhenAbsent(section, key string) bool {
 }
 
 // effectiveHubName returns the hub_name in effect: the snapshot value, which
-// is the DB value or, when the endpoints row has none, the bootstrap value.
+// is the DB value or, when the endpoints row has none, the bootstrap value,
+// or else the startup default (config.ResolveHubNameOrDefault).
 // GET server-config returns this value.
 func effectiveHubName(ops *OperationalSettings) string {
 	return ops.Snapshot().HubName

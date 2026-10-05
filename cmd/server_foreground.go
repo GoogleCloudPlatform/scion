@@ -1679,14 +1679,7 @@ func resolveHubNameFromEnv() string {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBNAME"); v != "" {
 		return v
 	}
-	if v := os.Getenv("SCION_HUB_NAME"); v != "" {
-		return v
-	}
-	h, err := os.Hostname()
-	if err != nil {
-		return "unknown"
-	}
-	return h
+	return config.ResolveHubNameOrDefault(os.Getenv("SCION_HUB_NAME"))
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the

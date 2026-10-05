@@ -332,8 +332,16 @@ func (c *HubServerConfig) IsHubIDUnconfigured() bool {
 
 // ResolveHubName returns the configured HubName if set, otherwise falls back to os.Hostname().
 func (c *HubServerConfig) ResolveHubName() string {
-	if c.HubName != "" {
-		return c.HubName
+	return ResolveHubNameOrDefault(c.HubName)
+}
+
+// ResolveHubNameOrDefault returns name when it is set, otherwise the
+// default hub name: os.Hostname(), or "unknown" if that fails. Startup
+// (ResolveHubName) and the operational settings snapshot both use it, so a
+// cleared hub_name resolves to the same name a restart would use.
+func ResolveHubNameOrDefault(name string) string {
+	if name != "" {
+		return name
 	}
 	hostname, err := os.Hostname()
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,10 +35,11 @@ import (
 func newHubNameDBServer(t *testing.T, bootstrapHubName string) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
-	bootstrapK := newFileKoanf(t, map[string]interface{}{
-		"server.hub.hub_name":   bootstrapHubName,
-		"server.hub.public_url": "https://boot.example.com",
-	})
+	flat := map[string]interface{}{"server.hub.public_url": "https://boot.example.com"}
+	if bootstrapHubName != "" { // "" means no bootstrap hub_name at all
+		flat["server.hub.hub_name"] = bootstrapHubName
+	}
+	bootstrapK := newFileKoanf(t, flat)
 	doc, err := opsettings.ExtractSectionFromKoanf(bootstrapK, "endpoints")
 	require.NoError(t, err)
 	fakeStore.seedWithOrigin("endpoints", doc, "seeded")
@@ -228,4 +230,30 @@ func TestServerConfigDB_HubName_InvalidChangeRejected(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "endpoints")
 	after, _ := endpointsRow(t, fakeStore)
 	assert.Equal(t, before, after)
+}
+
+// With no bootstrap hub_name, clearing a managed hub_name returns the
+// running hub, the snapshot and GET to the startup default
+// (config.ResolveHubNameOrDefault: os.Hostname), the name a restart uses.
+func TestServerConfigDB_HubName_ClearWithoutBootstrapUsesStartupDefault(t *testing.T) {
+	srv, _, ops := newHubNameDBServer(t, "")
+	startupDefault := config.ResolveHubNameOrDefault("")
+	require.NotEmpty(t, startupDefault)
+
+	running := &Server{}
+	ApplySnapshot(running, ops.Snapshot())
+	assert.Equal(t, startupDefault, running.HubName(), "before any write")
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	ApplySnapshot(running, ops.Snapshot())
+	assert.Equal(t, "new-hub", running.HubName())
+
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":""}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	ApplySnapshot(running, ops.Snapshot())
+	assert.Equal(t, startupDefault, running.HubName(), "after the clear")
+	assert.Equal(t, startupDefault, ops.Snapshot().HubName)
+	assert.Equal(t, startupDefault, getServerConfigDB(t, srv, ops).Server.Hub.HubName)
+	assert.NotContains(t, supersededKeyNames(getServerConfigDB(t, srv, ops), "endpoints"), "server.hub.hub_name")
 }
