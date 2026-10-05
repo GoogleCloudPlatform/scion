@@ -19,6 +19,8 @@ package hub
 import (
 	"os"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // TestMain isolates $HOME for the whole (non-integration) pkg/hub test
@@ -32,7 +34,7 @@ import (
 // the binary with goroutine stacks if process memory runs away.
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
-	teardown := isolateTestHome()
+	teardown := testutil.IsolateHome("scion-hub-test-home-*")
 	code := m.Run()
 	teardown()
 	stopMemGuard()

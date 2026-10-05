@@ -12,29 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build integration
-
-package hub
+package runtimebroker
 
 import (
 	"os"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
-// TestMain isolates $HOME (see testutil.IsolateHome) in addition to the existing ent test
-// database setup, so integration-tagged pkg/hub tests keep scion state off
-// the real developer/agent HOME (ptone/scion#2417), and starts the same
-// memory guard as the non-integration TestMain.
+// TestMain isolates $HOME for the whole pkg/runtimebroker test binary.
+// The broker resolves its global dir (~/.scion/projects,
+// ~/.scion/project-configs, ~/.scion/runtime-broker-state, caches) through
+// HOME, so without this, tests write into the real developer/agent HOME
+// (ptone/scion#2445).
 func TestMain(m *testing.M) {
-	stopMemGuard := startMemGuard()
-	teardown := testutil.IsolateHome("scion-hub-test-home-*")
-	enttest.MainSetup()
+	teardown := testutil.IsolateHome("scion-runtimebroker-test-home-*")
 	code := m.Run()
-	enttest.MainTeardown()
 	teardown()
-	stopMemGuard()
 	os.Exit(code)
 }
