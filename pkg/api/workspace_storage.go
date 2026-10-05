@@ -52,7 +52,30 @@ type BrokerNFSWorkspaceStorage struct {
 	// Healthy reports whether the broker's last health check of the share
 	// succeeded. It is false until the broker has checked the mount.
 	Healthy bool `json:"healthy"`
+	// ExportID is the UUID in the export identity marker,
+	// <subPathRoot>/.scion-export-id on Shares[0], as the broker read it
+	// through its own mount (creating it when absent). Two brokers see the
+	// same directory tree only when they report the same ExportID; settings
+	// strings alone are not proof. Empty when the broker could not read the
+	// marker (share unhealthy, marker unreadable) or predates the marker.
+	ExportID string `json:"exportId,omitempty"`
 }
+
+// ExportIDMarkerName is the export identity marker's file name, directly
+// under the NFS sub-path root of a broker's workspace share.
+const ExportIDMarkerName = ".scion-export-id"
+
+// Workspace placements reported for an agent (AgentInfo.WorkspacePlacement).
+// The set may grow; a reader must treat any value it does not recognise as
+// "not on the shared export".
+const (
+	// WorkspacePlacementExport: the agent's workspace is on the broker's
+	// shared NFS workspace export.
+	WorkspacePlacementExport = "export"
+	// WorkspacePlacementLocal: the agent's workspace is not on the shared
+	// NFS export (broker-local disk, or a non-NFS workspace backend).
+	WorkspacePlacementLocal = "local"
+)
 
 // SameWorkspaceExport reports whether a and b place agent workspaces on the
 // same NFS export with the same sub-path root, so a workspace written by one
