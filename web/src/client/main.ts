@@ -928,8 +928,8 @@ async function init(): Promise<void> {
   // every page, because an unread mention is worth seeing from the dashboard.
   // After the flags settle — with chat disabled the endpoints it reads are
   // not even registered.
-  // A chat first page holds the first refresh from here, before its module
-  // has loaded (see startChatUnreadIfEligible).
+  // On a chat first page the first refresh goes out now and the page shares
+  // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
   const initialPath = stripBasePath(window.location.pathname);
   startChatUnreadIfEligible(
     chatUnread,

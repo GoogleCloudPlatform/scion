@@ -32,7 +32,6 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
-import { chatUnread } from '../../client/chat-unread.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
@@ -1739,26 +1738,5 @@ describe('chat page — late DM peer lookups', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     expect(el.v2Conversation.conversationKey).toBe('topic-2');
     errorSpy.mockRestore();
-  });
-});
-
-describe('chat page — tab-title unread badge', () => {
-  it('holds the badge counter first refresh for the data it loads itself', () => {
-    // The page pushes both unread halves from its own loads; without the hold
-    // the counter would fetch the same two lists alongside them. Only the
-    // page's own connect logic runs: rendering and initV2 are stubbed out.
-    const litBase = Object.getPrototypeOf(ScionPageChat.prototype);
-    vi.spyOn(litBase, 'connectedCallback').mockImplementation(() => {});
-    vi.spyOn(litBase, 'disconnectedCallback').mockImplementation(() => {});
-    vi.spyOn(ScionPageChat.prototype, 'initV2').mockResolvedValue(undefined);
-    const hold = vi.spyOn(chatUnread, 'holdFirstRefreshForPagePushes');
-
-    const page = document.createElement('scion-page-chat') as any;
-    page.connectedCallback();
-    try {
-      expect(hold).toHaveBeenCalledTimes(1);
-    } finally {
-      page.disconnectedCallback();
-    }
   });
 });

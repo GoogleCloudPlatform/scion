@@ -45,10 +45,11 @@ import { stateManager } from './state.js';
 export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
 
 /**
- * Upper bound on how long the first refresh waits after start(). The first
- * refresh runs at the page's first idle period so it does not compete with
- * the page's own requests, and no later than this. It is also how long the
- * chat page's hold lasts (see holdFirstRefreshForPagePushes).
+ * Upper bound on how long a deferred first refresh waits after start(). It
+ * runs at the page's first idle period so it does not compete with the page's
+ * own requests, and no later than this. It is shorter than
+ * CHAT_STARTUP_REUSE_MS, so when the chat page has loaded the lists since
+ * start() the first refresh reuses that load instead of fetching again.
  */
 export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
 
@@ -110,11 +111,6 @@ export class ChatUnreadCounter {
   private refreshId = 0;
   /** The pending first refresh, until it runs or is superseded. */
   private initial: InitialHandle | null = null;
-  private startedAt = 0;
-  private holdingForPagePushes = false;
-  /** Which halves have been pushed in since start(). */
-  private spacesPushed = false;
-  private dmsPushed = false;
   /**
    * When the newest event of the pending burst was delivered. The debounced
    * refresh only needs data requested after it, so it shares a fetch the
@@ -126,11 +122,13 @@ export class ChatUnreadCounter {
   private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
   /**
-   * Begins tracking. The first refresh is deferred to the page's first idle
-   * period (at most INITIAL_REFRESH_MAX_DELAY_MS), so it stays off the
-   * critical path of the page's own requests.
+   * Begins tracking. By default the first refresh is deferred to the page's
+   * first idle period (at most INITIAL_REFRESH_MAX_DELAY_MS), so it stays off
+   * the critical path of the page's own requests. With `immediate` it is sent
+   * now: on a chat page the page and rail need the same lists, and share this
+   * request instead of waiting for their own.
    */
-  start(): void {
+  start(options: { immediate?: boolean } = {}): void {
     if (this.listening) return;
     // Anything that can create or clear an unread conversation.
     stateManager.addEventListener('notification-created', this.boundNotification);
@@ -138,11 +136,8 @@ export class ChatUnreadCounter {
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
     this.stopped = false;
-    this.spacesPushed = false;
-    this.dmsPushed = false;
-    this.holdingForPagePushes = false;
-    this.startedAt = Date.now();
-    this.scheduleInitialRefresh();
+    if (options.immediate) this.runInitialRefresh();
+    else this.scheduleInitialRefresh();
   }
 
   stop(): void {
@@ -157,29 +152,6 @@ export class ChatUnreadCounter {
   }
 
   /**
-   * Holds the first refresh for data the chat page is about to push in.
-   *
-   * The chat page loads both halves itself, and those loads are slow enough
-   * that an idle-time refresh would usually go out alongside them. Once this
-   * is called, the first refresh waits until INITIAL_REFRESH_MAX_DELAY_MS
-   * after start() instead of the first idle period; if both halves were pushed
-   * by then it sends nothing, otherwise it fetches both as usual.
-   *
-   * Only the first refresh is affected: this does nothing once that refresh
-   * has run or been superseded, and refreshes for live chat events are never
-   * held.
-   */
-  holdFirstRefreshForPagePushes(): void {
-    // Called at start for a chat first page and again when the chat page
-    // connects; the second call must not re-arm the timer.
-    if (!this.initial || this.holdingForPagePushes) return;
-    this.holdingForPagePushes = true;
-    this.cancelInitialRefresh();
-    const remaining = Math.max(0, this.startedAt + INITIAL_REFRESH_MAX_DELAY_MS - Date.now());
-    this.initial = { kind: 'timeout', id: setTimeout(() => this.runInitialRefresh(), remaining) };
-  }
-
-  /**
    * Space rollup, from data the chat rail already loaded.
    *
    * Neither setter cancels a pending refresh. Each owns one half, and the
@@ -191,14 +163,12 @@ export class ChatUnreadCounter {
    */
   setSpaceUnread(spaces: readonly UnreadSpace[]): void {
     this.spaceUnread = countUnreadSpaces(spaces);
-    this.spacesPushed = true;
     this.publish();
   }
 
   /** DM half, from data the chat page already loaded. */
   setDMUnread(dms: readonly UnreadDM[]): void {
     this.dmUnread = countUnreadDMs(dms);
-    this.dmsPushed = true;
     this.publish();
   }
 
@@ -272,9 +242,6 @@ export class ChatUnreadCounter {
 
   private runInitialRefresh(): void {
     this.initial = null;
-    // The chat page already supplied both halves: fetching them again would
-    // repeat its requests for the same answer.
-    if (this.spacesPushed && this.dmsPushed) return;
     // The chat page and rail ask for the same lists as they mount; share
     // whatever request is already in flight or has just completed.
     void this.refresh({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
@@ -318,21 +285,18 @@ export class ChatUnreadCounter {
  * chat disabled the endpoints it reads are not registered, and with nobody
  * signed in there is nothing to count. Returns whether it started.
  *
- * When the first page is a chat page, the first refresh is held for that
- * page's pushes right away. The chat page also asks for the hold when it
- * connects, but on a cold load it connects only after its module has been
- * downloaded, and the idle-time first refresh could already have run during
- * that wait.
+ * When the first page is a chat page, the first refresh is sent at once: the
+ * page and rail load the same lists and share that request. On any other page
+ * it waits for the first idle period.
  */
 export function startChatUnreadIfEligible(
-  counter: Pick<ChatUnreadCounter, 'start' | 'holdFirstRefreshForPagePushes'>,
+  counter: Pick<ChatUnreadCounter, 'start'>,
   signedIn: boolean,
   chatEnabled: boolean,
   onChatRoute: boolean
 ): boolean {
   if (!signedIn || !chatEnabled) return false;
-  counter.start();
-  if (onChatRoute) counter.holdFirstRefreshForPagePushes();
+  counter.start({ immediate: onChatRoute });
   return true;
 }
 
