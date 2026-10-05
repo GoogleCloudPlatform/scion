@@ -57,7 +57,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         "applied-config-env-cleanup",
 		Title:       "Applied Config Env Cleanup",
-		Description: `Removes entries from agent.appliedConfig.env that a since-fixed merge-back could have written for agents created before the fix: GITHUB_TOKEN unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Safe to re-run; agents with nothing to remove are left untouched.`,
+		Description: `Removes entries from agent.appliedConfig.env that a since-fixed merge-back could have written for agents created before the fix: GITHUB_TOKEN unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Also re-derives SCION_AUTO_EXPOSE_PORTS for agents whose inline config still holds a value an older hub stamped there: the stamp is removed and the project or template value, if any, is applied as at reincarnate. Safe to re-run; agents with nothing to remove are left untouched.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
