@@ -33,10 +33,6 @@ type Store interface {
 	GetConversationContext(ctx context.Context, slackUserID, projectID, agentSlug string) (*ConversationContext, error)
 	GetLatestConversationContext(ctx context.Context, slackUserID, projectID string) (*ConversationContext, error)
 
-	// Agent cache
-	SetProjectAgents(ctx context.Context, pa *ProjectAgents) error
-	GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error)
-
 	// Pending ask-user requests
 	CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error
 	GetPendingAskUser(ctx context.Context, requestID string) (*PendingAskUser, error)
@@ -77,13 +73,6 @@ type ConversationContext struct {
 	LastChannelID string
 	LastThreadTS  string
 	LastMessageAt time.Time
-}
-
-// ProjectAgents caches the list of agents for a project.
-type ProjectAgents struct {
-	ProjectID   string
-	AgentSlugs  []string
-	RefreshedAt time.Time
 }
 
 // PendingAskUser represents an ask-user callback awaiting a Slack user response.
@@ -362,45 +351,6 @@ ORDER BY last_message_at DESC LIMIT 1`
 		return nil, fmt.Errorf("parse last_message_at: %w", err)
 	}
 	return &cc, nil
-}
-
-// --- ProjectAgents ---
-
-func (s *sqliteStore) SetProjectAgents(ctx context.Context, pa *ProjectAgents) error {
-	slugsJSON, err := json.Marshal(pa.AgentSlugs)
-	if err != nil {
-		return fmt.Errorf("marshal agent_slugs: %w", err)
-	}
-	const q = `
-INSERT INTO project_agents (project_id, agent_slugs, refreshed_at)
-VALUES (?, ?, ?)
-ON CONFLICT(project_id) DO UPDATE SET
-	agent_slugs=excluded.agent_slugs, refreshed_at=excluded.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC().Format(time.RFC3339))
-	return err
-}
-
-func (s *sqliteStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`
-	row := s.db.QueryRowContext(ctx, q, projectID)
-
-	var pa ProjectAgents
-	var slugsJSON, refreshedAt string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs); err != nil {
-		return nil, fmt.Errorf("unmarshal agent_slugs: %w", err)
-	}
-	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
-	if err != nil {
-		return nil, fmt.Errorf("parse refreshed_at: %w", err)
-	}
-	return &pa, nil
 }
 
 // --- PendingAskUser ---
