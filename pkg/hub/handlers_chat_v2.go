@@ -1804,20 +1804,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	// The row was stored with the optimistic "dispatched" state, which the
-	// primary dispatch below confirms or replaces. If anything panics
-	// before that settles, mark the row failed (the message may not have
-	// been delivered) and re-panic: otherwise the row, and an idempotent
-	// replay of it, would claim a delivery that may never have happened.
+	// primary dispatch below confirms or replaces. If the function exits
+	// before that settles (a panic or an early return), mark the row
+	// failed, since the message may not have been delivered: otherwise the
+	// row, and an idempotent replay of it, would claim a delivery that may
+	// never have happened. This runs before the caller's deferred Finish
+	// makes the idempotency key done. A row the gates already settled
+	// (failed or deferred) keeps its state.
 	primarySettled := false
 	defer func() {
-		if primarySettled {
-			return
-		}
-		if p := recover(); p != nil {
-			if storeMsg.DispatchState == store.MessageDispatchDispatched {
-				_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
-			}
-			panic(p)
+		if !primarySettled && storeMsg.DispatchState == store.MessageDispatchDispatched {
+			_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
 		}
 	}()
 
