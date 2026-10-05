@@ -29,11 +29,12 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -59,6 +60,12 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 });
 
 let ScionPageChat: any;
+
+// A connected page retains the agent store's hub list, which opens the
+// store's feed; it never connects here.
+beforeEach(() => {
+  vi.stubGlobal('EventSource', FakeEventSource);
+});
 
 describe('chat mention roster stability', () => {
   it('reuses agent props until the member roster or project changes', () => {

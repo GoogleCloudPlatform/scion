@@ -286,8 +286,14 @@ By default this does not activate container-script provisioning. Use
 var harnessConfigSyncCmd = &cobra.Command{
 	Use:   "sync <name>",
 	Short: "Sync a local harness-config to the Hub",
-	Long:  `Uploads a local harness-config directory to the Hub for use by remote Runtime Brokers.`,
-	Args:  cobra.ExactArgs(1),
+	Long: `Uploads a local harness-config directory to the Hub for use by remote Runtime Brokers.
+
+By default the config is synced to the current project's scope on the Hub.
+Use --global to sync it to the global scope (requires hub admin rights).
+--global also reads the config from the global directory
+(~/.scion/harness-configs), so to publish a config globally it must live there.
+An existing config with the same name in the target scope is updated.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
@@ -317,14 +323,12 @@ var harnessConfigSyncCmd = &cobra.Command{
 
 		PrintUsingHub(hubCtx.Endpoint)
 
-		scope := "global"
-
 		hubName, _ := cmd.Flags().GetString("name")
 		if hubName == "" {
 			hubName = name
 		}
 
-		return syncHarnessConfigToHub(hubCtx, hubName, hcDir.Path, scope, "", hcDir.Config.Harness)
+		return syncLocalHarnessConfigToHub(hubCtx, hubName, hcDir.Path, hcDir.Config.Harness)
 	},
 }
 
@@ -541,6 +545,67 @@ var harnessConfigDeleteCmd = &cobra.Command{
 	},
 }
 
+// syncLocalHarnessConfigToHub implements 'harness-config sync/push': it
+// picks the scope (project by default, global with --global) and creates or
+// updates the named config there.
+func syncLocalHarnessConfigToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
+	scope, scopeID, err := harnessConfigHubScope(hubCtx)
+	if err != nil {
+		return err
+	}
+	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType)
+}
+
+// harnessConfigHubScope picks the Hub scope for harness-config sync, push and
+// install, the same way templates do: the current project by default, or
+// global with --global. For project scope it resolves the project ID.
+func harnessConfigHubScope(hubCtx *HubContext) (scope, scopeID string, err error) {
+	scope = templateScopeFromGlobalFlag()
+	if scope == "global" {
+		return scope, "", nil
+	}
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve project for Hub harness-config (use --global for the global scope): %w", err)
+	}
+	return scope, projectID, nil
+}
+
+// harnessConfigScopeLabel renders a Hub scope for user-facing output, e.g.
+// "global" or "project (<id>)".
+func harnessConfigScopeLabel(scope, scopeID string) string {
+	if scope == "" {
+		scope = "global"
+	}
+	if scopeID != "" {
+		return fmt.Sprintf("%s (%s)", scope, scopeID)
+	}
+	return scope
+}
+
+// findHubHarnessConfig returns the active harness config named name in
+// exactly the given scope, or nil if there is none. It is the single
+// existence lookup shared by syncHarnessConfigToHub (create vs update) and
+// installToHub (--force guard), so "exists" always means "sync would update
+// it".
+func findHubHarnessConfig(ctx context.Context, hubCtx *HubContext, name, scope, scopeID string) (*hubclient.HarnessConfig, error) {
+	resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
+		Name:    name,
+		Scope:   scope,
+		ScopeID: scopeID,
+		Status:  "active",
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range resp.HarnessConfigs {
+		if resp.HarnessConfigs[i].Name == name {
+			return &resp.HarnessConfigs[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // syncHarnessConfigToHub creates or updates a harness config in the Hub.
 func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID, harnessType string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -567,24 +632,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		}
 	}
 
-	// Check if it already exists
+	// Check if it already exists (the same lookup installToHub's --force
+	// guard uses, so the two cannot disagree).
 	var hcID string
-	existingResp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
-		Name:    name,
-		Scope:   scope,
-		ScopeID: scopeID,
-		Status:  "active",
-	})
+	existing, err := findHubHarnessConfig(ctx, hubCtx, name, scope, scopeID)
 	if err != nil {
 		return fmt.Errorf("failed to check for existing harness-config: %w", err)
-	}
-
-	var existing *hubclient.HarnessConfig
-	for i := range existingResp.HarnessConfigs {
-		if existingResp.HarnessConfigs[i].Name == name {
-			existing = &existingResp.HarnessConfigs[i]
-			break
-		}
 	}
 
 	localFileMap := make(map[string]*hubclient.FileInfo)
@@ -640,6 +693,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 			if len(filesToUpload) == 0 && staleTransient == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
+				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
 				fmt.Printf("  Content Hash: %s\n", truncateHash(existing.ContentHash))
 				return nil
@@ -653,7 +707,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 		}
 	} else {
-		fmt.Printf("Creating harness-config '%s' in Hub...\n", name)
+		fmt.Printf("Creating harness-config '%s' in Hub scope %s...\n", name, harnessConfigScopeLabel(scope, scopeID))
 		createReq := &hubclient.CreateHarnessConfigRequest{
 			Name:    name,
 			Harness: harnessType,
@@ -743,12 +797,14 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				"status":        hc.Status,
 				"contentHash":   hc.ContentHash,
 				"scope":         scope,
+				"scopeId":       scopeID,
 				"filesUploaded": len(filesToUpload),
 			},
 		})
 	}
 
 	fmt.Printf("Harness-config '%s' synced successfully!\n", name)
+	fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 	fmt.Printf("  ID: %s\n", hc.ID)
 	fmt.Printf("  Status: %s\n", hc.Status)
 	fmt.Printf("  Content Hash: %s\n", truncateHash(hc.ContentHash))

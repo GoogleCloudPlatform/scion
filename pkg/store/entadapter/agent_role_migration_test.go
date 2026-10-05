@@ -158,15 +158,17 @@ func TestMigrateBackfillsProjectMembersGroupSystemMarkers(t *testing.T) {
 
 	gotLegacy, err := cs.GetGroup(ctx, legacyMembersGroup.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "true", gotLegacy.Annotations["scion.io/system-project-members-group"])
+	assert.Equal(t, "true", gotLegacy.Annotations[store.AnnotationProjectMembersGroup],
+		"the backfill must write the canonical key the hub checks (ptone/scion#2556)")
+	assert.NotContains(t, gotLegacy.Annotations, store.LegacyAnnotationProjectMembersGroup)
 
 	gotSuspicious, err := cs.GetGroup(ctx, suspiciousGroup.ID)
 	require.NoError(t, err)
-	assert.NotContains(t, gotSuspicious.Annotations, "scion.io/system-project-members-group")
+	assert.NotContains(t, gotSuspicious.Annotations, store.AnnotationProjectMembersGroup)
 
 	gotMismatched, err := cs.GetGroup(ctx, mismatchedGroup.ID)
 	require.NoError(t, err)
-	assert.NotContains(t, gotMismatched.Annotations, "scion.io/system-project-members-group")
+	assert.NotContains(t, gotMismatched.Annotations, store.AnnotationProjectMembersGroup)
 
 	futureLegacyMembersGroup := &store.Group{
 		ID:        uuid.NewString(),
@@ -181,5 +183,5 @@ func TestMigrateBackfillsProjectMembersGroupSystemMarkers(t *testing.T) {
 
 	gotFuture, err := cs.GetGroup(ctx, futureLegacyMembersGroup.ID)
 	require.NoError(t, err)
-	assert.NotContains(t, gotFuture.Annotations, "scion.io/system-project-members-group")
+	assert.NotContains(t, gotFuture.Annotations, store.AnnotationProjectMembersGroup)
 }

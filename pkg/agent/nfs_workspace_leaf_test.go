@@ -436,8 +436,11 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		assert.False(t, prepared)
 		_, statErr := os.Stat(res.HostPath)
 		assert.True(t, os.IsNotExist(statErr))
-		require.Len(t, warnings(), 1)
+		// The workspace and the provisioning state directory are both
+		// left to the node.
+		require.Len(t, warnings(), 2)
 		assert.Contains(t, warnings()[0], nfsLeafLeftToNodeWarning)
+		assert.Contains(t, warnings()[1], nfsLeafLeftToNodeWarning)
 	})
 
 	t.Run("workspace denied, shared dir still created", func(t *testing.T) {
@@ -457,7 +460,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		assert.True(t, os.IsNotExist(statErr))
 		assert.Equal(t, uint32(0o2775), statMode(t, filepath.Join(sdRoot, "scratchpad")).Mode&0o7777,
 			"the shared dir is still created")
-		require.Len(t, warnings(), 1)
+		require.Len(t, warnings(), 2, "workspace and provisioning state directory")
 	})
 
 	t.Run("shared dir", func(t *testing.T) {
