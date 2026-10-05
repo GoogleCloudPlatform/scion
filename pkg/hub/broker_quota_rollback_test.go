@@ -325,7 +325,7 @@ func TestBrokerQuota_RestartHoldsReservationAcrossLegs(t *testing.T) {
 // ptone/scion#1978, ptone/scion#2710: a restart of a stopped agent whose
 // stop leg fails aborts before the start leg, so it must not leave a
 // reservation behind.
-func TestBrokerQuota_RestartStoppedAgentBothLegsFailReleasesNewReservation(t *testing.T) {
+func TestBrokerQuota_RestartStoppedAgentStopLegFailsLeavesNoReservation(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetDispatcher(&failingStopStartDispatcher{})
 	setBrokerAgentCeiling(t, s, 2)

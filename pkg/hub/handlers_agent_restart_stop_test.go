@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -45,6 +46,9 @@ func TestAgentLifecycle_RestartStopErrorHandling(t *testing.T) {
 		wantStatus int
 		wantCode   string
 		wantStart  bool
+		// wantBrokerCode is the expected details.brokerCode of the 503;
+		// "" means no details.
+		wantBrokerCode string
 	}{
 		{name: "clean stop", stopErr: nil, wantStatus: http.StatusOK, wantStart: true},
 		{name: "agent not found", stopErr: brokerErr(http.StatusNotFound, ErrCodeAgentNotFound),
@@ -54,8 +58,20 @@ func TestAgentLifecycle_RestartStopErrorHandling(t *testing.T) {
 		{name: "generic error", stopErr: errors.New("broker unreachable"),
 			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable},
 		{name: "broker 502", stopErr: brokerErr(http.StatusBadGateway, ErrCodeRuntimeError),
-			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable},
+			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable,
+			wantBrokerCode: ErrCodeRuntimeError},
 		{name: "404 without agent_not_found", stopErr: brokerErr(http.StatusNotFound, ErrCodeNotFound),
+			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable,
+			wantBrokerCode: ErrCodeNotFound},
+		// A tolerated code on the wrong status is not tolerated: the status
+		// check is part of the rule.
+		{name: "agent_not_found on 500", stopErr: brokerErr(http.StatusInternalServerError, ErrCodeAgentNotFound),
+			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable,
+			wantBrokerCode: ErrCodeAgentNotFound},
+		{name: "agent_not_running on 404", stopErr: brokerErr(http.StatusNotFound, ErrCodeAgentNotRunning),
+			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable,
+			wantBrokerCode: ErrCodeAgentNotRunning},
+		{name: "malformed broker code omitted", stopErr: brokerErr(http.StatusConflict, "Not A Code"),
 			wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable},
 		{name: "runtime unavailable", stopErr: brokerErr(http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable),
 			wantStatus: http.StatusServiceUnavailable, wantCode: brokerCodeRuntimeUnavailable},
@@ -65,7 +81,7 @@ func TestAgentLifecycle_RestartStopErrorHandling(t *testing.T) {
 			srv, s := testServer(t)
 			disp := &runIntentDispatcher{stopErr: tc.stopErr}
 			srv.SetDispatcher(disp)
-			_, _, agent := setupOnlineBrokerAgent(t, s, "restart-stop-"+string(rune('a'+i)))
+			_, _, agent := setupOnlineBrokerAgent(t, s, fmt.Sprintf("restart-stop-%d", i))
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
 			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
@@ -79,6 +95,15 @@ func TestAgentLifecycle_RestartStopErrorHandling(t *testing.T) {
 			var body ErrorResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			assert.Equal(t, tc.wantCode, body.Error.Code)
+			if tc.wantCode == ErrCodeUnavailable {
+				assert.Equal(t, "Restart not performed: the agent's current instance could not be stopped; retry later",
+					body.Error.Message, "the message is fixed; the broker body is never relayed")
+				if tc.wantBrokerCode == "" {
+					assert.Empty(t, body.Error.Details)
+				} else {
+					assert.Equal(t, map[string]interface{}{"brokerCode": tc.wantBrokerCode}, body.Error.Details)
+				}
+			}
 
 			got, err := s.GetAgent(context.Background(), agent.ID)
 			require.NoError(t, err)

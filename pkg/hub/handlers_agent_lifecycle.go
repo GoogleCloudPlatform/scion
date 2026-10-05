@@ -595,7 +595,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// phase and reservation.
 					slog.Warn("Restart: stop dispatch failed, not starting",
 						"agent_id", id, "error", stopErr)
-					writeRestartStopFailed(w)
+					writeRestartStopFailed(w, stopErr)
 					return
 				}
 				// The broker reports no running instance: the stop's goal

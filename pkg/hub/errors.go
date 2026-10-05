@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -578,10 +579,11 @@ func isBrokerRuntimeUnavailable(err error) bool {
 }
 
 // isRestartStopTolerable reports whether a restart's stop-leg error means the
-// agent has no running instance on its broker, so the start leg may proceed:
-// the broker's 404 agent_not_found or 409 agent_not_running answer. Any other
-// error, including a runtime_unavailable 503, leaves the old instance's state
-// unknown.
+// agent has no running instance on its broker, so the start leg may proceed.
+// The current broker stop route answers 202 for an absent agent, so these
+// codes are defensive, for older brokers or proxies: a 404 agent_not_found
+// or a 409 agent_not_running. Any other error, including a
+// runtime_unavailable 503, leaves the old instance's state unknown.
 func isRestartStopTolerable(err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -600,12 +602,25 @@ func isRestartStopTolerable(err error) bool {
 // aborted because its stop leg failed.
 const restartStopFailedRetryAfter = "30"
 
+// brokerCodePattern bounds a broker error code copied into a hub response.
+var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
 // writeRestartStopFailed writes the retryable 503 for a restart aborted
-// because its stop leg failed and the start leg was not dispatched.
-func writeRestartStopFailed(w http.ResponseWriter) {
+// because its stop leg failed and the start leg was not dispatched. The
+// message is fixed; when stopErr is a broker answer with a well-formed error
+// code, details.brokerCode carries that code (never the raw body) so the
+// cause can be diagnosed.
+func writeRestartStopFailed(w http.ResponseWriter, stopErr error) {
+	var details map[string]interface{}
+	var se *brokerStatusError
+	if errors.As(stopErr, &se) {
+		if code := se.brokerErrorCode(); brokerCodePattern.MatchString(code) {
+			details = map[string]interface{}{"brokerCode": code}
+		}
+	}
 	w.Header().Set("Retry-After", restartStopFailedRetryAfter)
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-		"Restart not performed: the agent's current instance could not be stopped; retry later", nil)
+		"Restart not performed: the agent's current instance could not be stopped; retry later", details)
 }
 
 // writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
