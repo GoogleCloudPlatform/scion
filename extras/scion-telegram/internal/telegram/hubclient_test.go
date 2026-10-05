@@ -72,7 +72,7 @@ func TestNewHTTPHubClient_UsesProvidedTransport(t *testing.T) {
 		client := NewHTTPHubClient(hub.URL, "", "", httpClient)
 		ctx := context.Background()
 
-		agents, err := client.ListAgents(ctx, "p1")
+		agents, err := client.ListAgents(ctx, "p1", "")
 		require.NoError(t, err)
 		assert.Len(t, agents, 1)
 		assert.Equal(t, int64(1), transport.calls.Load(),
@@ -117,4 +117,70 @@ func TestNewHTTPHubClient_TransportPreserved(t *testing.T) {
 
 	assert.Same(t, transport, hc.httpClient.Transport,
 		"httpClient transport should be the same object as provided")
+}
+
+func TestHTTPHubClient_SendsLinkedUser(t *testing.T) {
+	type seen struct {
+		path, query, onBehalfOf string
+	}
+	var got []seen
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, seen{r.URL.Path, r.URL.RawQuery, r.Header.Get("X-Scion-On-Behalf-Of")})
+		if r.URL.Path == "/api/v1/projects" {
+			json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p1", Slug: "alpha"}}})
+			return
+		}
+		json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{Slug: "coder"}}})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	ctx := context.Background()
+
+	t.Run("agent list carries the linked user", func(t *testing.T) {
+		got = nil
+		_, err := client.ListAgents(ctx, "p1", "user:alice@example.com")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "/api/v1/projects/p1/agents", got[0].path)
+		assert.Equal(t, "user:alice@example.com", got[0].onBehalfOf)
+	})
+
+	t.Run("user project list carries the linked user and no owner filter", func(t *testing.T) {
+		got = nil
+		projects, err := client.ListProjectsForUser(ctx, "user:alice@example.com")
+		require.NoError(t, err)
+		require.Len(t, projects, 1)
+		require.Len(t, got, 1)
+		assert.Equal(t, "/api/v1/projects", got[0].path)
+		assert.Empty(t, got[0].query)
+		assert.Equal(t, "user:alice@example.com", got[0].onBehalfOf)
+	})
+
+	t.Run("empty principal sends no linked user", func(t *testing.T) {
+		got = nil
+		_, err := client.ListAgents(ctx, "p1", "")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].onBehalfOf)
+	})
+}
+
+func TestHTTPHubClient_SendsLinkedUserWithBrokerCredentials(t *testing.T) {
+	var onBehalfOf, signedHeaders, brokerID string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onBehalfOf = r.Header.Get("X-Scion-On-Behalf-Of")
+		signedHeaders = r.Header.Get("X-Scion-Signed-Headers")
+		brokerID = r.Header.Get("X-Scion-Broker-ID")
+		json.NewEncoder(w).Encode(hubAgentsResponse{})
+	}))
+	defer hub.Close()
+
+	// base64("0123456789abcdef0123456789abcdef")
+	client := NewHTTPHubClient(hub.URL, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", "broker-1", nil)
+	_, err := client.ListAgents(context.Background(), "p1", "user:alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "user:alice@example.com", onBehalfOf)
+	assert.Contains(t, signedHeaders, "x-scion-on-behalf-of")
+	assert.Equal(t, "broker-1", brokerID)
 }

@@ -41,6 +41,24 @@ type fakeHubClient struct {
 	mu       sync.Mutex
 	projects []ProjectOption
 	agents   map[string][]AgentInfo // projectID → agents
+
+	// userProjects, when non-nil, is returned by ListProjectsForUser keyed
+	// by principal instead of projects.
+	userProjects map[string][]ProjectOption
+	// listAgentsErr, when set, is returned by ListAgents.
+	listAgentsErr error
+	// listUserProjectsErr, when set, is returned by ListProjectsForUser.
+	listUserProjectsErr error
+
+	// Calls recorded for assertions: the principal passed on each call.
+	listAgentsCalls       []fakeListAgentsCall
+	listUserProjectsCalls []string
+	listFreshCalls        int
+}
+
+type fakeListAgentsCall struct {
+	ProjectID  string
+	OnBehalfOf string
 }
 
 func newFakeHubClient() *fakeHubClient {
@@ -55,22 +73,40 @@ func (f *fakeHubClient) ListProjects(_ context.Context) ([]ProjectOption, error)
 	return f.projects, nil
 }
 
-func (f *fakeHubClient) ListProjectsForUser(_ context.Context, _ string) ([]ProjectOption, error) {
+func (f *fakeHubClient) ListProjectsForUser(_ context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listUserProjectsCalls = append(f.listUserProjectsCalls, onBehalfOf)
+	if f.listUserProjectsErr != nil {
+		return nil, f.listUserProjectsErr
+	}
+	if f.userProjects != nil {
+		return f.userProjects[onBehalfOf], nil
+	}
 	return f.projects, nil
 }
 
 func (f *fakeHubClient) ListProjectsFresh(_ context.Context) ([]ProjectOption, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listFreshCalls++
 	return f.projects, nil
 }
 
-func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]AgentInfo, error) {
+func (f *fakeHubClient) ListAgents(_ context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listAgentsCalls = append(f.listAgentsCalls, fakeListAgentsCall{ProjectID: projectID, OnBehalfOf: onBehalfOf})
+	if f.listAgentsErr != nil {
+		return nil, f.listAgentsErr
+	}
 	return f.agents[projectID], nil
+}
+
+func (f *fakeHubClient) agentCalls() []fakeListAgentsCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeListAgentsCall(nil), f.listAgentsCalls...)
 }
 
 func (f *fakeHubClient) HubBaseURL() string {

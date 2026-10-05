@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -32,6 +33,19 @@ func newTestCommandHandler(t *testing.T) (*CommandHandler, *fakeTGServerV2, *fak
 	api := NewAPIClient("test-token", tgSrv.srv.URL)
 	h := NewCommandHandler(store, api, hub, "test_bot", slog.Default())
 	return h, tgSrv, hub, store
+}
+
+// linkTestUser stores a link mapping for a Telegram user and returns the
+// principal the plugin acts as for that user.
+func linkTestUser(t *testing.T, store Store, telegramUserID int64, email string) string {
+	t.Helper()
+	require.NoError(t, store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+		TelegramUserID: strconv.FormatInt(telegramUserID, 10),
+		ScionUserID:    "scion-" + strconv.FormatInt(telegramUserID, 10),
+		ScionEmail:     email,
+		LinkedAt:       time.Now().UTC(),
+	}))
+	return "user:" + email
 }
 
 func TestCommandHandler_HandleCommand_UnrecognizedReturnsFalse(t *testing.T) {
@@ -209,9 +223,12 @@ func TestCommandHandler_Agents_WithAgents(t *testing.T) {
 	}))
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}}
 
+	linkTestUser(t, store, 42, "alice@example.com")
+
 	h.HandleCommand(&TGMessage{
 		Text: "/agents",
 		Chat: TGChat{ID: -100, Type: "group"},
+		From: &TGUser{ID: 42},
 	})
 
 	sent := tgSrv.getSentMessages()
@@ -235,9 +252,12 @@ func TestCommandHandler_Agents_NoAgents(t *testing.T) {
 	}))
 	hub.agents["proj-1"] = []AgentInfo{}
 
+	linkTestUser(t, store, 42, "alice@example.com")
+
 	h.HandleCommand(&TGMessage{
 		Text: "/agents",
 		Chat: TGChat{ID: -100, Type: "group"},
+		From: &TGUser{ID: 42},
 	})
 
 	sent := tgSrv.getSentMessages()
@@ -457,4 +477,78 @@ func TestCommandHandler_Settings_Linked(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.Contains(t, sent[0].Text, "settings")
 	require.NotNil(t, sent[0].ReplyMarkup)
+}
+
+// --- linked user on hub reads ---
+
+func saveTestGroupLink(t *testing.T, store Store, chatID int64, projectID, slug, defaultAgent string) {
+	t.Helper()
+	require.NoError(t, store.SaveGroupLink(context.Background(), &GroupLink{
+		ChatID:       chatID,
+		ProjectID:    projectID,
+		ProjectSlug:  slug,
+		DefaultAgent: defaultAgent,
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+}
+
+func TestCommandHandler_GroupCommands_SendLinkedUser(t *testing.T) {
+	for _, text := range []string{"/agents", "/default", "/terminal coder"} {
+		t.Run(text, func(t *testing.T) {
+			h, _, hub, store := newTestCommandHandler(t)
+			saveTestGroupLink(t, store, -100, "proj-1", "my-project", "coder")
+			hub.agents["proj-1"] = []AgentInfo{{ID: "a1", Slug: "coder", Phase: "running"}}
+			principal := linkTestUser(t, store, 42, "alice@example.com")
+
+			h.HandleCommand(&TGMessage{Text: text, Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+			calls := hub.agentCalls()
+			require.Len(t, calls, 1)
+			assert.Equal(t, fakeListAgentsCall{ProjectID: "proj-1", OnBehalfOf: principal}, calls[0])
+		})
+	}
+}
+
+func TestCommandHandler_GroupCommands_UnlinkedSenderGetsRegisterHint(t *testing.T) {
+	for _, text := range []string{"/agents", "/default", "/terminal coder"} {
+		t.Run(text, func(t *testing.T) {
+			h, tgSrv, hub, store := newTestCommandHandler(t)
+			saveTestGroupLink(t, store, -100, "proj-1", "my-project", "coder")
+			hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+
+			h.HandleCommand(&TGMessage{Text: text, Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+			assert.Empty(t, hub.agentCalls(), "no hub read without a linked user")
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1)
+			assert.Contains(t, sent[0].Text, "/register")
+		})
+	}
+}
+
+func TestCommandHandler_Notifications_SendsLinkedUser(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	saveTestGroupLink(t, store, -100, "proj-1", "my-project", "")
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+
+	h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+
+	calls := hub.agentCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, principal, calls[0].OnBehalfOf)
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "toggle notifications")
+}
+
+func TestCommandHandler_Setup_ListsProjectsAsLinkedUser(t *testing.T) {
+	h, _, hub, store := newTestCommandHandler(t)
+	hub.projects = []ProjectOption{{ID: "p1", Slug: "alpha"}}
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+	assert.Equal(t, []string{principal}, hub.listUserProjectsCalls)
 }

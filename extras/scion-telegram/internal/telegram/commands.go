@@ -38,11 +38,17 @@ type AgentInfo struct {
 }
 
 // HubClient provides access to the Scion hub API for project and agent listing.
+//
+// Methods that take onBehalfOf act as the linked Scion user identified by
+// that principal ("user:<email>", see linkedUserPrincipal). User-initiated
+// reads must pass the requesting user's principal.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	// ListProjectsForUser returns the projects visible to the linked user.
+	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
+	// ListAgents returns the agents of a project as seen by the linked user.
+	ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error)
 
 	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
 	HubBaseURL() string
@@ -75,6 +81,34 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 // SetProjects updates the cached project list used by /setup.
 func (h *CommandHandler) SetProjects(projects []ProjectOption) {
 	h.cachedProjects = projects
+}
+
+// registerHint is the reply sent when a command needs a linked Scion account
+// and the sender has none.
+const registerHint = "Please /register first to use this bot. Send /register to me in a direct message."
+
+// requireLinkedSender looks up the sender's link mapping and returns the
+// principal to act as on hub reads. When the sender is not linked it replies
+// with a register hint and returns ok=false.
+func (h *CommandHandler) requireLinkedSender(ctx context.Context, msg *TGMessage) (mapping *TelegramUserMapping, principal string, ok bool) {
+	chatID := msg.Chat.ID
+	if msg.From == nil {
+		h.reply(chatID, registerHint)
+		return nil, "", false
+	}
+	senderID := strconv.FormatInt(msg.From.ID, 10)
+	mapping, err := h.store.GetUserMapping(ctx, senderID)
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "sender_id", senderID, "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return nil, "", false
+	}
+	principal = linkedUserPrincipal(mapping)
+	if principal == "" {
+		h.reply(chatID, registerHint)
+		return nil, "", false
+	}
+	return mapping, principal, true
 }
 
 // HandleCommand dispatches an incoming message to the appropriate command
@@ -164,8 +198,8 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 		if mapErr != nil {
 			h.log.Warn("Failed to check user mapping for /setup filtering", "error", mapErr)
 		}
-		if mapping != nil && mapping.ScionUserID != "" {
-			userProjects, userErr := h.hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
+		if principal := linkedUserPrincipal(mapping); principal != "" {
+			userProjects, userErr := h.hubClient.ListProjectsForUser(ctx, principal)
 			if userErr != nil {
 				h.log.Warn("Failed to list user projects, falling back to all", "error", userErr)
 			} else if len(userProjects) > 0 {
@@ -220,8 +254,13 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
+	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	// Always fetch fresh agent list so the keyboard reflects current state.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
 		h.reply(chatID, "Failed to fetch agents. Please try again later.")
@@ -279,7 +318,12 @@ func (h *CommandHandler) handleTerminal(msg *TGMessage) {
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
 		h.reply(chatID, "Failed to fetch agents. Please try again later.")
@@ -323,8 +367,13 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		return
 	}
 
+	_, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	// Always fetch fresh state for /agents display — bypass the cache.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
 		h.reply(chatID, "Failed to fetch agents. Please try again later.")
@@ -542,7 +591,8 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
 	}
-	if mapping == nil {
+	principal := linkedUserPrincipal(mapping)
+	if principal == "" {
 		h.reply(chatID, "Please /register first to manage notifications.")
 		return
 	}
@@ -581,7 +631,7 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 		}
 		seen[link.ProjectID] = true
 
-		agents, agentErr := h.getAgents(ctx, link.ProjectID)
+		agents, agentErr := h.getAgents(ctx, link.ProjectID, principal)
 		if agentErr != nil {
 			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
 			continue
@@ -611,8 +661,9 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 }
 
 // getAgents returns agents for a project, using the store cache with a
-// fallback to the hub API.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+// fallback to the hub API, which is called as the linked user identified by
+// onBehalfOf.
+func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
@@ -621,7 +672,7 @@ func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]Age
 		return cached.Agents, nil
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
+	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		if cached != nil {
 			return cached.Agents, nil
@@ -803,15 +854,16 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
+	url := c.hubURL + "/api/v1/projects"
 
-	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
+	slog.Debug("Listing projects for linked user from hub", "url", url, "on_behalf_of", onBehalfOf)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -839,12 +891,13 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -874,6 +927,29 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 
 func (c *httpHubClient) HubBaseURL() string {
 	return c.hubURL
+}
+
+// onBehalfOfHeader names the linked user the plugin acts for on a request.
+const onBehalfOfHeader = "X-Scion-On-Behalf-Of"
+
+// setOnBehalfOf makes req act as the linked user identified by onBehalfOf
+// ("user:<email>"). An empty principal leaves the request unchanged.
+// Call it before signRequest.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set(onBehalfOfHeader, onBehalfOf)
+	req.Header.Set(apiclient.HeaderSignedHeaders, strings.ToLower(onBehalfOfHeader))
+}
+
+// linkedUserPrincipal returns the "user:<email>" principal for a linked
+// Telegram user, or "" when there is no mapping or it has no Scion email.
+func linkedUserPrincipal(m *TelegramUserMapping) string {
+	if m == nil || m.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + m.ScionEmail
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

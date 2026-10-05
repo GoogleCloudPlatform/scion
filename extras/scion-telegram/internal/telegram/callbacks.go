@@ -161,8 +161,29 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 	}
 }
 
+// callbackPrincipal returns the principal of the linked user who pressed the
+// button, or "" when that user is not linked.
+func (h *CallbackHandler) callbackPrincipal(ctx context.Context, cb *CallbackQuery) string {
+	if cb.From == nil {
+		return ""
+	}
+	senderID := strconv.FormatInt(cb.From.ID, 10)
+	mapping, err := h.store.GetUserMapping(ctx, senderID)
+	if err != nil {
+		h.log.Warn("Failed to look up user mapping", "sender_id", senderID, "error", err)
+		return ""
+	}
+	return linkedUserPrincipal(mapping)
+}
+
 func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, projectID string) error {
-	agentInfos, err := h.hubClient.ListAgents(ctx, projectID)
+	principal := h.callbackPrincipal(ctx, cb)
+	if principal == "" {
+		h.answerCallback(ctx, cb.ID, registerHint, true)
+		return nil
+	}
+
+	agentInfos, err := h.hubClient.ListAgents(ctx, projectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
 		h.answerCallback(ctx, cb.ID, "Failed to fetch agents. Try again.", false)

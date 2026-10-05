@@ -2609,7 +2609,7 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		return agentSlugs(cached.Agents)
 	}
 
-	agents, err := b.hubClient.ListAgents(ctx, projectID)
+	agents, err := b.hubClient.ListAgents(ctx, projectID, "")
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
