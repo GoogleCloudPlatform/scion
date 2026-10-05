@@ -505,6 +505,26 @@ func (_u *AgentUpdate) ClearRuntimeBrokerID() *AgentUpdate {
 	return _u
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_u *AgentUpdate) SetWorkspacePlacement(v string) *AgentUpdate {
+	_u.mutation.SetWorkspacePlacement(v)
+	return _u
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableWorkspacePlacement(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetWorkspacePlacement(*v)
+	}
+	return _u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (_u *AgentUpdate) ClearWorkspacePlacement() *AgentUpdate {
+	_u.mutation.ClearWorkspacePlacement()
+	return _u
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_u *AgentUpdate) SetWebPtyEnabled(v bool) *AgentUpdate {
 	_u.mutation.SetWebPtyEnabled(v)
@@ -1758,6 +1778,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.RuntimeBrokerIDCleared() {
 		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeString)
 	}
+	if value, ok := _u.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+	}
+	if _u.mutation.WorkspacePlacementCleared() {
+		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
+	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 	}
@@ -2660,6 +2686,26 @@ func (_u *AgentUpdateOne) SetNillableRuntimeBrokerID(v *string) *AgentUpdateOne 
 // ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
 func (_u *AgentUpdateOne) ClearRuntimeBrokerID() *AgentUpdateOne {
 	_u.mutation.ClearRuntimeBrokerID()
+	return _u
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_u *AgentUpdateOne) SetWorkspacePlacement(v string) *AgentUpdateOne {
+	_u.mutation.SetWorkspacePlacement(v)
+	return _u
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableWorkspacePlacement(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetWorkspacePlacement(*v)
+	}
+	return _u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (_u *AgentUpdateOne) ClearWorkspacePlacement() *AgentUpdateOne {
+	_u.mutation.ClearWorkspacePlacement()
 	return _u
 }
 
@@ -3945,6 +3991,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RuntimeBrokerIDCleared() {
 		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+	}
+	if _u.mutation.WorkspacePlacementCleared() {
+		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
 	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)

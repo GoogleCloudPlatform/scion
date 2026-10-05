@@ -139,6 +139,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		RunID:               a.RunID,
+		WorkspacePlacement:  a.WorkspacePlacement,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
@@ -1514,6 +1515,25 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 // UpdateAgentExposedPorts applies a partial exposed-port update without using
 // the whole-record optimistic-lock path. Port registration must not race with
 // high-frequency status writes.
+// SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
+func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetWorkspacePlacement(placement).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, ports []store.ExposedPort) error {
 	uid, err := parseUUID(id)
 	if err != nil {
