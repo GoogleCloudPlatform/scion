@@ -103,18 +103,19 @@ func TestHubClient_ListAgents_RequestWithoutLinkedUser(t *testing.T) {
 	assert.Empty(t, reqs[0].LinkedUser)
 }
 
-func TestHubClient_ListProjectsForUser_RequestWithLinkedUser(t *testing.T) {
+func TestHubClient_ListUserProjects_RequestWithLinkedUser(t *testing.T) {
 	hub := newFakeHub(t)
 	hub.on("GET", "/api/v1/projects", http.StatusOK,
 		`{"projects":[{"id":"p1","name":"Project One","slug":"p1"}]}`)
 
-	projects, err := hub.client().ListProjectsForUser(context.Background(), "uid-1", "user:alice@example.com")
+	projects, err := hub.client().ListUserProjects(context.Background(), "user:alice@example.com")
 	require.NoError(t, err)
 	require.Len(t, projects, 1)
 
 	reqs := hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Empty(t, reqs[0].RawQuery, "the user's projects come from the linked user, not a query filter")
 }
 
 func TestLinkedUserPrincipal(t *testing.T) {

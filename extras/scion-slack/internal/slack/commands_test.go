@@ -177,3 +177,64 @@ func TestHandleStatus_StaleAccountLinkShowsReRegisterText(t *testing.T) {
 
 	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
 }
+
+func TestHandleSetup_OffersOnlyTheUsersProjects(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusOK, `{"projects":[{"id":"p1","name":"Alice Project"}]}`)
+	f.hub.on("GET", "/api/v1/broker/projects", http.StatusOK,
+		`{"projects":[{"id":"p1","name":"Alice Project"},{"id":"p2","name":"Other Project"}]}`)
+
+	f.run(t, "setup")
+
+	for _, r := range f.hub.recorded() {
+		assert.NotEqual(t, "/api/v1/broker/projects", r.Path, "setup must not offer every project")
+	}
+	text := f.slack.lastText(t)
+	assert.Contains(t, text, "Alice Project")
+	assert.NotContains(t, text, "Other Project")
+}
+
+func TestHandleSetup_NoProjectsDoesNotFallBackToAllProjects(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusOK, `{"projects":[]}`)
+	f.hub.on("GET", "/api/v1/broker/projects", http.StatusOK, `{"projects":[{"id":"p2","name":"Other Project"}]}`)
+
+	f.run(t, "setup")
+
+	reqs := f.hub.recorded()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, "/api/v1/projects", reqs[0].Path)
+	assert.Contains(t, f.slack.lastText(t), "don't have access to any projects")
+}
+
+func TestHandleSetup_RequiresLinkedAccount(t *testing.T) {
+	f := newCommandFixture(t)
+
+	f.run(t, "setup")
+
+	assert.Empty(t, f.hub.recorded())
+	assert.Contains(t, f.slack.lastText(t), "/scion register")
+}
+
+func TestHandleSetup_LinkWithoutEmailAsksToReRegister(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "")
+
+	f.run(t, "setup")
+
+	assert.Empty(t, f.hub.recorded())
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleSetup_StaleAccountLinkShowsReRegisterText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "gone@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"on-behalf-of principal is not active (status: suspended)"}}`)
+
+	f.run(t, "setup")
+
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}

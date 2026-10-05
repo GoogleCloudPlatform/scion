@@ -103,25 +103,25 @@ func handleSetup(ctx context.Context, client *slackapi.Client, store Store, hubC
 		return
 	}
 
-	var projects []ProjectOption
-	if mapping.ScionUserID != "" {
-		projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID, linkedUserPrincipal(mapping))
-		if err != nil {
-			log.Warn("Failed to list user projects", "error", err)
-			if text := deniedRequestText(err, mapping.ScionEmail, ""); text != "" {
-				postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
-				return
-			}
+	// Setup offers only the projects the linked user can see.
+	linkedUser := linkedUserPrincipal(mapping)
+	if linkedUser == "" {
+		postEphemeral(client, cmd.ChannelID, cmd.UserID, staleAccountLinkText)
+		return
+	}
+	projects, err := hubClient.ListUserProjects(ctx, linkedUser)
+	if err != nil {
+		log.Warn("Failed to list user projects", "error", err)
+		if text := deniedRequestText(err, mapping.ScionEmail, ""); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
 		}
+		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch your projects. Please try again later.")
+		return
 	}
 	if len(projects) == 0 {
-		projects, err = hubClient.ListProjectsFresh(ctx)
-		if err != nil {
-			log.Warn("Failed to list projects from hub", "error", err)
-		}
-	}
-	if len(projects) == 0 {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "No projects found. Create a project in the hub first.")
+		postEphemeral(client, cmd.ChannelID, cmd.UserID,
+			"You don't have access to any projects yet. Ask a project owner to add you, or create a project in the hub.")
 		return
 	}
 

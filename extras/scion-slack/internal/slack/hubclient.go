@@ -38,12 +38,14 @@ func (p ProjectOption) DisplayName() string {
 
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
-	ListProjects(ctx context.Context) ([]ProjectOption, error)
+	// ListUserProjects lists the projects visible to the linked user.
+	// linkedUser ("user:<email>") is the Slack user's linked Scion account,
+	// sent with the request. Use this for every user-facing project picker.
+	ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error)
+	// ListProjectsFresh lists every project the plugin serves. It is for
+	// refreshing the project slug map only; never offer its result to a
+	// Slack user.
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	// ListProjectsForUser lists the projects of the Scion user with the
-	// given ID. linkedUser ("user:<email>") is the Slack user's linked Scion
-	// account, sent with the request.
-	ListProjectsForUser(ctx context.Context, ownerID, linkedUser string) ([]ProjectOption, error)
 	// ListAgents lists the agents of a project. linkedUser ("user:<email>")
 	// is the Slack user's linked Scion account, sent with the request; the
 	// hub denies a project agent list without it.
@@ -109,40 +111,6 @@ type hubAgent struct {
 	Activity string `json:"activity"`
 }
 
-func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list projects: %w", parseHubError(resp))
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
 func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/broker/projects"
 
@@ -179,8 +147,8 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID, linkedUser string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
+func (c *httpHubClient) ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error) {
+	url := c.hubURL + "/api/v1/projects"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
