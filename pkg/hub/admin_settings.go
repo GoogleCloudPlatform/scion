@@ -167,10 +167,14 @@ type ServerConfigUpdateRequest struct {
 // GET: Returns the current global settings.yaml contents (sensitive fields masked).
 // PUT: Updates global settings.yaml and optionally reloads applicable runtime settings.
 func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request) {
-	// In postgres mode, delegate to the DB-backed handlers that use
-	// OperationalSettings for Layer-1 reads/writes (design §3.8).
-	// File/SQLite mode keeps the exact current behavior (file read/write).
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Whenever OperationalSettings is wired (every DB driver, SQLite
+	// included, since #1432) delegate to the DB-backed handlers: Layer-1
+	// reads/writes go through the DB (design §3.8) and Layer-0 keys are
+	// rejected with 422 exactly as on postgres. Writing settings.yaml on a
+	// DB-backed SQLite hub let the next ops.Update re-apply the stale DB rows
+	// and silently revert the write (#1091). Only a hub with no
+	// OperationalSettings service keeps the file read/write path.
+	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetServerConfigDB(w, r, ops)

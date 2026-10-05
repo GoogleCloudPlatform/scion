@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -159,5 +160,101 @@ func TestSQLite_UpdateGitHubApp_PersistsToDBAndSurvivesUnrelatedUpdate(t *testin
 	}
 	if data := readFileString(t, settingsPath); strings.Contains(data, "app_id") {
 		t.Errorf("settings.yaml must not be written on a DB-backed SQLite hub:\n%s", data)
+	}
+}
+
+// Server-config PUT on SQLite routes through the DB handler: a Layer-1 key
+// lands in the DB, survives an unrelated ops.Update, is reflected by GET, and
+// shows up in superseded_keys against the settings.yaml (bootstrap) value.
+func TestSQLite_PutServerConfig_Layer1PersistsToDB(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	bootstrap := newFileKoanf(t, map[string]interface{}{
+		"quotas.enforce_broker_quotas": true,
+	})
+	srv, st, ops := newSQLiteOpsServer(t, bootstrap, map[string]string{
+		"quotas": `{"enforce_broker_quotas":true}`,
+	})
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("precondition: want broker quotas enforced from the seeded row")
+	}
+	before := readFileString(t, settingsPath)
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"quotas":{"enforce_broker_quotas":false}}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	unrelatedLifecycleUpdate(t, ops)
+
+	if srv.brokerQuotasEnforced() {
+		t.Error("broker quotas re-enabled after unrelated ops.Update; the PUT was reverted")
+	}
+	rec, doc := hubSettingDocMap(t, st, "quotas")
+	if got, ok := doc["enforce_broker_quotas"].(bool); !ok || got {
+		t.Errorf("DB quotas.enforce_broker_quotas = %v, want false", doc["enforce_broker_quotas"])
+	}
+	if rec.Origin != "managed" {
+		t.Errorf("DB quotas origin = %q, want managed", rec.Origin)
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml must not change on a DB-backed SQLite hub:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+
+	getRR := httptest.NewRecorder()
+	srv.handleAdminServerConfig(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal GET: %v", err)
+	}
+	if resp.SectionMeta == nil {
+		t.Error("GET on a DB-backed SQLite hub should carry section_metadata (DB handler)")
+	}
+	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas {
+		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+	found := false
+	for _, sk := range resp.SupersededKeys["quotas"] {
+		if sk.Key == "quotas.enforce_broker_quotas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected quotas.enforce_broker_quotas in superseded_keys, got %+v", resp.SupersededKeys)
+	}
+}
+
+// Layer-0 keys on SQLite get the same treatment as on postgres: 422
+// layer0_rejected, nothing written to the DB or to settings.yaml.
+func TestSQLite_PutServerConfig_Layer0Rejected(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	srv, st, _ := newSQLiteOpsServer(t, nil, nil)
+	before := readFileString(t, settingsPath)
+	// Migration seeds some rows of its own; compare against them.
+	rowsBefore := hubSettingRevisions(t, st)
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"database":{"driver":"postgres"},"hub":{"admin_emails":["a@example.com"]}}}`))
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["error"] != "layer0_rejected" {
+		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+	}
+
+	if rowsAfter := hubSettingRevisions(t, st); !reflect.DeepEqual(rowsAfter, rowsBefore) {
+		t.Errorf("a rejected Layer-0 PUT must write nothing to the DB:\nbefore: %v\nafter:  %v", rowsBefore, rowsAfter)
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("a rejected Layer-0 PUT must not touch settings.yaml:\n%s", after)
 	}
 }
