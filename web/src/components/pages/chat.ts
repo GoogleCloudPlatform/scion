@@ -254,7 +254,8 @@ const HUB_AGENTS_QUERY = { scope: 'hub' } as const;
  * A row of the agent store's hub list as a members-sidebar agent. The hub
  * list carries no per-viewer attach decision (only the space members
  * endpoint does), so `canAttach` stays unset and the terminal control
- * hidden, as for the hub view's rows before the store.
+ * hidden. `lastSeen` is left out: compact rows do not carry it, and the
+ * sidebar does not read it.
  */
 function hubAgentMember(a: Agent): import('../shared/chat/chat-members.js').ChatAgentMember {
   return {
@@ -264,7 +265,6 @@ function hubAgentMember(a: Agent): import('../shared/chat/chat-members.js').Chat
     slug: a.slug || '',
     phase: a.phase || '',
     activity: a.activity || '',
-    lastSeen: a.lastSeen || '',
     projectId: a.projectId || '',
     detailMessage: agentDetailMessage(a),
     lastActivityEvent: realTimestamp(a.lastActivityEvent) || realTimestamp(a.updated),
