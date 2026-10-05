@@ -1043,8 +1043,8 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 		return nil, false
 	}
 
-	if !b.recipientCanReadProject(ctx, mapping, projectID) {
-		b.log.Debug("Recipient cannot read project, not routing to their chat", "project_id", projectID)
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Not routing to recipient's chat", reason, projectID)
 		return nil, true
 	}
 
@@ -1206,8 +1206,8 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		}
 	}
 
-	if !b.recipientCanReadProject(ctx, mapping, projectID) {
-		b.log.Debug("State-change recipient cannot read project, dropping DM", "project_id", projectID)
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping state-change DM", reason, projectID)
 		return nil
 	}
 
@@ -1277,8 +1277,8 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
-	if !b.recipientCanReadProject(ctx, mapping, projectID) {
-		b.log.Debug("Input-needed recipient cannot read project, dropping DM", "project_id", projectID)
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping input-needed DM", reason, projectID)
 		return nil
 	}
 
@@ -2714,11 +2714,11 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 // failures are cached briefly per user. It returns false when the user
 // cannot be acted as or the list cannot be fetched, so notifications are
 // not sent for projects the user may not be able to read.
-func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) bool {
+func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) (bool, readDenial) {
 	principal := linkedUserPrincipal(mapping)
 	// Agent topics always carry a project; an empty one fails closed.
 	if principal == "" || projectID == "" || b.hubClient == nil {
-		return false
+		return false, readDenialCheckFailed
 	}
 
 	entry, ok := b.cachedUserProjects(principal)
@@ -2740,10 +2740,41 @@ func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping 
 			entry = res.Val.(userProjectsEntry)
 		case <-ctx.Done():
 			// The caller stopped waiting: treat as not readable.
-			return false
+			return false, readDenialCallerGaveUp
 		}
 	}
-	return !entry.failed && entry.ids[projectID]
+	if entry.failed {
+		return false, readDenialCheckFailed
+	}
+	if !entry.ids[projectID] {
+		return false, readDenialCannotRead
+	}
+	return true, ""
+}
+
+// readDenial says why recipientCanReadProject returned false.
+type readDenial string
+
+const (
+	// readDenialCannotRead: the user's project list does not include the
+	// project.
+	readDenialCannotRead readDenial = "cannot read project"
+	// readDenialCheckFailed: the check could not be made (no usable link,
+	// no hub, or the project list failed); fails closed.
+	readDenialCheckFailed readDenial = "project check failed"
+	// readDenialCallerGaveUp: the caller's context ended while waiting;
+	// fails closed.
+	readDenialCallerGaveUp readDenial = "caller stopped waiting"
+)
+
+// logReadDenial logs a notification dropped by the project read check: a
+// plain denial at Debug, a fail-closed drop at Warn.
+func (b *TelegramBrokerV2) logReadDenial(msg string, reason readDenial, projectID string) {
+	if reason == readDenialCannotRead {
+		b.log.Debug(msg, "project_id", projectID, "reason", string(reason))
+		return
+	}
+	b.log.Warn(msg, "project_id", projectID, "reason", string(reason))
 }
 
 // cachedUserProjects returns the unexpired cache entry for principal.

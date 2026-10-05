@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -339,14 +341,20 @@ func TestCallbackHandler_NotifyToggle_UnlinkedUserGetsRegisterHint(t *testing.T)
 
 // --- recipient project cache ---
 
+// canRead returns only the readable result of recipientCanReadProject.
+func canRead(b *TelegramBrokerV2, ctx context.Context, m *TelegramUserMapping, projectID string) bool {
+	ok, _ := b.recipientCanReadProject(ctx, m, projectID)
+	return ok
+}
+
 func TestV2_RecipientCanReadProject_FailureIsCachedBriefly(t *testing.T) {
 	b, _, hub, _ := newDMScopeBroker(t)
 	hub.listUserProjectsErr = errors.New("list user projects returned status 500")
 	mapping, err := b.store.GetUserMapping(context.Background(), "456")
 	require.NoError(t, err)
 
-	assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
-	assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.False(t, canRead(b, context.Background(), mapping, "proj-1"))
+	assert.False(t, canRead(b, context.Background(), mapping, "proj-1"))
 	assert.Len(t, hub.userProjectCalls(), 1, "a failed list is remembered")
 
 	// After the failure window the list is fetched again.
@@ -360,7 +368,7 @@ func TestV2_RecipientCanReadProject_FailureIsCachedBriefly(t *testing.T) {
 	b.userProjects["user:alice@example.com"] = e
 	b.userProjectsMu.Unlock()
 
-	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.True(t, canRead(b, context.Background(), mapping, "proj-1"))
 	assert.Len(t, hub.userProjectCalls(), 2)
 }
 
@@ -377,7 +385,7 @@ func TestV2_RecipientCanReadProject_ConcurrentMissesMakeOneHubCall(t *testing.T)
 	const n = 8
 	results := make(chan bool, n)
 	for i := 0; i < n; i++ {
-		go func() { results <- b.recipientCanReadProject(context.Background(), mapping, "proj-1") }()
+		go func() { results <- canRead(b, context.Background(), mapping, "proj-1") }()
 	}
 	// Callers that join while the hub call is held share it; callers that
 	// arrive after it finished read its cached result. Either way there is
@@ -402,7 +410,7 @@ func TestV2_RecipientCanReadProject_CallerStopsWaitingSharedCallFillsCache(t *te
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan bool, 1)
-	go func() { result <- b.recipientCanReadProject(ctx, mapping, "proj-1") }()
+	go func() { result <- canRead(b, ctx, mapping, "proj-1") }()
 	<-entered
 	cancel()
 	assert.False(t, <-result, "a caller that stops waiting fails closed")
@@ -413,7 +421,7 @@ func TestV2_RecipientCanReadProject_CallerStopsWaitingSharedCallFillsCache(t *te
 		_, ok := b.cachedUserProjects("user:alice@example.com")
 		return ok
 	}, 2*time.Second, 5*time.Millisecond)
-	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.True(t, canRead(b, context.Background(), mapping, "proj-1"))
 	assert.Len(t, hub.userProjectCalls(), 1)
 }
 
@@ -425,13 +433,13 @@ func TestV2_FetchUserProjects_TimeoutIsCached(t *testing.T) {
 			mapping, err := b.store.GetUserMapping(context.Background(), "456")
 			require.NoError(t, err)
 
-			assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+			assert.False(t, canRead(b, context.Background(), mapping, "proj-1"))
 			e, cached := b.cachedUserProjects("user:alice@example.com")
 			require.True(t, cached, "a timed-out shared call is remembered")
 			assert.True(t, e.failed)
 
 			// Within the failure window no new hub call is made.
-			assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+			assert.False(t, canRead(b, context.Background(), mapping, "proj-1"))
 			assert.Len(t, hub.userProjectCalls(), 1)
 		})
 	}
@@ -447,7 +455,7 @@ func TestV2_RecipientCanReadProject_EvictsExpiredEntriesOnWrite(t *testing.T) {
 	mapping, err := b.store.GetUserMapping(context.Background(), "456")
 	require.NoError(t, err)
 
-	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.True(t, canRead(b, context.Background(), mapping, "proj-1"))
 
 	b.userProjectsMu.Lock()
 	defer b.userProjectsMu.Unlock()
@@ -545,9 +553,11 @@ func TestV2_Publish_RecipientWithoutContextStillBroadcasts(t *testing.T) {
 	for name, recipient := range map[string]string{
 		"unknown user recipient": "user:nobody@example.com",
 		"no recipient":           "",
+		"linked recipient who can read, without context": "user:alice@example.com",
 	} {
 		t.Run(name, func(t *testing.T) {
-			b, tgSrv, _, _ := newDMScopeBroker(t)
+			b, tgSrv, hub, principal := newDMScopeBroker(t)
+			hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1"}}}
 			saveTestGroupLink(t, b.store, -200, "proj-1", "alpha", "")
 
 			require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", agentReplyFor(recipient)))
@@ -555,6 +565,103 @@ func TestV2_Publish_RecipientWithoutContextStillBroadcasts(t *testing.T) {
 			sent := tgSrv.getSentMessages()
 			require.Len(t, sent, 1)
 			assert.Equal(t, int64(-200), sent[0].ChatID)
+		})
+	}
+}
+
+// levelRecorder is a slog handler that records messages with their level.
+type levelRecorder struct {
+	mu      sync.Mutex
+	records map[string]slog.Level
+}
+
+func (r *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *levelRecorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.records == nil {
+		r.records = make(map[string]slog.Level)
+	}
+	r.records[rec.Message] = rec.Level
+	return nil
+}
+func (r *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *levelRecorder) WithGroup(string) slog.Handler      { return r }
+func (r *levelRecorder) level(msg string) (slog.Level, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.records[msg]
+	return l, ok
+}
+
+func TestV2_RecipientCanReadProject_Reasons(t *testing.T) {
+	t.Run("cannot read", func(t *testing.T) {
+		b, _, hub, principal := newDMScopeBroker(t)
+		hub.userProjects = map[string][]ProjectOption{principal: {}}
+		m, _ := b.store.GetUserMapping(context.Background(), "456")
+		ok, reason := b.recipientCanReadProject(context.Background(), m, "proj-1")
+		assert.False(t, ok)
+		assert.Equal(t, readDenialCannotRead, reason)
+	})
+	t.Run("check failed", func(t *testing.T) {
+		b, _, hub, _ := newDMScopeBroker(t)
+		hub.listUserProjectsErr = errors.New("list user projects returned status 500")
+		m, _ := b.store.GetUserMapping(context.Background(), "456")
+		ok, reason := b.recipientCanReadProject(context.Background(), m, "proj-1")
+		assert.False(t, ok)
+		assert.Equal(t, readDenialCheckFailed, reason)
+	})
+	t.Run("caller gave up", func(t *testing.T) {
+		b, _, hub, _ := newDMScopeBroker(t)
+		gate := make(chan struct{})
+		entered := make(chan struct{}, 2)
+		hub.listUserProjectsGate = gate
+		hub.listUserProjectsEntered = entered
+		defer close(gate)
+		m, _ := b.store.GetUserMapping(context.Background(), "456")
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { <-entered; cancel() }()
+		ok, reason := b.recipientCanReadProject(ctx, m, "proj-1")
+		assert.False(t, ok)
+		assert.Equal(t, readDenialCallerGaveUp, reason)
+	})
+	t.Run("readable", func(t *testing.T) {
+		b, _, hub, principal := newDMScopeBroker(t)
+		hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1"}}}
+		m, _ := b.store.GetUserMapping(context.Background(), "456")
+		ok, reason := b.recipientCanReadProject(context.Background(), m, "proj-1")
+		assert.True(t, ok)
+		assert.Empty(t, reason)
+	})
+}
+
+func TestV2_NotificationDrops_LogLevelByReason(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(*fakeHubClient, string)
+		want  slog.Level
+	}{
+		"plain denial at debug":    {func(h *fakeHubClient, p string) { h.userProjects = map[string][]ProjectOption{p: {}} }, slog.LevelDebug},
+		"fail-closed drop at warn": {func(h *fakeHubClient, _ string) { h.listUserProjectsErr = errors.New("status 500") }, slog.LevelWarn},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, _, hub, principal := newDMScopeBroker(t)
+			tc.setup(hub, principal)
+			rec := &levelRecorder{}
+			b.log = slog.New(rec)
+			ctx := context.Background()
+			require.NoError(t, b.store.SaveConversationContext(ctx, &ConversationContext{
+				TelegramUserID: "456", ProjectID: "proj-1", AgentSlug: "coder", LastChatID: -200, LastMessageAt: time.Now(),
+			}))
+
+			require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", stateChangeFor("user:alice@example.com")))
+			require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", inputNeededFor("user:alice@example.com")))
+			require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", agentReplyFor("user:alice@example.com")))
+
+			for _, msg := range []string{"Dropping state-change DM", "Dropping input-needed DM", "Not routing to recipient's chat"} {
+				lvl, ok := rec.level(msg)
+				require.True(t, ok, msg)
+				assert.Equal(t, tc.want, lvl, msg)
+			}
 		})
 	}
 }
