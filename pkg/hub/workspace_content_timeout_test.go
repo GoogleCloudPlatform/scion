@@ -136,6 +136,7 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.Empty(t, path)
 	nfsPath := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
+	assert.NotContains(t, err.Error(), mountRoot, "the error text must not carry the path (it can be stored, e.g. ScheduledEvent.Error)")
 	assert.Contains(t, logs.String(), "Workspace storage did not respond")
 	assert.Contains(t, logs.String(), "path="+nfsPath)
 }
@@ -548,6 +549,21 @@ func TestProjectImportTemplates_WorkspacePath_HungStorageReturns503(t *testing.T
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/import-templates",
 		ImportTemplatesRequest{WorkspacePath: "templates"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+}
+
+// Round 4 N2: workspace-path discover answers 503, not 400, when the
+// project workspace cannot be resolved.
+func TestProjectDiscoverTemplates_WorkspacePath_HungStorageReturns503(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	srv.SetStorage(newMockStorage("hung-discover-bucket"))
+	project := &store.Project{ID: tid("project-hung-discover"), Slug: "hung-discover", Name: "Hung Discover Project"}
+	require.NoError(t, s.CreateProject(context.Background(), project))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/discover-templates",
+		DiscoverResourcesRequest{WorkspacePath: "templates"})
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
 	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")

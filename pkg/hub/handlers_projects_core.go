@@ -1076,12 +1076,14 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	return durablePath, nil
 }
 
-// workspaceProbeError logs a timed-out workspace probe and wraps err with
-// the path. The wrapped error still matches errWorkspaceContentTimeout.
+// workspaceProbeError logs a timed-out workspace probe (with the path) and
+// wraps err with the project slug only. The error text can reach stored,
+// API-visible fields (e.g. a scheduled event's error), so it must not carry
+// the filesystem path. It still matches errWorkspaceContentTimeout.
 func (s *Server) workspaceProbeError(slug, path string, err error) error {
 	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
 		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
-	return fmt.Errorf("workspace content check for %s: %w", path, err)
+	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
 }
 
 // writeWorkspaceStorageUnavailable writes a 503 and returns true when err is
