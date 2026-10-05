@@ -1107,7 +1107,10 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		projectName = project.Name
 	}
 
-	// If we used --broker flag, resolve broker by name or ID
+	// If we used --broker flag, resolve broker by name or ID. A local
+	// path names something only on this host, so it is registered only
+	// when the resolved broker is this host's own (see providerRegisterPath).
+	brokerIsRemote := false
 	if isRemoteBroker {
 		broker, err := resolveBrokerByNameOrID(ctx, client, brokerBrokerID)
 		if err != nil {
@@ -1118,6 +1121,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
+		brokerIsRemote = brokerID != getLocalBrokerID()
 	}
 
 	// Show confirmation prompt
@@ -1130,7 +1134,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		ID:       projectID,
 		Name:     projectName,
 		BrokerID: brokerID,
-		Path:     providerRegisterPath(projectPath, projectID, brokerProjectID != "", isRemoteBroker),
+		Path:     providerRegisterPath(projectPath, projectID, brokerProjectID != "", brokerIsRemote),
 	}
 
 	resp, err := client.Projects().Register(ctx, req)
@@ -2056,8 +2060,9 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 // providerRegisterPath returns the local project path `scion broker provide`
 // registers for projectID, or "" to have the hub let the broker resolve the
 // project by its slug (ptone/scion#2839):
-//   - for a remote broker (--broker), always "": a path on this host names
-//     nothing on the broker's host;
+//   - for a remote broker (--broker naming a broker other than this
+//     host's own), always "": a path on this host names nothing on the
+//     broker's host;
 //   - with --project, the CWD's project only if it is linked to projectID
 //     (see localPathForProvidedProject): registering an unrelated CWD
 //     project, often the global ~/.scion, made the broker provision this
