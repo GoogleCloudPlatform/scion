@@ -198,8 +198,9 @@ type AgentCreatedEvent struct {
 	Launch *store.AgentLaunch `json:"launch,omitempty"`
 	// ProvisionedOnly mirrors the agent's computed provisionedOnly view
 	// (ptone/scion#2929), so a browser shows a provision-only create as
-	// "provisioned, not started" without a refetch.
-	ProvisionedOnly bool `json:"provisionedOnly,omitempty"`
+	// "provisioned, not started" without a refetch. No omitempty, as on
+	// the status event: a false must clear a value merged onto an existing row.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.

@@ -161,8 +161,9 @@ func TestProvisionedOnly_Enrich(t *testing.T) {
 }
 
 // createdEventProvisionedOnly creates an agent over HTTP and returns the
-// provisionedOnly value of the agent created event the hub publishes.
-func createdEventProvisionedOnly(t *testing.T, provisionOnly bool) bool {
+// provisionedOnly value of the agent created event the hub publishes (nil
+// when the key is absent).
+func createdEventProvisionedOnly(t *testing.T, provisionOnly bool) interface{} {
 	t.Helper()
 	disp := newSiteIntentDispatcher(nil)
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -181,19 +182,19 @@ func createdEventProvisionedOnly(t *testing.T, provisionOnly bool) bool {
 	case evt := <-ch:
 		var m map[string]interface{}
 		require.NoError(t, json.Unmarshal(evt.Data, &m))
-		return m["provisionedOnly"] == true
+		return m["provisionedOnly"]
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the agent created event")
-		return false
+		return nil
 	}
 }
 
 // The agent created event carries provisionedOnly, so the web can show it
-// without a refetch: true for a provision-only create, false for a full
-// create.
+// without a refetch: true for a provision-only create, and an explicit
+// false for a full create (no omitempty), so a false clears a merged true.
 func TestProvisionedOnly_CreatedEvent(t *testing.T) {
-	assert.True(t, createdEventProvisionedOnly(t, true), "provision-only create")
-	assert.False(t, createdEventProvisionedOnly(t, false), "full create")
+	assert.Equal(t, true, createdEventProvisionedOnly(t, true), "provision-only create")
+	assert.Equal(t, false, createdEventProvisionedOnly(t, false), "full create")
 }
 
 // Status deltas always carry provisionedOnly (no omitempty), so a false
