@@ -764,3 +764,27 @@ func TestLegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
 	child, _ := f.childOf(t, f.legacy, "legacy-launch-c")
 	assert.False(t, launched(child), "an unrecorded chain launches without it")
 }
+
+// The remedy the unrecorded-provenance message names: a user recreates the
+// affected agent directly, and agents created from the replacement pass the
+// SA gate's chain check, while descendants of the legacy agent do not.
+func TestLegacyAgentRecreatedByUserClearsUnrecordedDenial(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-fix")
+	ctx := context.Background()
+
+	legacyChild, _ := f.childOf(t, f.legacy, "legacy-fix-lc")
+	f.assertGateUnrecorded(t, f.agentToken(t, legacyChild.ID), SurfaceAgentCreate)
+
+	replacement, edge := f.createdAgent(t, f.create(t, authUser(f.owner), CreateAgentRequest{Name: "legacy-fix-r"}), "legacy-fix-r")
+	require.NotZero(t, edge.ProvenanceVersion, "a user create records provenance")
+	child, childEdge := f.childOf(t, replacement, "legacy-fix-c")
+	require.Equal(t, replacement.ID, childEdge.DelegatorID)
+	require.NotZero(t, childEdge.ProvenanceVersion, "an agent create records provenance")
+
+	for _, a := range []*store.Agent{replacement, child} {
+		identity := f.agentIdentityFor(t, f.agentToken(t, a.ID))
+		d := f.srv.authzService.CheckAccess(contextWithIdentity(ctx, identity), identity, gcpServiceAccountResource(f.sa), ActionAssign)
+		assert.NotEqual(t, DenyCauseCeilingUnrecorded, d.DenyCause, "agent %s: reason %q", a.Name, d.Reason)
+		assert.True(t, d.Allowed, "agent %s: reason %q", a.Name, d.Reason)
+	}
+}
