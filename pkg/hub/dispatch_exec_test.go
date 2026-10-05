@@ -276,11 +276,11 @@ func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _ stri
 	return nil
 }
 
-func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string, _ StartExtras) error {
+func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string, _ StartExtras) (*RemoteAgentResponse, error) {
 	if brokerID != c.localBroker {
-		return ErrLifecycleDeferred
+		return nil, ErrLifecycleDeferred
 	}
-	return nil
+	return nil, nil
 }
 
 func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
@@ -690,7 +690,7 @@ type deferredDataOpTestClient struct {
 	localBroker string
 }
 
-func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _, _, _ bool, _ time.Time) error {
+func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _ DeleteAgentOptions) error {
 	if brokerID != c.localBroker {
 		return ErrLifecycleDeferred
 	}

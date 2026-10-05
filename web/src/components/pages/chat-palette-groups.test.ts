@@ -65,7 +65,14 @@ const fakeState = vi.hoisted(() => {
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({ navigateTo: vi.fn(), stateManager: fakeState }));
+vi.mock('../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(window.history.state, '', path);
+    return Promise.resolve();
+  }),
+  stateManager: fakeState,
+}));
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
   return { ...actual, apiFetch: vi.fn() };
@@ -281,15 +288,23 @@ describe('navigateToThread: routing when a project has no known slug', () => {
       expect(el.v2Conversation).toMatchObject({ projectId: 'p2', conversationKey: 'topic-x' });
     });
 
-    it("redirects to the canonical slug route once p2's slug is known", () => {
+    it("rewrites to the canonical slug route in place once p2's slug is known", () => {
       const el = createPage();
       el._slugToProjectId.set('beta', 'p2');
       el._projectIdToSlug.set('p2', 'beta');
       window.history.pushState({}, '', '/chat/space/p2/thread/topic-x');
+      const historyLength = window.history.length;
 
       el.parseV2Route();
 
-      expect(navigateTo).toHaveBeenCalledWith('/chat/beta/topic-x');
+      expect(navigateTo).not.toHaveBeenCalled();
+      expect(window.location.pathname).toBe('/chat/beta/topic-x');
+      expect(window.history.length).toBe(historyLength);
+      expect(el.v2Conversation).toMatchObject({
+        projectId: 'p2',
+        projectSlug: 'beta',
+        conversationKey: 'topic-x',
+      });
     });
   });
 });

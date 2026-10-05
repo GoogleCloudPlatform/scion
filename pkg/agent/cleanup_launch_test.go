@@ -37,8 +37,8 @@ func (f *uidPreconditionFakeRuntime) DeleteResource(ctx context.Context, handle 
 	return f.deleteErr
 }
 
-func (f *uidPreconditionFakeRuntime) Delete(ctx context.Context, id string) error {
-	f.plainDeletes = append(f.plainDeletes, id)
+func (f *uidPreconditionFakeRuntime) Delete(ctx context.Context, ref runtime.RunRef) error {
+	f.plainDeletes = append(f.plainDeletes, ref.ID)
 	return nil
 }
 
@@ -69,8 +69,8 @@ type plainFakeRuntime struct {
 
 func (f *plainFakeRuntime) Name() string { return "plain" }
 
-func (f *plainFakeRuntime) Delete(ctx context.Context, id string) error {
-	f.deletes = append(f.deletes, id)
+func (f *plainFakeRuntime) Delete(ctx context.Context, ref runtime.RunRef) error {
+	f.deletes = append(f.deletes, ref.ID)
 	return nil
 }
 

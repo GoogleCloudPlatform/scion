@@ -234,6 +234,10 @@ class ReferenceModel {
     }
 
     if (isCreated) {
+      // ptone/scion#2886: a delete is terminal for its ID, so a `created`
+      // replayed after the tombstone (an SSE redelivery or a reordered
+      // event) is dropped. A recreated agent gets a new ID.
+      if (this.deletedIds.has(ev.id)) return;
       let base = applyKnown(existing ?? ({} as Agent), fuzzEventToDelta(ev), ev.id);
       const buffered = this.pendingDeltas.get(ev.id);
       this.pendingDeltas.delete(ev.id);
@@ -460,7 +464,8 @@ describe('W2 coalescing fuzz (10k random events)', () => {
           deletedIdsShadow.add(ev.id);
           expectedUnknown.delete(ev.id);
         } else if (ev.kind === 'created') {
-          knownThisWindow.add(ev.id);
+          // A created for a tombstoned ID is dropped (ptone/scion#2886).
+          if (!deletedIdsShadow.has(ev.id)) knownThisWindow.add(ev.id);
           expectedUnknown.delete(ev.id);
         } else if (ev.kind === 'status') {
           // Ports events for an absent ID are dropped outright (accepted
@@ -729,7 +734,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     ]);
   });
 
-  it('a created event after a delete in the same flush is upserted, not left in deleted', () => {
+  it('a created event after a delete in the same flush is dropped: the tombstone wins (ptone/scion#2886)', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
@@ -739,14 +744,29 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     sm.addEventListener('agents-changed', changedSpy as EventListener);
 
     emit(sm, 'agent.a1.deleted', {});
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // fresher than the delete
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // replayed after the delete
     vi.advanceTimersByTime(100);
 
     const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
       .detail.data;
-    expect(detail.upserted).toContain('a1');
-    expect(detail.deleted).not.toContain('a1');
-    expect(sm.getAgent('a1')).toBeDefined();
+    expect(detail.upserted).not.toContain('a1');
+    expect(detail.deleted).toContain('a1');
+    expect(sm.getAgent('a1')).toBeUndefined();
+    expect(sm.getDeletedAgentIds().has('a1')).toBe(true);
+  });
+
+  it('a created event for a new ID reusing a deleted agent name is still added (ptone/scion#2886)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'worker' });
+    vi.advanceTimersByTime(100);
+
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a2.created', { phase: 'running', name: 'worker' });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')).toBeUndefined();
+    expect(sm.getAgent('a2')?.name).toBe('worker');
   });
 });
 
@@ -772,18 +792,21 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
     expect(sm.getAgent('a1')).toBeUndefined();
   });
 
-  it('a status delta after a delete never resurfaces in a later created event (not buffered)', () => {
+  it('a status delta and a replayed created after a delete both stay dropped (ptone/scion#2886)', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
     vi.advanceTimersByTime(100);
     emit(sm, 'agent.a1.deleted', {});
     emit(sm, 'agent.a1.status', { phase: 'error' }); // dropped, not buffered
+    const pending = (sm as unknown as { pendingAgentDeltas: Map<string, unknown> })
+      .pendingAgentDeltas;
+    expect(pending.has('a1')).toBe(false);
 
-    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // dropped: tombstoned
     vi.advanceTimersByTime(100);
 
-    expect(sm.getAgent('a1')?.phase).toBe('running'); // not 'error'
+    expect(sm.getAgent('a1')).toBeUndefined();
   });
 
   it('a status delta after a delete never reports the ID as both deleted and unknown in one flush', () => {

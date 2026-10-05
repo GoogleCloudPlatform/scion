@@ -27,10 +27,12 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
+import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
 import type {
   Agent,
   AgentActivity,
   AgentDetail,
+  DeletionInfo,
   ExposedPort,
   Project,
   RuntimeBroker,
@@ -41,8 +43,8 @@ const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exc
 
 /**
  * Two agent objects are shallow-equal iff every field matches by reference,
- * except `detail` and `exposedPorts`, which are freshly reconstructed on
- * every merge and so are compared by value instead (§7).
+ * except `detail`, `exposedPorts` and `deletion`, which are freshly
+ * reconstructed on every merge and so are compared by value instead (§7).
  *
  * Every other array/object field (`labels`, `_capabilities`,
  * `appliedConfig`, `ancestry`, ...) is still reference-compared: a delta
@@ -66,6 +68,10 @@ function agentsShallowEqual(a: Agent, b: Agent): boolean {
     }
     if (key === 'exposedPorts') {
       if (!exposedPortsEqual(a.exposedPorts, b.exposedPorts)) return false;
+      continue;
+    }
+    if (key === 'deletion') {
+      if (!deletionEqual(a.deletion, b.deletion)) return false;
       continue;
     }
     if (ar[key] !== br[key]) {
@@ -92,6 +98,23 @@ function shallowObjectEqual<T extends object>(a: T, b: T): boolean {
     if (a[key] !== b[key]) return false;
   }
   return true;
+}
+
+/**
+ * Value comparison for `Agent.deletion`, whose fields are all scalars. Every
+ * SSE delta carries a fresh object, and the hub republishes an unchanged
+ * view (for example, once per broker stop report), so comparing by
+ * reference would turn each republish into a re-render. `null` and
+ * `undefined` stay distinct from an object, so `deletion: null` still
+ * registers as a change and clears the view.
+ */
+function deletionEqual(
+  a: DeletionInfo | null | undefined,
+  b: DeletionInfo | null | undefined
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return shallowObjectEqual(a, b);
 }
 
 /** Value comparison for `AgentDetail`, whose fields are all scalars. */
@@ -948,6 +971,20 @@ export class StateManager extends EventTarget {
       return;
     }
 
+    // A `created` for a tombstoned ID is treated as stale: the hub can
+    // publish it concurrently with, or replay it after, the `deleted` that
+    // already removed the agent. Drop it like any other late delta, so it
+    // cannot re-add the agent (ptone/scion#2886). A new agent with the same
+    // *name* has a new ID and is unaffected.
+    //
+    // Known limitation (ptone/scion#2951): restoring a soft-deleted agent
+    // reuses its ID and publishes `created`, so a browser that already saw
+    // `deleted` keeps hiding the restored agent until the next scope change
+    // (setScope clears the tombstones) or a full reload.
+    if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
+      return;
+    }
+
     const existing = this.state.agents.get(agentId);
     if (!existing && eventType !== 'created') {
       // A status delta racing a delete for the same ID (the hub can publish
@@ -1017,11 +1054,6 @@ export class StateManager extends EventTarget {
       this.state.agents.set(agentId, updated);
       this.dirty.upserted.add(agentId);
       this.dirty.unknown.delete(agentId);
-      // A `created` for an ID whose `deleted` arrived earlier in the same
-      // flush window must not report it as still deleted — the create is
-      // fresher. IDs are UUIDs, so a real reuse is not reachable in
-      // practice; this only matters within one coalescing window.
-      this.dirty.deleted.delete(agentId);
     }
     if (eventType === 'created') {
       // A legitimate SSE creation for this ID. Signalled separately from
@@ -1472,6 +1504,28 @@ export class StateManager extends EventTarget {
     for (const w of waiters) {
       w.reject(new Error(reason));
     }
+  }
+
+  /**
+   * Apply the `deletion` view from a DELETE 202 response (ptone/scion#2483
+   * phase 1b) so every view shows "Deleting…" at once. The agent is *not*
+   * removed: the SSE `deleted` event removes it later, in place, for every
+   * browser alike.
+   *
+   * Routed through the same merge as an SSE status delta, so held lists,
+   * the paged window and agent-detail all pick it up from the next flush.
+   * Skipped for an unknown or tombstoned ID, and when the SSE view already
+   * holds the same or a newer claim (a renewal or failure that beat the
+   * response). Returns whether the view was applied.
+   */
+  applyDeleteAccepted(id: string, deletion: DeletionInfo | null | undefined): boolean {
+    if (!deletion) return false;
+    const existing = this.state.agents.get(id);
+    // Tombstone check is defensive: tombstoned IDs are never in state.agents.
+    if (!existing || this.state.deletedAgentIds.has(id)) return false;
+    if (!shouldApplyAcceptedDeletion(existing.deletion, deletion)) return false;
+    this.handleAgentEvent(id, 'status', { deletion });
+    return true;
   }
 
   /**
