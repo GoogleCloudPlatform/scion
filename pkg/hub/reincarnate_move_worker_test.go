@@ -269,6 +269,19 @@ func TestReincarnateMove_EmptyPerAgent(t *testing.T) {
 		provisions, _, _ := f.disp.moveSnapshot()
 		assert.Equal(t, []string{f.dst.ID + "|agent-dir"}, provisions)
 	})
+	t.Run("different export identity keeps the 400", func(t *testing.T) {
+		f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) {
+			dst.WorkspaceStorage.NFS.ExportID = "0a0a0a0a-0000-4000-8000-000000000000"
+		})
+		makeEmptyPerAgent(t, f)
+		count := f.agentCount(t)
+		rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		_, msg, v := decodeMoveRefusal(t, rec)
+		assert.Contains(t, msg, "empty-per-agent")
+		assertVerdictFailedAt(t, v, moveCheckWorkspaceMode)
+		f.assertNoMoveSideEffects(t, count)
+	})
 	t.Run("placement local keeps the 400", func(t *testing.T) {
 		f := setupMoveFixture(t, true, nil)
 		makeEmptyPerAgent(t, f)
