@@ -505,6 +505,7 @@ BASE_ES=(
 BASE=(
   "${BASE_ES[@]}"
   --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set agents.imageRegistry=example.test/agents
 )
 
 # --------------------------------------------------------------------------
@@ -2107,6 +2108,10 @@ PROBE_CREDS=(
   --set-string auth.transport.mode=iap
   --set-string auth.transport.oidcAudience=probe-base-oauth-client.apps.googleusercontent.com
   --set-string auth.transport.platformAuthSa=probe-base@probe-project.iam.gserviceaccount.com
+  # The broker's required registry. In the baseline rather than in BASE_ES,
+  # because it is refused under config.existingSecret; agents.imageRegistry's
+  # own mutation still moves it, from this value to another.
+  --set-string agents.imageRegistry=probe.example/agents
 )
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
@@ -4061,7 +4066,8 @@ expect_render_failure \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com \
   --set auth.sessionSecret=neg-session-secret \
-  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg \
+  --set agents.imageRegistry=example.test/agents
 
 expect_render_failure \
   "the TEMPLATE rejects oauth mode without a web client credential" \
@@ -4255,6 +4261,8 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+agents:
+  imageRegistry: example.test/agents
 auth:
   sessionSecret: neg-session-secret
   proxy:

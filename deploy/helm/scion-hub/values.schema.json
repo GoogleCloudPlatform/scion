@@ -353,7 +353,7 @@
       "properties": {
         "imageRegistry": {
           "type": "string",
-          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml."
+          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml. Required by the template when the chart renders settings.yaml, because the hub refuses to start its in-process broker without a registry; config.extra image_registry or a hub.extraEnv SCION_IMAGE_REGISTRY also satisfies it."
         }
       }
     },

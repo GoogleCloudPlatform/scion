@@ -64,6 +64,7 @@ stringData:
     # The session secret is not here and does not belong here: it arrives as an
     # environment variable from its own Secret.
     active_profile: default
+    image_registry: us-docker.pkg.dev/example-project/example-repo
     profiles:
       default:
         runtime: kubernetes
@@ -277,7 +278,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-varied"
         checksum/env-config: 2de4f066a863fb877dec8904f0784d7fe6ccc69e2662ac70ac59370829ef2df2
-        checksum/settings: 0e34bf9522f05a4c22b842372411165f55b22c8d59184fd1c8cb4e186af7c751
+        checksum/settings: 3609ccd2676261e57737fc766d28b6558b51d0eef8631bc5d630c1a0ac28747a
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

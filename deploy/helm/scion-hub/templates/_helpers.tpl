@@ -3318,6 +3318,60 @@ was measured doing exactly that, landing in the Secret AND moving the
 checksum/settings digest. The projection cannot enumerate its way out of an
 open-ended surface; this turns the injection into a render failure instead. */}}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.config.extra "source" "config.extra") }}
+{{- /*
+AN IMAGE REGISTRY IS REQUIRED, because the hub refuses to start without one.
+This chart always runs the hub with an in-process runtime broker: it renders
+--enable-runtime-broker, which sets cfg.RuntimeBroker.Enabled, and $setByChart
+refuses an --enable-runtime-broker=false in hub.args. With the broker enabled,
+runServerForeground calls requireImageRegistryForBroker
+(cmd/server_foreground.go) before starting it, and that returns "image_registry
+is not configured, but the runtime broker requires it" unless one of these is
+non-empty:
+
+  1. SCION_IMAGE_REGISTRY in the environment
+  2. SCION_MAINTENANCE_IMAGE_REGISTRY in the environment
+  3. image_registry resolved from settings.yaml for the active profile
+     (VersionedSettings.ResolveImageRegistry: profiles.<active>.image_registry,
+     else the top-level image_registry)
+
+Those are the cases accepted here, read off the merged document and
+hub.extraEnv: agents.imageRegistry and config.extra both reach (3), and an
+extraEnv entry of either name with a value or a valueFrom reaches (1) or (2).
+A valueFrom is accepted unread because the chart cannot see what it resolves
+to. The hub's DB-backed settings overlay does not count: startRuntimeBroker
+installs it after this check has run.
+
+Not the check described under --profile in the reserved-flag comments. That
+one, config.RequireImageRegistry in cmd/root.go, is skipped for the server
+subtree and never runs on hub start; this one is in the server itself and
+always does.
+
+Not evaluated under config.existingSecret, where this define is not reached:
+the settings file is the operator's, and the hub's own check still applies.
+Runs after the document assertions so that a more specific refusal about the
+same render is reported first.
+*/}}
+{{- $activeProfile := toString (dig "active_profile" "" $doc) }}
+{{- $registryFromSettings := toString (dig "image_registry" "" $doc) }}
+{{- $profilesDoc := dig "profiles" (dict) $doc }}
+{{- if kindIs "map" $profilesDoc }}
+{{- $profileDoc := index $profilesDoc $activeProfile }}
+{{- if kindIs "map" $profileDoc }}
+{{- $profileRegistry := toString (dig "image_registry" "" $profileDoc) }}
+{{- if $profileRegistry }}{{- $registryFromSettings = $profileRegistry }}{{- end }}
+{{- end }}
+{{- end }}
+{{- $registryFromEnv := false }}
+{{- range $entry := .Values.hub.extraEnv }}
+{{- if has (toString (dig "name" "" $entry)) (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY") }}
+{{- if or (dig "value" "" $entry) (dig "valueFrom" "" $entry) }}
+{{- $registryFromEnv = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not (or $registryFromSettings $registryFromEnv) }}
+{{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv." }}
+{{- end }}
 {{- $rendered }}
 {{- end }}
 

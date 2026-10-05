@@ -51,7 +51,7 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # and B accuse the chart of dropping templates it never dropped. The chart will not default it -
 # a generated secret rotates on every upgrade - so the harness supplies one, exactly as it
 # supplies a base URL.
-BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
+BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
 BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real-secret)
 
 # HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.
@@ -634,7 +634,7 @@ fi
 # "a guard with this one exemption", which is exactly the state Phase 1 shipped.
 _e3="$("$HELM" template t "$CHART" "${BASE[@]}" \
          --set auth.requireStableSigningKey=true \
-         --set auth.proxy.iap.audience= --set config.existingSecret=operator-settings 2>&1)"
+         --set auth.proxy.iap.audience= --set agents.imageRegistry= --set config.existingSecret=operator-settings 2>&1)"
 if printf '%s\n' "$_e3" | grep -qF 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
   pass "requireStableSigningKey=true is permitted under config.existingSecret"
 else

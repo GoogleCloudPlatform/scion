@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=159   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check).
+EXPECTED_TOTAL=168   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -29,7 +29,7 @@ HELM="${HELM:-helm}"
 # BASE render would return an error string instead of manifests and every check below would
 # accuse the chart of a fault it does not have. The chart will not default it - a generated
 # secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
 # render at all. Not folded into BASE, because several rows below exist
@@ -856,7 +856,7 @@ accept "credentials supplied through config.extra in snake_case" --set auth.mode
 # there is nothing to inspect and nothing to refuse. Asserting this keeps the
 # guard from growing into a claim about a file the chart cannot see.
 accept "oauth with no credentials but an external settings Secret" \
-  --set auth.mode=oauth --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
+  --set auth.mode=oauth --set auth.proxy.iap.audience= --set agents.imageRegistry= --set config.existingSecret=operator-owned
 
 # THE POSITIVE TWIN OF THE SPELLING GUARD: the chart's own render must land on
 # the side of the guard it enforces. A chart that refused camelCase from
@@ -881,6 +881,32 @@ else
   failed=$((failed + 1))
 fi
 unset _oa
+
+echo "== agents.imageRegistry is required for the in-process broker =="
+# The chart always renders --enable-runtime-broker, and the hub then refuses to
+# start without a registry (requireImageRegistryForBroker,
+# cmd/server_foreground.go). The hub's sources, each accepted here: the
+# SCION_IMAGE_REGISTRY and SCION_MAINTENANCE_IMAGE_REGISTRY environment
+# variables, and image_registry resolved for the active profile (profile level,
+# else top level). Not checked under config.existingSecret. BASE carries a
+# registry, so each row clears it first.
+reject "no registry anywhere" "agents.imageRegistry is required" --set agents.imageRegistry=
+reject "registry only on a profile that is not active" "agents.imageRegistry is required" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents
+reject "SCION_IMAGE_REGISTRY with an empty value" "agents.imageRegistry is required" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "agents.imageRegistry set"
+accept "top-level image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.image_registry=example.invalid/agents
+accept "active-profile image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents
+accept "SCION_IMAGE_REGISTRY through hub.extraEnv" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/agents'
+accept "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+accept "no registry under config.existingSecret" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The

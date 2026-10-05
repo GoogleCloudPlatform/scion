@@ -326,9 +326,18 @@ runtime:
   listAllNamespaces: false
 
 agents:
-  # Optional. Registry prefix agent images are pulled from, rendered as the
-  # top-level image_registry key of settings.yaml. Empty leaves the key out and
-  # the hub uses its own default.
+  # REQUIRED when the chart renders settings.yaml. Registry prefix agent images
+  # are pulled from, rendered as the top-level image_registry key. The chart
+  # always runs an in-process runtime broker, and the hub refuses to start the
+  # broker without a registry (requireImageRegistryForBroker,
+  # cmd/server_foreground.go), so an empty value fails the render. The hub
+  # also accepts image_registry for the active profile through config.extra,
+  # or SCION_IMAGE_REGISTRY / SCION_MAINTENANCE_IMAGE_REGISTRY through
+  # hub.extraEnv; either satisfies the check instead. Not checked under
+  # config.existingSecret, where your file must carry it.
+  #
+  #   imageRegistry: us-docker.pkg.dev/my-project/scion
+  #
   imageRegistry: ""
 
 # The hub's own configuration - the contents of settings.yaml.
