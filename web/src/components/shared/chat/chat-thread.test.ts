@@ -6940,6 +6940,8 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
   type Internals = {
     loading: boolean;
     loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void>;
+    loadingOlder: boolean;
+    error: string | null;
     handleJumpToLatest(): Promise<void>;
     handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
     startStreamV2(): void;
@@ -7095,11 +7097,45 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
     await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
     await switchConversation(el);
     height = 400;
+    // The new conversation is loading its own older page.
+    (el as unknown as Internals).loadingOlder = true;
 
     held.release(stalePage('stale-older'));
     await loading;
 
     expect(scrollEl.scrollTop).toBe(50);
+    expect((el as unknown as Internals).loadingOlder).toBe(true);
+  });
+
+  it('an older page failing after a switch leaves the new conversation’s spinner and scroll', async () => {
+    const el = await mount();
+    let rejectBody: (err: Error) => void = () => {};
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => new Promise((_, reject) => (rejectBody = reject)),
+      } as unknown as Response)
+    );
+    let height = 100;
+    const scrollEl = {
+      scrollTop: 50,
+      get scrollHeight(): number {
+        return height;
+      },
+    } as unknown as HTMLElement;
+    const internals = el as unknown as Internals;
+    const loading = internals.loadOlderMessagesV2(scrollEl);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    height = 400;
+    internals.loadingOlder = true;
+
+    rejectBody(new Error('stream reset'));
+    await loading;
+
+    expect(scrollEl.scrollTop).toBe(50);
+    expect(internals.loadingOlder).toBe(true);
   });
 
   it('a stale jump to latest leaves the new conversation’s view alone', async () => {
@@ -7120,6 +7156,49 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
 
     expect(internals.viewingAroundMessage).toBe(true);
     expect(internals.pinnedToBottom).toBe(false);
+  });
+
+  it('a jump to latest whose request fails after a switch leaves the new view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    let rejectFetch: (err: Error) => void = () => {};
+    apiFetch.mockImplementationOnce(() => new Promise((_, reject) => (rejectFetch = reject)));
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    internals.viewingAroundMessage = true;
+
+    rejectFetch(new Error('offline'));
+    await jumping;
+
+    expect(internals.error).toBeNull();
+    expect(internals.pinnedToBottom).toBe(true);
+    expect(internals.viewingAroundMessage).toBe(true);
+  });
+
+  it('a jump to latest whose error is read after a switch leaves the new view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    internals.viewingAroundMessage = true;
+
+    releaseError('stale failure');
+    await jumping;
+
+    expect(internals.error).toBeNull();
+    expect(internals.pinnedToBottom).toBe(true);
+    expect(internals.viewingAroundMessage).toBe(true);
   });
 
   it('a send refused after a switch puts no reply bar or error on the new conversation', async () => {
@@ -7152,6 +7231,45 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
 
     expect(internals.composerReplyTo).toBeNull();
     expect(internals.sendError).toBeNull();
+  });
+
+  it('a send whose error is read after a switch shows no error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const sending = send(el);
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    await switchConversation(el);
+
+    releaseError('stale failure');
+    await sending;
+
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a reply picked while a refused send reads its error is kept', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const sending = send(el);
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    const picked = { messageId: 'm-2', senderName: 'Bob', content: 'later' };
+    internals.composerReplyTo = picked;
+
+    releaseError('refused');
+    await sending;
+
+    expect(internals.composerReplyTo).toEqual(picked);
+    expect(internals.sendError).toBe('refused');
   });
 
   it('a send refused in the same conversation restores the reply bar and shows the error', async () => {

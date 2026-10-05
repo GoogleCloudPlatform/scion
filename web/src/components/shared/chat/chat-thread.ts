@@ -1673,10 +1673,7 @@ export class ScionChatThread extends LitElement {
       // Fetch own read watermark for the unread divider.
       await this.fetchOwnReadState();
     } catch (err) {
-      // An error read after a switch belongs to the conversation left.
-      if (loadId === this.fetchId) {
-        this.error = err instanceof Error ? err.message : 'Failed to load messages';
-      }
+      this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       // The loading flag, the restore anchor, the scroll target and the
       // watermark timer all belong to the conversation now on screen.
@@ -1726,77 +1723,84 @@ export class ScionChatThread extends LitElement {
   /**
    * Fetch a page of history and merge it. Resolves false, having changed
    * nothing, when the thread switched conversations before the page
-   * arrived; callers then leave the new conversation alone too.
+   * arrived — including when the request then failed: that failure
+   * belongs to the conversation left. Callers then leave the new
+   * conversation alone too.
    */
   private async fetchHistoryV2(cursor?: string): Promise<boolean> {
     const currentId = this.fetchId;
-    // Captured before the request starts: a response landing after the user
-    // has logged out (or switched accounts) must not repopulate a store that
-    // is no longer this identity's.
-    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
-    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
-    if (cursor) {
-      params.set('cursor', cursor);
-    }
-
-    const res = await apiFetch(
-      `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
-    );
-
-    if (currentId !== this.fetchId) return false;
-
-    if (!res.ok) {
-      throw new Error(await extractApiError(res, 'Failed to fetch messages'));
-    }
-
-    const data = (await res.json()) as {
-      items?: Message[];
-      messages?: Message[];
-      nextCursor?: string;
-      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
-      messageExtensions?: Record<
-        string,
-        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
-      >;
-      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
-    };
-
-    // The body can still be arriving after the headers; a conversation
-    // switch in the meantime must not merge this page into the new one.
-    if (currentId !== this.fetchId) return false;
-
-    const items = data?.items ?? data?.messages ?? [];
-
-    // W7: Merge attachment refs from history response.
-    if (data?.messageAttachments) {
-      for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
-        this.v2AttachmentMap.set(msgId, refs);
+    try {
+      // Captured before the request starts: a response landing after the user
+      // has logged out (or switched accounts) must not repopulate a store that
+      // is no longer this identity's.
+      const recentFilesGeneration = chatRecentFiles.scopeGeneration;
+      const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+      if (cursor) {
+        params.set('cursor', cursor);
       }
-    }
 
-    // Phase-3: Merge message extensions and reply previews.
-    if (data?.messageExtensions) {
-      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
-        this.v2MessageExtMap.set(msgId, ext);
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+      );
+
+      if (currentId !== this.fetchId) return false;
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, 'Failed to fetch messages'));
       }
-    }
-    if (data?.replyPreviews) {
-      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
-        this.v2ReplyPreviewMap.set(msgId, preview);
+
+      const data = (await res.json()) as {
+        items?: Message[];
+        messages?: Message[];
+        nextCursor?: string;
+        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageExtensions?: Record<
+          string,
+          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+        >;
+        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      };
+
+      // The body can still be arriving after the headers; a conversation
+      // switch in the meantime must not merge this page into the new one.
+      if (currentId !== this.fetchId) return false;
+
+      const items = data?.items ?? data?.messages ?? [];
+
+      // W7: Merge attachment refs from history response.
+      if (data?.messageAttachments) {
+        for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
+          this.v2AttachmentMap.set(msgId, refs);
+        }
       }
-    }
 
-    if (items.length < HISTORY_PAGE_SIZE) {
-      this.hasOlderMessages = false;
-    }
+      // Phase-3: Merge message extensions and reply previews.
+      if (data?.messageExtensions) {
+        for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+          this.v2MessageExtMap.set(msgId, ext);
+        }
+      }
+      if (data?.replyPreviews) {
+        for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+          this.v2ReplyPreviewMap.set(msgId, preview);
+        }
+      }
 
-    if (data?.nextCursor) {
-      this.nextCursor = data.nextCursor;
-    }
+      if (items.length < HISTORY_PAGE_SIZE) {
+        this.hasOlderMessages = false;
+      }
 
-    this.mergeMessages(items);
-    this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    return true;
+      if (data?.nextCursor) {
+        this.nextCursor = data.nextCursor;
+      }
+
+      this.mergeMessages(items);
+      this.recordRecentFilesForHistory(items, recentFilesGeneration);
+      return true;
+    } catch (err) {
+      if (currentId !== this.fetchId) return false;
+      throw err;
+    }
   }
 
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
@@ -2478,12 +2482,11 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
+        // Restore reply-to state so the reply bar comes back for retry —
+        // before reading the error, so a reply picked meanwhile stands.
+        if (sendFetchId === this.fetchId) this.composerReplyTo = savedReplyTo;
         const error = await extractApiError(res, 'Failed to send message');
-        if (sendFetchId === this.fetchId) {
-          // Restore reply-to state so the reply bar comes back for retry.
-          this.composerReplyTo = savedReplyTo;
-          this.sendError = error;
-        }
+        if (sendFetchId === this.fetchId) this.sendError = error;
         onError?.(error ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
@@ -2963,18 +2966,19 @@ export class ScionChatThread extends LitElement {
   }
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
+    const loadId = this.fetchId;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
-    let stale = false;
     try {
-      stale = !(await this.fetchHistoryV2(this.nextCursor || undefined));
+      await this.fetchHistoryV2(this.nextCursor || undefined);
     } catch {
       // Silently fail for older messages
     } finally {
-      this.loadingOlder = false;
-      // The height delta was measured on the conversation the user left.
-      if (!stale) {
+      // After a switch, the spinner and the height delta belong to the
+      // conversation the user left.
+      if (loadId === this.fetchId) {
+        this.loadingOlder = false;
         await this.updateComplete;
         const newScrollHeight = scrollEl.scrollHeight;
         scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
