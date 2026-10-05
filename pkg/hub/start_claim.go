@@ -339,10 +339,8 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 			return err
 		}
 	}
-	if err := run.check(); err != nil {
-		run.finish(startReleased)
-		return err
-	}
+	// The dispatch checks the fence immediately before dispatching (after
+	// any capacity reservation, which it rolls back if the fence fails).
 	handoff, err := dispatch(run.Context(), run.check)
 	outcome := startOutcomeOf(err)
 	if handoff && err == nil {
