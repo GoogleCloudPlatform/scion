@@ -1285,7 +1285,11 @@ authDone:
 	// and keeps its existing (pre-existing, out of scope) project-level
 	// exposure — see design §3.2.6.
 	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
+	// sharedDirBackendOverrides holds the config of each shared dir whose
+	// backend differs from sharedDirStorageCfg (per-dir backends).
+	var sharedDirBackendOverrides map[string]*config.V1SharedDirStorageConfig
 	recordedSharedDirBackend := ""
+	var sharedDirRecord *sharedDirStorageRecord
 	// sharedDirStorageResolved is set only when the backend was chosen from
 	// successfully loaded global settings, so a start that fell back to the
 	// local layout after a load error never records that fallback.
@@ -1295,11 +1299,14 @@ authDone:
 	// is resolved from the same snapshot.
 	var startGlobalSettings *config.VersionedSettings
 	if len(effectiveSharedDirs) > 0 {
-		recorded, recErr := readSharedDirStorageRecord(agentDir)
+		recorded, recErr := loadSharedDirStorageRecord(agentDir)
 		if recErr != nil {
 			return nil, recErr
 		}
-		recordedSharedDirBackend = recorded
+		sharedDirRecord = recorded
+		if recorded != nil {
+			recordedSharedDirBackend = recorded.Backend
+		}
 		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
@@ -1358,7 +1365,12 @@ authDone:
 			if err != nil {
 				return nil, err
 			}
+			overrides, err := selectSharedDirBackends(globalSettings, sdStorageProfile, sharedDirRecord, cfg, effectiveSharedDirs, opts.Name)
+			if err != nil {
+				return nil, err
+			}
 			sharedDirStorageCfg = cfg
+			sharedDirBackendOverrides = overrides
 			sharedDirStorageResolved = true
 		}
 	}
@@ -1386,15 +1398,15 @@ authDone:
 	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
 	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
 		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
-	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
-		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
+	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirsPerDir(
+		sharedDirStorageCfg, sharedDirBackendOverrides, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
 	}
-	if len(effectiveSharedDirs) > 0 && recordedSharedDirBackend == "" && sharedDirStorageResolved {
-		// Record the backend the agent's shared dirs were set up with, so
-		// later starts keep using it even if settings change.
-		if err := writeSharedDirStorageRecord(agentDir, sharedDirStorageBackendName(sharedDirStorageCfg)); err != nil {
+	if len(effectiveSharedDirs) > 0 && sharedDirRecord == nil && sharedDirStorageResolved {
+		// Record the backends the agent's shared dirs were set up with, so
+		// later starts keep using them even if settings change.
+		if err := saveSharedDirStorageRecord(agentDir, newSharedDirStorageRecord(sharedDirStorageCfg, sharedDirBackendOverrides)); err != nil {
 			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
 		}
 	}
@@ -1510,11 +1522,13 @@ authDone:
 			// Create the workspace subPath directory, and the directories of
 			// shared dirs served from the same claim, before the pod exists,
 			// so the kubelet does not have to (ptone/scion#2530). Shared dirs
-			// with their own storage (sharedDirStorage set) are not on this
-			// claim.
+			// with their own storage (served by sharedDirStorage) are not on
+			// this claim.
 			var claimSharedDirNames []string
-			if sharedDirStorage == nil {
-				claimSharedDirNames = sharedDirNames
+			for _, name := range sharedDirNames {
+				if !sharedDirStorage.Serves(name) {
+					claimSharedDirNames = append(claimSharedDirNames, name)
+				}
 			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever

@@ -1551,18 +1551,28 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	// server.shared_dir_storage backend=nfs: shared dirs use subPaths on the
 	// dedicated shared NFS PVC, no separate PVCs needed (design
 	// deploy-config-explore §3.2.4). Takes precedence over the
-	// workspace_storage:nfs branch below.
+	// workspace_storage:nfs branch below. With per-dir backends only the
+	// dirs the realization serves are skipped; the rest are handled below.
+	sharedDirs := config.SharedDirs
 	if config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs" {
-		runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(config.SharedDirs))
-		return nil
+		sharedDirs = make([]api.SharedDir, 0, len(config.SharedDirs))
+		for _, sd := range config.SharedDirs {
+			if !config.SharedDirStorage.Serves(sd.Name) {
+				sharedDirs = append(sharedDirs, sd)
+			}
+		}
+		if len(sharedDirs) == 0 {
+			runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
+				"shared_dir_count", len(config.SharedDirs))
+			return nil
+		}
 	}
 
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
 	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
 		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(config.SharedDirs))
+			"shared_dir_count", len(sharedDirs))
 		return nil
 	}
 
@@ -1589,7 +1599,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return err
 	}
 
-	for _, sd := range config.SharedDirs {
+	for _, sd := range sharedDirs {
 		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
 			return err
 		}
@@ -2426,9 +2436,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
 	// server.shared_dir_storage backend=nfs takes precedence over the
 	// existing workspace_storage:nfs shared-dir branch when both are set
-	// (design deploy-config-explore §3.2.4).
-	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
-	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	// (design deploy-config-explore §3.2.4). It applies per shared dir:
+	// with per-dir backends the realization serves only the dirs on nfs.
+	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
@@ -2436,7 +2446,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 		sharedDirTargets[target] = true
 
-		if sharedDirStorageNFS {
+		if config.SharedDirStorage.Serves(sd.Name) {
 			// shared_dir_storage nfs: mount the dedicated shared PVC by
 			// subPath. Fail closed (design G5) rather than falling back to
 			// an unclaimed/EmptyDir volume when the claim name is missing.
@@ -4016,8 +4026,7 @@ type nfsSharedDirMount struct {
 // (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
 // backend) — those are separate subsystems, not implicated in F-111.
 func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
-	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
-	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
 		return nil, nil
 	}
@@ -4027,8 +4036,13 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 		k8sContainerWorkspace = "/workspace"
 	}
 
-	mounts := make([]nfsSharedDirMount, 0, len(config.SharedDirs))
+	var mounts []nfsSharedDirMount
 	for i, sd := range config.SharedDirs {
+		// A dir served by server.shared_dir_storage nfs is not on the
+		// workspace claim. The index stays the pod volume index.
+		if config.SharedDirStorage.Serves(sd.Name) {
+			continue
+		}
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)

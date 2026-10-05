@@ -300,6 +300,52 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	return out, source
 }
 
+// ResolveSharedDirStorageBackend returns the backend ("local" or "nfs")
+// that applies to the shared dir dirName for agents using profileName,
+// the settings key it came from, and whether that key is a per-dir
+// shared_dir_storage_backends entry. The nearest level wins: the
+// profile's shared_dir_storage_backends entry for dirName, else the
+// profile's shared_dir_storage_backend, else the same two keys on the
+// profile's runtime entry, else server.shared_dir_storage.backend. A
+// profile's single value therefore wins over a runtime entry's per-dir
+// entry; to keep one dir on another backend, name it in the profile's
+// own shared_dir_storage_backends. If profileName is empty,
+// vs.ActiveProfile is used. backend is "" and source is "" when nothing
+// is configured (the local layout). The value is returned as written;
+// callers validate it.
+//
+// For a dir no per-dir entry names, the result matches the backend of
+// ResolveSharedDirStorage. Call this only on global settings, as for
+// ResolveSharedDirStorage.
+func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profile, ok := vs.Profiles[profileName]; ok {
+		if v := profile.SharedDirStorageBackends[dirName]; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backends." + dirName, true
+		}
+		if v := profile.SharedDirStorageBackend; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backend", false
+		}
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+			if v := rt.SharedDirStorageBackends[dirName]; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backends." + dirName, true
+			}
+			if v := rt.SharedDirStorageBackend; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backend", false
+			}
+		}
+	}
+	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
+		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
+	}
+	return "", "", false
+}
+
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
 // runtime or profile override selects nfs, and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
@@ -318,12 +364,12 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	}
 	found := false
 	for _, rt := range vs.Runtimes {
-		if rt.SharedDirStorageBackend == "nfs" {
+		if rt.SharedDirStorageBackend == "nfs" || mapSelectsNFS(rt.SharedDirStorageBackends) {
 			found = true
 		}
 	}
 	for _, p := range vs.Profiles {
-		if p.SharedDirStorageBackend == "nfs" {
+		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
 		}
 	}
@@ -337,15 +383,44 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	return out, true
 }
 
-// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
-// every runtime and profile entry: the value must be empty, "local" or
-// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
-// (global may be nil). This checks configuration only; it never looks at
-// the filesystem. Each error's Path names the settings key. Results are
-// sorted by path.
+// mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
+// map selects nfs.
+func mapSelectsNFS(m map[string]string) bool {
+	for _, v := range m {
+		if v == "nfs" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend and
+// shared_dir_storage_backends on every runtime and profile entry: a single
+// value must be empty, "local" or "nfs"; a per-dir entry must be keyed by a
+// valid shared dir name and be "local" or "nfs". "nfs" needs a complete
+// server.shared_dir_storage.nfs block (global may be nil). A per-dir entry
+// for a dir that a project does not have is valid: settings are global,
+// shared dirs are per project, and agent start ignores such an entry. This
+// checks configuration only; it never looks at the filesystem. Each
+// error's Path names the settings key. Results are sorted by path.
 func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
 	var errs []ValidationError
-	check := func(path, backend string) {
+	var check func(path, backend string)
+	checkDirs := func(prefix string, dirs map[string]string) {
+		for name, backend := range dirs {
+			path := prefix + ".shared_dir_storage_backends." + name
+			if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("invalid shared dir name %q (must be lowercase alphanumeric with hyphens, e.g. \"build-cache\")", name)})
+				continue
+			}
+			if backend == "" {
+				errs = append(errs, ValidationError{Path: path, Message: "must be \"local\" or \"nfs\" (got \"\")"})
+				continue
+			}
+			check(path, backend)
+		}
+	}
+	check = func(path, backend string) {
 		switch backend {
 		case "", "local":
 			return
@@ -363,9 +438,11 @@ func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profi
 	}
 	for name, rt := range runtimes {
 		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+		checkDirs("runtimes."+name, rt.SharedDirStorageBackends)
 	}
 	for name, p := range profiles {
 		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+		checkDirs("profiles."+name, p.SharedDirStorageBackends)
 	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
 	return errs
@@ -2090,6 +2167,12 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents whose
+	// profile uses this runtime entry. A dir it does not name uses
+	// SharedDirStorageBackend. The profile's own settings win over this
+	// entry. See ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents whose profile uses this runtime entry. A profile's
 	// own value wins over it. Read from global settings only; see
@@ -2333,6 +2416,12 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents using this
+	// profile. A dir it does not name uses SharedDirStorageBackend. Both
+	// win over the profile's runtime entry. See
+	// ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents using this profile. It wins over the same key on
 	// the profile's runtime entry. Read from global settings only; see
