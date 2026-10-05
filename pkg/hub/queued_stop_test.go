@@ -123,7 +123,13 @@ func TestQueuedStop_RunningReportKeepsQueuedStatusAndCapacity(t *testing.T) {
 	f.srv.SetDispatcher(nil) // no drain in this test
 	queueStop(t, f, a, "")
 
-	f.heartbeat(completeInventory(), a.Slug)
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "running", ContainerStatus: "Up 5 minutes", Message: "working on it", RuntimeTarget: "docker"},
+		}}},
+	})
 	got := getAgent(t, f.s, a.ID)
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus)
 	assert.Equal(t, offlineStopMessage, got.Message)
