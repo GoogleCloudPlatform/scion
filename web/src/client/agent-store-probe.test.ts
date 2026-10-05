@@ -493,33 +493,39 @@ describe('AgentStore delta probe', () => {
   describe('the order a probe reads', () => {
     /**
      * A row whose last activity time is `activity` seconds into the day, with
-     * `lastSeen`, a field the full rows have and compact probe rows lack.
+     * `lastSeen`, a field full rows have and compact rows lack: a full-view
+     * walk holds it, and the probe's compact rows never carry it.
      */
     const active = (id: string, activity: number, extra: Partial<Agent> = {}): Agent =>
       row(id, activity, { lastActivityEvent: t(activity), lastSeen: t(activity), ...extra });
 
-    it('does not publish while heartbeats move only `updated`, and merges a row changed with them', async () => {
-      let publishes = 0;
-      const h = await loaded(
-        Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1, { labels: { team: 'red' } }))
-      );
-      h.store.retain(HUB, () => publishes++);
-      // Every activity time ties, so the first page is the highest ids.
-      const a99 = find(h.store.peek(HUB), 'a99');
-      for (let i = 1; i <= 4; i++) {
-        h.server.heartbeat(t(1000 + i * 30));
-        await tick();
-      }
-      expect(h.server.probes()).toBe(4);
-      expect(publishes).toBe(0);
-      expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
+    it.each(['compact', 'full'] as const)(
+      'in %s view, does not publish while heartbeats move only `updated`, and merges a row changed with them',
+      async (view) => {
+        let publishes = 0;
+        const h = await loaded(
+          Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1, { labels: { team: 'red' } })),
+          HUB,
+          { view }
+        );
+        h.store.retain(HUB, () => publishes++);
+        // Every activity time ties, so the first page is the highest ids.
+        const a99 = find(h.store.peek(HUB), 'a99');
+        for (let i = 1; i <= 4; i++) {
+          h.server.heartbeat(t(1000 + i * 30));
+          await tick();
+        }
+        expect(h.server.probes()).toBe(4);
+        expect(publishes).toBe(0);
+        expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
 
-      h.server.heartbeat(t(1200));
-      h.server.agents[99] = { ...h.server.agents[99], labels: { team: 'blue' } };
-      await tick();
-      expect(publishes).toBe(1);
-      expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
-    });
+        h.server.heartbeat(t(1200));
+        h.server.agents[99] = { ...h.server.agents[99], labels: { team: 'blue' } };
+        await tick();
+        expect(publishes).toBe(1);
+        expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
+      }
+    );
 
     it.each(['compact', 'full'] as const)(
       'in %s view, does not publish while heartbeats rewrite `containerStatus`, or for the creator name compact rows add',
@@ -551,6 +557,31 @@ describe('AgentStore delta probe', () => {
         expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
       }
     );
+
+    it('does not publish for a compact probe row over a full row a single-agent read holds', async () => {
+      const h = await loaded([active('a1', 1)]);
+      h.server.agents.push(
+        active('a2', 2, {
+          appliedConfig: { creatorName: 'Ada', harness: 'claude' },
+        } as Partial<Agent>)
+      );
+      await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
+      await settle();
+      const a2 = h.feeds[0].getAgent('a2') as (Agent & { appliedConfig?: unknown }) | undefined;
+      expect(a2?.appliedConfig).toEqual({ creatorName: 'Ada', harness: 'claude' });
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      for (let i = 1; i <= 4; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(4);
+      expect(h.server.walks()).toBe(1);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+    });
 
     // Every field a compact row carries that the probe compares, each changed
     // alone: a heartbeat moves `updated` on every row, so only that field
