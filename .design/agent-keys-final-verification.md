@@ -12,12 +12,13 @@ ptone/scion#2191 to #2202) is complete, and keeps the deferred work separate.
 | Item | Value |
 | --- | --- |
 | Branch | `scion/agent-keys-4-3` |
-| Base | Keys 4.2 head `957c3a2` (fork PR ptone/scion#2905, approved, submitted upstream, not yet merged) |
-| Tested revision | `266dbcc6` (4.2 head plus this task's two new tests and doc fixes). Later commits add this file and apply review nits (one tightened assertion in `TestSendMessage_RetiredRawRejectionLogsAreContentFree`, re-run and passing, plus doc wording). |
+| Base | Upstream `main` at `0bc54fda` (Keys 4.2 merged upstream as GoogleCloudPlatform/scion#2434; includes the ptone/scion#2721 fix, GoogleCloudPlatform/scion#2349 at `f8af776c`) |
+| Tested revision | `827ebeb6` (the four 4.3 commits rebased onto upstream `main`). The commit that records this revision changes only this file. Part A was first verified at `266dbcc6` on top of the fork 4.2 head `957c3a2`. |
 | Environment | Hermetic only: unit tests, `httptest` servers, mock runtimes and a private disposable tmux server. No live Hub, deployed agent, `scion start` or `scion create` was used. |
 
-When 4.2 merges upstream, this branch is rebased onto upstream `main`, the matrix and gates are
-re-run, and the revision above is replaced with the rebased SHA.
+After 4.2 merged upstream, this branch was rebased onto upstream `main` and the matrix, gates and
+stale-reference sweep were re-run at the tested revision above. The sweep found no new message-raw
+references in the upstream changes.
 
 ## 1. Post-removal matrix
 
@@ -81,7 +82,8 @@ by a test added on this branch. Every listed package passed at the tested revisi
 | `go test -run 'Keys\|Message\|RemovedFlag\|DeprecatedFlag\|Deprecation\|Mode' ./cmd/` | pass |
 | `go test -run 'Keys\|TestMessageRoutes_\|TestProjectBroadcast_Retired\|TestBrokerInbound_Retired\|TestRetiredRawIngress\|TestSchedule_\|TestCreateScheduledEvent_\|TestScheduledPayload_\|TestValidateScheduledEventPayloadJSON\|DMObserver\|AgentDM' ./pkg/hub/` (focused subset, `GOMEMLIMIT=4GiB`) | pass |
 | `gofmt -l pkg cmd`, `go vet ./pkg/hub/ ./pkg/runtimebroker/` | clean |
-| `golangci-lint run --new-from-rev=957c3a2f ./pkg/hub/... ./pkg/runtimebroker/...` | 0 issues |
+| `golangci-lint run --new-from-rev=upstream-main ./pkg/hub/... ./pkg/runtimebroker/...` | 0 issues |
+| `go build -buildvcs=false ./...`, `make check-annotation-prefix` | clean |
 | docs-site `astro build` with D2 generation skipped (no `d2` binary in the sandbox) | the new page builds and its links validate; the 15 reported broken links all point at D2-rendered pages (`/hosted/ha/runtime-broker/` and two others) and appear only because D2 was skipped |
 
 ## 2. Version alignment
@@ -147,19 +149,18 @@ That command now fails, so the guidance should move to `scion keys <agent> "0"` 
 | 3.1 ptone/scion#2198 Hubclient and CLI | Local same-name isolation; user/agent modes; no replay under retries; one JSON result | Upstream #2233 (`0259486c`); `cmd/keys_test.go`, `pkg/hubclient/keys_test.go` | Closed, complete. The temporary `--raw` alias criterion was superseded by 4.2. |
 | 3.2 ptone/scion#2199 Docs and caller inventory | Advertised syntax works; caller/image inventory; raw not advertised; accurate operational notes | Upstream #2234 (`117ebf42`); docs in `docs-site/`; inventory rewritten post-removal in 4.2 | Closed, complete. |
 | 4.1 ptone/scion#2200 Integrated UAT | Focused tests and CI at a recorded revision; no replay; no side effects or leaks; caller dispositions; removal gate recorded | UAT accepted at `d95a1dab`; tests upstream #2286 (`ebd5d8f5`), #2325 (`2365ba09`); docs #2243 (`d95a1dab`) | Closed, accepted. Defects it found are listed in §5. |
-| 4.2 ptone/scion#2201 Remove raw | Zero-side-effect retirement tests for every ingress; no injection via message API or `--raw`; both spellings and all values rejected; no production Raw field; keys still works; Plain unchanged | Fork PR ptone/scion#2905, head `957c3a2`, review approved; §1 of this document | Approved and submitted upstream; **not yet merged**. |
-| 4.3 ptone/scion#2202 Final verification | Keys path complete and retired route fails safely; checks tied to a revision; callers migrated or receive an intentional error; no outstanding accepted findings; deferred work separated | This document; the two new tests; migration guide | Part A done at the tested revision. Part B (rebase onto upstream after 4.2 merges, re-run, fork PR) is pending. |
+| 4.2 ptone/scion#2201 Remove raw | Zero-side-effect retirement tests for every ingress; no injection via message API or `--raw`; both spellings and all values rejected; no production Raw field; keys still works; Plain unchanged | Fork PR ptone/scion#2905, head `957c3a2`, review approved; merged upstream as GoogleCloudPlatform/scion#2434 (`0bc54fda`); §1 of this document | Complete (merged upstream). Fork issue still open; close at cleanup. |
+| 4.3 ptone/scion#2202 Final verification | Keys path complete and retired route fails safely; checks tied to a revision; callers migrated or receive an intentional error; no outstanding accepted findings; deferred work separated | This document; the two new tests; migration guide | Verified at the tested revision on upstream `main`; fork PR referencing ptone/scion#2202. |
 
 ## 5. Open items found during core verification
 
-These are not blockers recorded by any core review, but the issue owner should see them before
-calling core complete:
+These were not blockers recorded by any core review; they are listed so the issue owner sees them
+when closing core:
 
-- ptone/scion#2721 (fork fix ptone/scion#2722; upstream fix GoogleCloudPlatform/scion#2349 is green and in the merge queue; open, pending merge, and core closes only after it lands): in an unlinked local project, the created-agent
-  on-disk scan in `agent.List` ignores the `scion.name` filter, so `scion keys <name>` can report
-  an ambiguity, or pick a created-only agent that was not requested. It is still present at the
-  tested revision (`pkg/agent/list.go`). Local mode only, with no authorization boundary
-  involved; a created-only target has no container, so injection into it fails.
+- ptone/scion#2721 (closed): in an unlinked local project, the created-agent on-disk scan in
+  `agent.List` ignored the `scion.name` filter, so `scion keys <name>` could report an ambiguity or
+  pick a created-only agent that was not requested. Fixed upstream by GoogleCloudPlatform/scion#2349
+  (`f8af776c`), which is in the tested base; the local keys tests in §1.1 pass on it.
 - ptone/scion#2724 (open): a bare `SCION_HUB` env var breaks settings load. It was found during
   4.1 but is a config issue, not a keys issue.
 
