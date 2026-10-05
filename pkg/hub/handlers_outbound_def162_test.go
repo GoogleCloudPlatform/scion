@@ -565,6 +565,10 @@ func TestDEF162_AC9_AgentPrefixThreadID_NoMention(t *testing.T) {
 	// and Channel:"web". The handler derives a "group" conversation via
 	// DeriveConversationKey (Rules 2/3 at :482) and proceeds to the mention
 	// guard at :934, which must exclude the agent:-prefixed ThreadID.
+	// ptone/scion#2026: the hub no longer mints a conversation for an
+	// unknown free-text thread_id, so seed the thread conversation; this
+	// test is about the mention guard, not about thread creation.
+	seedThreadConversation(t, s, project.ID, "agent:"+agent.ID)
 	body, _ := json.Marshal(OutboundMessageRequest{
 		Recipient: "user:" + human.Email,
 		Msg:       "Hey @UniqueHuman162 via agent thread",

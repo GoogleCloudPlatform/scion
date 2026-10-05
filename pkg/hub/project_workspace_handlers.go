@@ -135,8 +135,13 @@ func (s *Server) workspaceWriteBlocked() bool {
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg != nil {
 		switch wsCfg.Backend {
-		case "nfs", "cloudrun-volume", "gke-shared-volume":
+		case "nfs":
 			return false // Known durable backend → writes allowed
+		case "cloudrun-volume", "gke-shared-volume":
+			// A volume backend without a volume name has no mount point:
+			// hubManagedProjectPath falls back to the ephemeral local path,
+			// so it is not durable and writes are blocked (ptone/scion#1073).
+			return workspaceMountRoot(wsCfg) == ""
 		}
 	}
 	// No config, empty backend, "local", or unrecognized → block writes
@@ -1301,10 +1306,7 @@ func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution 
 		return nil, true, fmt.Errorf("server.shared_dir_storage: shared dir %q not found in NFS resolution", dirName)
 	}
 
-	subPathRoot := sdCfg.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	// Defense in depth alongside the name/ID validation above, exactly as
 	// resolveSharedDirs does at creation time.
 	if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, subPathRoot, projectID, dirName); err != nil {

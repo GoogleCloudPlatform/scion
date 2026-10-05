@@ -1417,6 +1417,7 @@ authDone:
 	nfsGID := 0
 	nfsPVClaimName := ""
 	nfsSubPath := ""
+	nfsSubPathRoot := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1548,6 +1549,7 @@ authDone:
 			nfsPVClaimName = mount.PVClaimName
 			nfsSubPath = mount.SubPath
 			if settings.Server.WorkspaceStorage.NFS != nil {
+				nfsSubPathRoot = settings.Server.WorkspaceStorage.NFS.SubPathRoot
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
@@ -1626,6 +1628,7 @@ authDone:
 		NFSGID:               nfsGID,
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
+		NFSSubPathRoot:       nfsSubPathRoot,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.

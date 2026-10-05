@@ -29,9 +29,10 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -119,6 +120,12 @@ function ownDialogAfterHideEvent(): Event {
   dialog.classList.add('palette-dialog');
   return { composedPath: () => [dialog] } as unknown as Event;
 }
+
+// A connected page retains the agent store's hub list, which opens the
+// store's feed; it never connects here.
+beforeEach(() => {
+  vi.stubGlobal('EventSource', FakeEventSource);
+});
 
 afterEach(() => {
   document.body.innerHTML = '';

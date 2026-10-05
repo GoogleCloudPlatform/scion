@@ -128,7 +128,13 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithRetry configures retry behavior.
+// WithRetry configures retry behavior: up to maxRetries further attempts
+// after a transport error or a 5xx response (see apiclient.Transport.Do).
+// Retries are off by default. A retry replays the whole request, body
+// included, and this client has no no-retry methods, so every call —
+// including non-idempotent ones such as agent create, start and message —
+// is replayed. Pinning those writes to a no-retry send is tracked in
+// ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) Option {
 	return func(c *client) {
 		c.transport.MaxRetries = maxRetries
