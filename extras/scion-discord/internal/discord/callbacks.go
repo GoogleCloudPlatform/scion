@@ -302,7 +302,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	pending, err := h.store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to get pending ask-user", "request_id", requestID, "error", err)
-		h.respondUpdate(s, i, "Error looking up request. Please try again.", nil)
+		respondEphemeral(s, i, "Error looking up request. Please try again.")
 		return
 	}
 	if pending == nil {
@@ -327,7 +327,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 
 	// Deliver the response to the hub.
 	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
-		h.respondUpdate(s, i, he.userFacingMessage(), nil)
+		respondEphemeral(s, i, he.userFacingMessage())
 		return
 	}
 

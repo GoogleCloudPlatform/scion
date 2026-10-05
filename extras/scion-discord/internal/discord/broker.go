@@ -822,7 +822,8 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			// Questions get answer buttons and a pending ask-user entry.
 			err = b.sendInputNeeded(ctx, session, sendQueue, store, channelID, text, msg, senderSlug, projectID, files)
 		} else {
-			// Send via bot API (state changes, input-needed, non-agent messages).
+			// Send via bot API (state changes, non-agent messages, and
+			// input-needed without a store or sender slug).
 			if sendQueue != nil {
 				_, err = sendQueue.Send(ctx, channelID, text, nil, nil, files)
 			} else {
@@ -877,21 +878,14 @@ func (b *DiscordBroker) sendInputNeeded(
 		return err
 	}
 
-	// RenderInputNeeded falls back to Reply/Dismiss when the choices do
-	// not parse, so the stored choices follow the same rule.
-	var choices []string
-	if raw := msg.Metadata["choices"]; raw != "" {
-		if jsonErr := json.Unmarshal([]byte(raw), &choices); jsonErr != nil {
-			choices = nil
-		}
-	}
-
+	// Stored choices match the rendered buttons (nil for Reply/Dismiss)
+	// and keep the full text of any truncated label.
 	pending := &PendingAskUser{
 		RequestID: requestID,
 		ChannelID: channelID,
 		AgentSlug: agentSlug,
 		ProjectID: projectID,
-		Choices:   choices,
+		Choices:   inputNeededChoices(msg),
 		ExpiresAt: time.Now().Add(askUserExpiry),
 	}
 	if sent != nil {
@@ -901,8 +895,9 @@ func (b *DiscordBroker) sendInputNeeded(
 		b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
 	}
 	if createErr := store.CreatePendingAskUser(ctx, pending); createErr != nil {
-		b.log.Error("Failed to record pending ask-user",
-			"request_id", requestID, "channel_id", channelID, "error", createErr)
+		b.log.Error("Failed to record pending ask-user; its buttons will not work",
+			"request_id", requestID, "channel_id", channelID,
+			"message_id", pending.MessageID, "error", createErr)
 	}
 	return nil
 }

@@ -27,6 +27,13 @@ const (
 	// maxButtonsPerRow is the maximum number of buttons allowed in a single Discord action row.
 	maxButtonsPerRow = 5
 
+	// maxChoiceButtons is the maximum number of buttons in one message
+	// (5 action rows of 5 buttons).
+	maxChoiceButtons = 25
+
+	// maxButtonLabelRunes is the maximum length of a Discord button label.
+	maxButtonLabelRunes = 80
+
 	// truncationSuffix is appended when a message exceeds the Discord limit.
 	truncationSuffix = "\n*[truncated]*"
 
@@ -263,6 +270,39 @@ func RenderStateChangeEmbed(msg *messages.StructuredMessage, agentSlug string) *
 	return embed
 }
 
+// inputNeededChoices returns the choices from msg.Metadata["choices"] that
+// can be rendered as one button each, or nil when the message should get
+// Reply/Dismiss buttons instead: the metadata is missing or does not parse,
+// the list is empty, it has more than maxChoiceButtons entries, or a choice
+// is blank. The returned choices keep their full text.
+func inputNeededChoices(msg *messages.StructuredMessage) []string {
+	if msg == nil || msg.Metadata["choices"] == "" {
+		return nil
+	}
+	var choices []string
+	if err := json.Unmarshal([]byte(msg.Metadata["choices"]), &choices); err != nil {
+		return nil
+	}
+	if len(choices) == 0 || len(choices) > maxChoiceButtons {
+		return nil
+	}
+	for _, c := range choices {
+		if strings.TrimSpace(c) == "" {
+			return nil
+		}
+	}
+	return choices
+}
+
+// truncateButtonLabel shortens a choice to the Discord button label limit.
+func truncateButtonLabel(label string) string {
+	if utf8.RuneCountInString(label) <= maxButtonLabelRunes {
+		return label
+	}
+	r := []rune(label)
+	return string(r[:maxButtonLabelRunes-1]) + "…"
+}
+
 // RenderInputNeeded builds an embed and interactive components for a TypeInputNeeded message.
 // If msg.Metadata["choices"] contains a JSON array of strings, each choice is rendered as a
 // button. Otherwise, a generic "Reply" and "Dismiss" button pair is returned.
@@ -284,30 +324,22 @@ func RenderInputNeeded(msg *messages.StructuredMessage, agentSlug, requestID str
 
 	var components []discordgo.MessageComponent
 
-	choicesJSON := ""
-	if msg.Metadata != nil {
-		choicesJSON = msg.Metadata["choices"]
-	}
-
-	if choicesJSON != "" {
-		var choices []string
-		if err := json.Unmarshal([]byte(choicesJSON), &choices); err == nil && len(choices) > 0 {
-			var buttons []discordgo.MessageComponent
-			for idx, choice := range choices {
-				buttons = append(buttons, discordgo.Button{
-					Label:    choice,
-					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("ask:opt:%s:%d", requestID, idx),
+	if choices := inputNeededChoices(msg); choices != nil {
+		var buttons []discordgo.MessageComponent
+		for idx, choice := range choices {
+			buttons = append(buttons, discordgo.Button{
+				Label:    truncateButtonLabel(choice),
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("ask:opt:%s:%d", requestID, idx),
+			})
+			if len(buttons) == maxButtonsPerRow || idx == len(choices)-1 {
+				components = append(components, discordgo.ActionsRow{
+					Components: buttons,
 				})
-				if len(buttons) == maxButtonsPerRow || idx == len(choices)-1 {
-					components = append(components, discordgo.ActionsRow{
-						Components: buttons,
-					})
-					buttons = nil
-				}
+				buttons = nil
 			}
-			return embed, components
 		}
+		return embed, components
 	}
 
 	// Default: Reply + Dismiss buttons.
