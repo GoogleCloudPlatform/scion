@@ -216,6 +216,16 @@ var (
 		{Name: "deletion_request", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "run_intent", Type: field.TypeString, Nullable: true},
 		{Name: "run_intent_at", Type: field.TypeTime, Nullable: true},
+		{Name: "start_claim_id", Type: field.TypeString, Nullable: true},
+		{Name: "start_claim_kind", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "start_claim_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "start_claim_owner", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "start_claim_target", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "start_claim_at", Type: field.TypeTime, Nullable: true},
+		{Name: "start_claim_lease_until", Type: field.TypeTime, Nullable: true},
+		{Name: "start_claim_unconfirmed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "start_claim_hold_until", Type: field.TypeTime, Nullable: true},
+		{Name: "start_claim_launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -226,7 +236,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[66]},
+				Columns:    []*schema.Column{AgentsColumns[76]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -235,7 +245,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[66]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[76]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -254,6 +264,14 @@ var (
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
 				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[64]},
+			},
+			{
+				Name:    "agent_start_claim_state_start_claim_lease_until",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[68], AgentsColumns[72]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "start_claim_id IS NOT NULL",
+				},
 			},
 			{
 				Name:    "agent_harness_config_reconcile_pending",
@@ -328,6 +346,29 @@ var (
 				Name:    "agentidentitykey_agent_id",
 				Unique:  false,
 				Columns: []*schema.Column{AgentIdentityKeysColumns[3]},
+			},
+		},
+	}
+	// AgentRecoveriesColumns holds the columns for the "agent_recoveries" table.
+	AgentRecoveriesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "observed_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "observed_target", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "observed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "first_absent_at", Type: field.TypeTime, Nullable: true},
+		{Name: "observed_in_flight", Type: field.TypeBool, Default: false},
+	}
+	// AgentRecoveriesTable holds the schema information for the "agent_recoveries" table.
+	AgentRecoveriesTable = &schema.Table{
+		Name:       "agent_recoveries",
+		Columns:    AgentRecoveriesColumns,
+		PrimaryKey: []*schema.Column{AgentRecoveriesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentrecovery_broker_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentRecoveriesColumns[1]},
 			},
 		},
 	}
@@ -558,6 +599,26 @@ var (
 				Name:    "brokersetting_broker_id",
 				Unique:  true,
 				Columns: []*schema.Column{BrokerSettingsColumns[1]},
+			},
+		},
+	}
+	// BrokerTargetInventoriesColumns holds the columns for the "broker_target_inventories" table.
+	BrokerTargetInventoriesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "target", Type: field.TypeString},
+		{Name: "last_complete_inventory_at", Type: field.TypeTime},
+	}
+	// BrokerTargetInventoriesTable holds the schema information for the "broker_target_inventories" table.
+	BrokerTargetInventoriesTable = &schema.Table{
+		Name:       "broker_target_inventories",
+		Columns:    BrokerTargetInventoriesColumns,
+		PrimaryKey: []*schema.Column{BrokerTargetInventoriesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokertargetinventory_broker_id_target",
+				Unique:  true,
+				Columns: []*schema.Column{BrokerTargetInventoriesColumns[1], BrokerTargetInventoriesColumns[2]},
 			},
 		},
 	}
@@ -2001,6 +2062,7 @@ var (
 		{Name: "resources", Type: field.TypeString, Nullable: true},
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
 		{Name: "default_profile", Type: field.TypeString, Nullable: true},
+		{Name: "workspace_storage", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
@@ -2541,6 +2603,7 @@ var (
 		AgentsTable,
 		AgentCredentialsTable,
 		AgentIdentityKeysTable,
+		AgentRecoveriesTable,
 		AgentReincarnationsTable,
 		AgentSessionMetricsTable,
 		AllowListTable,
@@ -2549,6 +2612,7 @@ var (
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
 		BrokerSettingsTable,
+		BrokerTargetInventoriesTable,
 		ChatLinkCodesTable,
 		ConduitPrincipalEpochsTable,
 		ConduitSessionsTable,

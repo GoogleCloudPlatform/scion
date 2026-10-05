@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
@@ -102,6 +104,7 @@ const (
 	TypeAgent                    = "Agent"
 	TypeAgentCredential          = "AgentCredential"
 	TypeAgentIdentityKey         = "AgentIdentityKey"
+	TypeAgentRecovery            = "AgentRecovery"
 	TypeAgentReincarnation       = "AgentReincarnation"
 	TypeAgentSessionMetrics      = "AgentSessionMetrics"
 	TypeAllowListEntry           = "AllowListEntry"
@@ -110,6 +113,7 @@ const (
 	TypeBrokerJoinToken          = "BrokerJoinToken"
 	TypeBrokerSecret             = "BrokerSecret"
 	TypeBrokerSetting            = "BrokerSetting"
+	TypeBrokerTargetInventory    = "BrokerTargetInventory"
 	TypeChatLinkCode             = "ChatLinkCode"
 	TypeConduitPrincipalEpoch    = "ConduitPrincipalEpoch"
 	TypeConduitSession           = "ConduitSession"
@@ -4515,95 +4519,105 @@ func (m *AccessPolicyMutation) ResetEdge(name string) error {
 // AgentMutation represents an operation that mutates the Agent nodes in the graph.
 type AgentMutation struct {
 	config
-	op                       Op
-	typ                      string
-	id                       *uuid.UUID
-	slug                     *string
-	name                     *string
-	template                 *string
-	status                   *agent.Status
-	created_by               *uuid.UUID
-	owner_id                 *uuid.UUID
-	delegation_enabled       *bool
-	message_mode             *agent.MessageMode
-	labels                   *map[string]string
-	annotations              *map[string]string
-	phase                    *string
-	activity                 *string
-	tool_name                *string
-	connection_state         *string
-	container_status         *string
-	exit_code                *int
-	addexit_code             *int
-	exit_reason              *string
-	runtime_state            *string
-	stalled_from_activity    *string
-	current_turns            *int
-	addcurrent_turns         *int
-	current_model_calls      *int
-	addcurrent_model_calls   *int
-	image                    *string
-	detached                 *bool
-	runtime                  *string
-	runtime_broker_id        *string
-	web_pty_enabled          *bool
-	exposed_ports            *[]store.ExposedPort
-	appendexposed_ports      []store.ExposedPort
-	task_summary             *string
-	message                  *string
-	applied_config           *string
-	harness_config           *string
-	ancestry                 *[]string
-	appendancestry           []string
-	created                  *time.Time
-	updated                  *time.Time
-	last_seen                *time.Time
-	last_activity_event      *time.Time
-	started_at               *time.Time
-	deleted_at               *time.Time
-	state_version            *int64
-	addstate_version         *int64
-	generation               *int
-	addgeneration            *int
-	reincarnation_state      *string
-	reincarnation_updated_at *time.Time
-	launch_async_opt_in      *bool
-	launch_id                *string
-	run_id                   *string
-	launch_state             *string
-	launch_end_reason        *string
-	launch_kind              *string
-	launch_deadline          *time.Time
-	launch_last_report_at    *time.Time
-	launch_owner             *string
-	launch_seq               *int64
-	addlaunch_seq            *int64
-	launch_step              *string
-	launch_error             *string
-	deletion_state           *string
-	deletion_claim           *int64
-	adddeletion_claim        *int64
-	deletion_lease_at        *time.Time
-	deletion_started_at      *time.Time
-	deletion_failed_at       *time.Time
-	deletion_code            *string
-	deletion_error           *string
-	deletion_prior           *string
-	deletion_request         *string
-	run_intent               *string
-	run_intent_at            *time.Time
-	clearedFields            map[string]struct{}
-	project                  *uuid.UUID
-	clearedproject           bool
-	memberships              map[uuid.UUID]struct{}
-	removedmemberships       map[uuid.UUID]struct{}
-	clearedmemberships       bool
-	policy_bindings          map[uuid.UUID]struct{}
-	removedpolicy_bindings   map[uuid.UUID]struct{}
-	clearedpolicy_bindings   bool
-	done                     bool
-	oldValue                 func(context.Context) (*Agent, error)
-	predicates               []predicate.Agent
+	op                         Op
+	typ                        string
+	id                         *uuid.UUID
+	slug                       *string
+	name                       *string
+	template                   *string
+	status                     *agent.Status
+	created_by                 *uuid.UUID
+	owner_id                   *uuid.UUID
+	delegation_enabled         *bool
+	message_mode               *agent.MessageMode
+	labels                     *map[string]string
+	annotations                *map[string]string
+	phase                      *string
+	activity                   *string
+	tool_name                  *string
+	connection_state           *string
+	container_status           *string
+	exit_code                  *int
+	addexit_code               *int
+	exit_reason                *string
+	runtime_state              *string
+	stalled_from_activity      *string
+	current_turns              *int
+	addcurrent_turns           *int
+	current_model_calls        *int
+	addcurrent_model_calls     *int
+	image                      *string
+	detached                   *bool
+	runtime                    *string
+	runtime_broker_id          *string
+	web_pty_enabled            *bool
+	exposed_ports              *[]store.ExposedPort
+	appendexposed_ports        []store.ExposedPort
+	task_summary               *string
+	message                    *string
+	applied_config             *string
+	harness_config             *string
+	ancestry                   *[]string
+	appendancestry             []string
+	created                    *time.Time
+	updated                    *time.Time
+	last_seen                  *time.Time
+	last_activity_event        *time.Time
+	started_at                 *time.Time
+	deleted_at                 *time.Time
+	state_version              *int64
+	addstate_version           *int64
+	generation                 *int
+	addgeneration              *int
+	reincarnation_state        *string
+	reincarnation_updated_at   *time.Time
+	launch_async_opt_in        *bool
+	launch_id                  *string
+	run_id                     *string
+	launch_state               *string
+	launch_end_reason          *string
+	launch_kind                *string
+	launch_deadline            *time.Time
+	launch_last_report_at      *time.Time
+	launch_owner               *string
+	launch_seq                 *int64
+	addlaunch_seq              *int64
+	launch_step                *string
+	launch_error               *string
+	deletion_state             *string
+	deletion_claim             *int64
+	adddeletion_claim          *int64
+	deletion_lease_at          *time.Time
+	deletion_started_at        *time.Time
+	deletion_failed_at         *time.Time
+	deletion_code              *string
+	deletion_error             *string
+	deletion_prior             *string
+	deletion_request           *string
+	run_intent                 *string
+	run_intent_at              *time.Time
+	start_claim_id             *string
+	start_claim_kind           *string
+	start_claim_state          *string
+	start_claim_owner          *string
+	start_claim_target         *string
+	start_claim_at             *time.Time
+	start_claim_lease_until    *time.Time
+	start_claim_unconfirmed_at *time.Time
+	start_claim_hold_until     *time.Time
+	start_claim_launch_id      *string
+	clearedFields              map[string]struct{}
+	project                    *uuid.UUID
+	clearedproject             bool
+	memberships                map[uuid.UUID]struct{}
+	removedmemberships         map[uuid.UUID]struct{}
+	clearedmemberships         bool
+	policy_bindings            map[uuid.UUID]struct{}
+	removedpolicy_bindings     map[uuid.UUID]struct{}
+	clearedpolicy_bindings     bool
+	done                       bool
+	oldValue                   func(context.Context) (*Agent, error)
+	predicates                 []predicate.Agent
 }
 
 var _ ent.Mutation = (*AgentMutation)(nil)
@@ -7896,6 +7910,496 @@ func (m *AgentMutation) ResetRunIntentAt() {
 	delete(m.clearedFields, agent.FieldRunIntentAt)
 }
 
+// SetStartClaimID sets the "start_claim_id" field.
+func (m *AgentMutation) SetStartClaimID(s string) {
+	m.start_claim_id = &s
+}
+
+// StartClaimID returns the value of the "start_claim_id" field in the mutation.
+func (m *AgentMutation) StartClaimID() (r string, exists bool) {
+	v := m.start_claim_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimID returns the old "start_claim_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimID: %w", err)
+	}
+	return oldValue.StartClaimID, nil
+}
+
+// ClearStartClaimID clears the value of the "start_claim_id" field.
+func (m *AgentMutation) ClearStartClaimID() {
+	m.start_claim_id = nil
+	m.clearedFields[agent.FieldStartClaimID] = struct{}{}
+}
+
+// StartClaimIDCleared returns if the "start_claim_id" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimID]
+	return ok
+}
+
+// ResetStartClaimID resets all changes to the "start_claim_id" field.
+func (m *AgentMutation) ResetStartClaimID() {
+	m.start_claim_id = nil
+	delete(m.clearedFields, agent.FieldStartClaimID)
+}
+
+// SetStartClaimKind sets the "start_claim_kind" field.
+func (m *AgentMutation) SetStartClaimKind(s string) {
+	m.start_claim_kind = &s
+}
+
+// StartClaimKind returns the value of the "start_claim_kind" field in the mutation.
+func (m *AgentMutation) StartClaimKind() (r string, exists bool) {
+	v := m.start_claim_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimKind returns the old "start_claim_kind" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimKind: %w", err)
+	}
+	return oldValue.StartClaimKind, nil
+}
+
+// ClearStartClaimKind clears the value of the "start_claim_kind" field.
+func (m *AgentMutation) ClearStartClaimKind() {
+	m.start_claim_kind = nil
+	m.clearedFields[agent.FieldStartClaimKind] = struct{}{}
+}
+
+// StartClaimKindCleared returns if the "start_claim_kind" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimKindCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimKind]
+	return ok
+}
+
+// ResetStartClaimKind resets all changes to the "start_claim_kind" field.
+func (m *AgentMutation) ResetStartClaimKind() {
+	m.start_claim_kind = nil
+	delete(m.clearedFields, agent.FieldStartClaimKind)
+}
+
+// SetStartClaimState sets the "start_claim_state" field.
+func (m *AgentMutation) SetStartClaimState(s string) {
+	m.start_claim_state = &s
+}
+
+// StartClaimState returns the value of the "start_claim_state" field in the mutation.
+func (m *AgentMutation) StartClaimState() (r string, exists bool) {
+	v := m.start_claim_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimState returns the old "start_claim_state" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimState: %w", err)
+	}
+	return oldValue.StartClaimState, nil
+}
+
+// ClearStartClaimState clears the value of the "start_claim_state" field.
+func (m *AgentMutation) ClearStartClaimState() {
+	m.start_claim_state = nil
+	m.clearedFields[agent.FieldStartClaimState] = struct{}{}
+}
+
+// StartClaimStateCleared returns if the "start_claim_state" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimStateCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimState]
+	return ok
+}
+
+// ResetStartClaimState resets all changes to the "start_claim_state" field.
+func (m *AgentMutation) ResetStartClaimState() {
+	m.start_claim_state = nil
+	delete(m.clearedFields, agent.FieldStartClaimState)
+}
+
+// SetStartClaimOwner sets the "start_claim_owner" field.
+func (m *AgentMutation) SetStartClaimOwner(s string) {
+	m.start_claim_owner = &s
+}
+
+// StartClaimOwner returns the value of the "start_claim_owner" field in the mutation.
+func (m *AgentMutation) StartClaimOwner() (r string, exists bool) {
+	v := m.start_claim_owner
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimOwner returns the old "start_claim_owner" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimOwner(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimOwner is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimOwner requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimOwner: %w", err)
+	}
+	return oldValue.StartClaimOwner, nil
+}
+
+// ClearStartClaimOwner clears the value of the "start_claim_owner" field.
+func (m *AgentMutation) ClearStartClaimOwner() {
+	m.start_claim_owner = nil
+	m.clearedFields[agent.FieldStartClaimOwner] = struct{}{}
+}
+
+// StartClaimOwnerCleared returns if the "start_claim_owner" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimOwnerCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimOwner]
+	return ok
+}
+
+// ResetStartClaimOwner resets all changes to the "start_claim_owner" field.
+func (m *AgentMutation) ResetStartClaimOwner() {
+	m.start_claim_owner = nil
+	delete(m.clearedFields, agent.FieldStartClaimOwner)
+}
+
+// SetStartClaimTarget sets the "start_claim_target" field.
+func (m *AgentMutation) SetStartClaimTarget(s string) {
+	m.start_claim_target = &s
+}
+
+// StartClaimTarget returns the value of the "start_claim_target" field in the mutation.
+func (m *AgentMutation) StartClaimTarget() (r string, exists bool) {
+	v := m.start_claim_target
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimTarget returns the old "start_claim_target" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimTarget(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimTarget is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimTarget requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimTarget: %w", err)
+	}
+	return oldValue.StartClaimTarget, nil
+}
+
+// ClearStartClaimTarget clears the value of the "start_claim_target" field.
+func (m *AgentMutation) ClearStartClaimTarget() {
+	m.start_claim_target = nil
+	m.clearedFields[agent.FieldStartClaimTarget] = struct{}{}
+}
+
+// StartClaimTargetCleared returns if the "start_claim_target" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimTargetCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimTarget]
+	return ok
+}
+
+// ResetStartClaimTarget resets all changes to the "start_claim_target" field.
+func (m *AgentMutation) ResetStartClaimTarget() {
+	m.start_claim_target = nil
+	delete(m.clearedFields, agent.FieldStartClaimTarget)
+}
+
+// SetStartClaimAt sets the "start_claim_at" field.
+func (m *AgentMutation) SetStartClaimAt(t time.Time) {
+	m.start_claim_at = &t
+}
+
+// StartClaimAt returns the value of the "start_claim_at" field in the mutation.
+func (m *AgentMutation) StartClaimAt() (r time.Time, exists bool) {
+	v := m.start_claim_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimAt returns the old "start_claim_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimAt: %w", err)
+	}
+	return oldValue.StartClaimAt, nil
+}
+
+// ClearStartClaimAt clears the value of the "start_claim_at" field.
+func (m *AgentMutation) ClearStartClaimAt() {
+	m.start_claim_at = nil
+	m.clearedFields[agent.FieldStartClaimAt] = struct{}{}
+}
+
+// StartClaimAtCleared returns if the "start_claim_at" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimAt]
+	return ok
+}
+
+// ResetStartClaimAt resets all changes to the "start_claim_at" field.
+func (m *AgentMutation) ResetStartClaimAt() {
+	m.start_claim_at = nil
+	delete(m.clearedFields, agent.FieldStartClaimAt)
+}
+
+// SetStartClaimLeaseUntil sets the "start_claim_lease_until" field.
+func (m *AgentMutation) SetStartClaimLeaseUntil(t time.Time) {
+	m.start_claim_lease_until = &t
+}
+
+// StartClaimLeaseUntil returns the value of the "start_claim_lease_until" field in the mutation.
+func (m *AgentMutation) StartClaimLeaseUntil() (r time.Time, exists bool) {
+	v := m.start_claim_lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimLeaseUntil returns the old "start_claim_lease_until" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimLeaseUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimLeaseUntil: %w", err)
+	}
+	return oldValue.StartClaimLeaseUntil, nil
+}
+
+// ClearStartClaimLeaseUntil clears the value of the "start_claim_lease_until" field.
+func (m *AgentMutation) ClearStartClaimLeaseUntil() {
+	m.start_claim_lease_until = nil
+	m.clearedFields[agent.FieldStartClaimLeaseUntil] = struct{}{}
+}
+
+// StartClaimLeaseUntilCleared returns if the "start_claim_lease_until" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimLeaseUntilCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimLeaseUntil]
+	return ok
+}
+
+// ResetStartClaimLeaseUntil resets all changes to the "start_claim_lease_until" field.
+func (m *AgentMutation) ResetStartClaimLeaseUntil() {
+	m.start_claim_lease_until = nil
+	delete(m.clearedFields, agent.FieldStartClaimLeaseUntil)
+}
+
+// SetStartClaimUnconfirmedAt sets the "start_claim_unconfirmed_at" field.
+func (m *AgentMutation) SetStartClaimUnconfirmedAt(t time.Time) {
+	m.start_claim_unconfirmed_at = &t
+}
+
+// StartClaimUnconfirmedAt returns the value of the "start_claim_unconfirmed_at" field in the mutation.
+func (m *AgentMutation) StartClaimUnconfirmedAt() (r time.Time, exists bool) {
+	v := m.start_claim_unconfirmed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimUnconfirmedAt returns the old "start_claim_unconfirmed_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimUnconfirmedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimUnconfirmedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimUnconfirmedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimUnconfirmedAt: %w", err)
+	}
+	return oldValue.StartClaimUnconfirmedAt, nil
+}
+
+// ClearStartClaimUnconfirmedAt clears the value of the "start_claim_unconfirmed_at" field.
+func (m *AgentMutation) ClearStartClaimUnconfirmedAt() {
+	m.start_claim_unconfirmed_at = nil
+	m.clearedFields[agent.FieldStartClaimUnconfirmedAt] = struct{}{}
+}
+
+// StartClaimUnconfirmedAtCleared returns if the "start_claim_unconfirmed_at" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimUnconfirmedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimUnconfirmedAt]
+	return ok
+}
+
+// ResetStartClaimUnconfirmedAt resets all changes to the "start_claim_unconfirmed_at" field.
+func (m *AgentMutation) ResetStartClaimUnconfirmedAt() {
+	m.start_claim_unconfirmed_at = nil
+	delete(m.clearedFields, agent.FieldStartClaimUnconfirmedAt)
+}
+
+// SetStartClaimHoldUntil sets the "start_claim_hold_until" field.
+func (m *AgentMutation) SetStartClaimHoldUntil(t time.Time) {
+	m.start_claim_hold_until = &t
+}
+
+// StartClaimHoldUntil returns the value of the "start_claim_hold_until" field in the mutation.
+func (m *AgentMutation) StartClaimHoldUntil() (r time.Time, exists bool) {
+	v := m.start_claim_hold_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimHoldUntil returns the old "start_claim_hold_until" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimHoldUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimHoldUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimHoldUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimHoldUntil: %w", err)
+	}
+	return oldValue.StartClaimHoldUntil, nil
+}
+
+// ClearStartClaimHoldUntil clears the value of the "start_claim_hold_until" field.
+func (m *AgentMutation) ClearStartClaimHoldUntil() {
+	m.start_claim_hold_until = nil
+	m.clearedFields[agent.FieldStartClaimHoldUntil] = struct{}{}
+}
+
+// StartClaimHoldUntilCleared returns if the "start_claim_hold_until" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimHoldUntilCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimHoldUntil]
+	return ok
+}
+
+// ResetStartClaimHoldUntil resets all changes to the "start_claim_hold_until" field.
+func (m *AgentMutation) ResetStartClaimHoldUntil() {
+	m.start_claim_hold_until = nil
+	delete(m.clearedFields, agent.FieldStartClaimHoldUntil)
+}
+
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (m *AgentMutation) SetStartClaimLaunchID(s string) {
+	m.start_claim_launch_id = &s
+}
+
+// StartClaimLaunchID returns the value of the "start_claim_launch_id" field in the mutation.
+func (m *AgentMutation) StartClaimLaunchID() (r string, exists bool) {
+	v := m.start_claim_launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimLaunchID returns the old "start_claim_launch_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimLaunchID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimLaunchID: %w", err)
+	}
+	return oldValue.StartClaimLaunchID, nil
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (m *AgentMutation) ClearStartClaimLaunchID() {
+	m.start_claim_launch_id = nil
+	m.clearedFields[agent.FieldStartClaimLaunchID] = struct{}{}
+}
+
+// StartClaimLaunchIDCleared returns if the "start_claim_launch_id" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimLaunchIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimLaunchID]
+	return ok
+}
+
+// ResetStartClaimLaunchID resets all changes to the "start_claim_launch_id" field.
+func (m *AgentMutation) ResetStartClaimLaunchID() {
+	m.start_claim_launch_id = nil
+	delete(m.clearedFields, agent.FieldStartClaimLaunchID)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -8065,7 +8569,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 66)
+	fields := make([]string, 0, 76)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8264,6 +8768,36 @@ func (m *AgentMutation) Fields() []string {
 	if m.run_intent_at != nil {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.start_claim_id != nil {
+		fields = append(fields, agent.FieldStartClaimID)
+	}
+	if m.start_claim_kind != nil {
+		fields = append(fields, agent.FieldStartClaimKind)
+	}
+	if m.start_claim_state != nil {
+		fields = append(fields, agent.FieldStartClaimState)
+	}
+	if m.start_claim_owner != nil {
+		fields = append(fields, agent.FieldStartClaimOwner)
+	}
+	if m.start_claim_target != nil {
+		fields = append(fields, agent.FieldStartClaimTarget)
+	}
+	if m.start_claim_at != nil {
+		fields = append(fields, agent.FieldStartClaimAt)
+	}
+	if m.start_claim_lease_until != nil {
+		fields = append(fields, agent.FieldStartClaimLeaseUntil)
+	}
+	if m.start_claim_unconfirmed_at != nil {
+		fields = append(fields, agent.FieldStartClaimUnconfirmedAt)
+	}
+	if m.start_claim_hold_until != nil {
+		fields = append(fields, agent.FieldStartClaimHoldUntil)
+	}
+	if m.start_claim_launch_id != nil {
+		fields = append(fields, agent.FieldStartClaimLaunchID)
+	}
 	return fields
 }
 
@@ -8404,6 +8938,26 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RunIntent()
 	case agent.FieldRunIntentAt:
 		return m.RunIntentAt()
+	case agent.FieldStartClaimID:
+		return m.StartClaimID()
+	case agent.FieldStartClaimKind:
+		return m.StartClaimKind()
+	case agent.FieldStartClaimState:
+		return m.StartClaimState()
+	case agent.FieldStartClaimOwner:
+		return m.StartClaimOwner()
+	case agent.FieldStartClaimTarget:
+		return m.StartClaimTarget()
+	case agent.FieldStartClaimAt:
+		return m.StartClaimAt()
+	case agent.FieldStartClaimLeaseUntil:
+		return m.StartClaimLeaseUntil()
+	case agent.FieldStartClaimUnconfirmedAt:
+		return m.StartClaimUnconfirmedAt()
+	case agent.FieldStartClaimHoldUntil:
+		return m.StartClaimHoldUntil()
+	case agent.FieldStartClaimLaunchID:
+		return m.StartClaimLaunchID()
 	}
 	return nil, false
 }
@@ -8545,6 +9099,26 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRunIntent(ctx)
 	case agent.FieldRunIntentAt:
 		return m.OldRunIntentAt(ctx)
+	case agent.FieldStartClaimID:
+		return m.OldStartClaimID(ctx)
+	case agent.FieldStartClaimKind:
+		return m.OldStartClaimKind(ctx)
+	case agent.FieldStartClaimState:
+		return m.OldStartClaimState(ctx)
+	case agent.FieldStartClaimOwner:
+		return m.OldStartClaimOwner(ctx)
+	case agent.FieldStartClaimTarget:
+		return m.OldStartClaimTarget(ctx)
+	case agent.FieldStartClaimAt:
+		return m.OldStartClaimAt(ctx)
+	case agent.FieldStartClaimLeaseUntil:
+		return m.OldStartClaimLeaseUntil(ctx)
+	case agent.FieldStartClaimUnconfirmedAt:
+		return m.OldStartClaimUnconfirmedAt(ctx)
+	case agent.FieldStartClaimHoldUntil:
+		return m.OldStartClaimHoldUntil(ctx)
+	case agent.FieldStartClaimLaunchID:
+		return m.OldStartClaimLaunchID(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9016,6 +9590,76 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRunIntentAt(v)
 		return nil
+	case agent.FieldStartClaimID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimID(v)
+		return nil
+	case agent.FieldStartClaimKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimKind(v)
+		return nil
+	case agent.FieldStartClaimState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimState(v)
+		return nil
+	case agent.FieldStartClaimOwner:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimOwner(v)
+		return nil
+	case agent.FieldStartClaimTarget:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimTarget(v)
+		return nil
+	case agent.FieldStartClaimAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimAt(v)
+		return nil
+	case agent.FieldStartClaimLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimLeaseUntil(v)
+		return nil
+	case agent.FieldStartClaimUnconfirmedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimUnconfirmedAt(v)
+		return nil
+	case agent.FieldStartClaimHoldUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimHoldUntil(v)
+		return nil
+	case agent.FieldStartClaimLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimLaunchID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9280,6 +9924,36 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunIntentAt) {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.FieldCleared(agent.FieldStartClaimID) {
+		fields = append(fields, agent.FieldStartClaimID)
+	}
+	if m.FieldCleared(agent.FieldStartClaimKind) {
+		fields = append(fields, agent.FieldStartClaimKind)
+	}
+	if m.FieldCleared(agent.FieldStartClaimState) {
+		fields = append(fields, agent.FieldStartClaimState)
+	}
+	if m.FieldCleared(agent.FieldStartClaimOwner) {
+		fields = append(fields, agent.FieldStartClaimOwner)
+	}
+	if m.FieldCleared(agent.FieldStartClaimTarget) {
+		fields = append(fields, agent.FieldStartClaimTarget)
+	}
+	if m.FieldCleared(agent.FieldStartClaimAt) {
+		fields = append(fields, agent.FieldStartClaimAt)
+	}
+	if m.FieldCleared(agent.FieldStartClaimLeaseUntil) {
+		fields = append(fields, agent.FieldStartClaimLeaseUntil)
+	}
+	if m.FieldCleared(agent.FieldStartClaimUnconfirmedAt) {
+		fields = append(fields, agent.FieldStartClaimUnconfirmedAt)
+	}
+	if m.FieldCleared(agent.FieldStartClaimHoldUntil) {
+		fields = append(fields, agent.FieldStartClaimHoldUntil)
+	}
+	if m.FieldCleared(agent.FieldStartClaimLaunchID) {
+		fields = append(fields, agent.FieldStartClaimLaunchID)
+	}
 	return fields
 }
 
@@ -9440,6 +10114,36 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ClearRunIntentAt()
+		return nil
+	case agent.FieldStartClaimID:
+		m.ClearStartClaimID()
+		return nil
+	case agent.FieldStartClaimKind:
+		m.ClearStartClaimKind()
+		return nil
+	case agent.FieldStartClaimState:
+		m.ClearStartClaimState()
+		return nil
+	case agent.FieldStartClaimOwner:
+		m.ClearStartClaimOwner()
+		return nil
+	case agent.FieldStartClaimTarget:
+		m.ClearStartClaimTarget()
+		return nil
+	case agent.FieldStartClaimAt:
+		m.ClearStartClaimAt()
+		return nil
+	case agent.FieldStartClaimLeaseUntil:
+		m.ClearStartClaimLeaseUntil()
+		return nil
+	case agent.FieldStartClaimUnconfirmedAt:
+		m.ClearStartClaimUnconfirmedAt()
+		return nil
+	case agent.FieldStartClaimHoldUntil:
+		m.ClearStartClaimHoldUntil()
+		return nil
+	case agent.FieldStartClaimLaunchID:
+		m.ClearStartClaimLaunchID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -9646,6 +10350,36 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ResetRunIntentAt()
+		return nil
+	case agent.FieldStartClaimID:
+		m.ResetStartClaimID()
+		return nil
+	case agent.FieldStartClaimKind:
+		m.ResetStartClaimKind()
+		return nil
+	case agent.FieldStartClaimState:
+		m.ResetStartClaimState()
+		return nil
+	case agent.FieldStartClaimOwner:
+		m.ResetStartClaimOwner()
+		return nil
+	case agent.FieldStartClaimTarget:
+		m.ResetStartClaimTarget()
+		return nil
+	case agent.FieldStartClaimAt:
+		m.ResetStartClaimAt()
+		return nil
+	case agent.FieldStartClaimLeaseUntil:
+		m.ResetStartClaimLeaseUntil()
+		return nil
+	case agent.FieldStartClaimUnconfirmedAt:
+		m.ResetStartClaimUnconfirmedAt()
+		return nil
+	case agent.FieldStartClaimHoldUntil:
+		m.ResetStartClaimHoldUntil()
+		return nil
+	case agent.FieldStartClaimLaunchID:
+		m.ResetStartClaimLaunchID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
@@ -11060,6 +11794,706 @@ func (m *AgentIdentityKeyMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentIdentityKeyMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AgentIdentityKey edge %s", name)
+}
+
+// AgentRecoveryMutation represents an operation that mutates the AgentRecovery nodes in the graph.
+type AgentRecoveryMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *string
+	broker_id          *string
+	observed_state     *string
+	observed_target    *string
+	observed_at        *time.Time
+	first_absent_at    *time.Time
+	observed_in_flight *bool
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*AgentRecovery, error)
+	predicates         []predicate.AgentRecovery
+}
+
+var _ ent.Mutation = (*AgentRecoveryMutation)(nil)
+
+// agentrecoveryOption allows management of the mutation configuration using functional options.
+type agentrecoveryOption func(*AgentRecoveryMutation)
+
+// newAgentRecoveryMutation creates new mutation for the AgentRecovery entity.
+func newAgentRecoveryMutation(c config, op Op, opts ...agentrecoveryOption) *AgentRecoveryMutation {
+	m := &AgentRecoveryMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentRecovery,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentRecoveryID sets the ID field of the mutation.
+func withAgentRecoveryID(id string) agentrecoveryOption {
+	return func(m *AgentRecoveryMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentRecovery
+		)
+		m.oldValue = func(ctx context.Context) (*AgentRecovery, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentRecovery.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentRecovery sets the old AgentRecovery of the mutation.
+func withAgentRecovery(node *AgentRecovery) agentrecoveryOption {
+	return func(m *AgentRecoveryMutation) {
+		m.oldValue = func(context.Context) (*AgentRecovery, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentRecoveryMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentRecoveryMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentRecovery entities.
+func (m *AgentRecoveryMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentRecoveryMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentRecoveryMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentRecovery.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *AgentRecoveryMutation) SetBrokerID(s string) {
+	m.broker_id = &s
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *AgentRecoveryMutation) BrokerID() (r string, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ClearBrokerID clears the value of the "broker_id" field.
+func (m *AgentRecoveryMutation) ClearBrokerID() {
+	m.broker_id = nil
+	m.clearedFields[agentrecovery.FieldBrokerID] = struct{}{}
+}
+
+// BrokerIDCleared returns if the "broker_id" field was cleared in this mutation.
+func (m *AgentRecoveryMutation) BrokerIDCleared() bool {
+	_, ok := m.clearedFields[agentrecovery.FieldBrokerID]
+	return ok
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *AgentRecoveryMutation) ResetBrokerID() {
+	m.broker_id = nil
+	delete(m.clearedFields, agentrecovery.FieldBrokerID)
+}
+
+// SetObservedState sets the "observed_state" field.
+func (m *AgentRecoveryMutation) SetObservedState(s string) {
+	m.observed_state = &s
+}
+
+// ObservedState returns the value of the "observed_state" field in the mutation.
+func (m *AgentRecoveryMutation) ObservedState() (r string, exists bool) {
+	v := m.observed_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservedState returns the old "observed_state" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldObservedState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservedState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservedState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservedState: %w", err)
+	}
+	return oldValue.ObservedState, nil
+}
+
+// ClearObservedState clears the value of the "observed_state" field.
+func (m *AgentRecoveryMutation) ClearObservedState() {
+	m.observed_state = nil
+	m.clearedFields[agentrecovery.FieldObservedState] = struct{}{}
+}
+
+// ObservedStateCleared returns if the "observed_state" field was cleared in this mutation.
+func (m *AgentRecoveryMutation) ObservedStateCleared() bool {
+	_, ok := m.clearedFields[agentrecovery.FieldObservedState]
+	return ok
+}
+
+// ResetObservedState resets all changes to the "observed_state" field.
+func (m *AgentRecoveryMutation) ResetObservedState() {
+	m.observed_state = nil
+	delete(m.clearedFields, agentrecovery.FieldObservedState)
+}
+
+// SetObservedTarget sets the "observed_target" field.
+func (m *AgentRecoveryMutation) SetObservedTarget(s string) {
+	m.observed_target = &s
+}
+
+// ObservedTarget returns the value of the "observed_target" field in the mutation.
+func (m *AgentRecoveryMutation) ObservedTarget() (r string, exists bool) {
+	v := m.observed_target
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservedTarget returns the old "observed_target" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldObservedTarget(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservedTarget is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservedTarget requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservedTarget: %w", err)
+	}
+	return oldValue.ObservedTarget, nil
+}
+
+// ClearObservedTarget clears the value of the "observed_target" field.
+func (m *AgentRecoveryMutation) ClearObservedTarget() {
+	m.observed_target = nil
+	m.clearedFields[agentrecovery.FieldObservedTarget] = struct{}{}
+}
+
+// ObservedTargetCleared returns if the "observed_target" field was cleared in this mutation.
+func (m *AgentRecoveryMutation) ObservedTargetCleared() bool {
+	_, ok := m.clearedFields[agentrecovery.FieldObservedTarget]
+	return ok
+}
+
+// ResetObservedTarget resets all changes to the "observed_target" field.
+func (m *AgentRecoveryMutation) ResetObservedTarget() {
+	m.observed_target = nil
+	delete(m.clearedFields, agentrecovery.FieldObservedTarget)
+}
+
+// SetObservedAt sets the "observed_at" field.
+func (m *AgentRecoveryMutation) SetObservedAt(t time.Time) {
+	m.observed_at = &t
+}
+
+// ObservedAt returns the value of the "observed_at" field in the mutation.
+func (m *AgentRecoveryMutation) ObservedAt() (r time.Time, exists bool) {
+	v := m.observed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservedAt returns the old "observed_at" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldObservedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservedAt: %w", err)
+	}
+	return oldValue.ObservedAt, nil
+}
+
+// ClearObservedAt clears the value of the "observed_at" field.
+func (m *AgentRecoveryMutation) ClearObservedAt() {
+	m.observed_at = nil
+	m.clearedFields[agentrecovery.FieldObservedAt] = struct{}{}
+}
+
+// ObservedAtCleared returns if the "observed_at" field was cleared in this mutation.
+func (m *AgentRecoveryMutation) ObservedAtCleared() bool {
+	_, ok := m.clearedFields[agentrecovery.FieldObservedAt]
+	return ok
+}
+
+// ResetObservedAt resets all changes to the "observed_at" field.
+func (m *AgentRecoveryMutation) ResetObservedAt() {
+	m.observed_at = nil
+	delete(m.clearedFields, agentrecovery.FieldObservedAt)
+}
+
+// SetFirstAbsentAt sets the "first_absent_at" field.
+func (m *AgentRecoveryMutation) SetFirstAbsentAt(t time.Time) {
+	m.first_absent_at = &t
+}
+
+// FirstAbsentAt returns the value of the "first_absent_at" field in the mutation.
+func (m *AgentRecoveryMutation) FirstAbsentAt() (r time.Time, exists bool) {
+	v := m.first_absent_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFirstAbsentAt returns the old "first_absent_at" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldFirstAbsentAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFirstAbsentAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFirstAbsentAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFirstAbsentAt: %w", err)
+	}
+	return oldValue.FirstAbsentAt, nil
+}
+
+// ClearFirstAbsentAt clears the value of the "first_absent_at" field.
+func (m *AgentRecoveryMutation) ClearFirstAbsentAt() {
+	m.first_absent_at = nil
+	m.clearedFields[agentrecovery.FieldFirstAbsentAt] = struct{}{}
+}
+
+// FirstAbsentAtCleared returns if the "first_absent_at" field was cleared in this mutation.
+func (m *AgentRecoveryMutation) FirstAbsentAtCleared() bool {
+	_, ok := m.clearedFields[agentrecovery.FieldFirstAbsentAt]
+	return ok
+}
+
+// ResetFirstAbsentAt resets all changes to the "first_absent_at" field.
+func (m *AgentRecoveryMutation) ResetFirstAbsentAt() {
+	m.first_absent_at = nil
+	delete(m.clearedFields, agentrecovery.FieldFirstAbsentAt)
+}
+
+// SetObservedInFlight sets the "observed_in_flight" field.
+func (m *AgentRecoveryMutation) SetObservedInFlight(b bool) {
+	m.observed_in_flight = &b
+}
+
+// ObservedInFlight returns the value of the "observed_in_flight" field in the mutation.
+func (m *AgentRecoveryMutation) ObservedInFlight() (r bool, exists bool) {
+	v := m.observed_in_flight
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservedInFlight returns the old "observed_in_flight" field's value of the AgentRecovery entity.
+// If the AgentRecovery object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentRecoveryMutation) OldObservedInFlight(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservedInFlight is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservedInFlight requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservedInFlight: %w", err)
+	}
+	return oldValue.ObservedInFlight, nil
+}
+
+// ResetObservedInFlight resets all changes to the "observed_in_flight" field.
+func (m *AgentRecoveryMutation) ResetObservedInFlight() {
+	m.observed_in_flight = nil
+}
+
+// Where appends a list predicates to the AgentRecoveryMutation builder.
+func (m *AgentRecoveryMutation) Where(ps ...predicate.AgentRecovery) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentRecoveryMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentRecoveryMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentRecovery, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentRecoveryMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentRecoveryMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentRecovery).
+func (m *AgentRecoveryMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentRecoveryMutation) Fields() []string {
+	fields := make([]string, 0, 6)
+	if m.broker_id != nil {
+		fields = append(fields, agentrecovery.FieldBrokerID)
+	}
+	if m.observed_state != nil {
+		fields = append(fields, agentrecovery.FieldObservedState)
+	}
+	if m.observed_target != nil {
+		fields = append(fields, agentrecovery.FieldObservedTarget)
+	}
+	if m.observed_at != nil {
+		fields = append(fields, agentrecovery.FieldObservedAt)
+	}
+	if m.first_absent_at != nil {
+		fields = append(fields, agentrecovery.FieldFirstAbsentAt)
+	}
+	if m.observed_in_flight != nil {
+		fields = append(fields, agentrecovery.FieldObservedInFlight)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentRecoveryMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentrecovery.FieldBrokerID:
+		return m.BrokerID()
+	case agentrecovery.FieldObservedState:
+		return m.ObservedState()
+	case agentrecovery.FieldObservedTarget:
+		return m.ObservedTarget()
+	case agentrecovery.FieldObservedAt:
+		return m.ObservedAt()
+	case agentrecovery.FieldFirstAbsentAt:
+		return m.FirstAbsentAt()
+	case agentrecovery.FieldObservedInFlight:
+		return m.ObservedInFlight()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentRecoveryMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentrecovery.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case agentrecovery.FieldObservedState:
+		return m.OldObservedState(ctx)
+	case agentrecovery.FieldObservedTarget:
+		return m.OldObservedTarget(ctx)
+	case agentrecovery.FieldObservedAt:
+		return m.OldObservedAt(ctx)
+	case agentrecovery.FieldFirstAbsentAt:
+		return m.OldFirstAbsentAt(ctx)
+	case agentrecovery.FieldObservedInFlight:
+		return m.OldObservedInFlight(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentRecovery field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentRecoveryMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentrecovery.FieldBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case agentrecovery.FieldObservedState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservedState(v)
+		return nil
+	case agentrecovery.FieldObservedTarget:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservedTarget(v)
+		return nil
+	case agentrecovery.FieldObservedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservedAt(v)
+		return nil
+	case agentrecovery.FieldFirstAbsentAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFirstAbsentAt(v)
+		return nil
+	case agentrecovery.FieldObservedInFlight:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservedInFlight(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentRecovery field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentRecoveryMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentRecoveryMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentRecoveryMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown AgentRecovery numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentRecoveryMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(agentrecovery.FieldBrokerID) {
+		fields = append(fields, agentrecovery.FieldBrokerID)
+	}
+	if m.FieldCleared(agentrecovery.FieldObservedState) {
+		fields = append(fields, agentrecovery.FieldObservedState)
+	}
+	if m.FieldCleared(agentrecovery.FieldObservedTarget) {
+		fields = append(fields, agentrecovery.FieldObservedTarget)
+	}
+	if m.FieldCleared(agentrecovery.FieldObservedAt) {
+		fields = append(fields, agentrecovery.FieldObservedAt)
+	}
+	if m.FieldCleared(agentrecovery.FieldFirstAbsentAt) {
+		fields = append(fields, agentrecovery.FieldFirstAbsentAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentRecoveryMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentRecoveryMutation) ClearField(name string) error {
+	switch name {
+	case agentrecovery.FieldBrokerID:
+		m.ClearBrokerID()
+		return nil
+	case agentrecovery.FieldObservedState:
+		m.ClearObservedState()
+		return nil
+	case agentrecovery.FieldObservedTarget:
+		m.ClearObservedTarget()
+		return nil
+	case agentrecovery.FieldObservedAt:
+		m.ClearObservedAt()
+		return nil
+	case agentrecovery.FieldFirstAbsentAt:
+		m.ClearFirstAbsentAt()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentRecovery nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentRecoveryMutation) ResetField(name string) error {
+	switch name {
+	case agentrecovery.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case agentrecovery.FieldObservedState:
+		m.ResetObservedState()
+		return nil
+	case agentrecovery.FieldObservedTarget:
+		m.ResetObservedTarget()
+		return nil
+	case agentrecovery.FieldObservedAt:
+		m.ResetObservedAt()
+		return nil
+	case agentrecovery.FieldFirstAbsentAt:
+		m.ResetFirstAbsentAt()
+		return nil
+	case agentrecovery.FieldObservedInFlight:
+		m.ResetObservedInFlight()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentRecovery field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentRecoveryMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentRecoveryMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentRecoveryMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentRecoveryMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentRecoveryMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentRecoveryMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentRecoveryMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AgentRecovery unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentRecoveryMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AgentRecovery edge %s", name)
 }
 
 // AgentReincarnationMutation represents an operation that mutates the AgentReincarnation nodes in the graph.
@@ -18478,6 +19912,446 @@ func (m *BrokerSettingMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *BrokerSettingMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown BrokerSetting edge %s", name)
+}
+
+// BrokerTargetInventoryMutation represents an operation that mutates the BrokerTargetInventory nodes in the graph.
+type BrokerTargetInventoryMutation struct {
+	config
+	op                         Op
+	typ                        string
+	id                         *uuid.UUID
+	broker_id                  *string
+	target                     *string
+	last_complete_inventory_at *time.Time
+	clearedFields              map[string]struct{}
+	done                       bool
+	oldValue                   func(context.Context) (*BrokerTargetInventory, error)
+	predicates                 []predicate.BrokerTargetInventory
+}
+
+var _ ent.Mutation = (*BrokerTargetInventoryMutation)(nil)
+
+// brokertargetinventoryOption allows management of the mutation configuration using functional options.
+type brokertargetinventoryOption func(*BrokerTargetInventoryMutation)
+
+// newBrokerTargetInventoryMutation creates new mutation for the BrokerTargetInventory entity.
+func newBrokerTargetInventoryMutation(c config, op Op, opts ...brokertargetinventoryOption) *BrokerTargetInventoryMutation {
+	m := &BrokerTargetInventoryMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBrokerTargetInventory,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBrokerTargetInventoryID sets the ID field of the mutation.
+func withBrokerTargetInventoryID(id uuid.UUID) brokertargetinventoryOption {
+	return func(m *BrokerTargetInventoryMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BrokerTargetInventory
+		)
+		m.oldValue = func(ctx context.Context) (*BrokerTargetInventory, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BrokerTargetInventory.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBrokerTargetInventory sets the old BrokerTargetInventory of the mutation.
+func withBrokerTargetInventory(node *BrokerTargetInventory) brokertargetinventoryOption {
+	return func(m *BrokerTargetInventoryMutation) {
+		m.oldValue = func(context.Context) (*BrokerTargetInventory, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BrokerTargetInventoryMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BrokerTargetInventoryMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BrokerTargetInventory entities.
+func (m *BrokerTargetInventoryMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BrokerTargetInventoryMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BrokerTargetInventoryMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BrokerTargetInventory.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *BrokerTargetInventoryMutation) SetBrokerID(s string) {
+	m.broker_id = &s
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *BrokerTargetInventoryMutation) BrokerID() (r string, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the BrokerTargetInventory entity.
+// If the BrokerTargetInventory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerTargetInventoryMutation) OldBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *BrokerTargetInventoryMutation) ResetBrokerID() {
+	m.broker_id = nil
+}
+
+// SetTarget sets the "target" field.
+func (m *BrokerTargetInventoryMutation) SetTarget(s string) {
+	m.target = &s
+}
+
+// Target returns the value of the "target" field in the mutation.
+func (m *BrokerTargetInventoryMutation) Target() (r string, exists bool) {
+	v := m.target
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTarget returns the old "target" field's value of the BrokerTargetInventory entity.
+// If the BrokerTargetInventory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerTargetInventoryMutation) OldTarget(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTarget is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTarget requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTarget: %w", err)
+	}
+	return oldValue.Target, nil
+}
+
+// ResetTarget resets all changes to the "target" field.
+func (m *BrokerTargetInventoryMutation) ResetTarget() {
+	m.target = nil
+}
+
+// SetLastCompleteInventoryAt sets the "last_complete_inventory_at" field.
+func (m *BrokerTargetInventoryMutation) SetLastCompleteInventoryAt(t time.Time) {
+	m.last_complete_inventory_at = &t
+}
+
+// LastCompleteInventoryAt returns the value of the "last_complete_inventory_at" field in the mutation.
+func (m *BrokerTargetInventoryMutation) LastCompleteInventoryAt() (r time.Time, exists bool) {
+	v := m.last_complete_inventory_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastCompleteInventoryAt returns the old "last_complete_inventory_at" field's value of the BrokerTargetInventory entity.
+// If the BrokerTargetInventory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerTargetInventoryMutation) OldLastCompleteInventoryAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastCompleteInventoryAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastCompleteInventoryAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastCompleteInventoryAt: %w", err)
+	}
+	return oldValue.LastCompleteInventoryAt, nil
+}
+
+// ResetLastCompleteInventoryAt resets all changes to the "last_complete_inventory_at" field.
+func (m *BrokerTargetInventoryMutation) ResetLastCompleteInventoryAt() {
+	m.last_complete_inventory_at = nil
+}
+
+// Where appends a list predicates to the BrokerTargetInventoryMutation builder.
+func (m *BrokerTargetInventoryMutation) Where(ps ...predicate.BrokerTargetInventory) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BrokerTargetInventoryMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BrokerTargetInventoryMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BrokerTargetInventory, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BrokerTargetInventoryMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BrokerTargetInventoryMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BrokerTargetInventory).
+func (m *BrokerTargetInventoryMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BrokerTargetInventoryMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.broker_id != nil {
+		fields = append(fields, brokertargetinventory.FieldBrokerID)
+	}
+	if m.target != nil {
+		fields = append(fields, brokertargetinventory.FieldTarget)
+	}
+	if m.last_complete_inventory_at != nil {
+		fields = append(fields, brokertargetinventory.FieldLastCompleteInventoryAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BrokerTargetInventoryMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case brokertargetinventory.FieldBrokerID:
+		return m.BrokerID()
+	case brokertargetinventory.FieldTarget:
+		return m.Target()
+	case brokertargetinventory.FieldLastCompleteInventoryAt:
+		return m.LastCompleteInventoryAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BrokerTargetInventoryMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case brokertargetinventory.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case brokertargetinventory.FieldTarget:
+		return m.OldTarget(ctx)
+	case brokertargetinventory.FieldLastCompleteInventoryAt:
+		return m.OldLastCompleteInventoryAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BrokerTargetInventory field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerTargetInventoryMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case brokertargetinventory.FieldBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case brokertargetinventory.FieldTarget:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTarget(v)
+		return nil
+	case brokertargetinventory.FieldLastCompleteInventoryAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastCompleteInventoryAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerTargetInventory field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BrokerTargetInventoryMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BrokerTargetInventoryMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerTargetInventoryMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown BrokerTargetInventory numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BrokerTargetInventoryMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BrokerTargetInventoryMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BrokerTargetInventoryMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown BrokerTargetInventory nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BrokerTargetInventoryMutation) ResetField(name string) error {
+	switch name {
+	case brokertargetinventory.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case brokertargetinventory.FieldTarget:
+		m.ResetTarget()
+		return nil
+	case brokertargetinventory.FieldLastCompleteInventoryAt:
+		m.ResetLastCompleteInventoryAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerTargetInventory field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BrokerTargetInventoryMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BrokerTargetInventoryMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BrokerTargetInventoryMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BrokerTargetInventoryMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BrokerTargetInventoryMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BrokerTargetInventoryMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BrokerTargetInventoryMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown BrokerTargetInventory unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BrokerTargetInventoryMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown BrokerTargetInventory edge %s", name)
 }
 
 // ChatLinkCodeMutation represents an operation that mutates the ChatLinkCode nodes in the graph.
@@ -58119,6 +59993,7 @@ type RuntimeBrokerMutation struct {
 	resources                      *string
 	runtimes                       *string
 	default_profile                *string
+	workspace_storage              *string
 	labels                         *map[string]string
 	annotations                    *map[string]string
 	endpoint                       *string
@@ -58820,6 +60695,55 @@ func (m *RuntimeBrokerMutation) ResetDefaultProfile() {
 	delete(m.clearedFields, runtimebroker.FieldDefaultProfile)
 }
 
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) SetWorkspaceStorage(s string) {
+	m.workspace_storage = &s
+}
+
+// WorkspaceStorage returns the value of the "workspace_storage" field in the mutation.
+func (m *RuntimeBrokerMutation) WorkspaceStorage() (r string, exists bool) {
+	v := m.workspace_storage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkspaceStorage returns the old "workspace_storage" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldWorkspaceStorage(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkspaceStorage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkspaceStorage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkspaceStorage: %w", err)
+	}
+	return oldValue.WorkspaceStorage, nil
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) ClearWorkspaceStorage() {
+	m.workspace_storage = nil
+	m.clearedFields[runtimebroker.FieldWorkspaceStorage] = struct{}{}
+}
+
+// WorkspaceStorageCleared returns if the "workspace_storage" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) WorkspaceStorageCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldWorkspaceStorage]
+	return ok
+}
+
+// ResetWorkspaceStorage resets all changes to the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) ResetWorkspaceStorage() {
+	m.workspace_storage = nil
+	delete(m.clearedFields, runtimebroker.FieldWorkspaceStorage)
+}
+
 // SetLabels sets the "labels" field.
 func (m *RuntimeBrokerMutation) SetLabels(value map[string]string) {
 	m.labels = &value
@@ -59403,7 +61327,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -59442,6 +61366,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.default_profile != nil {
 		fields = append(fields, runtimebroker.FieldDefaultProfile)
+	}
+	if m.workspace_storage != nil {
+		fields = append(fields, runtimebroker.FieldWorkspaceStorage)
 	}
 	if m.labels != nil {
 		fields = append(fields, runtimebroker.FieldLabels)
@@ -59513,6 +61440,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Runtimes()
 	case runtimebroker.FieldDefaultProfile:
 		return m.DefaultProfile()
+	case runtimebroker.FieldWorkspaceStorage:
+		return m.WorkspaceStorage()
 	case runtimebroker.FieldLabels:
 		return m.Labels()
 	case runtimebroker.FieldAnnotations:
@@ -59572,6 +61501,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldRuntimes(ctx)
 	case runtimebroker.FieldDefaultProfile:
 		return m.OldDefaultProfile(ctx)
+	case runtimebroker.FieldWorkspaceStorage:
+		return m.OldWorkspaceStorage(ctx)
 	case runtimebroker.FieldLabels:
 		return m.OldLabels(ctx)
 	case runtimebroker.FieldAnnotations:
@@ -59695,6 +61626,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultProfile(v)
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkspaceStorage(v)
 		return nil
 	case runtimebroker.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -59846,6 +61784,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldDefaultProfile) {
 		fields = append(fields, runtimebroker.FieldDefaultProfile)
 	}
+	if m.FieldCleared(runtimebroker.FieldWorkspaceStorage) {
+		fields = append(fields, runtimebroker.FieldWorkspaceStorage)
+	}
 	if m.FieldCleared(runtimebroker.FieldLabels) {
 		fields = append(fields, runtimebroker.FieldLabels)
 	}
@@ -59907,6 +61848,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldDefaultProfile:
 		m.ClearDefaultProfile()
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		m.ClearWorkspaceStorage()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ClearLabels()
@@ -59981,6 +61925,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldDefaultProfile:
 		m.ResetDefaultProfile()
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		m.ResetWorkspaceStorage()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ResetLabels()
