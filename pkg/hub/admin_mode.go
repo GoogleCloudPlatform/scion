@@ -202,11 +202,13 @@ func isAppIconPath(path string) bool {
 // GET returns the current maintenance state; PUT updates it.
 // Authorization: enforced by routeGuard via hub.admin_mode.update permission.
 func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
-	// In postgres mode, delegate to DB-backed handlers: maintenance becomes
-	// durable (persisted in hub_settings) and cluster-wide (propagated via
-	// LISTEN/NOTIFY). File/SQLite mode keeps the exact current behavior
-	// (in-memory state only).
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Whenever OperationalSettings is wired (any DB driver, SQLite included),
+	// delegate to DB-backed handlers: maintenance is durable (persisted in
+	// hub_settings) and, on postgres, cluster-wide (LISTEN/NOTIFY). An
+	// in-memory-only write on a DB-backed hub would be reverted by the next
+	// ops.Update re-applying the maintenance row (#1091). Only a hub with no
+	// OperationalSettings keeps the in-memory state.
+	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetMaintenanceDB(w, ops)

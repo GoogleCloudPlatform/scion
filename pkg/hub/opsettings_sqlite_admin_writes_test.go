@@ -258,3 +258,36 @@ func TestSQLite_PutServerConfig_Layer0Rejected(t *testing.T) {
 		t.Errorf("a rejected Layer-0 PUT must not touch settings.yaml:\n%s", after)
 	}
 }
+
+// Maintenance PUT on SQLite persists to the maintenance DB section. Before the
+// fix it was in-memory only, so with a maintenance row present the next
+// unrelated ops.Update re-applied admin_mode=false.
+func TestSQLite_PutMaintenance_PersistsToDBAndSurvivesUnrelatedUpdate(t *testing.T) {
+	tempSettingsHome(t)
+	srv, st, ops := newSQLiteOpsServer(t, nil, map[string]string{
+		"maintenance": `{"admin_mode":false}`,
+	})
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenance(rr, adminRequest(http.MethodPut, "/api/v1/admin/maintenance",
+		`{"enabled":true,"message":"sqlite maint"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	unrelatedLifecycleUpdate(t, ops)
+
+	if !srv.maintenance.IsEnabled() {
+		t.Error("maintenance disabled after unrelated ops.Update; the PUT was reverted")
+	}
+	if got := srv.maintenance.Message(); got != "sqlite maint" {
+		t.Errorf("maintenance message = %q, want %q", got, "sqlite maint")
+	}
+	rec, doc := hubSettingDocMap(t, st, "maintenance")
+	if got, _ := doc["admin_mode"].(bool); !got {
+		t.Errorf("DB maintenance.admin_mode = %v, want true", doc["admin_mode"])
+	}
+	if rec.Origin != "managed" {
+		t.Errorf("DB maintenance origin = %q, want managed", rec.Origin)
+	}
+}
