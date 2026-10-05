@@ -346,11 +346,12 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // user-created agent's chain contains only that one recorded edge. So having
 // a user recreate this agent directly always clears the cause, whether the
 // unrecorded link was this agent or an ancestor; the message does not need to
-// identify which hop failed. Recreating the agent from another agent keeps
-// that agent's chain, and reincarnating an agent keeps its existing edge, so
-// neither clears the cause. The same cause also covers a hop whose provenance
-// version this binary does not interpret (hopEffectCeilingDeny); the remedy
-// is the same for both.
+// identify which hop failed. Recreating the agent from an agent whose chain
+// includes the unrecorded hop (for example the same parent) keeps that hop,
+// and reincarnating an agent keeps its existing edge, so neither clears the
+// cause. The same cause also covers a hop whose provenance version this
+// binary does not interpret (hopEffectCeilingDeny); the remedy is the same
+// for both.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
