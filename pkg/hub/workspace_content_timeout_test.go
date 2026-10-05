@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -246,4 +248,26 @@ func TestProjectWorkspaceList_HungStorageReturns503(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+}
+
+// When the project path cannot be resolved (here: a hung workspace mount),
+// post-deletion filesystem cleanup is skipped. The skip must be logged so
+// a left-behind directory is visible to operators.
+func TestExecutePostDeletionEffects_LogsUnresolvedProjectPath(t *testing.T) {
+	f := newHungPathFixture(t, "deleted-hung-project")
+	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+	hangReadDirFor(t, mountRoot)
+
+	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+
+	project := &store.Project{ID: "proj-deleted-hung", Slug: f.slug}
+	srv.executePostDeletionEffects(context.Background(), project.ID, project, deletionEffectInputs{})
+
+	out := logs.String()
+	assert.Contains(t, out, "skipping removal, the directory may be left behind")
+	assert.Contains(t, out, "project_id="+project.ID)
+	assert.Contains(t, out, "slug="+f.slug)
+	assert.DirExists(t, f.localDir, "nothing is removed when the path is unresolved")
 }

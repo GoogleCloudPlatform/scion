@@ -2960,6 +2960,9 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 				}
 			}
 		}
+	} else {
+		s.projectsLogger().Warn("could not resolve project workspace directory; skipping rename, the directory may keep the old slug",
+			"project_id", project.ID, "slug", oldSlug, "new_slug", newSlug, "error", err)
 	}
 
 	// Migrate the project config directory (~/.scion/project-configs/<slug>__<short-uuid>/).
@@ -3132,6 +3135,9 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
 					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
 			}
+		} else {
+			s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
+				"project_id", projectID, "slug", project.Slug, "error", err)
 		}
 	}
 	s.webdavLocks.Delete(projectID)
