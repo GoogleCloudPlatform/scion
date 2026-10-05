@@ -68,33 +68,43 @@ describe('StateManager user-scoped chat subjects', () => {
 });
 
 /**
- * Chat notifications are published on `user.{id}.notification` so that a DM
- * preview reaches only its recipient. The user-scoped chat branch routes
- * anything that is not typing or read-state to `chat-message-received`, so
- * without an explicit case the notification would masquerade as a chat message
- * and the tray would silently stop refreshing.
+ * DM messages and read-state changes are published on the caller's own
+ * `user.{id}.chat.*` subjects. They must be subscribed in every scope, so a
+ * DM raises a popup and moves the unread badge on any page.
  */
-describe('StateManager user-scoped notification subject', () => {
-  const payload = {
-    id: 'notif-1',
-    status: 'MENTION',
-    message: '@Ada mentioned you in #design: have a look',
-    subscriberId: 'b',
-  };
+describe('StateManager own chat subject', () => {
+  const subjectsFor = (
+    sm: StateManager,
+    scope: Parameters<StateManager['setScope']>[0]
+  ): string[] =>
+    (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
 
-  it('routes user.{id}.notification to notification-created with its payload', () => {
+  it('marks a message on the own subject as delivered to the user', () => {
+    const sm = new StateManager();
+    const message = vi.fn();
+    sm.addEventListener('chat-message-received', message);
+
+    emit(sm, 'user.b.chat.dm', { threadId: 'dm:user:a:user:b', id: 'm1' });
+
+    const detail = (message.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual({
+      threadId: 'dm:user:a:user:b',
+      id: 'm1',
+      deliveredToUser: true,
+    });
+  });
+
+  it('no longer routes the retired per-user notification subject', () => {
     const sm = new StateManager();
     const created = vi.fn();
     const message = vi.fn();
     sm.addEventListener('notification-created', created);
     sm.addEventListener('chat-message-received', message);
 
-    emit(sm, 'user.b.notification', payload);
+    emit(sm, 'user.b.notification', { id: 'n1', status: 'MENTION' });
 
+    expect(created).not.toHaveBeenCalled();
     expect(message).not.toHaveBeenCalled();
-    expect(created).toHaveBeenCalledTimes(1);
-    const detail = (created.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
-    expect(detail.data).toEqual(payload);
   });
 
   it('still routes the unscoped notification subject to notification-created', () => {
@@ -107,31 +117,29 @@ describe('StateManager user-scoped notification subject', () => {
     expect(created).toHaveBeenCalledTimes(1);
   });
 
-  it('subscribes to the per-user notification subject in a non-chat scope', () => {
+  it('subscribes to the own chat subject in every view scope', () => {
     const sm = new StateManager();
-    const subjectsFor = (scope: Parameters<StateManager['setScope']>[0]): string[] =>
-      (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
-
-    expect(subjectsFor({ type: 'dashboard' })).not.toContain('user.me.notification');
+    expect(subjectsFor(sm, { type: 'dashboard' })).not.toContain('user.me.chat.>');
 
     sm.setCurrentUserId('me');
 
-    expect(subjectsFor({ type: 'dashboard' })).toContain('user.me.notification');
-    expect(subjectsFor({ type: 'project', projectId: 'p1' })).toContain('user.me.notification');
-    expect(subjectsFor({ type: 'chat', spaceIds: ['p1'], userId: 'me' })).toContain(
-      'user.me.notification'
-    );
+    for (const scope of [
+      { type: 'dashboard' },
+      { type: 'project', projectId: 'p1' },
+      { type: 'agent-detail', projectId: 'p1', agentId: 'a1' },
+      { type: 'brokers-list' },
+    ] as const) {
+      const subjects = subjectsFor(sm, scope);
+      expect(subjects).toContain('user.me.chat.>');
+      expect(subjects).not.toContain('user.me.notification');
+    }
   });
 
-  it('subscribes to the per-user notification subject in chat scope before the user id is set', () => {
+  it('lists the own chat subject once in chat scope', () => {
     const sm = new StateManager();
-    const subjects = (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(
-      { type: 'chat', spaceIds: ['p1'], userId: 'me' }
-    );
-
-    // `user.me.chat.>` does not match `user.me.notification` — the chat scope
-    // needs the notification subject listed in its own right.
-    expect(subjects).toContain('user.me.notification');
+    sm.setCurrentUserId('me');
+    const subjects = subjectsFor(sm, { type: 'chat', spaceIds: ['p1'], userId: 'me' });
+    expect(subjects.filter((s) => s === 'user.me.chat.>')).toHaveLength(1);
   });
 });
 
@@ -148,7 +156,7 @@ describe('StateManager agent-feed scope', () => {
 
     sm.setCurrentUserId('me');
 
-    // No per-user notification subject: the view connection already holds it.
+    // No own chat subject: the view connection already holds it.
     expect(subjectsFor(sm, { type: 'agent-feed' })).toEqual(['project.*.agent.>']);
   });
 

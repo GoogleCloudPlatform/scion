@@ -35,6 +35,8 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
+import { chatNotifications } from '../../../client/chat-notifications.js';
+import { chatUnread } from '../../../client/chat-unread.js';
 import {
   CHAT_STARTUP_REUSE_MS,
   chatLoadClock,
@@ -2763,6 +2765,9 @@ export class ScionChatSpaceRail extends LitElement {
         this.setThreadMuted(projectId, thread.id, thread.muted === true);
         return;
       }
+      // Muting changes what counts as unread and what may pop up.
+      chatNotifications.invalidateConversationInfo();
+      chatUnread.scheduleRefresh();
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
         this.setThreadMuted(projectId, thread.id, data.muted);

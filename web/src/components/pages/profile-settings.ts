@@ -32,6 +32,7 @@ import {
   pushPermission,
   setPushOptIn,
   PUSH_PREFERENCE_EVENT,
+  type PushCategory,
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
@@ -42,8 +43,13 @@ import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 
 @customElement('scion-page-profile-settings')
 export class ScionPageProfileSettings extends LitElement {
+  /** Chat message popups: opted in and permitted. */
   @state()
-  private _pushEnabled = false;
+  private _chatPushEnabled = false;
+
+  /** Agent event popups: opted in and permitted. */
+  @state()
+  private _agentPushEnabled = false;
 
   @state()
   private _permissionState: PushPermissionState = 'default';
@@ -331,24 +337,25 @@ export class ScionPageProfileSettings extends LitElement {
 
   private _initNotificationState(): void {
     this._permissionState = pushPermission();
-    this._pushEnabled = canShowPushNotification();
+    this._chatPushEnabled = canShowPushNotification('chat');
+    this._agentPushEnabled = canShowPushNotification('agent');
   }
 
-  private async _handleToggle(e: Event): Promise<void> {
+  private async _handleToggle(e: Event, category: PushCategory): Promise<void> {
     const target = e.target as HTMLInputElement & { checked: boolean };
     const wantsEnabled = target.checked;
 
     if (!wantsEnabled) {
-      setPushOptIn(false);
+      setPushOptIn(category, false);
       this._initNotificationState();
       return;
     }
 
     // Requesting permission from the change handler keeps it inside the user
     // gesture, which is the only place browsers accept the request.
-    this._permissionState = await enablePushWithPermission();
+    this._permissionState = await enablePushWithPermission(category);
     this._initNotificationState();
-    target.checked = this._pushEnabled;
+    target.checked = category === 'chat' ? this._chatPushEnabled : this._agentPushEnabled;
   }
 
   private _handleChimeToggle(e: Event): void {
@@ -404,7 +411,7 @@ export class ScionPageProfileSettings extends LitElement {
         return html`
           <div class="permission-status status-default">
             <sl-icon name="info-circle"></sl-icon>
-            Enable the toggle to request notification permission.
+            Turn on an alert toggle to request notification permission.
           </div>
         `;
       default:
@@ -432,17 +439,38 @@ export class ScionPageProfileSettings extends LitElement {
 
         <div class="setting-row">
           <div class="setting-info">
-            <p class="setting-label">Enable Push Notifications</p>
+            <p class="setting-label">Chat message alerts</p>
             <p class="setting-description">
-              Receive browser notifications when agents complete tasks, encounter errors, or need
-              your input.
+              Show a browser notification for each new message in your direct messages and in
+              threads you are a member of. Muted conversations stay silent.
             </p>
           </div>
           <div class="setting-control">
             <sl-switch
-              ?checked=${this._pushEnabled}
+              data-push-category="chat"
+              aria-label="Chat message alerts"
+              ?checked=${this._chatPushEnabled}
               ?disabled=${isDisabled}
-              @sl-change=${this._handleToggle}
+              @sl-change=${(e: Event): Promise<void> => this._handleToggle(e, 'chat')}
+            ></sl-switch>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">Agent event alerts</p>
+            <p class="setting-description">
+              Show a browser notification when agents complete tasks, encounter errors, or need your
+              input.
+            </p>
+          </div>
+          <div class="setting-control">
+            <sl-switch
+              data-push-category="agent"
+              aria-label="Agent event alerts"
+              ?checked=${this._agentPushEnabled}
+              ?disabled=${isDisabled}
+              @sl-change=${(e: Event): Promise<void> => this._handleToggle(e, 'agent')}
             ></sl-switch>
           </div>
         </div>

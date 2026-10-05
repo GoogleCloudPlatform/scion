@@ -770,14 +770,14 @@ export class StateManager extends EventTarget {
       }
     })();
 
-    // Chat notifications arrive on the subscriber-scoped subject, which the
-    // server authorizes against the session user. It is added in every scope,
-    // not just chat: a mention must still reach the tray and the title badge
-    // while the user is looking at the agent list. Note that the chat scope's
-    // `user.<id>.chat.>` does not cover it — `notification` is not under `chat`.
+    // DM messages and read-state changes arrive on the caller's own chat
+    // subject, which the server authorizes against the session user. It is
+    // added in every scope, not just chat: a DM must still raise a popup and
+    // move the unread badge while the user is looking at the agent list.
     const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
     if (userId) {
-      subs.push(`user.${userId}.notification`);
+      const own = `user.${userId}.chat.>`;
+      if (!subs.includes(own)) subs.push(own);
     }
     return subs;
   }
@@ -817,18 +817,6 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped notifications: user.{userId}.notification
-    //
-    // Without an explicit case here the subject is silently dropped: it has
-    // three tokens, and the user-scoped chat branch below requires four, so
-    // it falls past every branch to the end of handleUpdate. The tray and the
-    // unread badge would then never hear about a chat notification. (It does
-    // not get misrouted to 'chat-message-received' — measured, not assumed.)
-    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
-      this.notifyWithData('notification-created', data);
-      return;
-    }
-
     // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
@@ -849,7 +837,12 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-message-deleted', data);
         }
       } else {
-        this.notifyWithData('chat-message-received', data);
+        // Marked as addressed to this user: only conversations the user
+        // takes part in are published on their own subject.
+        this.notifyWithData('chat-message-received', {
+          ...(data as Record<string, unknown>),
+          deliveredToUser: true,
+        });
       }
       return;
     }

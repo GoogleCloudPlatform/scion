@@ -15,44 +15,48 @@
  */
 
 /**
- * Unread chat count for the tab title badge.
+ * Unread conversation count: the chat mode badge in the header and the tab
+ * title badge show the same number.
  *
- * Two halves, kept separately because they have different sources: the space
- * rollup (threads across all projects) and DMs. On the chat page both arrive
- * with data the page already loaded, and are pushed in rather than fetched
- * again; anywhere else, this module fetches them itself.
+ * The number comes from `GET /api/v1/chat/unread-count`, whose
+ * `conversations` field counts the caller's unread, unmuted conversations
+ * (member threads plus DMs). The server owns membership and muting, so this
+ * module never filters or adds anything itself.
  *
- * Muting is honoured in both halves. A muted conversation is the user saying
- * "stop telling me about this", and a number in the tab title is telling them.
+ * It refreshes, debounced, on every chat message and read-state event, and
+ * whenever the chat page reports that its own lists changed (the user read
+ * or muted something in this tab, which the server does not echo back).
  */
 
-import {
-  CHAT_STARTUP_REUSE_MS,
-  chatDMsLoad,
-  chatLoadClock,
-  chatSpacesLoad,
-} from './chat-list-cache.js';
-import type { SharedLoadOptions } from './chat-list-cache.js';
-import { isChatNotificationStatus } from './chat-notifications.js';
+import { apiFetch } from './api.js';
 import { setUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
+/** The unread count endpoint. */
+export const CHAT_UNREAD_COUNT_URL = '/api/v1/chat/unread-count';
+
+/**
+ * Fired on `window` whenever the count changes. The detail carries the new
+ * count; `chatUnread.count` holds it for late subscribers.
+ */
+export const CHAT_UNREAD_COUNT_EVENT = 'scion:chat-unread-count';
+
+export interface ChatUnreadCountDetail {
+  count: number;
+}
+
 /**
  * Refresh coalescing window. A burst of messages in a busy thread raises one
- * event each; without this the badge would issue a pair of requests per
- * message. Matches the debounce the chat page uses for its own reloads.
+ * event each; without this the badge would issue a request per message.
+ * Matches the debounce the chat page uses for its own reloads.
  */
 export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
 
 /**
  * How long a deferred first refresh waits for the page's first idle period
- * before it asks to run anyway. It runs at idle so it does not compete with
- * the page's own requests. This is the timeout passed to requestIdleCallback
- * (or the fallback timer's delay), so it is a minimum wait for the forced
- * run, not a guaranteed maximum: a hidden tab, a busy main thread or a frozen
- * page can delay the callback further. The first refresh therefore reuses
- * any list load made since start(), however late it runs; events after
- * start() cancel it and fetch fresh data themselves.
+ * before it asks to run anyway. This is the timeout passed to
+ * requestIdleCallback (or the fallback timer's delay), so it is a minimum
+ * wait for the forced run, not a guaranteed maximum.
  */
 export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
 
@@ -60,30 +64,21 @@ type InitialHandle =
   | { kind: 'idle'; id: number }
   | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
 
-/** The unread fields of `GET /api/v1/chat/spaces`. */
-export interface UnreadSpace {
-  unreadCount?: number;
-}
-
-/** The unread fields of `GET /api/v1/chat/dms`. */
-export interface UnreadDM {
-  hasUnread?: boolean;
-  muted?: boolean;
+/** The body of `GET /api/v1/chat/unread-count`. */
+export interface ChatUnreadCountBody {
+  conversations?: number;
+  threads?: number;
+  dms?: number;
 }
 
 /**
- * Unread threads across all spaces.
- *
- * `unreadCount` is the server's rollup and already excludes muted threads, so
- * this must not filter again — it would double-count the exclusion.
+ * The conversation count from a response body, or null when the body does
+ * not carry a usable one (so the caller keeps the last known count).
  */
-export function countUnreadSpaces(spaces: readonly UnreadSpace[]): number {
-  return spaces.reduce((total, s) => total + Math.max(0, s.unreadCount ?? 0), 0);
-}
-
-/** Unread, unmuted DM conversations. */
-export function countUnreadDMs(dms: readonly UnreadDM[]): number {
-  return dms.filter((dm) => dm.hasUnread && !dm.muted).length;
+export function unreadConversations(body: unknown): number | null {
+  const n = (body as ChatUnreadCountBody | null)?.conversations;
+  if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+  return Math.max(0, Math.floor(n));
 }
 
 /**
@@ -102,11 +97,10 @@ function idleCallbacks(): Pick<Window, 'requestIdleCallback' | 'cancelIdleCallba
 }
 
 /**
- * Owns the tab-title unread count for the lifetime of the page.
+ * Owns the unread conversation count for the lifetime of the page.
  */
 export class ChatUnreadCounter {
-  private spaceUnread = 0;
-  private dmUnread = 0;
+  private current = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listening = false;
   private stopped = false;
@@ -114,127 +108,71 @@ export class ChatUnreadCounter {
   private refreshId = 0;
   /** The pending first refresh, until it runs or is superseded. */
   private initial: InitialHandle | null = null;
-  /** When start() ran, on the shared loads' clock. */
-  private startedAt = 0;
-  /**
-   * When the newest event of the pending burst was delivered. The debounced
-   * refresh only needs data requested after it, so it shares a fetch the
-   * chat page made for the same event — the page reloads its DM dots the
-   * moment a message arrives — instead of asking the server again.
-   */
-  private burstEventAt: number | null = null;
-  private readonly boundSchedule = (e: Event): void => this.scheduleRefresh(eventTime(e));
-  private readonly boundNotification = (e: Event): void => this.onNotification(e);
+  private readonly boundSchedule = (): void => this.scheduleRefresh();
+
+  /** The latest known unread conversation count. */
+  get count(): number {
+    return this.current;
+  }
 
   /**
    * Begins tracking. By default the first refresh is deferred to the page's
-   * first idle period (at most INITIAL_REFRESH_MAX_DELAY_MS), so it stays off
-   * the critical path of the page's own requests. With `immediate` it is sent
-   * now: on a chat page the page and rail need the same lists, and share this
-   * request instead of waiting for their own.
+   * first idle period, so it stays off the critical path of the page's own
+   * requests. With `immediate` it is sent now.
    */
   start(options: { immediate?: boolean } = {}): void {
     if (this.listening) return;
     // Anything that can create or clear an unread conversation.
-    stateManager.addEventListener('notification-created', this.boundNotification);
     stateManager.addEventListener('chat-message-received', this.boundSchedule);
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
     this.stopped = false;
-    this.startedAt = chatLoadClock();
-    if (options.immediate) this.runInitialRefresh();
+    if (options.immediate) void this.refresh();
     else this.scheduleInitialRefresh();
   }
 
+  /** Stops tracking and clears the count (a signed-out page shows none). */
   stop(): void {
     if (!this.listening) return;
-    stateManager.removeEventListener('notification-created', this.boundNotification);
     stateManager.removeEventListener('chat-message-received', this.boundSchedule);
     stateManager.removeEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = false;
     this.stopped = true;
     this.cancelPending();
     this.cancelInitialRefresh();
+    this.publish(0);
   }
 
-  /**
-   * Space rollup, from data the chat rail already loaded.
-   *
-   * Neither setter cancels a pending refresh. Each owns one half, and the
-   * refresh they would cancel carries both — so cancelling starves the other
-   * half for as long as pushes keep arriving. The cost of not cancelling is
-   * one redundant fetch that overwrites a push with equally-correct server
-   * data; the cost of cancelling was a tab-title badge that stopped moving
-   * during exactly the burst it exists to report.
-   */
-  setSpaceUnread(spaces: readonly UnreadSpace[]): void {
-    this.spaceUnread = countUnreadSpaces(spaces);
-    this.publish();
-  }
-
-  /** DM half, from data the chat page already loaded. */
-  setDMUnread(dms: readonly UnreadDM[]): void {
-    this.dmUnread = countUnreadDMs(dms);
-    this.publish();
-  }
-
-  /**
-   * Refreshes for chat notifications only.
-   *
-   * Agent-status notifications cannot change an unread chat count, and they
-   * still broadcast to every logged-in session (#1125) — so without this
-   * guard one agent-status event anywhere on the deployment costs every
-   * signed-in browser a `/chat/spaces` + `/chat/dms` pair, on every page.
-   * `/chat/spaces` is the heaviest chat endpoint there is.
-   *
-   * Unscoped events carry no payload, so they fail the same test as a
-   * non-chat status and need no separate branch.
-   */
-  private onNotification(e: Event): void {
-    const { detail } = e as CustomEvent<{ data?: { status?: string } } | undefined>;
-    if (!isChatNotificationStatus(detail?.data?.status)) return;
-    this.scheduleRefresh(eventTime(e));
-  }
-
-  /**
-   * Coalesces a burst of events into a single refresh. `eventAt` is when
-   * the triggering event was delivered (default: now); the refresh accepts
-   * any request started after the newest one.
-   */
-  scheduleRefresh(eventAt: number = chatLoadClock()): void {
-    this.burstEventAt = Math.max(this.burstEventAt ?? eventAt, eventAt);
-    // This refresh carries both halves, so a pending first refresh would
-    // only repeat it.
+  /** Coalesces a burst of events into a single refresh. */
+  scheduleRefresh(): void {
+    if (!this.listening) return;
+    // This refresh supersedes a pending first refresh.
     this.cancelInitialRefresh();
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      const startedAfter = this.burstEventAt ?? chatLoadClock();
-      this.burstEventAt = null;
-      void this.refresh({ startedAfter });
+      void this.refresh();
     }, UNREAD_REFRESH_DEBOUNCE_MS);
   }
 
-  /**
-   * Recomputes both halves from the server. Without options this always
-   * fetches; `start` passes `maxAgeMs` to share the startup loads, and the
-   * debounced refresh passes `startedAfter` to share a fetch made after its
-   * events.
-   */
-  async refresh(options: SharedLoadOptions = {}): Promise<void> {
+  /** Fetches the count now. */
+  async refresh(): Promise<void> {
     this.cancelInitialRefresh();
     const localId = ++this.refreshId;
-    const [spaces, dms] = await Promise.all([this.fetchSpaces(options), this.fetchDMs(options)]);
+    const count = await this.fetchCount();
     // Discard stale results: a newer refresh was started while we awaited.
     if (this.stopped || localId !== this.refreshId) return;
-    if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
-    if (dms) this.dmUnread = countUnreadDMs(dms);
-    this.publish();
+    // A failed load (offline, chat disabled) keeps the last known count
+    // rather than flashing the badge to zero.
+    if (count !== null) this.publish(count);
   }
 
   private scheduleInitialRefresh(): void {
     this.cancelInitialRefresh();
-    const run = (): void => this.runInitialRefresh();
+    const run = (): void => {
+      this.initial = null;
+      void this.refresh();
+    };
     const idle = idleCallbacks();
     if (idle) {
       this.initial = {
@@ -244,17 +182,6 @@ export class ChatUnreadCounter {
     } else {
       this.initial = { kind: 'timeout', id: setTimeout(run, INITIAL_REFRESH_MAX_DELAY_MS) };
     }
-  }
-
-  private runInitialRefresh(): void {
-    this.initial = null;
-    // The chat page and rail ask for the same lists as they mount; share
-    // whatever request is already in flight or has just completed. Any load
-    // made since start() is fresh enough: an event after start() cancels this
-    // refresh and fetches for itself, so a late idle callback must not send a
-    // second pair just because the page's load is older than the reuse window.
-    const sinceStart = chatLoadClock() - this.startedAt;
-    void this.refresh({ maxAgeMs: Math.max(CHAT_STARTUP_REUSE_MS, sinceStart) });
   }
 
   private cancelInitialRefresh(): void {
@@ -270,34 +197,37 @@ export class ChatUnreadCounter {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    this.burstEventAt = null;
   }
 
-  private publish(): void {
-    setUnreadBadge(this.spaceUnread + this.dmUnread);
+  private publish(count: number): void {
+    setUnreadBadge(count);
+    if (count === this.current) return;
+    this.current = count;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent<ChatUnreadCountDetail>(CHAT_UNREAD_COUNT_EVENT, { detail: { count } })
+      );
+    }
   }
 
-  private async fetchSpaces(options: SharedLoadOptions): Promise<UnreadSpace[] | null> {
-    // A failed load (offline, chat disabled) is null: keep the last known
-    // count rather than flashing the badge to zero.
-    const data = await chatSpacesLoad.load(options);
-    return data ? ((data.spaces ?? []) as UnreadSpace[]) : null;
-  }
-
-  private async fetchDMs(options: SharedLoadOptions): Promise<UnreadDM[] | null> {
-    const data = await chatDMsLoad.load(options);
-    return data ? ((data.dms ?? []) as UnreadDM[]) : null;
+  private async fetchCount(): Promise<number | null> {
+    try {
+      const res = await apiFetch(CHAT_UNREAD_COUNT_URL);
+      if (!res.ok) return null;
+      return unreadConversations(await res.json());
+    } catch {
+      return null;
+    }
   }
 }
 
 /**
  * Starts the counter only for a signed-in user with native chat enabled. With
- * chat disabled the endpoints it reads are not registered, and with nobody
+ * chat disabled the endpoint it reads is not registered, and with nobody
  * signed in there is nothing to count. Returns whether it started.
  *
- * When the first page is a chat page, the first refresh is sent at once: the
- * page and rail load the same lists and share that request. On any other page
- * it waits for the first idle period.
+ * On a chat route the first refresh is sent at once; elsewhere it waits for
+ * the first idle period.
  */
 export function startChatUnreadIfEligible(
   counter: Pick<ChatUnreadCounter, 'start'>,
@@ -308,12 +238,6 @@ export function startChatUnreadIfEligible(
   if (!signedIn || !chatEnabled) return false;
   counter.start({ immediate: onChatRoute });
   return true;
-}
-
-/** When an event was delivered, on the shared loads' clock. */
-function eventTime(e: Event): number {
-  // A synthetic event stamped 0 would share any request: fall back to now.
-  return e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
 }
 
 /** The page-wide unread counter. */

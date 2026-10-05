@@ -15,18 +15,18 @@
  */
 
 /**
- * Event contract between the inbox and notification trays and the header that
- * shows their counts as badges. Each tray owns its list; it dispatches this
- * event whenever the list changes (a fetch is applied, the list is cleared on
- * a user change or sign-out, or an item is acknowledged or marked read), so
- * the header never has to read the trays' internal state.
+ * Event contract between the notification tray and the header that shows its
+ * count as a badge. The tray owns its list; it dispatches this event whenever
+ * the list changes (a fetch is applied, the list is cleared on a user change
+ * or sign-out, or an item is acknowledged), so the header never has to read
+ * the tray's internal state.
  */
 
 /** Dispatched by a tray, bubbling and composed, whenever its list changes. */
 export const TRAY_COUNT_EVENT = 'scion:tray-count';
 
 /** Which tray a count belongs to. */
-export type TrayCountSource = 'inbox' | 'notifications';
+export type TrayCountSource = 'notifications';
 
 export interface TrayCountDetail {
   /** The tray that dispatched the count. */

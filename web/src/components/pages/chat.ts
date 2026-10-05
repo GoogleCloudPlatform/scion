@@ -1565,10 +1565,11 @@ export class ScionPageChat extends LitElement {
       }>;
     };
 
-    // The rail just loaded the space rollup the tab-title badge needs; hand it
-    // over rather than fetching /chat/spaces again alongside it.
+    // The rail reloads its spaces after the user reads, marks unread or
+    // mutes in this tab — changes the server does not echo back here — so
+    // the unread conversation count follows the reload (debounced).
     if (detail.spaces) {
-      chatUnread.setSpaceUnread(detail.spaces);
+      chatUnread.scheduleRefresh();
     }
 
     // Populate slug ↔ projectId maps for deep-link resolution
@@ -3052,8 +3053,8 @@ export class ScionPageChat extends LitElement {
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
-      // Same list the tab-title badge counts — reuse the response.
-      chatUnread.setDMUnread(data?.dms || []);
+      // The DM list reloads after a read in this tab; so does the count.
+      chatUnread.scheduleRefresh();
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||
@@ -5153,6 +5154,9 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) throw new Error('mute failed');
+      // Muting changes what counts as unread and what may pop up.
+      chatNotifications.invalidateConversationInfo();
+      chatUnread.scheduleRefresh();
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
         // The user may have switched conversations while the request was in

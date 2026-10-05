@@ -15,7 +15,7 @@
  */
 
 /**
- * Both trays announce their list size through TRAY_COUNT_EVENT whenever the
+ * The notification tray announces its list size through TRAY_COUNT_EVENT when the
  * list changes: when a fetch is applied, when the list is cleared on a user
  * change or sign-out, and when an item is acknowledged or marked read. A
  * response dropped because it belongs to a previous user announces nothing.
@@ -65,7 +65,7 @@ async function flush(): Promise<void> {
 
 interface TrayCase {
   tag: string;
-  source: 'inbox' | 'notifications';
+  source: 'notifications';
   /** A list response holding the given item ids. */
   body: (...ids: string[]) => unknown;
   /** Starts a list fetch, as a poll or a real-time event does. */
@@ -77,23 +77,6 @@ interface TrayCase {
 }
 
 const CASES: TrayCase[] = [
-  {
-    tag: 'scion-inbox-tray',
-    source: 'inbox',
-    body: (...ids) => ({
-      items: ids.map((id) => ({
-        id,
-        sender: 'agent:helper',
-        msg: id,
-        type: 'instruction',
-        createdAt: new Date().toISOString(),
-      })),
-    }),
-    refetch: (tray) => tray.fetchMessages(),
-    removeOne: (tray, id) => tray.markOne(id),
-    removeAll: (tray) => tray.markAll(),
-    rowText: '.msg-text',
-  },
   {
     tag: 'scion-notification-tray',
     source: 'notifications',
@@ -120,7 +103,6 @@ describe.each(CASES)('$tag: count events', (c) => {
   };
 
   beforeAll(async () => {
-    await import('./inbox-tray.js');
     await import('./notification-tray.js');
   });
 

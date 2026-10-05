@@ -15,23 +15,48 @@
  */
 
 /**
- * Browser push preference — the single master toggle.
+ * Browser push preferences: one opt-in per alert category.
  *
- * Three surfaces read this: the profile settings page, the notification tray,
- * and the chat notification dispatcher. They used to reach for the localStorage
- * key directly, which is how a second toggle with a slightly different key
- * gets written by accident. There is one key and one predicate here.
+ * Two categories, each with its own toggle:
+ *
+ * - `chat`: a popup for every new message in a conversation the user
+ *   takes part in (DMs and member threads), muted conversations excepted.
+ *   Read by the chat notification dispatcher.
+ * - `agent`: a popup for agent events (completed, needs input, and so on)
+ *   from the notification tray.
+ *
+ * The profile settings page and the notification tray write these, and the
+ * dispatchers read them, through this module only, so a third key with a
+ * slightly different name cannot appear by accident.
  *
  * "Enabled" always means both halves: the user opted in *and* the browser
  * granted permission. Permission can be revoked in site settings without the
- * page knowing, so the stored flag alone is never sufficient.
+ * page knowing, so the stored flag alone is never sufficient. Permission is
+ * per site, so both categories share it.
  */
 
-/** localStorage key. Historical name, kept so existing opt-ins survive. */
-export const PUSH_STORAGE_KEY = 'scion-push-notifications';
+/** An alert category with its own opt-in. */
+export type PushCategory = 'chat' | 'agent';
 
-/** Fired on `window` whenever the preference changes, so open surfaces sync. */
+/** localStorage keys, one per category. */
+export const PUSH_STORAGE_KEYS: Readonly<Record<PushCategory, string>> = {
+  chat: 'scion-push-chat-messages',
+  agent: 'scion-push-agent-events',
+};
+
+/**
+ * The single key used before the split. Its value seeds both categories the
+ * first time either is read, so an existing opt-in survives the upgrade.
+ */
+export const LEGACY_PUSH_STORAGE_KEY = 'scion-push-notifications';
+
+/** Fired on `window` whenever a preference changes, so open surfaces sync. */
 export const PUSH_PREFERENCE_EVENT = 'scion-push-preference-changed';
+
+export interface PushPreferenceDetail {
+  category: PushCategory;
+  enabled: boolean;
+}
 
 export type PushPermissionState = NotificationPermission | 'unsupported';
 
@@ -46,10 +71,29 @@ export function pushPermission(): PushPermissionState {
   return window.Notification.permission;
 }
 
-/** The stored opt-in, independent of browser permission. */
-export function isPushOptedIn(): boolean {
+/**
+ * Copies the legacy single opt-in into any category that has no value of
+ * its own yet, then removes the legacy key. Idempotent; safe to call on
+ * every read.
+ */
+export function migrateLegacyPushPreference(): void {
   try {
-    return localStorage.getItem(PUSH_STORAGE_KEY) === 'true';
+    const legacy = localStorage.getItem(LEGACY_PUSH_STORAGE_KEY);
+    if (legacy === null) return;
+    for (const key of Object.values(PUSH_STORAGE_KEYS)) {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, legacy);
+    }
+    localStorage.removeItem(LEGACY_PUSH_STORAGE_KEY);
+  } catch {
+    // Storage can throw in private-browsing modes; nothing to migrate.
+  }
+}
+
+/** The stored opt-in for a category, independent of browser permission. */
+export function isPushOptedIn(category: PushCategory): boolean {
+  migrateLegacyPushPreference();
+  try {
+    return localStorage.getItem(PUSH_STORAGE_KEYS[category]) === 'true';
   } catch {
     // Storage can throw in private-browsing modes; treat as opted out.
     return false;
@@ -57,29 +101,35 @@ export function isPushOptedIn(): boolean {
 }
 
 /**
- * True only when a browser notification may actually be shown: supported,
- * permission granted, and the user opted in.
+ * True only when a browser notification of this category may actually be
+ * shown: supported, permission granted, and the user opted in.
  */
-export function canShowPushNotification(): boolean {
-  return isPushSupported() && window.Notification.permission === 'granted' && isPushOptedIn();
+export function canShowPushNotification(category: PushCategory): boolean {
+  return (
+    isPushSupported() && window.Notification.permission === 'granted' && isPushOptedIn(category)
+  );
 }
 
-/** Writes the opt-in and notifies other surfaces. */
-export function setPushOptIn(enabled: boolean): void {
+/** Writes a category's opt-in and notifies other surfaces. */
+export function setPushOptIn(category: PushCategory, enabled: boolean): void {
+  migrateLegacyPushPreference();
   try {
-    localStorage.setItem(PUSH_STORAGE_KEY, enabled ? 'true' : 'false');
+    localStorage.setItem(PUSH_STORAGE_KEYS[category], enabled ? 'true' : 'false');
   } catch {
     // Non-fatal: the toggle simply won't persist across reloads.
   }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
-      new CustomEvent<{ enabled: boolean }>(PUSH_PREFERENCE_EVENT, { detail: { enabled } })
+      new CustomEvent<PushPreferenceDetail>(PUSH_PREFERENCE_EVENT, {
+        detail: { category, enabled },
+      })
     );
   }
 }
 
 /**
- * Turns push on, requesting browser permission if it has not been decided.
+ * Turns a category on, requesting browser permission if it has not been
+ * decided.
  *
  * MUST be called from a user gesture — browsers ignore (or permanently deny)
  * `requestPermission()` outside one, and a permission prompt on page load is
@@ -88,7 +138,9 @@ export function setPushOptIn(enabled: boolean): void {
  * Returns the resulting permission state; the opt-in is only stored as `true`
  * when that state is 'granted'.
  */
-export async function enablePushWithPermission(): Promise<PushPermissionState> {
+export async function enablePushWithPermission(
+  category: PushCategory
+): Promise<PushPermissionState> {
   if (!isPushSupported()) return 'unsupported';
 
   const permission =
@@ -96,6 +148,6 @@ export async function enablePushWithPermission(): Promise<PushPermissionState> {
       ? await window.Notification.requestPermission()
       : window.Notification.permission;
 
-  setPushOptIn(permission === 'granted');
+  setPushOptIn(category, permission === 'granted');
   return permission;
 }

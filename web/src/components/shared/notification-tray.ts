@@ -26,7 +26,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
-import { isChatNotificationStatus } from '../../client/chat-notifications.js';
 import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import {
   canShowPushNotification,
@@ -38,6 +37,14 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
+
+/** The nil UUID some older notification rows carry in place of an agent. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+/** Whether a notification row names an agent the "View agent" link can open. */
+function hasAgentLink(agentId: string | undefined): boolean {
+  return !!agentId && agentId !== NIL_UUID;
+}
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
@@ -176,11 +183,12 @@ export class ScionNotificationTray extends LitElement {
     this.pushPermission = pushPermission();
     // Permission can be revoked in site settings long after the opt-in was
     // stored, so the toggle reflects both halves rather than the flag alone.
-    this.pushEnabled = canShowPushNotification();
+    this.pushEnabled = canShowPushNotification('agent');
   }
 
   /**
-   * Turns desktop notifications on or off.
+   * Turns desktop notifications for agent events on or off. Chat message
+   * alerts have their own toggle in profile settings.
    *
    * This is the only path that asks the browser for permission, and it is
    * reachable from chat because the tray is in the chat header. Permission is
@@ -189,9 +197,9 @@ export class ScionNotificationTray extends LitElement {
    */
   private async handlePushToggle(): Promise<void> {
     if (this.pushEnabled) {
-      setPushOptIn(false);
+      setPushOptIn('agent', false);
     } else {
-      await enablePushWithPermission();
+      await enablePushWithPermission('agent');
     }
     this.syncPushState();
   }
@@ -278,14 +286,7 @@ export class ScionNotificationTray extends LitElement {
    * and the browser has granted permission.
    */
   private dispatchBrowserNotification(n: Notification): void {
-    // Chat mentions and DMs are dispatched by chat-notifications.ts straight
-    // off the SSE event, with a conversation tag and a click target this
-    // component cannot build — the notification row has no conversation
-    // column. Firing here too would show every mention twice, because the
-    // same event that produces the popup also triggers the re-fetch below.
-    if (isChatNotificationStatus(n.status)) return;
-
-    if (!canShowPushNotification()) {
+    if (!canShowPushNotification('agent')) {
       return;
     }
 
@@ -801,9 +802,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   /**
-   * The master desktop-notification toggle. Lives in the tray because the tray
-   * is the one notification surface present on every page, chat included —
-   * the profile settings page is not reachable without leaving a conversation.
+   * The agent-event desktop-notification toggle. Lives in the tray because
+   * the tray is the one notification surface present on every page, chat
+   * included — the profile settings page is not reachable without leaving a
+   * conversation. It mirrors the profile page's agent event alerts toggle.
    */
   private renderPushToggle() {
     if (this.pushPermission === 'unsupported') return nothing;
@@ -815,10 +817,10 @@ export class ScionNotificationTray extends LitElement {
     // the next render admitted the button was blocked all along.
     const blocked = this.pushPermission === 'denied';
     const label = blocked
-      ? 'Desktop notifications blocked'
+      ? 'Agent alerts blocked'
       : this.pushEnabled
-        ? 'Desktop notifications on'
-        : 'Desktop notifications off';
+        ? 'Agent alerts on'
+        : 'Agent alerts off';
 
     return html`
       <button
@@ -848,10 +850,9 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            ${isChatNotificationStatus(n.status)
-              ? // Chat rows carry the nil agent UUID, so "View agent" would
-                // link to /agents/00000000-... and 404. Until the row records
-                // its conversation there is nowhere honest to send the click.
+            ${!hasAgentLink(n.agentId)
+              ? // Older rows can carry no agent (the nil UUID); a link would
+                // 404, so offer none.
                 nothing
               : html`<a
                   href="/agents/${n.agentId}"

@@ -869,13 +869,18 @@ async function init(): Promise<void> {
     cachedAdminStatus = await fetchAdminStatus();
   }
 
-  // Chat notifications are published on user.<id>.notification, so the state
-  // manager must know who we are before it opens the first SSE connection.
+  // DM messages and read-state changes are published on user.<id>.chat.*, so
+  // the state manager must know who we are before it opens the first SSE
+  // connection.
   if (currentUser?.id) {
     stateManager.setCurrentUserId(currentUser.id);
-    // Mention/DM popups are driven off those events. Started here rather than
-    // from the chat page because a mention has to reach you on any page.
-    chatNotifications.start(currentUser.id);
+    // Chat message popups are driven off those events. Started here rather
+    // than from the chat page because a DM has to reach you on any page.
+    chatNotifications.start({
+      id: currentUser.id,
+      email: currentUser.email,
+      name: currentUser.name,
+    });
     // The recent-files index (native chat quick palette "Documents") is
     // scoped to this identity + hub/base path; initialize only now that the
     // user is known.
@@ -923,11 +928,11 @@ async function init(): Promise<void> {
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
-  // The tab-title unread badge is unread state, not notification state: it
-  // runs for every signed-in user regardless of the push preference, and on
-  // every page, because an unread mention is worth seeing from the dashboard.
-  // After the flags settle — with chat disabled the endpoints it reads are
-  // not even registered.
+  // The unread conversation count (the header's chat badge and the tab-title
+  // badge) is unread state, not notification state: it runs for every
+  // signed-in user regardless of the push preference, and on every page.
+  // After the flags settle — with chat disabled the endpoint it reads is not
+  // even registered.
   // On a chat first page the first refresh goes out now and the page shares
   // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
   const initialPath = stripBasePath(window.location.pathname);

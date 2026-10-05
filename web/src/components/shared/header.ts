@@ -32,9 +32,10 @@
  *   Narrow (<=768px):  2-column grid -- hamburger + title | mode dropdown
  *                      + user dropdown.  Fully collapsed for mobile.
  *
- * Tray components (inbox, notifications) are always present in the DOM
- * with hidden triggers; they are opened programmatically from either the
- * inline action buttons (wide) or the user dropdown (medium/narrow).
+ * The notification tray is always present in the DOM with a hidden
+ * trigger; it is opened programmatically from either the inline bell
+ * (wide) or the user dropdown (medium/narrow). Chat has no tray: the chat
+ * mode selector carries the unread conversation count instead.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -48,13 +49,17 @@ import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-ev
 import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import {
+  CHAT_UNREAD_COUNT_EVENT,
+  chatUnread,
+  type ChatUnreadCountDetail,
+} from '../../client/chat-unread.js';
+import {
   GRAPH_PALETTE_AVAILABILITY_EVENT,
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
   isGraphPaletteAvailable,
 } from '../../client/graph-palette-events.js';
 import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
-import './inbox-tray.js';
 
 // ---------------------------------------------------------------------------
 // Project-context helpers for the dashboard <-> chat mode switch.
@@ -154,15 +159,15 @@ export class ScionHeader extends LitElement {
   @state()
   private graphPaletteAvailable = false;
 
-  /** Unread message count, from the inbox tray's count events. */
-  @state()
-  private inboxCount = 0;
-
   /** Unacknowledged notification count, from the notification tray's count events. */
   @state()
   private notificationCount = 0;
 
-  /** The user id that inboxCount and notificationCount belong to. */
+  /** Unread chat conversations, from the page-wide unread counter. */
+  @state()
+  private chatUnreadCount = chatUnread.count;
+
+  /** The user id that notificationCount belongs to. */
   private countsUserId: string | null = null;
 
   /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
@@ -339,6 +344,37 @@ export class ScionHeader extends LitElement {
     .mode-label {
       font-size: 0.875rem;
       font-weight: 500;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Chat unread badge: overlays the top-right of the mode icon. It is    */
+    /* absolutely positioned, so it never adds height to the 60px header,   */
+    /* and its right edge stays inside the gap before the "Chat" label so   */
+    /* it never covers the word. A wider "99+" grows leftward over the icon. */
+    /* ------------------------------------------------------------------ */
+    .mode-icon {
+      position: relative;
+      display: inline-flex;
+    }
+
+    .chat-unread-badge {
+      position: absolute;
+      top: -7px;
+      right: -4px;
+      box-sizing: border-box;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 8px;
+      background: var(--sl-color-danger-600, #dc2626);
+      box-shadow: 0 0 0 1px var(--scion-surface, #ffffff);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 16px;
+      text-align: center;
+      white-space: nowrap;
+      pointer-events: none;
     }
 
     /* ------------------------------------------------------------------ */
@@ -804,18 +840,6 @@ export class ScionHeader extends LitElement {
           ${this.user
             ? html`
                 <div class="header-actions">
-                  <sl-tooltip content="Messages">
-                    <span class="icon-badge-wrapper">
-                      <sl-icon-button
-                        name="envelope"
-                        label="Messages"
-                        @click=${(): void => this.openInboxTray()}
-                      ></sl-icon-button>
-                      ${this.inboxCount > 0
-                        ? html`<span class="trigger-badge">${this.inboxCount}</span>`
-                        : nothing}
-                    </span>
-                  </sl-tooltip>
                   <sl-tooltip content="Notifications">
                     <span class="icon-badge-wrapper">
                       <sl-icon-button
@@ -890,7 +914,6 @@ export class ScionHeader extends LitElement {
 
         <!-- Tray components: triggers hidden, panels open programmatically -->
         <div class="tray-container">
-          <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
           <scion-notification-tray .user=${this.user}></scion-notification-tray>
         </div>
       </div>
@@ -1001,15 +1024,19 @@ export class ScionHeader extends LitElement {
         </sl-tooltip>
         ${chatEnabled
           ? html`
-              <sl-tooltip content="Chat">
+              <sl-tooltip content=${this.chatLabel()}>
                 <button
                   class=${isChat ? 'active' : ''}
+                  data-mode="chat"
                   @click=${(): void => {
                     void this.handleModeSwitch('chat');
                   }}
-                  aria-label="Chat"
+                  aria-label=${this.chatLabel()}
                 >
-                  <sl-icon name="chat-dots"></sl-icon>
+                  <span class="mode-icon">
+                    <sl-icon name="chat-dots"></sl-icon>
+                    ${this.renderChatUnreadBadge()}
+                  </span>
                   <span class="mode-label">Chat</span>
                 </button>
               </sl-tooltip>
@@ -1054,8 +1081,17 @@ export class ScionHeader extends LitElement {
 
     return html`
       <sl-dropdown>
-        <button slot="trigger" class="mode-trigger" aria-label="Switch view mode">
-          <sl-icon name=${icon}></sl-icon>
+        <button
+          slot="trigger"
+          class="mode-trigger"
+          aria-label=${this.chatUnreadShown() > 0
+            ? `Switch view mode, ${this.chatUnreadPhrase()}`
+            : 'Switch view mode'}
+        >
+          <span class="mode-icon">
+            <sl-icon name=${icon}></sl-icon>
+            ${chatEnabled ? this.renderChatUnreadBadge() : nothing}
+          </span>
           <span class="mode-dropdown-label">${label}</span>
           <sl-icon class="caret" name="chevron-down"></sl-icon>
         </button>
@@ -1072,6 +1108,14 @@ export class ScionHeader extends LitElement {
                 <sl-menu-item value="chat" ?checked=${isChat}>
                   <sl-icon slot="prefix" name="chat-dots"></sl-icon>
                   Chat
+                  ${this.chatUnreadShown() > 0
+                    ? html`<span
+                        slot="suffix"
+                        class="count-badge chat-count"
+                        aria-label=${this.chatUnreadPhrase()}
+                        >${formatBadgeCount(this.chatUnreadShown())}</span
+                      >`
+                    : ''}
                 </sl-menu-item>
               `
             : ''}
@@ -1091,6 +1135,29 @@ export class ScionHeader extends LitElement {
         </sl-menu>
       </sl-dropdown>
     `;
+  }
+
+  /** The unread conversation count to show: none when signed out. */
+  private chatUnreadShown(): number {
+    return this.user ? this.chatUnreadCount : 0;
+  }
+
+  /** "3 unread conversations", for accessible labels. */
+  private chatUnreadPhrase(): string {
+    const n = this.chatUnreadShown();
+    return `${n} unread conversation${n === 1 ? '' : 's'}`;
+  }
+
+  /** The chat selector's accessible label and tooltip. */
+  private chatLabel(): string {
+    return this.chatUnreadShown() > 0 ? `Chat, ${this.chatUnreadPhrase()}` : 'Chat';
+  }
+
+  /** The count badge over the chat icon, or nothing at zero. */
+  private renderChatUnreadBadge(): TemplateResult | typeof nothing {
+    const n = this.chatUnreadShown();
+    if (n <= 0) return nothing;
+    return html`<span class="chat-unread-badge" aria-hidden="true">${formatBadgeCount(n)}</span>`;
   }
 
   /** Icon and label for the currently active mode. */
@@ -1113,11 +1180,11 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   /**
-   * Dropdown consolidating inbox, notifications, profile, help, theme, and
+   * Dropdown consolidating notifications, profile, help, theme, and
    * sign-out into a single compact trigger button (person icon).
    */
   private renderUserDropdown(): TemplateResult {
-    const hasUnread = this.inboxCount + this.notificationCount > 0;
+    const hasUnread = this.notificationCount > 0;
 
     return html`
       <sl-dropdown class="user-dropdown">
@@ -1130,13 +1197,6 @@ export class ScionHeader extends LitElement {
           @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void =>
             this.handleUserMenuSelect(e)}
         >
-          <sl-menu-item value="messages">
-            <sl-icon slot="prefix" name="envelope"></sl-icon>
-            Messages
-            ${this.inboxCount > 0
-              ? html`<span slot="suffix" class="count-badge">${this.inboxCount}</span>`
-              : ''}
-          </sl-menu-item>
           <sl-menu-item value="notifications">
             <sl-icon slot="prefix" name="bell"></sl-icon>
             Notifications
@@ -1176,13 +1236,8 @@ export class ScionHeader extends LitElement {
     const value = e.detail.item.value;
 
     switch (value) {
-      case 'messages':
-        // Close dropdown first, then open inbox tray after a frame
-        this.closeUserDropdown();
-        requestAnimationFrame(() => this.openInboxTray());
-        break;
-
       case 'notifications':
+        // Close dropdown first, then open the tray after a frame
         this.closeUserDropdown();
         requestAnimationFrame(() => this.openNotificationTray());
         break;
@@ -1225,30 +1280,18 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   // ----------------------------------------------------------------------
-  // COUPLING: inbox-tray.ts (.inbox-btn)
-  //           notification-tray.ts (.bell-btn)
-  // If either tray renames these selectors, update the
-  // references in openInboxTray(), openNotificationTray() and
-  // hideTrayTriggers() below. Badge counts arrive through TRAY_COUNT_EVENT.
-  // TODO: Add public toggle() methods to the tray components so the header
-  // does not need to pierce shadow DOMs.
+  // COUPLING: notification-tray.ts (.bell-btn)
+  // If the tray renames this selector, update the references in
+  // openNotificationTray() and hideTrayTriggers() below. The badge count
+  // arrives through TRAY_COUNT_EVENT.
+  // TODO: Add a public toggle() method to the tray component so the header
+  // does not need to pierce its shadow DOM.
   // ----------------------------------------------------------------------
 
   /**
-   * Programmatically open the inbox tray by clicking its (hidden) trigger
-   * button. This reuses the tray's own toggle logic, including the
-   * click-outside handler and data refresh.
-   */
-  private openInboxTray(): void {
-    const tray = this.shadowRoot?.querySelector('scion-inbox-tray');
-    if (!tray) return;
-    const btn = tray.shadowRoot?.querySelector('.inbox-btn') as HTMLElement | null;
-    btn?.click();
-  }
-
-  /**
    * Programmatically open the notification tray by clicking its (hidden)
-   * trigger button.
+   * trigger button. This reuses the tray's own toggle logic, including the
+   * click-outside handler and data refresh.
    */
   private openNotificationTray(): void {
     const tray = this.shadowRoot?.querySelector('scion-notification-tray');
@@ -1258,7 +1301,7 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Hide the tray trigger buttons from layout, focus and the accessibility
+   * Hide the tray trigger button from layout, focus and the accessibility
    * tree, while leaving them functional for programmatic clicks (a
    * synthetic `.click()` still fires on a `display: none` element). The
    * panels (siblings of the buttons in the tray's shadow DOM) are
@@ -1271,24 +1314,26 @@ export class ScionHeader extends LitElement {
       el.style.display = 'none';
     };
 
-    const inboxTray = this.shadowRoot?.querySelector('scion-inbox-tray');
     const notifTray = this.shadowRoot?.querySelector('scion-notification-tray');
 
-    hide(inboxTray?.shadowRoot?.querySelector('.inbox-btn') as HTMLElement | null);
     hide(notifTray?.shadowRoot?.querySelector('.bell-btn') as HTMLElement | null);
   }
 
   /**
-   * Sets a badge count from a tray's count event. Each tray dispatches one
-   * whenever its list changes, so the badges follow the trays' lists, however
-   * long a fetch takes.
+   * Sets the bell badge count from the tray's count event. The tray
+   * dispatches one whenever its list changes, so the badge follows the
+   * tray's list, however long a fetch takes.
    */
   private readonly handleTrayCount = (event: Event): void => {
     const detail = (event as CustomEvent<TrayCountDetail>).detail;
     if (!detail) return;
-    const count = Math.max(0, detail.count);
-    if (detail.source === 'inbox') this.inboxCount = count;
-    else if (detail.source === 'notifications') this.notificationCount = count;
+    if (detail.source === 'notifications') this.notificationCount = Math.max(0, detail.count);
+  };
+
+  /** Follows the page-wide unread conversation count. */
+  private readonly handleChatUnreadCount = (event: Event): void => {
+    const count = (event as CustomEvent<ChatUnreadCountDetail>).detail?.count ?? 0;
+    this.chatUnreadCount = Math.max(0, count);
   };
 
   // =========================================================================
@@ -1427,6 +1472,8 @@ export class ScionHeader extends LitElement {
     // The trays sit in this shadow root; their composed count events reach
     // the host.
     this.addEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
+    this.chatUnreadCount = chatUnread.count;
+    window.addEventListener(CHAT_UNREAD_COUNT_EVENT, this.handleChatUnreadCount);
   }
 
   override disconnectedCallback(): void {
@@ -1440,6 +1487,7 @@ export class ScionHeader extends LitElement {
       this.handleGraphPaletteAvailability
     );
     this.removeEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
+    window.removeEventListener(CHAT_UNREAD_COUNT_EVENT, this.handleChatUnreadCount);
   }
 
   override firstUpdated(): void {
@@ -1459,18 +1507,17 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Clears the badge counts when the signed-in user id changes, so the badges
-   * never show the previous user's counts. The trays clear their lists in
-   * their own next update, a render later than this one; clearing here keeps
-   * that render from pairing the new user with the old counts. The trays'
-   * count events then fill the badges in. A new user object with the same id
-   * keeps the counts.
+   * Clears the bell count when the signed-in user id changes, so the badge
+   * never shows the previous user's count. The tray clears its list in its
+   * own next update, a render later than this one; clearing here keeps that
+   * render from pairing the new user with the old count. The tray's count
+   * events then fill the badge in. A new user object with the same id keeps
+   * the count. (The chat count is page-wide and hidden while signed out.)
    */
   private resetCountsOnUserChange(): void {
     const id = this.user?.id ?? null;
     if (id === this.countsUserId) return;
     this.countsUserId = id;
-    this.inboxCount = 0;
     this.notificationCount = 0;
   }
 
@@ -1556,6 +1603,11 @@ export class ScionHeader extends LitElement {
       })
     );
   }
+}
+
+/** A badge count, capped so the badge stays narrow. */
+export function formatBadgeCount(n: number): string {
+  return n > 99 ? '99+' : String(n);
 }
 
 declare global {
