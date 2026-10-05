@@ -122,12 +122,23 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 			// agent.AppliedConfig in place. Aliasing the caller's struct
 			// would let that echo leak into it silently; the worker instead
 			// takes the echo explicitly with copyBrokerEcho. A shallow copy
-			// is enough: the dispatcher only assigns top-level string fields
-			// (applyBrokerAgentConfig, forgetRuntimeTarget). Its one map
-			// write, the resolved-env merge into Env, is skipped on
-			// reprovision and is not on the start path. The copy still
-			// shares Env, InlineConfig and the other reference fields with
-			// the caller, so nothing here may mutate those in place.
+			// is enough, given what the reprovision and start dispatch paths
+			// do to agent.AppliedConfig:
+			//   - applyBrokerAgentConfig and forgetRuntimeTarget assign
+			//     top-level string fields only (the copy absorbs them; fresh
+			//     never carries RuntimeTarget/RuntimeTargetCandidate);
+			//   - the resolved-env merge into Env is skipped on reprovision
+			//     and is not on the start path;
+			//   - adoptLegacyTZ (buildCreateRequest on reprovision,
+			//     buildStartEnv on start) deletes TZ from the SHARED Env and
+			//     InlineConfig.Env maps and may set ExplicitTimezone* on the
+			//     copy only. For fresh this is a no-op: resolveDerivedConfig's
+			//     captureCreateTZ and buildFreshAppliedConfig's
+			//     stripAgentEnvTZ already removed TZ from both maps, so there
+			//     is nothing to delete or adopt.
+			// The copy still shares Env, InlineConfig and the other
+			// reference fields with the caller, so any new in-place mutation
+			// of those on these paths must revisit this.
 			cfg := *upd.appliedConfig
 			agent.AppliedConfig = &cfg
 		}
@@ -152,8 +163,11 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 }
 
 // copyBrokerEcho copies the fields a broker answer writes onto the
-// dispatched agent's AppliedConfig (applyBrokerAgentConfig: HarnessConfig,
-// HarnessAuth, Profile and, when includeImage is set, Image) from src to dst.
+// dispatched agent's AppliedConfig from src to dst: HarnessConfig,
+// HarnessAuth, Profile and, when includeImage is set, Image.
+// applyBrokerAgentConfig (httpdispatcher.go) is the source of truth for that
+// field list; TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig fails if it
+// starts writing an AppliedConfig field this helper does not copy.
 // Like applyBrokerAgentConfig, an empty src field leaves dst unchanged. src
 // starts as a copy of dst (updateReincarnationStep), so a field the broker
 // did not echo still holds dst's own value. A nil src or dst is a no-op.
@@ -577,7 +591,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// below supplies the image the runtime actually resolved. If the start
 	// fails, failReincarnation leaves the row as the starting step wrote
 	// it, so the row keeps that qualified image and not the unqualified
-	// echo.
+	// echo. If the start succeeds but its response carries no image (the
+	// broker's started-but-not-listed fallback, an empty response body, a
+	// deferred start), the qualified image stays too.
 	copyBrokerEcho(fresh, agent.AppliedConfig, false)
 
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)

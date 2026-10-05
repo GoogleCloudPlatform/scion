@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1640,8 +1641,66 @@ func TestCopyBrokerEcho(t *testing.T) {
 	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", Profile: "echoed-p"}, true)
 	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", Profile: "echoed-p", Model: "m"}, *dst)
 
-	copyBrokerEcho(nil, dst, true)
+	snapshot := *dst
+	copyBrokerEcho(nil, dst, true) // must not panic
 	copyBrokerEcho(dst, nil, true)
+	assert.Equal(t, snapshot, *dst, "a nil src must leave dst unchanged")
+}
+
+// TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig is the drift guard for
+// copyBrokerEcho: applyBrokerAgentConfig (the source of truth) is run with a
+// RemoteAgentInfo whose every string field is set, onto a copy of a config;
+// copyBrokerEcho must then bring dst to exactly that copy. An AppliedConfig
+// field applyBrokerAgentConfig starts writing that copyBrokerEcho does not
+// copy fails here instead of being silently dropped on reincarnate.
+func TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig(t *testing.T) {
+	info := &RemoteAgentInfo{}
+	v := reflect.ValueOf(info).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		if f := v.Field(i); f.Kind() == reflect.String {
+			f.SetString("echo-" + v.Type().Field(i).Name)
+		}
+	}
+	base := store.AgentAppliedConfig{
+		Image: "ghcr.io/test-org/base:v1", HarnessConfig: "base-hc", HarnessAuth: "base-auth",
+		Profile: "base-profile", Model: "base-model", Task: "base-task",
+	}
+	echoed := base
+	applyBrokerAgentConfig(&store.Agent{AppliedConfig: &echoed}, info)
+	require.NotEqual(t, base, echoed, "the populated broker answer must change the config")
+
+	dst := base
+	copyBrokerEcho(&dst, &echoed, true)
+	assert.Equal(t, echoed, dst, "copyBrokerEcho must copy every AppliedConfig field applyBrokerAgentConfig writes")
+}
+
+// TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage covers
+// ptone/scion#1907's fallback: the reprovision echoes an unqualified image
+// and the start succeeds without echoing any image. The row and the record
+// keep the registry-qualified image buildFreshAppliedConfig resolved.
+func TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.NotNil(t, r.NewAppliedConfig)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", r.NewAppliedConfig.Image, "the record must keep the qualified image")
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image, "the row must keep the qualified image")
 }
 
 // TestReincarnateAgent_StartFailureKeepsQualifiedImage covers
