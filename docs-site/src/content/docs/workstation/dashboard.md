@@ -27,6 +27,8 @@ The header features a **mode switcher** that lets you move between the top-level
 
 Inbox and notifications stay reachable at every width. The Terminal entry also shows how many terminal sessions are open.
 
+The web UI also works on phones, down to 320 px wide and in landscape, including notched screens and the on-screen keyboard. Wide code blocks and tables scroll sideways on their own instead of widening the page, and a sideways swipe does not trigger the browser's Back gesture.
+
 ### Display Timezone & Clock
 The dashboard shows clock times in 24-hour format. The **Display timezone** card on your profile settings page sets the zone used to show times and to read date/time inputs in native chat and scheduling forms. Other views are moving to it over time. **Auto**, the default, follows your browser's zone. The value is stored per user as the `timezone` preference (see the [Users API](/scion/reference/api/)). It affects only what you see, never the `TZ` of agent containers. For that, see [Agent timezone](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
@@ -94,7 +96,7 @@ Detailed view for individual agents, featuring a high-density tabbed layout and 
 - **Agent Identity & Roles**: The agent detail page includes an expanded GCP Identity card that displays the service account email and target Google Cloud project for all identity modes. This card also displays a color-coded role badge representing the agent's active authorization tier (`full`, `baseline`, `readonly`, or `none`).
 - **Quick-Message Button**: Found on agent details, list, and graph cards. Instantly open an interactive modal dialog to chat with an agent (use `Enter` to send, `Shift+Enter` for a newline), gated by your existing message permissions.
 - **Graph Card Terminal Shortcut**: Connect straight to an agent's interactive terminal directly from its card in the graph view via a dedicated, icon-only shortcut button. Gated by attach capability and disabled when the agent is offline.
-- **Status Tab**: Real-time view of agent lifecycle (Starting, Thinking, Waiting, etc.), including the `suspended` and `error` phases. Includes **stalled agent detection** to flag agents that are alive but hung (activity `stalled`) and offline detection for agents whose heartbeat has gone silent (activity `offline`). A crashed agent (non-zero exit) is shown in the `error` phase using structured `ExitCode` and `ExitReason` data for high-fidelity crash detection, and can be restarted from the UI.
+- **Status Tab**: Real-time view of agent lifecycle (Starting, Thinking, Waiting, etc.), including the `suspended` and `error` phases. Includes **stalled agent detection** to flag agents that are alive but hung (activity `stalled`) and offline detection for agents whose heartbeat has gone silent (activity `offline`). An agent with activity `blocked` (intentionally waiting) is shown as **waiting on others**; the API and CLI still report `blocked`. A crashed agent (non-zero exit) is shown in the `error` phase using structured `ExitCode` and `ExitReason` data for high-fidelity crash detection, and can be restarted from the UI.
 - **Logs Tab**: Streamed logs from the agent container via the integrated Cloud Log Viewer.
 - **Messages Tab**: A dedicated tab for viewing structured messages sent to and from the agent.
 - **Configuration Tab**: Dedicated tab for viewing the applied configuration of the agent, featuring a new telemetry configuration card.
