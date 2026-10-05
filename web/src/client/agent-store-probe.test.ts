@@ -465,6 +465,29 @@ describe('AgentStore delta probe', () => {
     const active = (id: string, activity: number, extra: Partial<Agent> = {}): Agent =>
       row(id, activity, { lastActivityEvent: t(activity), ...extra });
 
+    it('does not publish while heartbeats move only `updated`, and merges a row changed with them', async () => {
+      let publishes = 0;
+      const h = await loaded(
+        Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1, { labels: { team: 'red' } }))
+      );
+      h.store.retain(HUB, () => publishes++);
+      // Every activity time ties, so the first page is the highest ids.
+      const a99 = find(h.store.peek(HUB), 'a99');
+      for (let i = 1; i <= 4; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(4);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
+
+      h.server.heartbeat(t(1200));
+      h.server.agents[99] = { ...h.server.agents[99], labels: { team: 'blue' } };
+      await tick();
+      expect(publishes).toBe(1);
+      expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
+    });
+
     it('reads one page and does not walk while heartbeats move only `updated`', async () => {
       const h = await loaded(Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1)));
       for (let i = 1; i <= 8; i++) {

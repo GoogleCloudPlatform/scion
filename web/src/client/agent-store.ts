@@ -343,6 +343,23 @@ function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
   return newest;
 }
 
+/**
+ * Whether merging a probe row into the row held would change more than
+ * `updated`, which every heartbeat moves. A merge never clears a field the
+ * probe row omits, so only the probe row's own fields count.
+ */
+function changesMoreThanUpdated(row: Agent, held: Agent): boolean {
+  const before = held as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(row)) {
+    if (key === 'updated') continue;
+    const other = before[key];
+    if (value === other) continue;
+    if (typeof value !== 'object' || typeof other !== 'object' || !value || !other) return true;
+    if (JSON.stringify(value) !== JSON.stringify(other)) return true;
+  }
+  return false;
+}
+
 function queryPath(q: AgentQuery, view: 'full' | 'compact'): string {
   const params = new URLSearchParams();
   if (q.scope === 'hub' && q.ownership) params.set('scope', q.ownership);
@@ -1036,8 +1053,9 @@ export class AgentStore {
 
   /**
    * One delta probe: read the most recently active rows in the server's
-   * order, and merge those the feed does not hold or holds older, as a
-   * seeded merge (deltas that land meanwhile win, deleted agents stay
+   * order, and merge those the feed does not hold, or holds older and
+   * different in more than `updated` (which heartbeats move), as a seeded
+   * merge (deltas that land meanwhile win, deleted agents stay
    * deleted, the completeness flag is untouched). When the first page all
    * lists before the newest row the last probe saw, follow further pages;
    * when that does not catch up, or the server's count differs from the
@@ -1080,7 +1098,9 @@ export class AgentStore {
           if (
             !held ||
             !listed.has(row.id) ||
-            (rowUpdated !== undefined && (heldUpdated === undefined || rowUpdated > heldUpdated))
+            (rowUpdated !== undefined &&
+              (heldUpdated === undefined || rowUpdated > heldUpdated) &&
+              changesMoreThanUpdated(row, held))
           ) {
             changed.push(row);
           }
