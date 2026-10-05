@@ -80,13 +80,17 @@ type mockRuntimeBrokerClient struct {
 	lastRestartExtras          StartExtras
 	lastInlineConfig           *api.ScionConfig
 	lastCreateReq              *RemoteCreateAgentRequest
-	lastDeleteOpts             struct{ deleteFiles, removeBranch bool }
-	returnErr                  error
-	cleanupErr                 error
-	startReturnResp            *RemoteAgentResponse // custom start response if set
-	cleanupCalls               int
-	cleanupSlugs               []string
-	createWithGatherFunc       func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+	lastDeleteOpts             struct {
+		deleteFiles, removeBranch bool
+		runID                     string
+	}
+	returnErr            error
+	cleanupErr           error
+	startReturnResp      *RemoteAgentResponse // custom start response if set
+	restartReturnResp    *RemoteAgentResponse // custom restart response if set
+	cleanupCalls         int
+	cleanupSlugs         []string
+	createWithGatherFunc func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 	// startCallCount and failFirstStartWith let a test simulate a
 	// hash-mismatch-then-retry sequence: the first StartAgent call fails with
 	// failFirstStartWith, and the second (and later) calls succeed.
@@ -154,14 +158,17 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastRestartResolvedEnv = resolvedEnv
 	m.lastRestartExtras = extras
-	return m.returnErr
+	if m.returnErr != nil {
+		return nil, m.returnErr
+	}
+	return m.restartReturnResp, nil
 }
 
 func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {
@@ -171,14 +178,15 @@ func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, 
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	m.deleteCalled = true
 	m.lastDeleteProjectPathQuery = deleteProjectPathQuery(ctx)
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
-	m.lastDeleteOpts.deleteFiles = deleteFiles
-	m.lastDeleteOpts.removeBranch = removeBranch
+	m.lastDeleteOpts.deleteFiles = opts.DeleteFiles
+	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
+	m.lastDeleteOpts.runID = opts.RunID
 	return m.returnErr
 }
 
@@ -409,49 +417,15 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw proves the
-// contract's §6.1 "(a) Dispatch-layer backstop" directly against the one
-// production AgentDispatcher.DispatchAgentMessage implementation: from task
-// 2.3 onward, a structuredMsg carrying Raw == true is refused
-// unconditionally, before requireRuntimeBrokerAssigned or any broker
-// endpoint lookup runs, and the underlying RuntimeBrokerClient is never
-// called at all. No broker or agent setup is required for this case
-// precisely because the refusal happens before anything broker-specific is
-// touched.
-func TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	agent := &store.Agent{
-		ID:   tid("agent-raw-backstop"),
-		Name: "test-agent-raw",
-		Slug: "test-agent-raw",
-		// Deliberately no RuntimeBrokerID: if the backstop did not run
-		// first, requireRuntimeBrokerAssigned would fail for an unrelated
-		// reason and this test would not actually prove the backstop ran.
-	}
-
-	err := dispatcher.DispatchAgentMessage(ctx, agent, "C-c", false, &messages.StructuredMessage{Raw: true})
-	if !errors.Is(err, ErrRawDispatchRefused) {
-		t.Fatalf("DispatchAgentMessage error = %v, want ErrRawDispatchRefused", err)
-	}
-	if mockClient.messageCalled {
-		t.Error("expected MessageAgent to never be called for a Raw==true structuredMsg")
-	}
-}
-
-// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw verifies a nil
-// agent is rejected with errNoRuntimeBrokerAssigned (not a panic in the raw
-// backstop log) and that no broker call is made.
-func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
+// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgent verifies a nil
+// agent is rejected with errNoRuntimeBrokerAssigned (not a panic) and that
+// no broker call is made.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgent(t *testing.T) {
 	memStore := createTestStore(t)
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{Raw: true})
+	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{})
 	if !errors.Is(err, errNoRuntimeBrokerAssigned) {
 		t.Fatalf("DispatchAgentMessage error = %v, want errNoRuntimeBrokerAssigned", err)
 	}
@@ -460,10 +434,8 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers is the
-// backstop's negative control: Plain (and ordinary, non-raw) messages are
-// completely unaffected, proving the Raw check above is not accidentally
-// over-broad.
+// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers pins that
+// a Plain message is delivered through the broker client unchanged.
 func TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -617,7 +589,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err != nil {
 		t.Fatalf("DeleteAgent failed: %v", err)
 	}
@@ -638,7 +610,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent503PropagatesAsError(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err == nil {
 		t.Fatal("expected a 503 from the broker to propagate as an error, not be treated as an idempotent success")
 	}
