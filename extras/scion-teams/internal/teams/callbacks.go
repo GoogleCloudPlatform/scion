@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // CallbackHandler processes Adaptive Card Action.Submit invoke activities.
@@ -317,24 +318,12 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 		return fmt.Errorf("hub client not configured")
 	}
 
-	// Resolve user identity.
-	senderID := activity.From.AadObjectID
-	if senderID == "" {
-		senderID = activity.From.ID
-	}
-	senderName := activity.From.Name
-
-	// Try to resolve Teams user to Scion identity.
-	store := h.getStore()
-	if store != nil {
-		mapping, err := store.GetUserMapping(ctx, senderID)
-		if err == nil && mapping != nil && mapping.ScionEmail != "" {
-			senderID = "user:" + mapping.ScionEmail
-		} else {
-			senderID = "teams:" + senderID
-		}
-	} else {
-		senderID = "teams:" + senderID
+	// Resolve user identity: Sender is the Scion principal, SenderID the
+	// Teams user ID.
+	teamsUserID := teamsUserIDOf(activity)
+	sender := "teams:" + teamsUserID
+	if mapping := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID, h.log); mapping != nil {
+		sender = onBehalfOfUser(mapping)
 	}
 
 	recipient := "agent:" + pending.AgentSlug
@@ -342,8 +331,8 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    senderName,
-		SenderID:  senderID,
+		Sender:    sender,
+		SenderID:  teamsUserID,
 		Recipient: recipient,
 		Msg:       responseText,
 		Type:      messages.TypeInstruction,
@@ -356,11 +345,7 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 		},
 	}
 
-	// Build the topic from project and agent.
-	topic := pending.ProjectID
-	if pending.AgentSlug != "" {
-		topic = topic + "." + pending.AgentSlug
-	}
+	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 
 	return hubClient.DeliverInbound(ctx, topic, msg)
 }

@@ -354,3 +354,55 @@ func TestCallbackHandler_WrappedActionData(t *testing.T) {
 	require.NotNil(t, link)
 	assert.Equal(t, "wrapped-project", link.ProjectSlug)
 }
+
+// askUserPayloadFor runs an ask_response through the callback handler and
+// returns the inbound payload delivered to the hub.
+func askUserPayloadFor(t *testing.T, linked bool) inboundPayload {
+	t.Helper()
+	var payload inboundPayload
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	})
+	if linked {
+		linkTestUser(t, broker)
+	}
+	require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+		RequestID:      "req-1",
+		ActivityID:     "act-ask-1",
+		ConversationID: "conv-1",
+		AgentSlug:      "dev-1",
+		ProjectID:      "proj-1",
+		Choices:        []string{"approve", "reject"},
+		ExpiresAt:      time.Now().Add(10 * time.Minute),
+	}))
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":     "ask_response",
+		"request_id": "req-1",
+		"choice":     "approve",
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, payload.Message, "expected inbound delivery to hub")
+	return payload
+}
+
+func TestCallbackHandler_AskResponse_UsesCanonicalTopicAndSenderFields(t *testing.T) {
+	payload := askUserPayloadFor(t, true)
+
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
+	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+	assert.Equal(t, "agent:dev-1", payload.Message.Recipient)
+	assert.Equal(t, "approve", payload.Message.Msg)
+}
+
+func TestCallbackHandler_AskResponse_UnlinkedSenderUsesTeamsID(t *testing.T) {
+	payload := askUserPayloadFor(t, false)
+
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "teams:aad-user-1", payload.Message.Sender)
+	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+}

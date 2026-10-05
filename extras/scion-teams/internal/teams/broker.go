@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 const (
@@ -825,7 +826,7 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		msg.ThreadID = convID
 	}
 
-	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
+	topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 	if err := b.hubClient.DeliverInbound(ctx, topic, msg); err != nil {
 		b.log.Error("Failed to deliver message to hub",
 			"error", err,
