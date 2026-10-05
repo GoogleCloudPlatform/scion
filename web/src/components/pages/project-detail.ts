@@ -39,11 +39,13 @@ import {
   getAgentDisplayStatus,
   isAgentRunning,
   isTerminalAvailable,
+  isEmptyPerAgentWorkspace,
   isSharedWorkspace,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -57,6 +59,8 @@ import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
@@ -78,6 +82,7 @@ import {
 } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
+import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -318,6 +323,11 @@ export class ScionPageProjectDetail extends LitElement {
   /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
   @state()
   private windowTick = 0;
+
+  /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
+  );
 
   /**
    * The list view's window (design §4.3, §6.1). Only the small and paged
@@ -1438,16 +1448,12 @@ export class ScionPageProjectDetail extends LitElement {
       }
 
       // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
+      if (this.hasProjectWorkspace()) {
         this.getTabDataSource('workspace');
       }
-      // For git-based projects (non-shared) with shared dirs, activate the first shared dir
-      if (
-        this.project &&
-        this.project.gitRemote &&
-        !isSharedWorkspace(this.project) &&
-        this.project.sharedDirs?.length
-      ) {
+      // Without a project workspace (per-agent git, empty per agent), activate
+      // the first shared dir
+      if (this.project && !this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
         this.activeFileTab = this.project.sharedDirs[0].name;
         this.getTabDataSource(this.project.sharedDirs[0].name);
       }
@@ -2004,6 +2010,13 @@ export class ScionPageProjectDetail extends LitElement {
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
+        if (response.status === 202) {
+          // Still deleting (ptone/scion#2483): keep the card, show
+          // "Deleting…" now, and let the SSE `deleted` remove it in place.
+          stateManager.applyDeleteAccepted(agentId, await readAcceptedDeletion(response));
+          return;
+        }
+
         // Server confirmed — remove from local list
         this.agents = this.agents.filter((a) => a.id !== agentId);
         this.backgroundRefresh();
@@ -2248,9 +2261,9 @@ export class ScionPageProjectDetail extends LitElement {
         throw new Error(await extractApiError(response, 'Failed to stop agents'));
       }
 
-      const result = (await response.json()) as { stopped: number; failed: number; scope?: string };
-      if (result.failed > 0) {
-        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
+      const result = (await response.json()) as StopAllResult;
+      for (const notice of stopAllNotices(result)) {
+        showToast(notice.message, notice.variant);
       }
 
       this.backgroundRefresh();
@@ -2813,18 +2826,28 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
+  /**
+   * Whether the project has a project-level workspace directory to browse:
+   * hub-native shared workspaces and shared-workspace git projects. Per-agent
+   * git projects and empty-per-agent projects (#2703 D5) have none.
+   */
+  private hasProjectWorkspace(): boolean {
+    if (!this.project) return false;
+    if (isEmptyPerAgentWorkspace(this.project)) return false;
+    return !this.project.gitRemote || isSharedWorkspace(this.project);
+  }
+
   private shouldShowFilesSection(): boolean {
     if (!this.project) return false;
-    // Hub-native projects and shared-workspace git projects always show files
-    if (!this.project.gitRemote || isSharedWorkspace(this.project)) return true;
-    // Per-agent git projects show only when shared dirs exist
+    if (this.hasProjectWorkspace()) return true;
+    // Otherwise show files only when shared dirs exist
     return (this.project.sharedDirs?.length ?? 0) > 0;
   }
 
   private getFileTabs(): Array<{ key: string; label: string }> {
     const tabs: Array<{ key: string; label: string }> = [];
-    // Hub-native projects and shared-workspace git projects get a workspace tab
-    if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
+    // Only projects with a project-level workspace get a workspace tab
+    if (this.hasProjectWorkspace()) {
       tabs.push({ key: 'workspace', label: 'workspace' });
     }
     // Add one tab per shared dir
@@ -3122,6 +3145,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentRow(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
 
     return html`
       <tr>
@@ -3143,9 +3169,13 @@ export class ScionPageProjectDetail extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
@@ -3181,7 +3211,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing}
             ${isAgentRunning(agent)
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     ${agent.harnessCapabilities?.resume?.support !== 'no'
                       ? html`
@@ -3216,7 +3246,7 @@ export class ScionPageProjectDetail extends LitElement {
                   `
                 : nothing
               : agent.phase === 'suspended'
-                ? canLifecycle(agent._capabilities)
+                ? lifecycleOk
                   ? html`
                       <sl-tooltip content="Resume">
                         <sl-button
@@ -3233,7 +3263,7 @@ export class ScionPageProjectDetail extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing
-                : canLifecycle(agent._capabilities)
+                : lifecycleOk
                   ? html`
                       ${agent.phase === 'error'
                         ? html`
@@ -3266,7 +3296,7 @@ export class ScionPageProjectDetail extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing}
-            ${can(agent._capabilities, 'delete')
+            ${can(agent._capabilities, 'delete') && !deleting
               ? html`
                   <sl-tooltip content="Delete">
                     <sl-button
@@ -3291,6 +3321,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentCard(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
 
     return html`
       <div class="agent-card">
@@ -3316,9 +3349,13 @@ export class ScionPageProjectDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
         </div>
 
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
@@ -3342,7 +3379,7 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
           ${isAgentRunning(agent)
-            ? canLifecycle(agent._capabilities)
+            ? lifecycleOk
               ? html`
                   ${agent.harnessCapabilities?.resume?.support !== 'no'
                     ? html`
@@ -3377,7 +3414,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-tooltip content="Resume">
                       <sl-button
@@ -3394,7 +3431,7 @@ export class ScionPageProjectDetail extends LitElement {
                     </sl-tooltip>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -3427,7 +3464,7 @@ export class ScionPageProjectDetail extends LitElement {
                     </sl-tooltip>
                   `
                 : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-tooltip content="Delete">
                   <sl-button

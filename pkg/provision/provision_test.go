@@ -4401,14 +4401,22 @@ func intPtr(i int) *int { return &i }
 
 // --- EmptyPerAgent rejection ---
 
+// TestProvision_RejectsEmptyPerAgent pins that ProvisionShared refuses
+// EmptyPerAgent (its agent directory is ProvisionAgentDir's) and leaves the
+// project's workspace path exactly as it was: no sentinel, no clone.
 func TestProvision_RejectsEmptyPerAgent(t *testing.T) {
+	hostPath := t.TempDir()
 	err := ProvisionShared(ProvisionInput{
 		ProjectID: "proj-1",
 		Mode:      store.SharingModeEmptyPerAgent,
+		GitClone:  &api.GitCloneConfig{URL: "https://example.com/repo.git"},
 		Resolved: ResolvedWorkspace{
-			HostPath: t.TempDir(),
+			HostPath: hostPath,
 		},
 	})
+	if entries, readErr := os.ReadDir(hostPath); readErr != nil || len(entries) != 0 {
+		t.Errorf("project workspace path changed: entries=%v err=%v", entries, readErr)
+	}
 	if err == nil {
 		t.Fatal("expected error for EmptyPerAgent on the shared NFS workspace")
 	}

@@ -139,6 +139,22 @@ type Agent struct {
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
 
+	// RunID is the identity of the agent's current or most recent run
+	// (ptone/scion#2550), minted by the Hub per create/start/restart
+	// dispatch and carried on the runtime entry as the scion.run_id label.
+	// "" for a row not dispatched since run IDs existed. Like the launch
+	// columns, UpdateAgent never writes it; the only writer is SetAgentRunID,
+	// so a concurrent whole-row CAS write cannot clobber it.
+	RunID string `json:"-"`
+
+	// RunIntent is whether the agent should be running ("running" or
+	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
+	// time of the last intent write. Internal bookkeeping, untagged like the
+	// launch columns. UpdateAgent and CreateAgent never write them; the only
+	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
+	RunIntent   RunIntent  `json:"-"`
+	RunIntentAt *time.Time `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
@@ -594,6 +610,32 @@ const (
 	// LabelTemplate marks a project as a project template.
 	LabelTemplate = "scion.io/template"
 )
+
+// Project members group marker annotations (ptone/scion#2556).
+const (
+	// AnnotationProjectMembersGroup marks a group as the hub-managed
+	// project:<slug>:members group. It is the only key the hub writes and the
+	// key project registration checks before adopting an existing group with
+	// that slug. The hub (createProjectMembersGroup) and the store marker
+	// backfill both write it.
+	AnnotationProjectMembersGroup = "scion.io/project-members-group"
+
+	// LegacyAnnotationProjectMembersGroup is the marker key the store marker
+	// backfill wrote before ptone/scion#2556. The one-shot migration
+	// MigrateLegacyProjectMembersGroupMarkers rewrites it to
+	// AnnotationProjectMembersGroup. No current code sets it; the migration
+	// only removes it. The group API marker guards and the owner-clearing
+	// backfill still accept it, because an older binary may write it during
+	// a rolling upgrade.
+	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
+)
+
+// AnnotationProjectAgentsGroup marks a group as the hub-managed
+// project:<slug>:agents group. The hub (createProjectGroup) writes it and
+// checks it (isSystemProjectAgentsGroup) before adopting an existing group
+// with that slug, and the store agents group marker backfill writes it on
+// legitimate pre-upgrade groups.
+const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over

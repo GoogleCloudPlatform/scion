@@ -4,6 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -284,11 +285,22 @@ func Execute() {
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if shouldShowUsageOnError(cmd, autoHelp) {
+		if showUsageForError(cmd, err, autoHelp) {
 			_ = cmd.Usage()
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor returns the process exit status for a failed command: the
+// status requested by an error implementing exitCoder (anywhere in the
+// wrap chain), otherwise 1.
+func exitCodeFor(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() > 0 {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // shouldShowUsageOnError reports whether Execute should print cmd's usage
@@ -310,6 +322,18 @@ func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
 		return false
 	}
 	return !cmd.HasParent() || !cmd.SilenceUsage
+}
+
+// showUsageForError combines shouldShowUsageOnError with an error-based
+// filter: hub failures (a wrapped *apiclient.APIError, or anything that went
+// through wrapHubError, including connectivity failures) are runtime errors
+// about the hub's answer, not about how the command was invoked, so the Usage
+// block is suppressed for them. Other errors keep the existing behaviour.
+func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
+	if isHubFailure(err) {
+		return false
+	}
+	return shouldShowUsageOnError(cmd, autoHelp)
 }
 
 func commandInSubtree(cmd *cobra.Command, name string) bool {

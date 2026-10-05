@@ -41,7 +41,7 @@ import (
 // with the test's assertions, so (unlike mockManager, built for the
 // single-goroutine synchronous path) every field here is mutex-guarded.
 type asyncManager struct {
-	*mockManager // Provision/Reprovision/Stop/Delete/DeleteTarget/List/Message/MessageRaw/Watch/Close: unused by these tests
+	*mockManager // Provision/Reprovision/Stop/Delete/DeleteTarget/List/Message/Watch/Close: unused by these tests
 
 	mu             sync.Mutex
 	preflightErr   error

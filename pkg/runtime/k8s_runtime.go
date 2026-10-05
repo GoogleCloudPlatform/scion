@@ -81,7 +81,7 @@ type KubernetesRuntime struct {
 
 	// homeSync, when set, replaces the home directory copy Run performs
 	// (syncToPod). Tests use it to observe the order of the start steps.
-	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string) error
+	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
 	// PriorityClassName is the runtime-level default spec.priorityClassName
 	// applied to agent pods (settings runtimes.<name>.priority_class_name).
@@ -769,11 +769,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
+		// NFS-home pods: the sync never writes over a link target.
+		homeLinkTargets := r.k8sHomeLinkTargets(config)
 		err = r.syncWithRetry(ctx, func() error {
 			if r.homeSync != nil {
-				return r.homeSync(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
+				return r.homeSync(ctx, namespace, createdPod.Name, config.HomeDir, destHome, homeLinkTargets)
 			}
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
+			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome, homeLinkTargets...)
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
@@ -801,7 +803,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// Copy staged secret and auth files to their targets in the agent home
 	// (see k8s_file_placement.go). This runs whether or not a home was
 	// synced, and before the startup gate, so the harness finds them.
-	if err := r.placeK8sHomeFiles(ctx, namespace, createdPod.Name, config); err != nil {
+	if err := r.placeK8sHomeFiles(ctx, namespace, createdPod.Name, config, k8sHomeFileModeFor(config)); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -1766,6 +1768,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
@@ -1910,7 +1916,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 	// Inject GCP telemetry credential path if the well-known secret is present
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
+		// NFS-home pods point at the staged file rather than its home link.
+		if staged := r.k8sStagedPathFor(config, telemetryGCPCredentialsSecretName); nfsHome && staged != "" {
+			credPath = staged
+		}
 		envVars = append(envVars, corev1.EnvVar{Name: telemetryGCPCredentialsEnvVar, Value: credPath})
+	}
+
+	// NFS-home pods: the memory-backed directory and the env vars that
+	// locate the staged files and harness directories (k8s_nfs_home.go).
+	if nfsHome {
+		memVolume, memMount := nfsHomeVolume()
+		extraVolumes = append(extraVolumes, memVolume)
+		extraVolumeMounts = append(extraVolumeMounts, memMount)
+		nfsEnv, err := r.nfsHomeEnv(config)
+		if err != nil {
+			return nil, err
+		}
+		envVars = append(envVars, nfsEnv...)
 	}
 
 	// Pass host user UID/GID for container user synchronization
@@ -2061,7 +2084,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: config.Annotations,
+			Annotations: withHomeStorageAnnotation(config.Annotations, nfsHome),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -2167,6 +2190,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
 		// in F-111.
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
+		// #2670: the sentinel and the provisioning lock live in the
+		// project's provisioning state directory, mounted next to the
+		// workspace (init containers only).
+		stateMount, stateEnv, err := nfsProvisionStateInitMount(config, nfsAgentDir)
+		if err != nil {
+			return nil, fmt.Errorf("workspace-provision init container: %w", err)
+		}
+		if stateMount != nil {
+			initVolumeMounts = append(initVolumeMounts, *stateMount)
+		}
 		// F-111 review (tf-lead nit): SCION_SHARED_DIR_PATHS carries
 		// "name=mountPath" pairs, comma-joined — keyed explicitly by each
 		// shared dir's own name (nfsSharedDirMount.Name), not derived from
@@ -2186,6 +2219,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 
 		initEnv := nfsProvisionEnv(initGitClone)
+		if stateEnv != nil {
+			initEnv = append(initEnv, *stateEnv)
+		}
 		// SCION_PROJECT_ID lets the init container's own provisioning logs
 		// (cmd/sciontool/commands/provision.go) identify which project they're
 		// provisioning, instead of falling back to "unknown" — unconditional
@@ -2217,7 +2253,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// directory instead of the shared checkout. An older sciontool
 		// ignores these and, with no clone settings, only creates and
 		// chowns the agent's directory; the agent container then clones.
-		if nfsAgentDir {
+		// Empty-per-agent: the same agent directory, with an empty
+		// workspace and no branch.
+		if nfsAgentDir && config.NFSAgentDirEmpty {
+			initEnv = append(initEnv,
+				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeEmptyPerAgent)},
+				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSAgentDirName},
+			)
+		} else if nfsAgentDir {
 			initEnv = append(initEnv,
 				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeClonePerAgent)},
 				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSAgentDirName},
@@ -2597,6 +2640,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Annotations = annotations
 	}
 
+	if nfsHome {
+		if err := checkNoMountsUnderHome(pod, containerHome); err != nil {
+			return nil, err
+		}
+	}
+
 	return pod, nil
 }
 
@@ -2882,9 +2931,28 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // syncArchiveCreateArgs returns the broker-side tar arguments syncToPod uses
-// to archive sourcePath.
-func syncArchiveCreateArgs(sourcePath string) []string {
-	return []string{"-cz", "-C", sourcePath, "."}
+// to archive sourcePath. Each exclude is a path relative to sourcePath that
+// is left out of the archive; it is matched literally.
+func syncArchiveCreateArgs(sourcePath string, excludes ...string) []string {
+	args := []string{"-cz"}
+	for _, e := range excludes {
+		args = append(args, "--exclude="+tarLiteralPattern("./"+path.Clean(e)))
+	}
+	return append(args, "-C", sourcePath, ".")
+}
+
+// tarLiteralPattern quotes the tar wildcard characters in p with a backslash so that an
+// exclude pattern matches p only.
+func tarLiteralPattern(p string) string {
+	var b strings.Builder
+	for _, c := range p {
+		switch c {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // syncArchiveExtractCommand returns the shell command syncToPod runs in the
@@ -2896,7 +2964,7 @@ func syncArchiveExtractCommand(destPath string) string {
 	return fmt.Sprintf("tar -xz -m --no-same-owner --no-same-permissions -C '%s'", destPath)
 }
 
-func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
+func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes ...string) error {
 	// Guard against fake/test clientsets where Config is nil (no real API
 	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
 	// built as a literal rather than via NewKubernetesRuntime has a nil
@@ -2909,7 +2977,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	}
 	syncStart := time.Now()
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
-	tarCmd := exec.CommandContext(ctx, "tar", syncArchiveCreateArgs(sourcePath)...)
+	tarCmd := exec.CommandContext(ctx, "tar", syncArchiveCreateArgs(sourcePath, excludes...)...)
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	stdout, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -3050,10 +3118,14 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 }
 
 func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, id)
+	return r.Delete(ctx, RunRef{ID: id})
 }
 
-func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the pod ref.ID and its secrets.
+// P2/P4: enforce ref.RunID (ptone/scion#2550). Today the pod name is reused
+// across runs, so this still targets whatever pod holds the name.
+func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	var namespace string
 
 	// Support namespace/pod format
@@ -3336,6 +3408,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     p.Name, // Pod name serves as the container identifier
+			RunID:           p.Labels[api.LabelRunID],
 			Name:            p.Labels["scion.name"],
 			Template:        p.Labels["scion.template"],
 			Project:         projectkeys.ProjectNameFromLabels(p.Labels),

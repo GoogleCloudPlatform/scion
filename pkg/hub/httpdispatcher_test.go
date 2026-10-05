@@ -80,13 +80,17 @@ type mockRuntimeBrokerClient struct {
 	lastRestartExtras          StartExtras
 	lastInlineConfig           *api.ScionConfig
 	lastCreateReq              *RemoteCreateAgentRequest
-	lastDeleteOpts             struct{ deleteFiles, removeBranch bool }
-	returnErr                  error
-	cleanupErr                 error
-	startReturnResp            *RemoteAgentResponse // custom start response if set
-	cleanupCalls               int
-	cleanupSlugs               []string
-	createWithGatherFunc       func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+	lastDeleteOpts             struct {
+		deleteFiles, removeBranch bool
+		runID                     string
+	}
+	returnErr            error
+	cleanupErr           error
+	startReturnResp      *RemoteAgentResponse // custom start response if set
+	restartReturnResp    *RemoteAgentResponse // custom restart response if set
+	cleanupCalls         int
+	cleanupSlugs         []string
+	createWithGatherFunc func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 	// startCallCount and failFirstStartWith let a test simulate a
 	// hash-mismatch-then-retry sequence: the first StartAgent call fails with
 	// failFirstStartWith, and the second (and later) calls succeed.
@@ -154,14 +158,17 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastRestartResolvedEnv = resolvedEnv
 	m.lastRestartExtras = extras
-	return m.returnErr
+	if m.returnErr != nil {
+		return nil, m.returnErr
+	}
+	return m.restartReturnResp, nil
 }
 
 func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {
@@ -171,14 +178,15 @@ func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, 
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	m.deleteCalled = true
 	m.lastDeleteProjectPathQuery = deleteProjectPathQuery(ctx)
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
-	m.lastDeleteOpts.deleteFiles = deleteFiles
-	m.lastDeleteOpts.removeBranch = removeBranch
+	m.lastDeleteOpts.deleteFiles = opts.DeleteFiles
+	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
+	m.lastDeleteOpts.runID = opts.RunID
 	return m.returnErr
 }
 
@@ -276,7 +284,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -409,49 +417,15 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw proves the
-// contract's §6.1 "(a) Dispatch-layer backstop" directly against the one
-// production AgentDispatcher.DispatchAgentMessage implementation: from task
-// 2.3 onward, a structuredMsg carrying Raw == true is refused
-// unconditionally, before requireRuntimeBrokerAssigned or any broker
-// endpoint lookup runs, and the underlying RuntimeBrokerClient is never
-// called at all. No broker or agent setup is required for this case
-// precisely because the refusal happens before anything broker-specific is
-// touched.
-func TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	agent := &store.Agent{
-		ID:   tid("agent-raw-backstop"),
-		Name: "test-agent-raw",
-		Slug: "test-agent-raw",
-		// Deliberately no RuntimeBrokerID: if the backstop did not run
-		// first, requireRuntimeBrokerAssigned would fail for an unrelated
-		// reason and this test would not actually prove the backstop ran.
-	}
-
-	err := dispatcher.DispatchAgentMessage(ctx, agent, "C-c", false, &messages.StructuredMessage{Raw: true})
-	if !errors.Is(err, ErrRawDispatchRefused) {
-		t.Fatalf("DispatchAgentMessage error = %v, want ErrRawDispatchRefused", err)
-	}
-	if mockClient.messageCalled {
-		t.Error("expected MessageAgent to never be called for a Raw==true structuredMsg")
-	}
-}
-
-// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw verifies a nil
-// agent is rejected with errNoRuntimeBrokerAssigned (not a panic in the raw
-// backstop log) and that no broker call is made.
-func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
+// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgent verifies a nil
+// agent is rejected with errNoRuntimeBrokerAssigned (not a panic) and that
+// no broker call is made.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgent(t *testing.T) {
 	memStore := createTestStore(t)
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{Raw: true})
+	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{})
 	if !errors.Is(err, errNoRuntimeBrokerAssigned) {
 		t.Fatalf("DispatchAgentMessage error = %v, want errNoRuntimeBrokerAssigned", err)
 	}
@@ -460,10 +434,8 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers is the
-// backstop's negative control: Plain (and ordinary, non-raw) messages are
-// completely unaffected, proving the Raw check above is not accidentally
-// over-broad.
+// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers pins that
+// a Plain message is delivered through the broker client unchanged.
 func TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -617,7 +589,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err != nil {
 		t.Fatalf("DeleteAgent failed: %v", err)
 	}
@@ -638,7 +610,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent503PropagatesAsError(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err == nil {
 		t.Fatal("expected a 503 from the broker to propagate as an error, not be treated as an idempotent success")
 	}
@@ -729,7 +701,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -781,7 +753,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ThreadsWorkspaceMode(t *testing
 		RuntimeBrokerID: tid("broker-wt"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -823,7 +795,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testin
 		RuntimeBrokerID: tid("host-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("expected DispatchAgentCreate to succeed (client handles empty endpoint), got: %v", err)
 	}
@@ -896,7 +868,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1610,7 +1582,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1658,7 +1630,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1702,7 +1674,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1743,7 +1715,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2661,7 +2633,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2707,7 +2679,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 		RuntimeBrokerID: tid("host-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2753,7 +2725,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2865,7 +2837,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3035,7 +3007,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3091,7 +3063,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3144,7 +3116,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3189,7 +3161,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3270,7 +3242,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3367,7 +3339,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3641,7 +3613,7 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -4075,7 +4047,8 @@ func TestHTTPAgentDispatcher_AgentEndpointOverride(t *testing.T) {
 		{
 			name: "create, unset",
 			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
-				return d.DispatchAgentCreate(ctx, agent)
+				_, err := d.DispatchAgentCreate(ctx, agent)
+				return err
 			},
 			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
 				if m.lastCreateReq == nil {
@@ -4089,7 +4062,8 @@ func TestHTTPAgentDispatcher_AgentEndpointOverride(t *testing.T) {
 			name:          "create, override set",
 			agentEndpoint: agentEndpoint,
 			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
-				return d.DispatchAgentCreate(ctx, agent)
+				_, err := d.DispatchAgentCreate(ctx, agent)
+				return err
 			},
 			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
 				if m.lastCreateReq == nil {
@@ -4307,7 +4281,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5031,7 +5005,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5080,7 +5054,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoRegistryNoRewrite(t *testing.
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5125,7 +5099,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5195,7 +5169,7 @@ func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
 			},
 		}
 
-		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			t.Fatalf("DispatchAgentCreate failed: %v", err)
 		}
@@ -5227,7 +5201,7 @@ func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
 			},
 		}
 
-		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			t.Fatalf("DispatchAgentCreate failed: %v", err)
 		}
@@ -5653,7 +5627,7 @@ func TestDispatchFinalizeEnv_PartialAutoResolve(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"DB_HOST": "cli-provided-host",
 	})
 	if err != nil {
@@ -5707,7 +5681,7 @@ func TestDispatchFinalizeEnv_FullAutoResolveInFinalize(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"CLI_VAR": "cli-value",
 	})
 	if err != nil {
@@ -5741,7 +5715,7 @@ func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"SOME_VAR": "some-value",
 	})
 
@@ -5791,7 +5765,7 @@ func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"SCION_METADATA_MODE":        "passthrough",
 		"SCION_METADATA_MODE_SOURCE": "hub",
 		"ORDINARY_VAR":               "ordinary-value",
@@ -6065,7 +6039,7 @@ func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -6106,7 +6080,6 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	// No profile timezone provider (or returns empty).
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 
 	// Hub default timezone.
 	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
@@ -6126,7 +6099,7 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -6191,7 +6164,6 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 	// The real accessor, not a test closure — this is what makes the test
 	// prove the GlobalConfig/BuildLayer1SnapshotFromFile fix, not just the
 	// dispatcher's pre-existing injection logic.
@@ -6210,7 +6182,7 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 		},
 	}
 
-	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+	if _, err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
 
@@ -6244,66 +6216,12 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 			Profile:       "no-tz",
 		},
 	}
-	if err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
+	if _, err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
 		t.Fatalf("DispatchAgentCreate (after clear) failed: %v", err)
 	}
 	if _, ok := mockClient.lastCreateReq.ResolvedEnv["TZ"]; ok {
 		t.Errorf("TZ present in ResolvedEnv after clearing default_timezone, want absent: %q",
 			mockClient.lastCreateReq.ResolvedEnv["TZ"])
-	}
-}
-
-// TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ verifies that
-// a raw TZ in profile env prevents the hub default from being applied, but is
-// itself overridden by the first-class profile timezone field.
-func TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("tz-broker-3"),
-		Name:     "tz-host-3",
-		Slug:     "tz-host-3",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("create broker: %v", err)
-	}
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	// Profile timezone returns empty (no first-class timezone set).
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
-
-	// Hub default timezone should NOT apply because config env has TZ.
-	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
-		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/Chicago"}
-	})
-
-	agent := &store.Agent{
-		ID:              tid("tz-agent-3"),
-		Name:            "tz-agent-3",
-		Slug:            "tz-agent-3",
-		ProjectID:       tid("project-1"),
-		RuntimeBrokerID: tid("tz-broker-3"),
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "claude",
-			Task:          "test env tz precedence",
-			Profile:       "env-tz-profile",
-			Env:           map[string]string{"TZ": "Europe/London"},
-		},
-	}
-
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
-	if err != nil {
-		t.Fatalf("DispatchAgentCreate failed: %v", err)
-	}
-
-	env := mockClient.lastCreateReq.ResolvedEnv
-	if got := env["TZ"]; got != "Europe/London" {
-		t.Errorf("TZ = %q, want Europe/London (config env TZ should beat hub default)", got)
 	}
 }
 

@@ -251,6 +251,11 @@ func LaunchID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchID, v))
 }
 
+// RunID applies equality check predicate on the "run_id" field. It's identical to RunIDEQ.
+func RunID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunID, v))
+}
+
 // LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
 func LaunchState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -339,6 +344,16 @@ func DeletionPrior(v string) predicate.Agent {
 // DeletionRequest applies equality check predicate on the "deletion_request" field. It's identical to DeletionRequestEQ.
 func DeletionRequest(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDeletionRequest, v))
+}
+
+// RunIntent applies equality check predicate on the "run_intent" field. It's identical to RunIntentEQ.
+func RunIntent(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntent, v))
+}
+
+// RunIntentAt applies equality check predicate on the "run_intent_at" field. It's identical to RunIntentAtEQ.
+func RunIntentAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentAt, v))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.
@@ -2601,6 +2616,81 @@ func LaunchIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchID, v))
 }
 
+// RunIDEQ applies the EQ predicate on the "run_id" field.
+func RunIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunID, v))
+}
+
+// RunIDNEQ applies the NEQ predicate on the "run_id" field.
+func RunIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunID, v))
+}
+
+// RunIDIn applies the In predicate on the "run_id" field.
+func RunIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunID, vs...))
+}
+
+// RunIDNotIn applies the NotIn predicate on the "run_id" field.
+func RunIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunID, vs...))
+}
+
+// RunIDGT applies the GT predicate on the "run_id" field.
+func RunIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunID, v))
+}
+
+// RunIDGTE applies the GTE predicate on the "run_id" field.
+func RunIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunID, v))
+}
+
+// RunIDLT applies the LT predicate on the "run_id" field.
+func RunIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunID, v))
+}
+
+// RunIDLTE applies the LTE predicate on the "run_id" field.
+func RunIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunID, v))
+}
+
+// RunIDContains applies the Contains predicate on the "run_id" field.
+func RunIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldRunID, v))
+}
+
+// RunIDHasPrefix applies the HasPrefix predicate on the "run_id" field.
+func RunIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldRunID, v))
+}
+
+// RunIDHasSuffix applies the HasSuffix predicate on the "run_id" field.
+func RunIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldRunID, v))
+}
+
+// RunIDIsNil applies the IsNil predicate on the "run_id" field.
+func RunIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunID))
+}
+
+// RunIDNotNil applies the NotNil predicate on the "run_id" field.
+func RunIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunID))
+}
+
+// RunIDEqualFold applies the EqualFold predicate on the "run_id" field.
+func RunIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldRunID, v))
+}
+
+// RunIDContainsFold applies the ContainsFold predicate on the "run_id" field.
+func RunIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldRunID, v))
+}
+
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.
 func LaunchStateEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -3754,6 +3844,131 @@ func DeletionRequestEqualFold(v string) predicate.Agent {
 // DeletionRequestContainsFold applies the ContainsFold predicate on the "deletion_request" field.
 func DeletionRequestContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldDeletionRequest, v))
+}
+
+// RunIntentEQ applies the EQ predicate on the "run_intent" field.
+func RunIntentEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntent, v))
+}
+
+// RunIntentNEQ applies the NEQ predicate on the "run_intent" field.
+func RunIntentNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunIntent, v))
+}
+
+// RunIntentIn applies the In predicate on the "run_intent" field.
+func RunIntentIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunIntent, vs...))
+}
+
+// RunIntentNotIn applies the NotIn predicate on the "run_intent" field.
+func RunIntentNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunIntent, vs...))
+}
+
+// RunIntentGT applies the GT predicate on the "run_intent" field.
+func RunIntentGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunIntent, v))
+}
+
+// RunIntentGTE applies the GTE predicate on the "run_intent" field.
+func RunIntentGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunIntent, v))
+}
+
+// RunIntentLT applies the LT predicate on the "run_intent" field.
+func RunIntentLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunIntent, v))
+}
+
+// RunIntentLTE applies the LTE predicate on the "run_intent" field.
+func RunIntentLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunIntent, v))
+}
+
+// RunIntentContains applies the Contains predicate on the "run_intent" field.
+func RunIntentContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldRunIntent, v))
+}
+
+// RunIntentHasPrefix applies the HasPrefix predicate on the "run_intent" field.
+func RunIntentHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldRunIntent, v))
+}
+
+// RunIntentHasSuffix applies the HasSuffix predicate on the "run_intent" field.
+func RunIntentHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldRunIntent, v))
+}
+
+// RunIntentIsNil applies the IsNil predicate on the "run_intent" field.
+func RunIntentIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunIntent))
+}
+
+// RunIntentNotNil applies the NotNil predicate on the "run_intent" field.
+func RunIntentNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunIntent))
+}
+
+// RunIntentEqualFold applies the EqualFold predicate on the "run_intent" field.
+func RunIntentEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldRunIntent, v))
+}
+
+// RunIntentContainsFold applies the ContainsFold predicate on the "run_intent" field.
+func RunIntentContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldRunIntent, v))
+}
+
+// RunIntentAtEQ applies the EQ predicate on the "run_intent_at" field.
+func RunIntentAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentAt, v))
+}
+
+// RunIntentAtNEQ applies the NEQ predicate on the "run_intent_at" field.
+func RunIntentAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunIntentAt, v))
+}
+
+// RunIntentAtIn applies the In predicate on the "run_intent_at" field.
+func RunIntentAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunIntentAt, vs...))
+}
+
+// RunIntentAtNotIn applies the NotIn predicate on the "run_intent_at" field.
+func RunIntentAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunIntentAt, vs...))
+}
+
+// RunIntentAtGT applies the GT predicate on the "run_intent_at" field.
+func RunIntentAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunIntentAt, v))
+}
+
+// RunIntentAtGTE applies the GTE predicate on the "run_intent_at" field.
+func RunIntentAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunIntentAt, v))
+}
+
+// RunIntentAtLT applies the LT predicate on the "run_intent_at" field.
+func RunIntentAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunIntentAt, v))
+}
+
+// RunIntentAtLTE applies the LTE predicate on the "run_intent_at" field.
+func RunIntentAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunIntentAt, v))
+}
+
+// RunIntentAtIsNil applies the IsNil predicate on the "run_intent_at" field.
+func RunIntentAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunIntentAt))
+}
+
+// RunIntentAtNotNil applies the NotNil predicate on the "run_intent_at" field.
+func RunIntentAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunIntentAt))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

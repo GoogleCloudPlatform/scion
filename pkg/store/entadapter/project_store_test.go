@@ -202,6 +202,69 @@ func TestProject_SetProjectOwnerID(t *testing.T) {
 	assert.ErrorIs(t, ps.SetProjectOwnerID(ctx, uuid.NewString(), newOwner), store.ErrNotFound)
 }
 
+// TestProjectOwnerID_UpdateProjectDoesNotWriteOwnerID pins the store
+// contract from ptone/scion#2597: the general UpdateProject never writes
+// owner_id, so a caller holding a stale row cannot undo an ownership
+// transfer, and SetProjectOwnerID remains the only writer. It also pins that
+// UpdateProject refreshes p.OwnerID from the stored row. It runs against
+// SQLite by default and against Postgres in make test-launch-store-postgres.
+func TestProjectOwnerID_UpdateProjectDoesNotWriteOwnerID(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	original := uuid.NewString()
+	p := newProject(1)
+	p.OwnerID = original
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	// A stale or hostile full-row write carrying a different OwnerID updates
+	// the other fields but leaves owner_id alone.
+	stale, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	stale.Name = "Renamed"
+	stale.OwnerID = uuid.NewString()
+	require.NoError(t, ps.UpdateProject(ctx, stale))
+	assert.Equal(t, original, stale.OwnerID, "UpdateProject must refresh p.OwnerID from the stored row")
+
+	got, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed", got.Name)
+	assert.Equal(t, original, got.OwnerID, "UpdateProject must not write owner_id")
+
+	// Clearing OwnerID through UpdateProject is ignored too.
+	got.OwnerID = ""
+	require.NoError(t, ps.UpdateProject(ctx, got))
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, original, got.OwnerID, "UpdateProject must not clear owner_id")
+
+	// The dedicated writer still changes it.
+	transferred := uuid.NewString()
+	require.NoError(t, ps.SetProjectOwnerID(ctx, p.ID, transferred))
+
+	// Interleaving: a row read before the transfer is written back after it.
+	// The transfer must survive.
+	before := *got
+	before.Name = "Renamed again"
+	require.NoError(t, ps.UpdateProject(ctx, &before))
+	assert.Equal(t, transferred, before.OwnerID, "UpdateProject must refresh p.OwnerID to the transferred owner")
+
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed again", got.Name)
+	assert.Equal(t, transferred, got.OwnerID, "a stale full-row write must not undo SetProjectOwnerID")
+}
+
+// TestProjectOwnerID_UpdateProjectNilReturnsInvalidInput pins that
+// UpdateProject rejects a nil project with store.ErrInvalidInput instead of
+// panicking.
+func TestProjectOwnerID_UpdateProjectNilReturnsInvalidInput(t *testing.T) {
+	ps := newTestProjectStore(t)
+	var err error
+	require.NotPanics(t, func() { err = ps.UpdateProject(context.Background(), nil) })
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()

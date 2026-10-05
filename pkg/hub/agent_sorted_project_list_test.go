@@ -37,7 +37,7 @@ import (
 )
 
 // sortedListFixture builds a project with an owner (full capabilities) and a
-// plain member (read-only: the design's read-pass and race tests need a
+// plain member (read-only: the read-pass and race tests need a
 // caller for whom some agents are unreadable), for the sorted-mode project
 // list tests.
 type sortedListFixture struct {
@@ -216,8 +216,7 @@ func TestListProjectAgentsSorted_CreatedSort(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_CursorWrongSortOrDirRejected pins that a
-// cursor minted for one sort/dir is rejected when replayed against another
-// (design 4.4).
+// cursor minted for one sort/dir is rejected when replayed against another.
 func TestListProjectAgentsSorted_CursorWrongSortOrDirRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -237,7 +236,7 @@ func TestListProjectAgentsSorted_CursorWrongSortOrDirRejected(t *testing.T) {
 
 // TestListProjectAgentsSorted_CursorCrossPrincipalRejected pins that a
 // cursor minted for one identity cannot be replayed by another (the
-// binding includes the identity, design 4.4).
+// binding includes the identity).
 func TestListProjectAgentsSorted_CursorCrossPrincipalRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -255,8 +254,8 @@ func TestListProjectAgentsSorted_CursorCrossPrincipalRejected(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_CursorPhaseReplayRejected pins the phase-replay
-// rejection (design 4.4: "a phase=running cursor replayed under
-// phase=stopped returns 400").
+// rejection: a phase=running cursor replayed under phase=stopped returns
+// 400.
 func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -391,7 +390,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 	// pre-check; then fake ListAgentMembers to report a grown pool. We
 	// achieve this by giving CountAgents a fixed "just under" answer and
 	// ListAgentMembers a fixed "over" answer independently.
-	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so step 0 passes
+	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so the ceiling pre-check passes
 	// Override ListAgentMembers behavior via a second wrapper layer that
 	// always returns an over-ceiling slice regardless of what CountAgents saw.
 	raceStore := &raceMembersStore{countingAgentStore: counting, memberCount: authorizedListMaxCandidates + 1}
@@ -407,7 +406,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 
 // raceMembersStore always answers ListAgentMembers with memberCount rows
 // (capped at the caller's max), independent of CountAgents' answer,
-// simulating candidate growth between the two reads (design 5.3 step 1).
+// simulating candidate growth between the two reads.
 type raceMembersStore struct {
 	*countingAgentStore
 	memberCount int
@@ -558,8 +557,8 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 	require.NotNil(t, resp.Stats.Agents)
 	assert.Len(t, *resp.Stats.Agents, 3)
 
-	// This response happens to be complete (n=3 <= fit=500), so per design
-	// 4.3/5.3 the page itself is the whole unphased set, not narrowed to
+	// This response happens to be complete (n=3 <= fit=500), so the
+	// page itself is the whole unphased set, not narrowed to
 	// phase=stopped -- phase only narrows a *paged* response. That is
 	// asserted separately in TestListProjectAgentsSorted_PagedAppliesPhase.
 	assert.Len(t, resp.Agents, 3)
@@ -567,8 +566,8 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 
 // TestListProjectAgentsSorted_PagedAppliesPhase confirms the complement:
 // once the response is paged (not complete), the phase filter narrows the
-// page, unlike a complete response (design 4.3: "Phase on a fit request is
-// applied only to a paged response").
+// page, unlike a complete response (phase on a fit request is applied
+// only to a paged response).
 func TestListProjectAgentsSorted_PagedAppliesPhase(t *testing.T) {
 	f := sortedListSetup(t)
 	f.createAgent(t, "pf-run-1", string(state.PhaseRunning), nil)
@@ -587,8 +586,8 @@ func TestListProjectAgentsSorted_PagedAppliesPhase(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_StatsOnlyValidWithSort pins that "stats=1"
-// without "sort" is not silently accepted (design 4.1: "Only valid with
-// sort"). The legacy endpoint has no stats concept, so this just checks the
+// without "sort" is not silently accepted (stats is only valid with
+// sort). The legacy endpoint has no stats concept, so this just checks the
 // legacy response has no stats block (stats is unrecognized/ignored there,
 // which is byte-identical to today per the legacy-mode contract).
 func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
@@ -604,13 +603,13 @@ func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
 
 // --- decision counts (hard gate) ---------------------------------------
 
-// TestListProjectAgentsSorted_DecisionCounts_Complete pins the section 6.4
+// TestListProjectAgentsSorted_DecisionCounts_Complete pins the decision-count
 // formula for a complete fit response: 5 + n + 7R (gate + one read decision
 // per candidate + 7 remaining-action decisions per readable item), which is
 // <= today's 5 + 8n and equal when R == n. n is kept small here as a quick
 // unit-style check of the formula's shape;
 // TestListProjectAgentsSorted_DecisionCounts_DesignSizes (designsizes_test.go)
-// re-asserts the same formula at the design's own sizes (25-1200).
+// re-asserts the same formula at larger sizes (25-1200).
 func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 6
@@ -635,8 +634,8 @@ func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_Paged pins the *paged* cost
-// bound, 5 + n + 7P, which does not depend on R at all (design 5.3,
-// "completeness does not depend on R"). The R < n sub-cases themselves
+// bound, 5 + n + 7P, which does not depend on R at all (completeness
+// does not depend on R). The R < n sub-cases themselves
 // (n=1200/R=400 paged=1380, n=500/R=200 complete=1905) are in
 // designsizes_test.go, using grantProjectListOnly plus per-agent ownership
 // -- a minimal project-scoped role granting only agent.list, combined with
@@ -728,19 +727,19 @@ func TestMergeCapabilities_EquivalentToSingleBatchPass(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision proves:
-// nil vs empty Labels/Ancestry must never trigger a step-5a re-decision.
+// nil vs empty Labels/Ancestry must never trigger a race re-decision.
 func TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision(t *testing.T) {
 	a := &Resource{Type: "agent", ID: "x", Labels: nil, Ancestry: nil}
 	b := &Resource{Type: "agent", ID: "x", Labels: map[string]string{}, Ancestry: []string{}}
 	assert.True(t, resourceEqual(*a, *b), "nil and empty Labels/Ancestry must compare equal")
 }
 
-// --- Step 5a race behavior -------------------------------------------------
+// --- Race behavior (member read vs full-row read) --------------------------
 
 // mutatingAfterMembersStore mutates an agent's labels (via the real store,
 // bypassing the read path) the first time ListAgentMembers is called,
-// simulating a write landing between the member read and the full-row read
-// (design 5.3 step 5a).
+// simulating a write landing between the member read and the full-row
+// read.
 type mutatingAfterMembersStore struct {
 	store.Store
 	once      sync.Once
@@ -767,8 +766,8 @@ func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 // TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the
 // decision-count gate's race sub-case: a page item's labels change between
 // the two reads but it still matches the request's label filter, so it is
-// kept and re-decided (9 decisions total: 1 in step 3, 8 in step 5a, 0 in
-// step 6).
+// kept and re-decided (9 decisions total: 1 in the read pass, 8 in the race
+// re-decision, 0 in the remaining-actions pass).
 func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-match", string(state.PhaseStopped), map[string]string{"team": "a", "extra": "1"})
@@ -784,7 +783,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.Len(t, resp.Agents, 1, "the raced item still matches label=team=a and must be kept")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 8 (step5a re-decision) + 0 (step6 skip) = 14.
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 8 (race re-decision) + 0 (remaining-actions skip) = 14.
 	assert.Len(t, emitter.records, 14)
 }
 
@@ -806,7 +805,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter(t *testi
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "the raced item no longer matches label=team=a and must be dropped")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 0 (filter-mismatch
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 0 (filter-mismatch
 	// drop, no additional decision) = 6.
 	assert.Len(t, emitter.records, 6)
 }

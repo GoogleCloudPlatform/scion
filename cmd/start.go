@@ -52,7 +52,7 @@ func init() {
 
 	startCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
 
-	startCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	startCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
@@ -97,6 +97,10 @@ func init() {
 		"Agent message mode: none, lineage, branch, project\n"+
 			"Controls which agents and users this agent can message.\n"+
 			"Default: inherited from template, parent, or 'project'.")
+
+	// Hub launch wait flags
+	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Hub mode: return once the Hub accepts the agent, without waiting for it to be running")
+	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// GCP service account assignment flag
 	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")

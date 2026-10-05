@@ -43,7 +43,6 @@ const (
 	MessageDenialCrossProjectUnsupported         MessageDenialCode = "cross_project_surface_unsupported"
 	MessageDenialCrossProjectGroupsUnsupported   MessageDenialCode = "cross_project_groups_unsupported"
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
-	MessageDenialCrossProjectRawUnsupported      MessageDenialCode = "cross_project_raw_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
 	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target" // reserved: scheduled message target validation
@@ -56,23 +55,6 @@ const (
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
 	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
 
-	// Phase 0.2 (ptone/scion#2192): raw messaging containment. Raw remains a
-	// guard-only, temporary compatibility path (ptone/scion#2184) supporting
-	// only an unadorned direct single-agent message; every other combination
-	// is rejected before conversation resolution, mention work, attachment
-	// ingestion, wake/lifecycle calls or dispatch of any kind.
-	MessageDenialRawPlainConflict            MessageDenialCode = "raw_plain_conflict"
-	MessageDenialRawGroupUnsupported         MessageDenialCode = "raw_group_unsupported"
-	MessageDenialRawBroadcastUnsupported     MessageDenialCode = "raw_broadcast_unsupported"
-	MessageDenialRawMentionsUnsupported      MessageDenialCode = "raw_mentions_unsupported"
-	MessageDenialRawAttachUnsupported        MessageDenialCode = "raw_attachment_unsupported"
-	MessageDenialRawSchedulingUnsupported    MessageDenialCode = "raw_scheduling_unsupported"
-	MessageDenialRawWakeUnsupported          MessageDenialCode = "raw_wake_unsupported"
-	MessageDenialRawInterruptUnsupported     MessageDenialCode = "raw_interrupt_unsupported"
-	MessageDenialRawObserverUnsupported      MessageDenialCode = "raw_observer_unsupported"
-	MessageDenialRawConversationUnsupported  MessageDenialCode = "raw_conversation_unsupported"
-	MessageDenialRawManagedUnsupported       MessageDenialCode = "raw_managed_backend_unsupported"
-	MessageDenialRawBrokerIngressUnsupported MessageDenialCode = "raw_broker_ingress_unsupported"
 )
 
 // MessageDecision captures the outcome of an agent message authorization
@@ -297,6 +279,18 @@ func (s *Server) authorizeUserToAgent(
 	}
 
 	targetResource := agentResource(targetAgent)
+
+	// A UAT-backed sender is confined by its token before any allow below,
+	// including ancestry and project-owner piercing: the token boundary
+	// must allow the target's project, the ceiling must allow
+	// agent.message, and the holder must currently have access to the
+	// target's project. The project and hub branch below applies the same
+	// gate again through CheckAccess.
+	if scoped, ok := userIdent.(*ScopedUserIdentity); ok {
+		if denied := s.authzService.uatMessageGate(ctx, scoped, targetResource); denied != nil {
+			return false, "agent.message permission denied: " + denied.Reason
+		}
+	}
 
 	// D6 UAT caveat: piercing applies only when the token carries agent:message.
 	// Full-session users (non-UAT) always have piercing ability.
@@ -837,4 +831,22 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 		return false
 	}
 	return membership.Role == store.ProjectRoleOwner
+}
+
+// uatMessageGate runs the bearer gate for agent.message on target for a
+// UAT-backed sender: the boundary is valid and allows the target's scope,
+// the ceiling allows agent.message, and for a project target the holder
+// currently has access to that project. It returns nil when every stage
+// passes. A nil scoped identity denies at entry with the reason the bearer
+// gate gives a missing credential. User message authorization calls it
+// before any ancestry or project-owner allow, so no messaging allow reaches
+// a target outside the token's boundary or the holder's current project
+// access.
+func (a *AuthzService) uatMessageGate(ctx context.Context, scoped *ScopedUserIdentity, target Resource) *Decision {
+	if scoped == nil {
+		return &Decision{Allowed: false, Reason: bearerReasonProjectAccessDenied}
+	}
+	principal := principalContextForIdentity(scoped)
+	in, _ := bearerGateInputsFor(principal, CredentialContext{})
+	return a.evaluateBearerGate(ctx, principal, in, target, TargetScopeEvidence{}, ActionMessage, "agent.message", nil, nil)
 }

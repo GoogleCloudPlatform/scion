@@ -87,6 +87,15 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		"endpoint", "broker.inbound.routed",
 	)
 
+	// Raw keystroke delivery through messages has been removed. A body
+	// whose message (or top level) still carries the retired raw field is
+	// rejected before decoding, so no sender identity is synthesized and no
+	// routing, conversation, mention or dispatch work runs. Trusted
+	// Hub-to-runtime-broker keys dispatch is a separate operation.
+	if s.rejectRetiredRawMessageBody(w, r, rawIngressBrokerInboundRouted, agentKeysAuditTarget{}, "", rawTombstonePreAuthMaxBodyBytes, "message") {
+		return
+	}
+
 	// Parse request body.
 	var req routedInboundRequest
 	if err := readJSON(r, &req); err != nil {
@@ -101,15 +110,6 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Message == nil {
 		ValidationError(w, "message is required", map[string]interface{}{"field": "message"})
-		return
-	}
-	// Phase 0.2 (ptone/scion#2192): broker/plugin ingress cannot use a raw
-	// message to obtain terminal authority through a claimed sender. Raw is
-	// rejected before sender identity synthesis, routing resolution,
-	// conversation resolution, mention work or dispatch.
-	if req.Message.Raw {
-		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBrokerIngressUnsupported,
-			"raw message delivery is not supported on broker inbound ingress"))
 		return
 	}
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
@@ -393,7 +393,7 @@ func (s *Server) dispatchRoutedRecipient(
 	if params.isPrimary {
 		msg = &messages.StructuredMessage{
 			Version:     messages.Version,
-			Timestamp:   params.now.Format(time.RFC3339),
+			Timestamp:   params.now.UTC().Format(time.RFC3339),
 			Sender:      params.req.Message.Sender,
 			SenderID:    params.req.Message.SenderID,
 			Recipient:   "agent:" + agent.Slug,
@@ -413,7 +413,7 @@ func (s *Server) dispatchRoutedRecipient(
 		)
 		// Override NewMention's time.Now() with the shared arrival timestamp
 		// so all recipients see one consistent arrival time (design step 6).
-		msg.Timestamp = params.now.Format(time.RFC3339)
+		msg.Timestamp = params.now.UTC().Format(time.RFC3339)
 		msg.SenderID = params.req.Message.SenderID
 		msg.RecipientID = agent.ID
 		msg.Urgent = params.req.Message.Urgent
