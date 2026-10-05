@@ -437,11 +437,11 @@ type countingStore struct {
 	userMappingError   error
 }
 
-func (c *countingStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
+func (c *countingStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {
 	c.mu.Lock()
 	c.agentCacheReads++
 	c.mu.Unlock()
-	return c.Store.GetProjectAgents(ctx, projectID)
+	return c.Store.GetProjectAgents(ctx, user, projectID)
 }
 
 func (c *countingStore) GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error) {
@@ -484,6 +484,7 @@ func (e *linkedUserEnv) useCountingStore(t *testing.T) *countingStore {
 	e.commands.store = cs
 	e.callback.store = cs
 	require.NoError(t, e.store.SetProjectAgents(context.Background(), &ProjectAgents{
+		User:        luPrincipal,
 		ProjectID:   luProject,
 		AgentSlugs:  []string{"worker"},
 		RefreshedAt: time.Now(),
@@ -842,67 +843,22 @@ func TestHandleIncomingMessage_RefreshesAgentsAsSender(t *testing.T) {
 	assert.Equal(t, 1, cs.lookups(), "the sender's link is looked up once")
 }
 
-func TestHandleIncomingMessage_LinkWithoutEmailIsDelivered(t *testing.T) {
-	e := newLinkedUserEnv(t)
-	e.linkChannel(t)
-	require.NoError(t, e.store.CreateUserMapping(context.Background(), &DiscordUserMapping{
-		DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-	}))
-	require.NoError(t, e.store.SetProjectAgents(context.Background(), &ProjectAgents{
-		ProjectID: luProject, AgentSlugs: []string{"worker"}, RefreshedAt: time.Now(),
-	}))
-	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
-	cs := &countingStore{Store: e.store}
-	b.store = cs
-
-	b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "@worker hello"))
-
-	assert.Equal(t, 1, cs.lookups(), "the sender's link is looked up once")
-	assert.NotContains(t, e.discord.allBodies(), "/scion register")
-}
-
-func TestHandleIncomingMessage_UnlinkedSenderUsesAgentCacheOnly(t *testing.T) {
-	tests := []struct {
-		name  string
-		cache *ProjectAgents
-	}{
-		{name: "empty cache"},
-		{name: "stale cache", cache: &ProjectAgents{
-			ProjectID: luProject, AgentSlugs: []string{"worker"}, RefreshedAt: time.Now().Add(-time.Hour),
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			e := newLinkedUserEnv(t)
-			e.linkChannel(t)
-			if tt.cache != nil {
-				require.NoError(t, e.store.SetProjectAgents(context.Background(), tt.cache))
-			}
-			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
-
-			b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "@worker hello"))
-
-			assert.Empty(t, e.hub.snapshot(), "no hub call for an unlinked sender")
-			if tt.cache != nil {
-				// The cached agent resolves, so the sender is asked to register.
-				assert.Contains(t, e.discord.allBodies(), "/scion register")
-			}
-		})
-	}
-}
-
-func TestLookupUserMapping_LogsFailedLookup(t *testing.T) {
+func TestGetUserMapping_LogsFailedLookup(t *testing.T) {
 	var buf strings.Builder
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 
 	store := &countingStore{Store: newTestStore(t), userMappingError: assert.AnError}
-	assert.Nil(t, lookupUserMapping(context.Background(), store, log, "du-carol"))
+	mapping, err := getUserMapping(context.Background(), store, log, "du-carol")
+	assert.Nil(t, mapping)
+	assert.Error(t, err)
 	assert.Contains(t, buf.String(), "level=WARN")
 	assert.Contains(t, buf.String(), "discord_user_id=du-carol")
 
 	buf.Reset()
 	store.userMappingError = nil
-	assert.Nil(t, lookupUserMapping(context.Background(), store, log, "du-carol"))
+	mapping, err = getUserMapping(context.Background(), store, log, "du-carol")
+	assert.Nil(t, mapping)
+	assert.NoError(t, err)
 	assert.Empty(t, buf.String(), "an unlinked user is not logged")
 }
 

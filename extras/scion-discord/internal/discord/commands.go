@@ -1892,17 +1892,6 @@ func getUserMapping(ctx context.Context, store Store, log *slog.Logger, discordU
 	return mapping, nil
 }
 
-// lookupUserMapping returns the Discord user's link, or nil when the user is
-// unknown, unlinked, or the lookup fails; a failed lookup is logged.
-//
-// A failed lookup is deliberately treated like no link: callers on the
-// legacy channel message path reply with the register prompt, not the retry
-// reply that requirePrincipal sends.
-func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, discordUserID string) *DiscordUserMapping {
-	mapping, _ := getUserMapping(ctx, store, log, discordUserID)
-	return mapping
-}
-
 // requirePrincipal returns the invoking user's principal. When the user has
 // no linked account, it calls reply with a prompt to run /scion register;
 // when the link has no email, it calls reply with staleLinkText;
@@ -1932,43 +1921,14 @@ func (h *CommandHandler) requirePrincipal(ctx context.Context, s *discordgo.Sess
 	return requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) { h.followup(s, i, msg) })
 }
 
-// getAgents returns agent slugs for a project, using the store cache with
-// a fallback to the hub API. onBehalfOf is the invoking user's principal.
+// getAgents returns agent slugs for a project as seen by the invoking
+// user onBehalfOf, from that user's cache entry or the hub (see
+// cachedAgentSlugs).
 func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
 	if onBehalfOf == "" {
 		return nil, errNoLinkedUser
 	}
-	cached, err := h.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
-	}
-	if cached != nil && time.Since(cached.RefreshedAt) < h.agentCacheTTL {
-		return cached.AgentSlugs, nil
-	}
-
-	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
-	if err != nil {
-		if cached != nil {
-			return cached.AgentSlugs, nil
-		}
-		return nil, err
-	}
-
-	slugs := make([]string, len(agents))
-	for i, a := range agents {
-		slugs[i] = a.Slug
-	}
-
-	saveErr := h.store.SetProjectAgents(ctx, &ProjectAgents{
-		ProjectID:   projectID,
-		AgentSlugs:  slugs,
-		RefreshedAt: time.Now(),
-	})
-	if saveErr != nil {
-		h.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
-	}
-
-	return slugs, nil
+	return cachedAgentSlugs(ctx, h.store, h.hubClient, h.log, h.agentCacheTTL, projectID, onBehalfOf)
 }
 
 // followup sends a follow-up message to the interaction.
