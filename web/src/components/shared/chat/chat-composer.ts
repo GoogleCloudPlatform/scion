@@ -797,8 +797,15 @@ export class ScionChatComposer extends LitElement {
   /**
    * Immediately persist the current draft text under the given key.
    * Cancels any pending debounced save so it is not double-written. (#1152)
+   *
+   * Empty text only removes the stored draft when this composer has a save
+   * pending (the user just cleared it). Otherwise storage already matches
+   * this composer, and an entry there was written elsewhere — e.g. text
+   * handed over from the quick message dialog — so it must survive this
+   * composer unmounting.
    */
   private flushDraft(key: string): void {
+    const savePending = this._draftTimer !== null;
     if (this._draftTimer !== null) {
       clearTimeout(this._draftTimer);
       this._draftTimer = null;
@@ -808,7 +815,7 @@ export class ScionChatComposer extends LitElement {
       const storageKey = `scion-chat-draft-${key}`;
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
-      } else {
+      } else if (savePending) {
         localStorage.removeItem(storageKey);
       }
     } catch {
