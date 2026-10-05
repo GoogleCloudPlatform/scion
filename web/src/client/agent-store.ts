@@ -924,6 +924,9 @@ export class AgentStore {
         w.cleanup();
         w.reject(error);
       }
+      // The probe keeps a loaded list current while it is in error, and its
+      // next periodic walk retries.
+      this.syncProbe(entry);
       this.scheduleIdleWork(entry);
     }
   }

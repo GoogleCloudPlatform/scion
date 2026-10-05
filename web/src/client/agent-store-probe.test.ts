@@ -617,6 +617,19 @@ describe('AgentStore delta probe', () => {
       expect(h.server.probes()).toBe(0);
     });
 
+    it('keeps probing after a periodic walk fails, and walks again five minutes later', async () => {
+      const h = await loaded([row('a1', 1)]);
+      expect(await run(h, 9)).toEqual([]);
+      h.server.status = 500;
+      expect(await run(h, 1, 9)).toEqual([5]);
+      h.server.status = 200;
+      h.server.agents.push(row('a2', 50));
+      const probes = h.server.probes();
+      expect(await run(h, 10, 10)).toEqual([10]);
+      expect(h.server.probes() - probes).toBe(9);
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+    });
+
     it('does not walk a list nobody retains', async () => {
       const h = createHarness([row('a1', 1)]);
       const release = h.store.retain(HUB, () => {});
