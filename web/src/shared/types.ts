@@ -639,6 +639,46 @@ export interface Agent {
 
   // Children agent IDs (populated by some API responses)
   childrenIds?: string[];
+
+  // Backend-driven delete lifecycle (ptone/scion#2483 §2.2). The hub always
+  // sends this key on REST agents and SSE status deltas; an explicit `null`
+  // means no delete is active and must clear any earlier value.
+  deletion?: DeletionInfo | null;
+}
+
+/** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
+export type DeletionState = 'deleting' | 'failed';
+
+/**
+ * Failure codes on a `failed` deletion (pkg/store/deletion_view.go). Kept
+ * open-ended so an unknown future code still renders its `error` text.
+ */
+export type DeletionCode =
+  | 'runtime_error'
+  | 'conflict'
+  | 'in_doubt'
+  | 'abandoned'
+  | 'revoke_failed'
+  | 'finalize_failed'
+  | 'runtime_unavailable'
+  | (string & Record<never, never>);
+
+/**
+ * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
+ * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
+ * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ */
+export interface DeletionInfo {
+  state: DeletionState;
+  code?: DeletionCode;
+  error?: string;
+  soft: boolean;
+  claim: number;
+  startedAt: string;
+  /** Set while `deleting`. */
+  leaseExpiresAt?: string;
+  /** Set on `failed`, except `in_doubt` and finalizing rows. */
+  expiresAt?: string;
 }
 
 /**

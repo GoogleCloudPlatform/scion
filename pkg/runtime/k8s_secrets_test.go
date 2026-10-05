@@ -731,7 +731,7 @@ func TestDelete_PodNotFound_StillCleansSecrets(t *testing.T) {
 	}
 
 	// Delete should not error even though pod doesn't exist
-	err = rt.Delete(ctx, "test-agent")
+	err = rt.Delete(ctx, RunRef{ID: "test-agent"})
 	if err != nil {
 		t.Fatalf("Delete should succeed when pod is not found: %v", err)
 	}

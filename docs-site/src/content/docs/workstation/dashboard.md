@@ -28,7 +28,7 @@ The header features a **mode switcher** that lets you move between the top-level
 Inbox and notifications stay reachable at every width. The Terminal entry also shows how many terminal sessions are open.
 
 ### Display Timezone & Clock
-The dashboard shows clock times in 24-hour format. The **Display timezone** card on your profile settings page sets the zone used to show times and to read date/time inputs in native chat and scheduling forms. Other views are moving to it over time. **Auto**, the default, follows your browser's zone. The value is stored per user as the `timezone` preference (see the [Users API](/scion/reference/api/)). It affects only what you see, never the `TZ` of agent containers. For that, see [Agent timezone](/scion/reference/orchestrator-settings/#profiles-profiles).
+The dashboard shows clock times in 24-hour format. The **Display timezone** card on your profile settings page sets the zone used to show times and to read date/time inputs in native chat and scheduling forms. Other views are moving to it over time. **Auto**, the default, follows your browser's zone. The value is stored per user as the `timezone` preference (see the [Users API](/scion/reference/api/)). It affects only what you see, never the `TZ` of agent containers. For that, see [Agent timezone](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.

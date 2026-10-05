@@ -222,7 +222,7 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	}
 	if intent != "" {
 		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 	}

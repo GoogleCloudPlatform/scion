@@ -897,11 +897,11 @@ var projectMembersGroupOwnerBackfillPageSize = 200
 // members group is now created without an owner.
 //
 // Groups are identified by the project-members-group marker annotation
-// (either key, see legacyProjectMembersGroupAnnotation), never by slug, so a
-// user-created group with a look-alike slug is left untouched. The pass runs
-// on every startup and is idempotent: a group whose OwnerID is already empty
-// is skipped, so a second run changes nothing. Per-group update errors are
-// logged and skipped.
+// (either key, see store.LegacyAnnotationProjectMembersGroup), never by
+// slug, so a user-created group with a look-alike slug is left untouched.
+// The pass runs on every startup and is idempotent: a group whose OwnerID is
+// already empty is skipped, so a second run changes nothing. Per-group update
+// errors are logged and skipped.
 func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
 	// All groups are scanned rather than filtering by GroupType: the scan is
 	// paginated and cheap, and a type filter could miss legacy group shapes.
