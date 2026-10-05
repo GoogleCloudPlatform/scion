@@ -1605,3 +1605,61 @@ func TestServerConfigSources_ResolvesRelativeCwdToAbsolute(t *testing.T) {
 		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, cwdServerYAML)
 	}
 }
+
+// TestLoadGlobalConfig_TopLevelSectionsWithoutServerKey guards
+// ptone/scion#2284: a settings.yaml with no "server" key must still
+// contribute its top-level hub sections to LoadGlobalConfig, exactly as the
+// same file with a "server" key does.
+func TestLoadGlobalConfig_TopLevelSectionsWithoutServerKey(t *testing.T) {
+	const topLevel = `quotas:
+  enforce_broker_quotas: false
+agent_secrets:
+  user_scope_only: true
+default_timezone: Europe/Berlin
+default_harness_config: claude
+project_defaults:
+  default_scratchpad: true
+default_gcp_identity_mode: block
+`
+	load := func(t *testing.T, content string) *GlobalConfig {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir := filepath.Join(home, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		gc, err := LoadGlobalConfig(t.TempDir())
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig: %v", err)
+		}
+		return gc
+	}
+
+	withServer := load(t, "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n"+topLevel)
+	without := load(t, "schema_version: \"1\"\n"+topLevel)
+
+	for name, gc := range map[string]*GlobalConfig{"with server": withServer, "without server": without} {
+		if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+			t.Errorf("%s: EnforceBrokerQuotas = %v, want false", name, gc.EnforceBrokerQuotas)
+		}
+		if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
+			t.Errorf("%s: AgentSecretsUserScopeOnly = %v, want true", name, gc.AgentSecretsUserScopeOnly)
+		}
+		if gc.DefaultTimezone != "Europe/Berlin" {
+			t.Errorf("%s: DefaultTimezone = %q, want Europe/Berlin", name, gc.DefaultTimezone)
+		}
+		if gc.DefaultHarnessConfig != "claude" {
+			t.Errorf("%s: DefaultHarnessConfig = %q, want claude", name, gc.DefaultHarnessConfig)
+		}
+		if gc.DefaultScratchpad == nil || !*gc.DefaultScratchpad {
+			t.Errorf("%s: DefaultScratchpad = %v, want true", name, gc.DefaultScratchpad)
+		}
+		if gc.DefaultGCPIdentityMode != "block" {
+			t.Errorf("%s: DefaultGCPIdentityMode = %q, want block", name, gc.DefaultGCPIdentityMode)
+		}
+	}
+}

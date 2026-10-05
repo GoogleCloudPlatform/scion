@@ -1008,8 +1008,16 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		return gc, nil
 	}
 
-	// Fall back to legacy server.yaml path
-	return loadGlobalConfigLegacy(configPath)
+	// Fall back to legacy server.yaml path. No settings.yaml had a "server"
+	// key, but a settings.yaml may still carry top-level hub sections
+	// (quotas, agent_secrets, default_timezone, ...); honour them so a
+	// file-mode reload does not reset those live values (ptone/scion#2284).
+	gc, err := loadGlobalConfigLegacy(configPath)
+	if err != nil {
+		return nil, err
+	}
+	applyTopLevelSettingsSectionsFromFiles(gc, configPath)
+	return gc, nil
 }
 
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
@@ -1852,15 +1860,8 @@ func loadServerConfigFile(k *koanf.Koanf, dir string) {
 // V1ServerConfig and converts it to a GlobalConfig.
 // Returns (config, true) if settings.yaml had a server key, (nil, false) otherwise.
 func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
-	settingsPath := filepath.Join(dir, "settings.yaml")
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return nil, false
-	}
-
-	// Parse the YAML to check if it has a "server" key
-	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	raw, ok := readSettingsFileRaw(dir)
+	if !ok {
 		return nil, false
 	}
 
@@ -1881,7 +1882,61 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 	}
 
 	gc := ConvertV1ServerToGlobalConfig(&v1Server)
+	applyTopLevelSettingsSections(gc, raw)
 
+	return gc, true
+}
+
+// readSettingsFileRaw reads settings.yaml in dir and parses it into a generic
+// map. Returns (nil, false) when the file is missing or unparseable.
+func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+	if err != nil {
+		return nil, false
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// applyTopLevelSettingsSectionsFromFiles applies the top-level hub sections
+// (see applyTopLevelSettingsSections) of the first settings.yaml found, in
+// the same search order loadGlobalConfigFromSettings uses for the server
+// key: the global dir, then the configPath directory. It is used when no
+// settings.yaml has a "server" key and config therefore comes from the
+// legacy server.yaml path, so a server-less settings.yaml still contributes
+// quotas, agent_secrets, default_timezone, etc. (ptone/scion#2284).
+func applyTopLevelSettingsSectionsFromFiles(gc *GlobalConfig, configPath string) {
+	var dirs []string
+	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
+		dirs = append(dirs, globalDir)
+	}
+	if configPath != "" {
+		if info, err := os.Stat(configPath); err == nil {
+			dir := configPath
+			if !info.IsDir() {
+				dir = filepath.Dir(configPath)
+			}
+			dirs = append(dirs, dir)
+		}
+	}
+	for _, dir := range dirs {
+		if raw, ok := readSettingsFileRaw(dir); ok {
+			applyTopLevelSettingsSections(gc, raw)
+			return
+		}
+	}
+}
+
+// applyTopLevelSettingsSections copies the hub-level settings that live at
+// the top level of settings.yaml (outside "server") onto gc: telemetry,
+// project_defaults, quotas, agent_secrets, default_harness_config,
+// default_timezone and default_gcp_identity_*. It runs whether or not the
+// file has a "server" key, so LoadGlobalConfig agrees with
+// LoadBootstrapKoanf, which loads the whole file.
+func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{}) {
 	// Also check for top-level "telemetry" section — it lives outside "server"
 	// in settings.yaml but controls the default telemetry opt-in for the Hub.
 	if telRaw, ok := raw["telemetry"]; ok && telRaw != nil {
@@ -1956,7 +2011,6 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 		gc.DefaultGCPIdentityServiceAccountID = v
 	}
 
-	return gc, true
 }
 
 // hasServerYAML checks if a directory has a server.yaml or server.yml file.
