@@ -631,6 +631,19 @@ export class AgentStore {
         // A walk already fetching while the feed is down may miss changes
         // that land before the feed is back: walk once more after it.
         if (entry.walk.phase === 'fetching' && !feed.isConnected) entry.followUp = true;
+        // A caller joining a walk that has published pages hears them now,
+        // not only from the walk's next page on.
+        const joined = entry.snapshot;
+        if (onProgress && joined.status === 'loading' && joined.agents.length > 0) {
+          queueMicrotask(() => {
+            if (!entry.waiters.has(waiter) || entry.snapshot !== joined) return;
+            try {
+              onProgress(joined);
+            } catch (err) {
+              console.error('[agent-store] progress callback failed:', err);
+            }
+          });
+        }
         return;
       }
       this.startWalk(entry);

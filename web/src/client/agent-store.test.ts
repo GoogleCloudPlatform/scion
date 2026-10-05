@@ -250,6 +250,68 @@ describe('AgentStore coalescing', () => {
     expect(done.complete).toBe(true);
   });
 
+  it('a caller joining a walk after its first page hears the rows so far at once', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    let releasePage2 = (): void => {};
+    const page2 = new Promise<void>((resolve) => {
+      releasePage2 = resolve;
+    });
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await page2;
+      return realFetch(path, options);
+    });
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    expect(ids(h.store.peek(HUB))).toEqual(['a0', 'a1']);
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress.map(ids)).toEqual([['a0', 'a1']]);
+    expect(progress[0]?.status).toBe('loading');
+
+    releasePage2();
+    await Promise.all([first, joined]);
+    expect(h.server.walks()).toBe(1);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 4, 5]);
+  });
+
+  it('a caller that joins a walk and leaves at once hears none of its rows', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+
+    const progress: AgentListSnapshot[] = [];
+    const controller = new AbortController();
+    const joined = h.store.ensure(HUB, {
+      signal: controller.signal,
+      onProgress: (s) => progress.push(s),
+    });
+    controller.abort();
+    await expect(joined).rejects.toThrow();
+    await settle();
+    expect(progress).toEqual([]);
+  });
+
+  it('a caller joining a walk before any page lands hears nothing until one does', async () => {
+    const h = createHarness(many(3), { pageSize: 2 });
+    const first = h.store.ensure(HUB);
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    await h.connect();
+    await Promise.all([first, joined]);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 3]);
+  });
+
   it('a walk waits for the feed to connect before its first request', async () => {
     const h = createHarness(many(1));
     const loading = h.store.ensure(HUB);
