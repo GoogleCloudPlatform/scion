@@ -6457,6 +6457,10 @@ describe('scion-chat-thread scroll position hand-over', () => {
     'clientHeight'
   );
   let hidden = false;
+  /** Extra px every row is pushed down by (simulates a late layout shift). */
+  let shift = 0;
+  /** Own read watermark served by the `/read` endpoint ('' = none). */
+  let lastRead = '';
 
   /** The thread's scroller, found from any element inside its shadow root. */
   function scrollerOf(el: Element): HTMLElement | null {
@@ -6481,15 +6485,21 @@ describe('scion-chat-thread scroll position hand-over', () => {
 
   beforeEach(() => {
     hidden = false;
+    shift = 0;
+    lastRead = '';
     apiFetch.mockReset();
     apiFetch.mockImplementation((url: string) =>
       Promise.resolve({
         ok: true,
         status: 200,
         json: () =>
-          Promise.resolve({
-            items: String(url).includes('around=old-1') ? [older, ...history] : history,
-          }),
+          Promise.resolve(
+            String(url).endsWith('/read')
+              ? lastRead
+                ? { lastReadMessageId: lastRead }
+                : {}
+              : { items: String(url).includes('around=old-1') ? [older, ...history] : history }
+          ),
       } as unknown as Response)
     );
     Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
@@ -6502,7 +6512,7 @@ describe('scion-chat-thread scroll position hand-over', () => {
           const scroller = scrollerOf(this);
           const rows = Array.from(scroller?.querySelectorAll('[id^="msg-"]') ?? []);
           const index = rows.indexOf(this);
-          return rect(index * ROW_HEIGHT - (scroller?.scrollTop ?? 0), ROW_HEIGHT);
+          return rect(index * ROW_HEIGHT + shift - (scroller?.scrollTop ?? 0), ROW_HEIGHT);
         }
         return originalGetBoundingClientRect.call(this);
       },
@@ -6634,6 +6644,119 @@ describe('scion-chat-thread scroll position hand-over', () => {
     await nextFrame();
     el.remove();
     expect(el.scrollAnchor?.messageId).toBe('m2');
+  });
+
+  it('meets messages that arrived while away at the unread divider, not the bottom', async () => {
+    lastRead = 'm5';
+    const { el, scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: true,
+      messageId: 'm9',
+      offset: 0,
+    });
+    const internals = el as unknown as { _unreadAnchorActive: boolean };
+    await vi.waitFor(() => expect(internals._unreadAnchorActive).toBe(true));
+    expect(scroller().scrollTop).not.toBe(ROWS * ROW_HEIGHT);
+  });
+
+  it('keeps a mid-thread position even when there are unread messages', async () => {
+    lastRead = 'm5';
+    const { el, scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm4',
+      offset: 0,
+    });
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(400));
+    expect((el as unknown as { _unreadAnchorActive: boolean })._unreadAnchorActive).toBe(false);
+  });
+
+  it('lets a #msg- permalink win over the anchor, and uses the anchor up', async () => {
+    window.history.replaceState({}, '', '#msg-m2');
+    try {
+      const anchor = {
+        conversationKey: CONVERSATION_KEY,
+        pinnedToBottom: false,
+        messageId: 'm4',
+        offset: 0,
+      };
+      const el = document.createElement('scion-chat-thread') as ScionChatThread;
+      const jump = vi.spyOn(el, 'scrollToMessageById').mockResolvedValue();
+      el.conversationKey = CONVERSATION_KEY;
+      el.restoreScrollAnchor = anchor;
+      document.body.appendChild(el);
+      await vi.waitFor(() => expect(jump).toHaveBeenCalledWith('m2', true));
+      const scroller = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+      expect(scroller.scrollTop).not.toBe(400);
+      expect((el as unknown as { _usedRestoreAnchor: unknown })._usedRestoreAnchor).toBe(anchor);
+    } finally {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  });
+
+  describe('holding the restored position against late layout shifts', () => {
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    let observers: Array<{ fire: () => void; disconnected: boolean }>;
+
+    beforeEach(() => {
+      observers = [];
+      globalThis.ResizeObserver = class {
+        private entry: { fire: () => void; disconnected: boolean };
+        constructor(callback: ResizeObserverCallback) {
+          this.entry = {
+            fire: () => callback([], this as unknown as ResizeObserver),
+            disconnected: false,
+          };
+          observers.push(this.entry);
+        }
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {
+          this.entry.disconnected = true;
+        }
+      } as unknown as typeof ResizeObserver;
+    });
+
+    afterEach(() => {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    });
+
+    async function restored(): Promise<{
+      scroller: () => HTMLElement;
+      watch: () => { fire: () => void; disconnected: boolean };
+    }> {
+      const { scroller } = await mountWith({
+        conversationKey: CONVERSATION_KEY,
+        pinnedToBottom: false,
+        messageId: 'm4',
+        offset: -30,
+      });
+      await vi.waitFor(() => expect(scroller().scrollTop).toBe(430));
+      return { scroller, watch: () => observers[observers.length - 1] };
+    }
+
+    it('re-applies the anchor when rows above it grow', async () => {
+      const { scroller, watch } = await restored();
+      shift = 200; // e.g. inter-agent exchanges rendered above the anchor
+      watch().fire();
+      expect(scroller().scrollTop).toBe(630);
+    });
+
+    it('stops at the first user scroll', async () => {
+      const { scroller, watch } = await restored();
+      scroller().scrollTop = 100; // the user scrolls away
+      shift = 200;
+      watch().fire();
+      expect(scroller().scrollTop).toBe(100);
+      expect(watch().disconnected).toBe(true);
+    });
+
+    it('stops after a short settle window', async () => {
+      const { watch } = await restored();
+      expect(watch().disconnected).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(watch().disconnected).toBe(true);
+    });
   });
 
   it('forgets the position when switching conversations', async () => {

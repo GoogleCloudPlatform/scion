@@ -30,7 +30,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
-import { render, type TemplateResult } from 'lit';
+import { nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
 import {
@@ -1775,6 +1775,11 @@ describe('chat page — thread and scroll position across mode switches', () => 
   it('a mounting page takes the handed-over position, once', () => {
     rememberChatScrollAnchor(THREAD_ANCHOR);
     const el = createPage();
+    // Only the connect/disconnect hand-over is under test: skip the lazy
+    // rail/members imports, route parse and full render a mount would start
+    // (this file's module mocks cannot support the rendered children).
+    el.initV2 = vi.fn(() => Promise.resolve());
+    el.render = () => nothing;
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     document.body.appendChild(el);
     expect(el._pendingScrollRestore).toEqual(THREAD_ANCHOR);
@@ -1828,9 +1833,14 @@ describe('chat page — thread and scroll position across mode switches', () => 
   });
 
   it('records an in-place thread switch with the router, keeping the page title', async () => {
+    // Detached on purpose: a full mount renders the thread and its children,
+    // which this file's module mocks cannot support. The title re-apply
+    // only checks `isConnected`, so report connected and wire the listener
+    // connectedCallback would add.
     const el = createPage();
+    Object.defineProperty(el, 'isConnected', { value: true });
+    el.addEventListener(PAGE_TITLE_EVENT, el._onOwnPageTitle);
     window.history.replaceState({}, '', '/chat');
-    document.body.appendChild(el);
     const titles: string[][] = [];
     el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
       titles.push((e as CustomEvent<{ segments: string[] }>).detail.segments)

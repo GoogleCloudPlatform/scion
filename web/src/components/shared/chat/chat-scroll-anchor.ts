@@ -96,9 +96,21 @@ export function rememberChatScrollAnchor(anchor: ChatScrollAnchor | null): void 
   remembered = anchor ? { ...anchor } : null;
 }
 
-/** Take (and clear) the stored anchor. */
+/**
+ * Take (and clear) the stored anchor.
+ *
+ * Nothing expires it: after a long stretch on the dashboard, the next chat
+ * page still restores it if it opens the same conversation, even through a
+ * plain link rather than the mode switch. That is intended — it is the
+ * position the user last saw in that conversation.
+ */
 export function takeChatScrollAnchor(): ChatScrollAnchor | null {
   const anchor = remembered;
   remembered = null;
   return anchor;
+}
+
+/** Forget any stored anchor (account teardown). */
+export function clearChatScrollAnchor(): void {
+  remembered = null;
 }

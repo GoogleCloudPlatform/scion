@@ -105,6 +105,9 @@ const SCROLL_TOP_THRESHOLD = 100;
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
 
+/** How long a restored scroll position is held against late layout shifts. */
+const RESTORE_SETTLE_MS = 500;
+
 /** Small margin kept above the unread divider when it is anchored to the top. */
 const UNREAD_ANCHOR_MARGIN_PX = 16;
 
@@ -445,6 +448,9 @@ export class ScionChatThread extends LitElement {
 
   /** Pending rAF that refreshes `_scrollAnchor` after a scroll. */
   private _scrollAnchorRaf: number | null = null;
+
+  /** Tears down the short watch that keeps a restored position in place. */
+  private _restoreSettleCleanup: (() => void) | null = null;
 
   @state() private messages: Message[] = [];
   @state() private messageMap = new Map<string, Message>();
@@ -1163,6 +1169,7 @@ export class ScionChatThread extends LitElement {
     // belong to the conversation we just left.
     this.deactivateUnreadAnchor();
     this.cancelScrollAnchorCapture();
+    this.cancelRestoreSettleWatch();
     this._scrollAnchor = null;
 
     // Stop any active SSE listener
@@ -1226,6 +1233,7 @@ export class ScionChatThread extends LitElement {
     this.deactivateUnreadAnchor();
     // Keep `_scrollAnchor` itself: the page reads it after we detach.
     this.cancelScrollAnchorCapture();
+    this.cancelRestoreSettleWatch();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
     // Clean up v2 SSE listeners
@@ -1529,12 +1537,15 @@ export class ScionChatThread extends LitElement {
     } finally {
       this.loading = false;
       // Determine scroll target: permalink hash > restored position >
-      // unread divider > bottom.
+      // unread divider > bottom. A restored position that was following the
+      // bottom yields to the unread divider: messages that arrived while the
+      // user was away should be met at "New messages", not scrolled past.
+      // The anchor is taken (used up) even when the hash wins.
       const hashMsgId = this.parseMessageHash();
       const restore = this.takeRestoreScrollAnchor();
       if (hashMsgId) {
         void this.scrollToMessageById(hashMsgId, true);
-      } else if (restore) {
+      } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
         void this.restoreScrollPosition(restore);
       } else if (this.showUnreadDivider) {
         this.scrollToUnreadDivider();
@@ -2899,21 +2910,57 @@ export class ScionChatThread extends LitElement {
       return;
     }
     const target = msgEl;
-    const apply = (): void => {
+    /** Write the anchor's scrollTop; returns it as read back, or null. */
+    const apply = (): number | null => {
       const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
-      if (!scrollEl || !target.isConnected) return;
+      if (!scrollEl || !target.isConnected) return null;
+      const containerRect = scrollEl.getBoundingClientRect();
+      if (containerRect.height === 0) return null; // hidden: no layout to read
       scrollEl.scrollTop = scrollTopForAnchor(
         scrollEl.scrollTop,
         target.getBoundingClientRect().top,
-        scrollEl.getBoundingClientRect().top,
+        containerRect.top,
         anchor.offset
       );
+      return scrollEl.scrollTop;
     };
-    apply();
-    // Rows can still settle for a frame (markdown, fonts); pin once more.
-    requestAnimationFrame(() => {
-      if (fetchId === this.fetchId) apply();
+    const written = apply();
+    if (written !== null) this.watchRestoreSettle(apply, written);
+  }
+
+  /**
+   * Rows can keep arriving or resizing for a moment after a restore (late
+   * markdown, fonts, an agent DM's inter-agent exchanges loading), which
+   * would drift the view off the anchor. Re-apply it on every resize of the
+   * list for `RESTORE_SETTLE_MS`, stopping early the moment the user scrolls
+   * (seen as `scrollTop` no longer being the value last written).
+   */
+  private watchRestoreSettle(apply: () => number | null, written: number): void {
+    this.cancelRestoreSettleWatch();
+    const list = this.shadowRoot?.querySelector('.messages-list');
+    if (!list || typeof ResizeObserver === 'undefined') return;
+    let last = written;
+    const observer = new ResizeObserver(() => {
+      const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+      if (!scrollEl || scrollEl.scrollTop !== last) {
+        this.cancelRestoreSettleWatch();
+        return;
+      }
+      const next = apply();
+      if (next !== null) last = next;
     });
+    observer.observe(list);
+    const timer = setTimeout(() => this.cancelRestoreSettleWatch(), RESTORE_SETTLE_MS);
+    this._restoreSettleCleanup = (): void => {
+      observer.disconnect();
+      clearTimeout(timer);
+    };
+  }
+
+  private cancelRestoreSettleWatch(): void {
+    const cleanup = this._restoreSettleCleanup;
+    this._restoreSettleCleanup = null;
+    cleanup?.();
   }
 
   private scrollToBottom(): void {

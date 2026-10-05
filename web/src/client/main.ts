@@ -54,6 +54,8 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
@@ -954,6 +956,8 @@ async function init(): Promise<void> {
     // can race a response into a store that is no longer this identity's. An
     // auth-expiry teardown may resume the same account after re-auth, so it
     // does not clear recents.
+    // A chat scroll position belongs to this account's session.
+    clearChatScrollAnchor();
     const reason = (e as CustomEvent<AccountTeardownDetail>).detail?.reason;
     if (shouldClearRecentFilesOnTeardown(reason)) {
       chatRecentFiles.clearForLogout();
@@ -1418,13 +1422,7 @@ function replaceRoute(path: string): Promise<void> {
  * Resolves once the shell has re-rendered for it.
  */
 function pushRoute(path: string): Promise<void> {
-  window.history.pushState({}, '', browserPath(path));
-  const shell = activeShell?.element as
-    | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
-    | undefined;
-  if (!shell) return Promise.resolve();
-  shell.currentPath = path;
-  return Promise.resolve(shell.updateComplete).then(() => undefined);
+  return pushRouteEntry(activeShell?.element as RouteShell | undefined, path, browserPath(path));
 }
 
 // Initialize when DOM is ready

@@ -16,6 +16,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  clearChatScrollAnchor,
   findTopVisibleRow,
   rememberChatScrollAnchor,
   scrollTopForAnchor,
@@ -104,6 +105,12 @@ describe('chat scroll anchor hand-over', () => {
 
     rememberChatScrollAnchor(anchor);
     rememberChatScrollAnchor(null);
+    expect(takeChatScrollAnchor()).toBeNull();
+  });
+
+  it('is forgotten on account teardown', () => {
+    rememberChatScrollAnchor(anchor);
+    clearChatScrollAnchor();
     expect(takeChatScrollAnchor()).toBeNull();
   });
 });
