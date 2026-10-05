@@ -582,11 +582,14 @@ var deletionParityModes = []string{
 // TestAgentCompactView_DeletionViewParityForEveryIdentityClass seeds a live
 // deleting view on one agent and a failed view on another, both readable to
 // every identity class that reads any agent of the project, and leaves every
-// other agent with no delete. For every identity class (the fixture's, plus
-// a project admin and a runtime broker identity), on both endpoints, it
-// checks that each compact item's deletion bytes equal the full item's for
-// the same agent and caller: the deleting view, the failed view, and the
-// explicit null both views emit when no delete is active or failed.
+// other agent with no delete. For every identity class that reads the
+// project's agents on an endpoint (the fixture's classes, plus a project
+// admin), it checks that each compact item's deletion bytes equal the full
+// item's for the same agent and caller: the deleting view, the failed view,
+// and the explicit null both views emit when no delete is active or failed.
+// Every other cell, a runtime broker identity on both endpoints among them,
+// is checked to read nothing: both views answer the cell's exact status, a
+// 403 or a 200 with an empty list.
 func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) {
 	f := compactSetup(t)
 	deletingID, failedID := f.agentIDAt(1), f.agentIDAt(4)
@@ -616,14 +619,15 @@ func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) 
 		}},
 	)
 
-	// Identity classes that read no agent of the project on an endpoint
-	// (a 403, or an empty list).
-	blind := map[string]bool{
-		"hub-admin-non-member global":  true,
-		"hub-admin-non-member project": true,
-		"agent-jwt global":             true,
-		"runtime-broker global":        true,
-		"runtime-broker project":       true,
+	// Identity classes that read no agent of the project on an endpoint,
+	// each with the status both views answer: a 403, or a 200 with an
+	// empty list.
+	blind := map[string]int{
+		"hub-admin-non-member global":  http.StatusOK,
+		"hub-admin-non-member project": http.StatusForbidden,
+		"agent-jwt global":             http.StatusOK,
+		"runtime-broker global":        http.StatusOK,
+		"runtime-broker project":       http.StatusForbidden,
 	}
 	for _, c := range callers {
 		for _, ep := range []struct{ name, base string }{{"global", f.globalBase()}, {"project", f.projectBase()}} {
@@ -632,9 +636,12 @@ func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) 
 				f.walkParity(t, c, ep.name, ep.base, mode)
 			}
 			p := f.requestBothViews(t, c, ep.base, "sort=updated&fit=500")
-			if blind[cell] {
-				if p.compact.Code == http.StatusOK {
-					assert.Empty(t, mustDecodeListAgentsResponse(t, p.compact.Body).Agents, "%s: reads no agents", cell)
+			if wantStatus, ok := blind[cell]; ok {
+				assert.Equal(t, wantStatus, p.full.Code, "%s: full view status: %s", cell, p.full.Body.String())
+				assert.Equal(t, wantStatus, p.compact.Code, "%s: compact view status: %s", cell, p.compact.Body.String())
+				if wantStatus == http.StatusOK {
+					assert.Empty(t, mustDecodeListAgentsResponse(t, p.full.Body).Agents, "%s: full view reads no agents", cell)
+					assert.Empty(t, mustDecodeListAgentsResponse(t, p.compact.Body).Agents, "%s: compact view reads no agents", cell)
 				}
 				continue
 			}
