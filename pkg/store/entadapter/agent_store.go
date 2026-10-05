@@ -67,6 +67,10 @@ type AgentStore struct {
 	// driver rejects the clause outright, so it must be elided there.
 	dialectOnce sync.Once
 	dialectName string
+
+	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
+	// read and its swap, to simulate a concurrent writer.
+	afterRunIDRead func(agentID string)
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
@@ -134,6 +138,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		RunID:               a.RunID,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
@@ -2257,4 +2262,87 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 	}
 
 	return result, nil
+}
+
+// setAgentRunIDAttempts bounds SetAgentRunID's read-then-swap loop. Each
+// retry means another writer changed run_id between the read and the
+// swap; a handful of retries absorbs any realistic contention.
+const setAgentRunIDAttempts = 8
+
+// SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
+// current value and swaps it under a compare-and-swap, retrying if another
+// writer got in between, so the returned previous value is exactly the one
+// this write replaced. That needs no transaction or row lock, and so works
+// the same on every dialect.
+//
+// The swap also requires that no delete holds the row (runIDWritable), and
+// a row that a delete holds returns store.ErrDeleteInProgress. The delete
+// claim is itself a single-row write, so the database orders the two: a
+// claim that lands first refuses this write, and one that lands after it
+// snapshots the new run ID (ptone/scion#2550 P1 round 3).
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return "", err
+	}
+	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
+		row, err := s.client.Agent.Query().
+			Where(agent.IDEQ(uid)).
+			Select(agent.FieldRunID, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+			Only(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		now := time.Now()
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+			return "", store.ErrDeleteInProgress
+		}
+		if s.afterRunIDRead != nil {
+			s.afterRunIDRead(agentID)
+		}
+		n, err := s.client.Agent.Update().
+			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
+			SetRunID(runID).
+			Save(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		if n > 0 {
+			return row.RunID, nil
+		}
+	}
+	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
+}
+
+// runIDWritable is store.DeletionHoldsRow negated, plus deleted_at IS NULL,
+// as a predicate for SetAgentRunID's swap. TestRunIDWritable_MatchesGoPredicate
+// keeps the two in step.
+func runIDWritable(now time.Time) predicate.Agent {
+	return agent.And(
+		agent.DeletedAtIsNil(),
+		agent.Or(
+			agent.DeletionStateIsNil(),
+			agent.DeletionStateNotIn(store.DeletionStateDeleting, store.DeletionStateFinalizing),
+			agent.And(
+				agent.DeletionStateEQ(store.DeletionStateDeleting),
+				agent.Or(agent.DeletionLeaseAtIsNil(), agent.DeletionLeaseAtLTE(now)),
+			),
+		),
+	)
+}
+
+// CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
+func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		SetRunID(newRunID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
 }

@@ -4571,6 +4571,7 @@ type AgentMutation struct {
 	reincarnation_updated_at   *time.Time
 	launch_async_opt_in        *bool
 	launch_id                  *string
+	run_id                     *string
 	launch_state               *string
 	launch_end_reason          *string
 	launch_kind                *string
@@ -6864,6 +6865,55 @@ func (m *AgentMutation) ResetLaunchID() {
 	delete(m.clearedFields, agent.FieldLaunchID)
 }
 
+// SetRunID sets the "run_id" field.
+func (m *AgentMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *AgentMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (m *AgentMutation) ClearRunID() {
+	m.run_id = nil
+	m.clearedFields[agent.FieldRunID] = struct{}{}
+}
+
+// RunIDCleared returns if the "run_id" field was cleared in this mutation.
+func (m *AgentMutation) RunIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunID]
+	return ok
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *AgentMutation) ResetRunID() {
+	m.run_id = nil
+	delete(m.clearedFields, agent.FieldRunID)
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (m *AgentMutation) SetLaunchState(s string) {
 	m.launch_state = &s
@@ -8517,7 +8567,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 75)
+	fields := make([]string, 0, 76)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8652,6 +8702,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.launch_id != nil {
 		fields = append(fields, agent.FieldLaunchID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, agent.FieldRunID)
 	}
 	if m.launch_state != nil {
 		fields = append(fields, agent.FieldLaunchState)
@@ -8841,6 +8894,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchAsyncOptIn()
 	case agent.FieldLaunchID:
 		return m.LaunchID()
+	case agent.FieldRunID:
+		return m.RunID()
 	case agent.FieldLaunchState:
 		return m.LaunchState()
 	case agent.FieldLaunchEndReason:
@@ -9000,6 +9055,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchAsyncOptIn(ctx)
 	case agent.FieldLaunchID:
 		return m.OldLaunchID(ctx)
+	case agent.FieldRunID:
+		return m.OldRunID(ctx)
 	case agent.FieldLaunchState:
 		return m.OldLaunchState(ctx)
 	case agent.FieldLaunchEndReason:
@@ -9383,6 +9440,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLaunchID(v)
+		return nil
+	case agent.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
 		return nil
 	case agent.FieldLaunchState:
 		v, ok := value.(string)
@@ -9801,6 +9865,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldLaunchID) {
 		fields = append(fields, agent.FieldLaunchID)
 	}
+	if m.FieldCleared(agent.FieldRunID) {
+		fields = append(fields, agent.FieldRunID)
+	}
 	if m.FieldCleared(agent.FieldLaunchState) {
 		fields = append(fields, agent.FieldLaunchState)
 	}
@@ -9988,6 +10055,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchID:
 		m.ClearLaunchID()
+		return nil
+	case agent.FieldRunID:
+		m.ClearRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ClearLaunchState()
@@ -10215,6 +10285,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchID:
 		m.ResetLaunchID()
+		return nil
+	case agent.FieldRunID:
+		m.ResetRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ResetLaunchState()

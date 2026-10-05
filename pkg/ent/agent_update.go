@@ -837,6 +837,26 @@ func (_u *AgentUpdate) ClearLaunchID() *AgentUpdate {
 	return _u
 }
 
+// SetRunID sets the "run_id" field.
+func (_u *AgentUpdate) SetRunID(v string) *AgentUpdate {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentUpdate) ClearRunID() *AgentUpdate {
+	_u.mutation.ClearRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -1846,6 +1866,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agent.FieldRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -2969,6 +2995,26 @@ func (_u *AgentUpdateOne) ClearLaunchID() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunID sets the "run_id" field.
+func (_u *AgentUpdateOne) SetRunID(v string) *AgentUpdateOne {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentUpdateOne) ClearRunID() *AgentUpdateOne {
+	_u.mutation.ClearRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -4008,6 +4054,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agent.FieldRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)

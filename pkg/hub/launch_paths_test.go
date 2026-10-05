@@ -522,8 +522,8 @@ func (c *raceLaunchClient) StartAgent(ctx context.Context, _, _, _, _, _, _, _, 
 	return nil, c.beginThenDefer(ctx)
 }
 
-func (c *raceLaunchClient) RestartAgent(ctx context.Context, _, _, _, _ string, _ map[string]string, _ StartExtras) error {
-	return c.beginThenDefer(ctx)
+func (c *raceLaunchClient) RestartAgent(ctx context.Context, _, _, _, _ string, _ map[string]string, _ StartExtras) (*RemoteAgentResponse, error) {
+	return nil, c.beginThenDefer(ctx)
 }
 
 func (c *raceLaunchClient) beginThenDefer(ctx context.Context) error {
