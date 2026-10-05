@@ -34,15 +34,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// TestPaginatedLists_MalformedCursorReturns400 sends a malformed ?cursor to
-// every hub list endpoint whose cursor reaches an entadapter cursor decoder
-// (decodeListCursor, decodeCursor, or a UUID ID cursor) and asserts 400,
-// never 500 (ptone/scion#1957). Some endpoints validate or unseal the cursor
-// before the store sees it; others (runtime brokers, skills, messages,
-// schedules, admin invites) hand it straight to the store, which is where the
-// decoders' store.ErrInvalidInput wrapping matters. Endpoints backed by
-// ListUsers (users, admin allow-list) are not listed: its numeric offset
-// cursor ignores unparseable input by design.
+// TestPaginatedLists_MalformedCursorReturns400 sends a malformed cursor
+// (?cursor, or ?pageToken where the endpoint uses that name) to every hub
+// list endpoint whose cursor reaches an entadapter cursor decoder
+// (decodeListCursor, decodeCursor, decodeConstraintCursor, or a UUID ID
+// cursor) and asserts 400, never 500 (ptone/scion#1957). Some endpoints
+// validate or unseal the cursor before the store sees it; others (runtime
+// brokers, skills, messages, schedules, admin invites, access constraints)
+// hand it straight to the store, which is where the decoders'
+// store.ErrInvalidInput wrapping matters. Not listed: endpoints backed by
+// ListUsers (users, admin allow-list), whose numeric offset cursor ignores
+// unparseable input by design, and the access-constraint principals and
+// audit-history pageTokens, which the hub decodes itself and already rejects
+// with 400.
 func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -84,6 +88,7 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 
 	type endpoint struct {
 		path   string
+		param  string      // cursor query parameter; "" means "cursor"
 		caller *store.User // nil: dev (admin) identity
 	}
 	endpoints := map[string]endpoint{
@@ -104,12 +109,18 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		// UUID cursor.
 		"scheduled events": {path: "/api/v1/projects/" + projectID + "/scheduled-events"},
 		"admin invites":    {path: "/api/v1/admin/invites"},
+		// decodeConstraintCursor, read from ?pageToken.
+		"access constraints": {path: "/api/v1/admin/access-constraints", param: "pageToken"},
 	}
 
 	for epName, ep := range endpoints {
 		for cName, cursor := range cursors {
 			t.Run(epName+"/"+cName, func(t *testing.T) {
-				path := ep.path + "?" + url.Values{"cursor": {cursor}}.Encode()
+				param := ep.param
+				if param == "" {
+					param = "cursor"
+				}
+				path := ep.path + "?" + url.Values{param: {cursor}}.Encode()
 				var rec *httptest.ResponseRecorder
 				if ep.caller != nil {
 					rec = doRequestAsUser(t, srv, ep.caller, http.MethodGet, path, nil)

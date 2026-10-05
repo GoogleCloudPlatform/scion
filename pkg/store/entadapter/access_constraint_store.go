@@ -485,6 +485,14 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("invalid page token: %w", err)
 		}
+		// Time-sorted tokens carry an RFC3339Nano sort value. Reject a corrupt
+		// one here instead of letting mustParseCursorTime page from the zero
+		// time.
+		if sortField != accessconstraint.FieldName {
+			if _, err := time.Parse(time.RFC3339Nano, cursorVal); err != nil {
+				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidInput, err)
+			}
+		}
 		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
 		if sortDesc {
 			query = query.Where(accessconstraint.Or(
@@ -678,10 +686,13 @@ func encodeConstraintCursor(sortVal string, id string) string {
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
+// decodeConstraintCursor is the inverse of encodeConstraintCursor. Every
+// failure wraps store.ErrInvalidInput: a malformed pageToken is caller error,
+// which the hub maps to HTTP 400 rather than 500 (ptone/scion#1957).
 func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
 	}
 	s := string(raw)
 	// Split at the last comma — UUIDs never contain commas, so the sort
@@ -689,11 +700,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	// everything before the last comma.
 	lastComma := strings.LastIndex(s, ",")
 	if lastComma < 0 {
-		return "", uuid.UUID{}, fmt.Errorf("expected 'value,id' format")
+		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidInput)
 	}
 	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
 	}
 	return s[:lastComma], id, nil
 }

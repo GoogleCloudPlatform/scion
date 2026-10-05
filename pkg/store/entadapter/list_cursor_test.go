@@ -103,8 +103,8 @@ func TestDecodeCursor_ErrorsAreInvalidInput(t *testing.T) {
 }
 
 // TestListStores_MalformedCursorIsInvalidInput hits every entadapter list
-// method that decodes an opaque cursor (decodeListCursor, decodeCursor or a
-// UUID ID cursor) and asserts the error surfaces as store.ErrInvalidInput
+// method that decodes an opaque cursor (decodeListCursor, decodeCursor,
+// decodeConstraintCursor or a UUID ID cursor) and asserts the error surfaces as store.ErrInvalidInput
 // (HTTP 400 at the hub), not a bare error (HTTP 500). ptone/scion#1957.
 // Not here: ListUsers, whose numeric offset cursor ignores unparseable input
 // by design, and sorted-mode ListAgents, whose cursor is
@@ -166,6 +166,14 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 		},
 		"allow list entries": func(opts store.ListOptions) error {
 			_, err := cs.ListAllowListEntries(ctx, opts)
+			return err
+		},
+		// decodeConstraintCursor (pageToken). The default sort is by creation
+		// time, so "bad timestamp" also covers the sort-value check.
+		"access constraints": func(opts store.ListOptions) error {
+			_, _, _, err := cs.ListAccessConstraintsFiltered(ctx, store.AccessConstraintListOptions{
+				PageSize: opts.Limit, PageToken: opts.Cursor,
+			})
 			return err
 		},
 	}
