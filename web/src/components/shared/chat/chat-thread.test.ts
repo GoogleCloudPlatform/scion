@@ -4331,7 +4331,7 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
     };
   }
 
-  it.each(['deferred', 'failed', 'no_recipient'])(
+  it.each(['deferred', 'failed'])(
     'keeps dispatchState=%s visible even when it is not the last own message',
     async (dispatchState) => {
       const el = document.createElement('scion-chat-thread') as ScionChatThread;
@@ -4350,6 +4350,17 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
       expect(internals.deliveryStateFor(older, 'a-newer-message-id', false)).toBe(dispatchState);
     }
   );
+
+  // no_recipient is shown like dispatched: only on the newest own message.
+  it('shows no_recipient only on the newest own message', () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    document.body.appendChild(el);
+    const internals = el as unknown as DeliveryStateInternals;
+    const msg = makeDeliveryMessage('no_recipient');
+    expect(internals.deliveryStateFor(msg, msg.id, false)).toBe('no_recipient');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', false)).toBe('');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', true)).toBe('');
+  });
 
   it('hides an ordinary dispatched state once it is no longer the last own message', () => {
     // Control: proves the test above is actually exercising the
