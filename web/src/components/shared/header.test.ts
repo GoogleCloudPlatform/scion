@@ -53,6 +53,7 @@ import {
 } from '../../client/graph-palette-events.js';
 import type { User } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
+import { stateManager } from '../../client/state.js';
 
 describe('projectIdFromDashboardPath', () => {
   it('extracts the project ID from /projects/:id', () => {
@@ -709,6 +710,17 @@ describe('tray badge counts: slow fetches', () => {
     await settle();
   }
 
+  /** Answers every held list request, with a count per tray. */
+  async function releaseListsPerTray(inbox: number, notifications: number): Promise<void> {
+    const lists = takeLists();
+    expect(lists.some((h) => h.url.startsWith('/api/v1/messages'))).toBe(true);
+    expect(lists.some((h) => h.url.startsWith('/api/v1/notifications'))).toBe(true);
+    for (const h of lists) {
+      h.release(h.url.startsWith('/api/v1/messages') ? inbox : notifications);
+    }
+    await settle();
+  }
+
   /** Lets response chains and the resulting Lit updates run. */
   async function settle(): Promise<void> {
     for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
@@ -830,5 +842,27 @@ describe('tray badge counts: slow fetches', () => {
       '.wide-right sl-icon-button[name="bell"] + .trigger-badge'
     );
     expect(notifBadge?.textContent?.trim()).toBe('1');
+  });
+
+  it('keeps updating the badges after the header is detached and attached again', async () => {
+    const el = await mount('u1');
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+
+    el.remove();
+    await settle();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await settle();
+    // The trays fetch again when they reconnect.
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+
+    stateManager.dispatchEvent(new CustomEvent('user-message-created'));
+    stateManager.dispatchEvent(new CustomEvent('notification-created'));
+    await settle();
+    await releaseListsPerTray(3, 4);
+    expect(badges(el)).toEqual(['3', '4']);
+    el.remove();
   });
 });

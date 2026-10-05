@@ -68,8 +68,12 @@ interface TrayCase {
   source: 'inbox' | 'notifications';
   /** A list response holding the given item ids. */
   body: (...ids: string[]) => unknown;
+  /** Starts a list fetch, as a poll or a real-time event does. */
+  refetch: (tray: any) => Promise<void>;
   removeOne: (tray: any, id: string) => Promise<void>;
   removeAll: (tray: any) => Promise<void>;
+  /** Selects the text of each rendered list row. */
+  rowText: string;
 }
 
 const CASES: TrayCase[] = [
@@ -85,8 +89,10 @@ const CASES: TrayCase[] = [
         createdAt: new Date().toISOString(),
       })),
     }),
+    refetch: (tray) => tray.fetchMessages(),
     removeOne: (tray, id) => tray.markOne(id),
     removeAll: (tray) => tray.markAll(),
+    rowText: '.msg-text',
   },
   {
     tag: 'scion-notification-tray',
@@ -99,8 +105,10 @@ const CASES: TrayCase[] = [
         message: id,
         createdAt: new Date().toISOString(),
       })),
+    refetch: (tray) => tray.fetchNotifications(),
     removeOne: (tray, id) => tray.ackOne(id),
     removeAll: (tray) => tray.ackAll(),
+    rowText: '.notif-message',
   },
 ];
 
@@ -261,5 +269,23 @@ describe.each(CASES)('$tag: count events', (c) => {
     await flush();
     await tray.updateComplete;
     expect(events).toEqual([]);
+  });
+
+  it('dispatches the size and shows the new rows when a fetch returns the same number of different items', async () => {
+    const tray = await mount('u1');
+    await answerLists(c.body('a', 'b'));
+    events = [];
+
+    void c.refetch(tray);
+    await answerLists(c.body('c', 'd'));
+    expect(counts()).toEqual([2]);
+
+    tray.open = true;
+    await tray.updateComplete;
+    const rows = [...tray.shadowRoot.querySelectorAll(c.rowText)].map((r: Element) =>
+      r.textContent?.trim()
+    );
+    expect(rows).toEqual(['c', 'd']);
+    expect(rows).not.toContain('a');
   });
 });
