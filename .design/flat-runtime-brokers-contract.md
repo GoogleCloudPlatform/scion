@@ -276,15 +276,17 @@ All flat registration goes through **one Hub implementation**, `(*hub.Server).re
   - P1.2 gives `FindExistingBroker` the descriptor. With a descriptor, it matches by ID only and never matches a flat row by name. The handler uses that one result for both the authorization decision and the pinned mutation.
   - Flat re-registration keeps the existing re-register permission gate.
 - **R8 Auto-provide.** `autoProvide` on a flat registration is stored as sent. When a new project is created, the auto-provide link (`handlers_env_secrets.go`, provider plus default) **skips flat rows while `hub.flat_runtime_brokers` is off**, so an auto-provided flat row never becomes the default of new projects whose creates would all get 412. With the experiment on it behaves as today.
-- **R9 Instance-side acceptance (reverse negotiation; P1.2).** A Hub that predates this contract (today's Hub, a Hub with only P1.1, or an older replica during a rolling Hub upgrade) decodes registration leniently. It drops `runtimeTarget`, matches by name first, and either re-registers an existing legacy row (rewriting its auto-provide, GCP host fields and labels) or creates a legacy row with the flat ID. **A flat instance refuses such a Hub:**
-  - Registration counts as accepted only if the response `brokerId` equals the identity's `runtimeBrokerId` **and** the response echoes a `runtimeTarget` equal to the identity's target (ID and type).
-  - Otherwise, including when the echo is missing, the instance **stops before join**. It sends no join, saves no credentials and never uses a different Runtime Broker ID. It reports "the Hub did not accept the runtime target for Runtime Broker <id>; upgrade the Hub before enabling flat Runtime Brokers" as a startup error, or through `EmbeddedBrokerRegistrationFailed` on the embedded path.
-  - The join response gets the same check. On a mismatch the instance discards the returned secret and stops.
-  - **Upgrade order:** upgrade the Hub (all replicas) before configuring a flat instance.
-  - **What an unaware Hub leaves behind, and recovery:**
-    - (i) A **legacy row with the flat ID** (no secret, because join never ran). After the Hub upgrade, re-registration gets 409 `runtime_broker_not_flat` (R3). Recovery: an administrator deletes that row (admin delete of the Runtime Broker), then the instance restarts and registers with the same identity. There is no automatic exception to R3. Converting a row is never implicit.
-    - (ii) An **existing legacy row adopted by name**, whose auto-provide, GCP host fields and labels were overwritten. The instance never joined, so it holds no credentials for that row. Recovery: an administrator restores that row's metadata, and the flat instance's `name` is changed if it collides (R2 at creation).
-  - This decision was confirmed in the architecture consultation for this workstream.
+- **R9 Activation acknowledgement (reverse negotiation; architecture decision).** A Hub that predates this contract (today's Hub, a P1.1-only Hub, or an older replica during a rolling Hub upgrade) decodes registration leniently. It drops `runtimeTarget`, matches by name first, and either re-registers an existing legacy row (rewriting its auto-provide, GCP host fields and labels) or creates a legacy row with the flat ID. The architecture decision for this workstream is that **a flat instance refuses to activate against such a Hub; there is no automatic downgrade to legacy.**
+  - **Acknowledgement.** Registration must acknowledge both the requested Runtime Broker ID and the agreed `runtimeTarget` binding: the response `brokerId` equals the identity's `runtimeBrokerId`, **and** the response `runtimeTarget` equals the identity's target (ID and type). The join response is checked the same way. The pure check is `brokeridentity.CheckActivationAck(identity, brokerID string, target *api.RuntimeTargetDescriptor) error` (P1.1). It returns a typed `*brokeridentity.AckError{Code, Phase ("register"|"join"), Expected, Got}` with one of two **distinct** codes:
+    - **`runtime_target_ack_missing`** (unsupported protocol/feature): the response carries no `runtimeTarget`. Message: "the Hub did not acknowledge the runtime target binding for Runtime Broker <id>; it does not support flat Runtime Brokers. Finish the Hub rollout (every replica, with hub.flat_runtime_brokers on) before enabling this instance".
+    - **`runtime_target_binding_conflict`** (binding conflict): the response `brokerId` or `runtimeTarget` differs from the identity. Message: "the Hub acknowledged a different binding for Runtime Broker <id> (expected <id>/<target>, got <id>/<target>); refusing to activate". An identity returned only through a name match is never adopted.
+  - **Refusal.** If the registration check fails, the instance sends no join and saves no credentials. If the join check fails, it discards the returned secret. In both cases the instance is **not activated**: no control channel, no heartbeat, no HTTP routing to it, and no dispatch accepted. The error is reported as a startup error, or through `EmbeddedBrokerRegistrationFailed` on the embedded path. The configured and persisted identity is preserved: no new identity is minted and there is no fallback to a profile or the legacy identity.
+  - **Not a zero-side-effect guarantee.** Refusing activation does not undo what an unaware Hub may already have done. It may have created a legacy row with the flat ID, or re-registered (and changed the metadata of) an existing legacy row matched by name. The refusal message says this may have happened and names the Runtime Broker ID and name for reconciliation. **Nothing deletes or rewrites such a row automatically**, because it may belong to an existing Runtime Broker. Recovery is an explicit administrator action:
+    - (i) a legacy row with the flat ID (no secret, because join never ran): after the Hub rollout, re-registration gets 409 `runtime_broker_not_flat` (R3). An administrator deletes that row, then the instance restarts and registers with the same identity. There is no automatic R3 exception.
+    - (ii) an existing legacy row adopted by name: an administrator restores its metadata, and the flat instance's `name` is changed if it collides (R2 at creation).
+  - **All serving replicas.** Flat mode requires the complete Hub path implementing this contract, with `hub.flat_runtime_brokers` on, on **every** Hub replica that can serve the instance. One successful registration, join or preflight does not prove that the next request reaches a capable replica. Operators finish the Hub rollout before enabling flat instances. Dispatch keeps its own guard: a create from an unaware or experiment-off replica arrives without `expectedRuntimeTargetId` and is refused (412 `runtime_target_required`), and a mismatched expected target is refused (409). An explicitly configured legacy Runtime Broker (no `instances`) stays supported during the compatibility window. It is never an automatic downgrade of flat config.
+  - **Forward rule (P2):** where one process hosts several instances, an acknowledgement failure rejects only the affected instance. Other instances in the process keep running.
+  - This is protocol compatibility at activation. It is unrelated to proactive Kubernetes credential monitoring, which remains out of scope.
 - **R7 Embedded side duties.** The embedded flat path (`RegisterEmbeddedFlatRuntimeBroker`, called from startup in place of `registerGlobalProjectAndBroker`):
   - creates the global project and its provider link for the flat ID if they are missing;
   - sets the project's default Runtime Broker only when it has none;
@@ -427,6 +429,8 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 | `runtime_broker_name_conflict` | 409 | `ErrCodeRuntimeBrokerNameConflict` | hub | `name`, `slug`, `existingRuntimeBrokerId` | R2 (flat creation), R4 (legacy creation colliding with a flat row), admin PATCH rename |
 | `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | `agentId`, `runtimeBrokerId` | Move eligibility: a dry-run move refused through `writeMoveRefusal` (verdict check `runtime_target`) in P1 (non-dry-run moves stay 501), and the same refusal once moves exist (section 7) |
 | `runtime_target_pin_stale` | 409 | `ErrCodeRuntimeTargetPinStale` | hub | `agentId`, `pinnedRuntimeBrokerId`, `runtimeBrokerId` | Stale pin (section 7) |
+| `runtime_target_ack_missing` | — (instance-side, not HTTP) | `ErrCodeRuntimeTargetAckMissing` | api | `runtimeBrokerId`, `phase` | Registration/join response lacks the `runtimeTarget` acknowledgement (R9). Startup error; instance not activated |
+| `runtime_target_binding_conflict` | — (instance-side, not HTTP) | `ErrCodeRuntimeTargetBindingConflict` | api | `runtimeBrokerId`, `phase`, `expected`, `got` | Registration/join response acknowledges a different Runtime Broker ID or target (R9). Startup error; instance not activated |
 | `experiment_disabled` | 412 | `ErrCodeExperimentDisabled` | hub | `experiment` | Flat registration/create with `hub.flat_runtime_brokers` off |
 
 Notes on the codes:
@@ -509,14 +513,16 @@ For the old-Hub columns there are two cases:
 
 | Exchange | New Hub + old Runtime Broker, experiment on | New Hub + old Runtime Broker, experiment off | Old Hub + new Runtime Broker (experiment on) | Old Hub + new Runtime Broker (experiment off) |
 |---|---|---|---|---|
-| Registration | Legacy path (no descriptor). The name match uses `GetLegacyRuntimeBrokerByName`, so a flat row is never adopted. An ID match on a flat row gets 409 `runtime_target_changed` (R4). Creating a row whose name/slug collides with a flat row gets 409 `runtime_broker_name_conflict`. No echo (legacy row) | Same as experiment on: legacy registration is not gated | Fresh: the Hub drops the descriptor, adopts by name or creates a legacy row, and returns no echo. The instance **stops before join** (R9); leftovers and recovery as in R9. Rollback: re-registration on restart returns no echo, so the instance stops (it can't restart under a downgraded Hub) | Same as experiment on |
-| Join | Legacy join, unchanged. A join without a descriptor on a flat row gets 409 before any secret change | Same | Fresh: not reached (stopped before join). Rollback: not reached on restart, for the same reason | Same |
+| Registration | Legacy path (no descriptor). The name match uses `GetLegacyRuntimeBrokerByName`, so a flat row is never adopted. An ID match on a flat row gets 409 `runtime_target_changed` (R4). Creating a row whose name/slug collides with a flat row gets 409 `runtime_broker_name_conflict`. No echo (legacy row) | Same as experiment on: legacy registration is not gated | Fresh: the Hub drops the descriptor, adopts by name or creates a legacy row, and returns no acknowledgement. The instance refuses to activate with `runtime_target_ack_missing` (or `runtime_target_binding_conflict` if a name match returned another ID), sends no join, and reports possible leftovers for explicit reconciliation (R9). Nothing is cleaned up automatically. Rollback: re-registration on restart has no acknowledgement, so the instance does not activate under a downgraded Hub | Same as experiment on |
+| Join | Legacy join, unchanged. A join without a descriptor on a flat row gets 409 before any secret change | Same | Fresh: not reached. **Mixed replicas** (registration acknowledged by a capable replica, join served by an unaware one): the join response lacks the acknowledgement, so the secret is discarded and the instance is not activated (`runtime_target_ack_missing`, phase join). Rollback: not reached on restart | Same |
 | Heartbeat | Unchanged for legacy rows | Unchanged | Fresh: not reached (never joined). Rollback, while the process keeps running with its existing credentials: the old Hub records status as today; the instance reports no profiles, so nothing is backfilled; old full-row writes leave the target columns intact | Same |
 | Create (interactive) | Legacy rows only: unchanged, no pin, no field sent. A client-supplied `expectedRuntimeTargetId` gets 409 `runtime_target_mismatch` (empty actual) | Unchanged. A client-supplied `expectedRuntimeTargetId` gets 412 `experiment_disabled` | Fresh: unreachable (not registered). Rollback: the old Hub sends no `expectedRuntimeTargetId` and gets 412 `runtime_target_required` (before any profile check), a loud failure with no side effects on the instance; the old Hub's own create rollback applies | Same |
 | Start | Legacy rows: unchanged (no pin, so no pre-check refusal, and no field sent) | Unchanged | Rollback: accepted. The start wire has no profile, the instance uses its single target, and a missing `expectedRuntimeTargetId` is accepted on start | Same |
 | Restart | Legacy rows: unchanged (user stop + start; cross-node restart) | Unchanged | Rollback: accepted, as for start (the stop leg goes to the same instance) | Same |
 | Reincarnate | Legacy rows: unchanged; reprovision carries no field | Unchanged | Rollback: the worker stops the agent, then the reprovision (create-shaped, no field) gets 412 `runtime_target_required`. The worker's existing failure path re-renders the previous config, and the agent is left stopped. This is a known limitation of a Hub rollback while flat agents exist | Same |
 | Scheduler dispatch | `providers[0]` legacy: unchanged. If `providers[0]` is flat, section 7 rules apply (not an old-Runtime Broker case) | Same. A flat `providers[0]` gets the refusal as a failed run | Rollback: the create gets 412 `runtime_target_required`, recorded as a failed scheduled run, with no side effects on the instance | Same |
+
+Mixed Hub replicas after activation (a capable replica activated the instance, then an unaware or experiment-off replica dispatches): creates arrive without `expectedRuntimeTargetId` and are refused with 412 `runtime_target_required` before side effects. Starts and restarts reach the single target, which is unchanged. This is why the rollout must complete on every replica before flat instances are enabled (R9).
 
 Runtime Broker binary rollback (a new Hub with an old binary started where a flat instance ran): the old binary uses the legacy identity and credential paths, not `runtime-brokers/<key>/`, so it registers as the legacy Runtime Broker. Flat agents stay pinned to the flat row, which shows offline. Their starts go to that row and fail as the Runtime Broker being unavailable. Nothing is retargeted.
 
@@ -629,6 +635,10 @@ Group F tests are the dispatch half:
 - `TestIdentity_TargetTypeChangeIsError`
 - `TestIdentity_CollidesWithAnyLegacyBrokerIDIsError`
 - `TestIdentity_ReaddedEntryRestoresSameIDs`: the settings-rollback case.
+- `TestCheckActivationAck_MissingRegistrationAck`: `runtime_target_ack_missing`, phase register.
+- `TestCheckActivationAck_MismatchedRegistrationAck`: `runtime_target_binding_conflict` for a different `brokerId` (name adoption) and for a different target.
+- `TestCheckActivationAck_MissingJoinAck` and `TestCheckActivationAck_MismatchedJoinAck`
+- `TestCheckActivationAck_DistinctCodes`: the two codes are distinct and stable.
 - `TestVerifyScope_DockerDaemonChangeRefused`
 - `TestVerifyScope_DockerEndpointChangeSameDaemonAccepted`
 - `TestVerifyScope_DockerEmptyDaemonIDIsError`
@@ -742,9 +752,15 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 - `TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget`
 - `TestFlatInstanceStart_IgnoresSavedProfile`
 - `TestFlatInstanceStart_MismatchKeepsRunIDFencing`
-- `TestFlatInstanceRegistration_UnawareHubRefusedBeforeJoin` (F‑arrange): a response without the echo means no join is sent and no credentials are saved; a startup error.
-- `TestFlatInstanceRegistration_BrokerIDMismatchRefused` (F‑arrange): a response with a different `brokerId` (name adoption) means no join; a startup error.
+- `TestFlatInstanceRegistration_UnawareHubRefusedBeforeJoin` (F‑arrange): a response without the acknowledgement gives `runtime_target_ack_missing`; no join, no credentials, not activated, identity unchanged.
+- `TestFlatInstanceRegistration_BrokerIDMismatchRefused` (F‑arrange): a different `brokerId` (name collision, no adoption) gives `runtime_target_binding_conflict`; no join.
+- `TestFlatInstanceRegistration_TargetMismatchRefused` (F‑arrange)
+- `TestFlatInstanceJoin_MissingAckNotActivated` (F‑arrange): the secret is discarded, no heartbeat or control channel, dispatch not accepted.
 - `TestFlatInstanceJoin_EchoMismatchDiscardsSecret` (F‑arrange)
+- `TestFlatInstanceActivation_MixedReplicasNotActivated` (F‑arrange): registration acknowledged, join from an unaware replica not acknowledged; the instance does not activate or accept dispatch.
+- `TestFlatInstanceCreate_FromUnawareReplicaRefused`: a create without `expectedRuntimeTargetId` after activation (unaware replica) gets 412 before side effects.
+- `TestFlatInstanceRegistration_NoAutomaticCleanup` (F‑arrange): after a refused activation, the pre-existing legacy row (created or adopted by the unaware Hub) is neither deleted nor rewritten by the instance, and the refusal reports it for reconciliation.
+- `TestFlatInstanceRegistration_IdentityPreservedAfterRefusal` (F‑arrange): no new identity is minted and there is no legacy or profile fallback on the next start.
 - `TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected`: a full body using the existing test server and raw JSON.
 
 ## 16. Scope
@@ -758,8 +774,8 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 ### P1.1 code surface
 
 - `pkg/config`: `settings_v1.go`, `hub_config.go` (`RuntimeBrokerConfig`, conversion, legacy rejection, strict loader), schema, validator.
-- `pkg/brokeridentity`: new.
-- `pkg/api/runtime_target.go`: descriptor, pure check and the shared wire codes.
+- `pkg/brokeridentity`: new, including `CheckActivationAck` and `AckError`.
+- `pkg/api/runtime_target.go`: descriptor, pure check, the shared wire codes, and the two activation acknowledgement codes.
 - `pkg/hub/errors.go`: also the `RuntimeTargetRefusal` type (fields and `Error()`, no callers) so that group F compiles.
 - `pkg/ent/schema` (runtimebroker, agent) plus generated code.
 - `pkg/store`: models, interface, and entadapter setters and guards, including the orphan guards in `agent_store.go` and the `UpdateRuntimeBroker` strip in `project_store.go`.
@@ -779,6 +795,7 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 
 ## Change log
 
+- **r6 addendum (architecture decision on r5 B1):** refuse activation, no automatic downgrade. Two distinct acknowledgement codes (`runtime_target_ack_missing`, `runtime_target_binding_conflict`) and a pure `CheckActivationAck` (P1.1). Refusal is not a zero-side-effect guarantee; nothing is cleaned up automatically. All serving replicas must be capable with the experiment on, and dispatch keeps its expected-target guard. P2 forward rule: per-instance rejection. Activation compatibility is separate from credential monitoring. Mixed-replica and no-cleanup tests added; the version table is aligned.
 - **r6 (review round 5):**
   - B1: registration and join responses echo the stored `runtimeTarget`; R9 instance-side acceptance (stop before join on a missing or mismatched echo or a different `brokerId`; join response checked too); upgrade order; leftovers and recovery; decision recorded as confirmed in the architecture consultation.
   - N1: §11 reincarnation sentence corrected. N2: dry-run move via `writeMoveRefusal` with the `runtime_target` check; pre-check at the in-place site. N3: frozen store signatures and sentinels; step-4 placement persists on a failed start; concurrent miss gets 409. N4: join check before secret rotation. N5: scheduler row (profile sources, ordering, broker row load, warning sink).
