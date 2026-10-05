@@ -546,6 +546,51 @@ describe('AgentStore delta probe', () => {
       expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
     });
 
+    // Every field a compact row carries that the probe compares, each changed
+    // alone: a heartbeat moves `updated` on every row, so only that field
+    // tells the changed row apart from the rest.
+    const COMPARED: ReadonlyArray<[keyof Agent, unknown]> = [
+      ['slug', 'renamed'],
+      ['name', 'renamed'],
+      ['template', 'reviewer'],
+      ['projectId', 'p2'],
+      ['project', 'Other'],
+      ['labels', { team: 'blue' }],
+      ['phase', 'stopped'],
+      ['activity', 'working'],
+      ['messageMode', 'hub'],
+      ['ancestry', ['root', 'parent']],
+      ['createdBy', 'u2'],
+      ['_capabilities', { actions: ['read'] }],
+      ['_messageability', { canMessage: false, canReachViewer: true }],
+    ];
+
+    it.each(COMPARED)('merges a row whose `%s` alone changed', async (field, value) => {
+      let publishes = 0;
+      const h = await loaded(
+        Array.from({ length: 10 }, (_, i) =>
+          active(`a${i}`, 1, {
+            slug: `a${i}`,
+            project: 'Main',
+            labels: { team: 'red' },
+            messageMode: 'lineage',
+            ancestry: ['root'],
+            createdBy: 'u1',
+            _messageability: { canMessage: true, canReachViewer: true },
+          })
+        )
+      );
+      h.store.retain(HUB, () => publishes++);
+      const a2 = find(h.store.peek(HUB), 'a2');
+      h.server.heartbeat(t(1000));
+      h.server.agents[3] = { ...h.server.agents[3], [field]: value };
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      expect(publishes).toBe(1);
+      expect(find(h.store.peek(HUB), 'a3')?.[field]).toEqual(value);
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+    });
+
     it('merges a row whose activity time moves while its activity stays the same', async () => {
       const h = await loaded(Array.from({ length: 10 }, (_, i) => active(`a${i}`, 1)));
       h.server.heartbeat(t(1000));
