@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=168   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances).
+EXPECTED_TOTAL=172   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -943,6 +943,63 @@ else
   failed=$((failed + 1))
 fi
 unset _sb _sd
+
+echo "== Deployment selector labels are a contract =="
+# CONTRACT, NOT STYLE. A Terraform-owned NEG Service selects the hub's pods by
+# exactly these two labels, app.kubernetes.io/name and app.kubernetes.io/instance,
+# with values derived from the chart name (or nameOverride) and the release
+# name. Change the set or the derivation and that Service selects nothing:
+# the load balancer's backends drain, nothing in this chart goes red, and
+# Kubernetes reports the Deployment healthy. spec.selector is also immutable on
+# an existing Deployment, so a change here cannot be rolled out in place.
+# If you must change these labels, change the Terraform selector in the same
+# release and plan for a Deployment replacement.
+#
+# Each row pins spec.selector.matchLabels to EXACTLY the two keys (no more, no
+# fewer) and checks the pod template carries both with the same values.
+# _matchlabels <release> <helm args...> prints "key=value" lines from the
+# Deployment's spec.selector.matchLabels, sorted.
+_matchlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  selector:$/ {s=1; next}
+           s==1 && /^    matchLabels:$/ {s=2; next}
+           s==2 && /^      [^ ]/ {sub(/^      /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_podlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  template:$/ {s=1; next}
+           s==1 && /^      labels:$/ {s=2; next}
+           s==2 && /^        [^ ]/ {sub(/^        /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_selector_row() { # _selector_row <label> <release> <expected name> <helm args...>
+  local label="$1" rel="$2" name="$3"; shift 3
+  executed=$((executed + 1))
+  local want got pod
+  want="$(printf 'app.kubernetes.io/instance=%s\napp.kubernetes.io/name=%s\n' "$rel" "$name")"
+  got="$(_matchlabels "$rel" "$@")"
+  pod="$(_podlabels "$rel" "$@")"
+  if [ "$got" != "$want" ]; then
+    echo "FAIL  selector contract, ${label}: matchLabels is not exactly name=${name}, instance=${rel}"
+    echo "        got: $(printf '%s' "$got" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  elif ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/name=${name}" \
+    || ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/instance=${rel}"; then
+    echo "FAIL  selector contract, ${label}: the pod template does not carry the selector labels"
+    echo "        got: $(printf '%s' "$pod" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  else
+    echo "ok    selector contract, ${label}: matchLabels is exactly name=${name}, instance=${rel}"
+  fi
+}
+_selector_row "chart name, release t" t scion-hub
+_selector_row "chart name, another release" scion-prod scion-hub
+_selector_row "nameOverride" scion-prod hub-override --set nameOverride=hub-override
+_selector_row "fullnameOverride does not reach the selector" t scion-hub --set fullnameOverride=something-else
+unset -f _matchlabels _podlabels _selector_row
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

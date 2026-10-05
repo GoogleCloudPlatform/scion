@@ -47,6 +47,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: scion
 {{- end }}
 
+{{- /*
+CONTRACT: a Terraform-owned NEG Service selects hub pods by exactly these two
+labels. Changing the keys or their derivation leaves that Service with no
+endpoints and breaks the load balancer without any error here. Pinned by
+tests/render-guards.sh ("Deployment selector labels are a contract").
+*/}}
 {{- define "scion-hub.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "scion-hub.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
