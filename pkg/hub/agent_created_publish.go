@@ -64,14 +64,10 @@ func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Age
 		s.events.PublishAgentCreated(ctx, agent)
 		return
 	}
-	if !fresh.DeletedAt.IsZero() {
-		s.agentLifecycleLog.Debug("skipping agent.created publish: agent soft-deleted",
-			"agent_id", agent.ID)
-		return
-	}
-	if deleteStopNoop(fresh) {
-		s.agentLifecycleLog.Debug("skipping agent.created publish: delete in progress",
-			"agent_id", agent.ID, "deletion_state", fresh.DeletionState, "deletion_claim", fresh.DeletionClaim)
+	if deletedOrDeleteHeld(fresh) {
+		s.agentLifecycleLog.Debug("skipping agent.created publish: agent soft-deleted or delete in progress",
+			"agent_id", agent.ID, "soft_deleted", !fresh.DeletedAt.IsZero(),
+			"deletion_state", fresh.DeletionState, "deletion_claim", fresh.DeletionClaim)
 		return
 	}
 	s.events.PublishAgentCreated(ctx, fresh)

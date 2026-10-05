@@ -401,7 +401,7 @@ func (p *MessageBrokerProxy) createdAgentLive(created AgentCreatedEvent) bool {
 			"agent_id", created.AgentID, "error", err)
 		return true
 	}
-	if !agent.DeletedAt.IsZero() || deleteStopNoop(agent) {
+	if deletedOrDeleteHeld(agent) {
 		p.log.Debug("Skipping subscriptions for created event: agent deleted or being deleted",
 			"agent_id", created.AgentID, "deletion_state", agent.DeletionState)
 		return false

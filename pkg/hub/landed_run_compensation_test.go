@@ -24,9 +24,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // Every synchronous dispatch that starts a runtime entry (create, create
@@ -130,6 +134,16 @@ var landingDeletes = []struct {
 	{"delete-failed", func(t *testing.T, s store.Store, id string) {
 		claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
 	}, false},
+	// A deleting row whose lease expired: the engine died, the delete reads
+	// as failed (abandoned), so the agent counts as live.
+	{"delete-expired", func(t *testing.T, s store.Store, id string) {
+		claimForTest(t, s, id, store.DeletionStateDeleting, -time.Minute)
+	}, false},
+	// A finalizing row holds the agent even with its lease expired:
+	// teardown already ran, only a retry or force lifts it.
+	{"finalizing-expired", func(t *testing.T, s store.Store, id string) {
+		claimForTest(t, s, id, store.DeletionStateFinalizing, -time.Minute)
+	}, true},
 }
 
 func claimForTest(t *testing.T, s store.Store, id, st string, lease time.Duration) {
@@ -173,6 +187,100 @@ func TestLandedRunCompensation_EverySyncDispatch(t *testing.T) {
 	}
 }
 
+// compensationMetrics wires a manual-reader dispatch metrics recorder into
+// d and returns a reader of the compensating_delete counters.
+func compensationMetrics(t *testing.T, d *HTTPAgentDispatcher) func() (done, failed int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	rec, err := dispatchmetrics.New(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	require.NoError(t, err)
+	d.SetDispatchMetrics(rec)
+	return func() (done, failed int64) {
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					continue
+				}
+				for _, dp := range sum.DataPoints {
+					if op, _ := dp.Attributes.Value(attribute.Key("op")); op.AsString() != compensatingDeleteOp {
+						continue
+					}
+					switch m.Name {
+					case dispatchmetrics.MetricDispatchDone:
+						done += dp.Value
+					case dispatchmetrics.MetricDispatchFailed:
+						failed += dp.Value
+					}
+				}
+			}
+		}
+		return done, failed
+	}
+}
+
+// A successful compensating delete is counted as done{op=compensating_delete}.
+func TestLandedRunCompensation_Success_CountsDone(t *testing.T) {
+	f, c := newLandingFixture(t, "land-metric-ok")
+	counters := compensationMetrics(t, f.dispatcher)
+	c.onLand = func() { require.NoError(t, f.store.DeleteAgent(context.Background(), f.agent.ID)) }
+	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent)
+	require.NoError(t, err)
+	require.Len(t, c.deleteRuns, 1)
+	done, failed := counters()
+	assert.Equal(t, int64(1), done)
+	assert.Zero(t, failed)
+}
+
+// The request is cancelled right after the broker answered (the caller
+// went away): the re-read and the delete are detached from it, so the run
+// is still deleted.
+func TestLandedRunCompensation_RequestCancelled_StillCompensates(t *testing.T) {
+	f, c := newLandingFixture(t, "land-cancelled")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.onLand = func() {
+		require.NoError(t, f.store.DeleteAgent(context.Background(), f.agent.ID))
+		cancel()
+	}
+	_, err := f.dispatcher.DispatchAgentCreate(ctx, f.agent)
+	require.NoError(t, err)
+	assert.Equal(t, []string{c.lastCreateReq.RunID}, c.deleteRuns,
+		"a cancelled request still deletes the run that landed")
+}
+
+// failingGetStore fails GetAgent, as a database outage would, once armed.
+type failingGetStore struct {
+	store.Store
+	fail bool
+}
+
+func (s *failingGetStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fail {
+		return nil, errors.New("database is unavailable")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// A failed re-read cannot tell whether the agent was deleted: it is
+// counted as a failure and the caller gets a warning.
+func TestLandedRunCompensation_ReadFails_WarnsAndCounts(t *testing.T) {
+	f, c := newLandingFixture(t, "land-readfail")
+	fs := &failingGetStore{Store: f.store}
+	f.dispatcher = NewHTTPAgentDispatcherWithClient(fs, c, false, f.dispatcher.log)
+	counters := compensationMetrics(t, f.dispatcher)
+	c.onLand = func() { fs.fail = true }
+	ctx, warns := withDispatchWarnings(context.Background())
+	_, err := f.dispatcher.DispatchAgentCreate(ctx, f.agent)
+	require.NoError(t, err)
+	assert.Empty(t, c.deleteRuns)
+	assert.Contains(t, warns.Warnings(), "could not check whether the agent was deleted while it was starting: database is unavailable")
+	_, failed := counters()
+	assert.Equal(t, int64(1), failed)
+}
+
 // An older broker reports no run ID: a delete by name could hit a same-name
 // successor, so none is sent; the caller gets a warning.
 func TestLandedRunCompensation_NoRunIDReported_NoDelete(t *testing.T) {
@@ -191,12 +299,16 @@ func TestLandedRunCompensation_NoRunIDReported_NoDelete(t *testing.T) {
 func TestLandedRunCompensation_DeleteFails_Warns(t *testing.T) {
 	f, c := newLandingFixture(t, "land-delfail")
 	c.deleteErr = errors.New("broker unreachable")
+	counters := compensationMetrics(t, f.dispatcher)
 	c.onLand = func() { require.NoError(t, f.store.DeleteAgent(context.Background(), f.agent.ID)) }
 	ctx, warns := withDispatchWarnings(context.Background())
 	_, err := f.dispatcher.DispatchAgentCreate(ctx, f.agent)
 	require.NoError(t, err)
 	assert.Len(t, c.deleteRuns, 1)
 	assert.Contains(t, warns.Warnings(), "agent was deleted while it was starting; removing its container failed: broker unreachable")
+	done, failed := counters()
+	assert.Zero(t, done)
+	assert.Equal(t, int64(1), failed, "the failure is counted as scion.dispatch.failed{op=compensating_delete}")
 }
 
 // An agent with no row never recorded its run, so no delete can have

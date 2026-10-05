@@ -74,7 +74,7 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 		{"retention-on", time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, s, project, client := newRaceSyncCreateServer(t)
+			srv, s, project, client, broker := newRunBrokerServer(t)
 			srv.config.SoftDeleteRetention = tc.retention
 			pub := recordCreatedEvents(t, srv)
 
@@ -126,6 +126,8 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 			assert.Zero(t, pub.count("created"), "no created while the delete holds the row: %v", pub.kinds())
 			assert.Equal(t, int32(1), compensating.Load(),
 				"the run that landed under a delete claim is deleted again (ptone/scion#3055)")
+			assert.Equal(t, []string{sent.RunID, sent.RunID}, broker.deletes,
+				"the engine's delete and the compensating delete both name the landed run")
 
 			close(release)
 			r := waitDelete(t, delCh, 10*time.Second)

@@ -54,7 +54,7 @@ func (d *HTTPAgentDispatcher) settleLandedRun(ctx context.Context, agent *store.
 // entry yet, answers 404 (an idempotent success), and the delete finishes.
 // The start then lands and its container runs with no hub row tracking it;
 // heartbeats skip slugs with no row. So once the broker answers, the row is
-// re-read and, when it is gone, soft-deleted or delete-held (deleteStopNoop),
+// re-read and, when it is gone or deletedOrDeleteHeld,
 // the run this dispatch started is deleted again. If the engine's own
 // broker delete is still to come, the second delete is a harmless 404.
 //
@@ -63,9 +63,12 @@ func (d *HTTPAgentDispatcher) settleLandedRun(ctx context.Context, agent *store.
 // carries its own run. A broker that reports no run ID (an older broker
 // that may not label entries) gets no compensating delete: a delete by name
 // alone could hit a successor. Files are left alone for the same reason
-// (they are addressed by name). The delete is best-effort: it publishes
-// nothing, a failure is logged at warn and counted (scion.dispatch.failed,
-// op=compensating_delete), and the caller's response carries a warning
+// (they are addressed by name); leftover files are for the broker sweep
+// (ptone/scion#3068). The re-read and the delete are best-effort and
+// detached from the request's cancellation: the delete publishes nothing,
+// a failure (including a failed re-read) is logged at warn and counted
+// (scion.dispatch.failed, op=compensating_delete; a success counts as
+// scion.dispatch.done), and the caller's response carries a warning
 // either way.
 //
 // Asynchronous launches do not need this: the launch reports back to the
@@ -76,14 +79,21 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 	if d.store == nil || agent == nil || agent.ID == "" || resp == nil || resp.Agent == nil {
 		return
 	}
-	fresh, err := d.store.GetAgent(ctx, agent.ID)
+	// The re-read and the delete run detached from the request: a caller
+	// that goes away right after the broker answered must not skip the
+	// check (the container is running either way).
+	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensatingDeleteTimeout)
+	defer cancel()
+	fresh, err := d.store.GetAgent(delCtx, agent.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 	case err != nil:
-		d.log.Warn("Dispatcher: failed to re-read agent after the broker started it; not checking for a delete",
-			"agent_id", agent.ID, "error", err)
+		d.log.Warn("Dispatcher: failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "error", err)
+		d.recordCompensation(ctx, false)
+		addDispatchWarnings(ctx, "could not check whether the agent was deleted while it was starting: "+err.Error())
 		return
-	case fresh.DeletedAt.IsZero() && !deleteStopNoop(fresh):
+	case !deletedOrDeleteHeld(fresh):
 		return
 	}
 
@@ -98,8 +108,6 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 
 	target := *agent
 	target.RunID = runID
-	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensatingDeleteTimeout)
-	defer cancel()
 	d.log.Info("Dispatcher: agent was deleted while the broker started it; deleting the run it started",
 		"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID)
 	if err := d.DispatchAgentDelete(delCtx, &target, false, false, false, time.Time{}); err != nil {
