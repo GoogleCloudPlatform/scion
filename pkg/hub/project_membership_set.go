@@ -1056,7 +1056,8 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				removedOwners = append(removedOwners, b)
 			}
 		}
-		removedUsable, err := anyUsableOwnerBinding(ctx, tx, removedOwners, svc.nowFunc())
+		now := svc.nowFunc() // one instant for the pre-state and post-state checks
+		removedUsable, err := anyUsableOwnerBinding(ctx, tx, removedOwners, now)
 		if err != nil {
 			return fmt.Errorf("cannot verify usable owner: %w", err)
 		}
@@ -1080,7 +1081,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		// Last-owner guard, part 2: evaluated on the full post-state, inside
 		// the same transaction as the mutations it may roll back.
 		if len(removedOwners) > 0 {
-			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, svc.nowFunc(), removedUsable); err != nil {
+			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
 				return err
 			}
 		}

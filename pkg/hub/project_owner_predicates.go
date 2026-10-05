@@ -89,51 +89,67 @@ func userIsActive(ctx context.Context, s store.Store, userID string) (bool, erro
 // projectHasUsableOwner reports whether projectID, read through s (which may
 // be a transactional store), has at least one usable owner (see
 // bindingIsUsableOwner) other than excludeUserID ("" excludes nobody).
-//
-// Candidates are deduplicated by principal and checked in principal ID order,
-// returning at the first usable one, so the cost is at most one GetUser per
-// distinct owner. A lookup error other than ErrNotFound is returned.
+// A lookup error other than ErrNotFound is returned.
 //
 // NEVER use this as the startup backfill gate (ptone/scion#2554); see the
 // comment at the top of this file.
 func projectHasUsableOwner(ctx context.Context, s store.Store, projectID string, now time.Time, excludeUserID string) (bool, error) {
-	ownerRDID, err := projectOwnerRoleDefinitionID(ctx, s)
+	ids, err := usableOwnerPrincipals(ctx, s, projectID, now, excludeUserID, true)
 	if err != nil {
 		return false, err
 	}
+	return len(ids) > 0, nil
+}
+
+// usableOwnerPrincipals returns, in principal ID order, the distinct
+// principals on projectID (read through s) that hold a usable owner binding
+// (bindingIsUsableOwner, the single definition of the predicate), skipping
+// excludeUserID ("" excludes nobody). With firstOnly it stops at the first
+// usable principal.
+//
+// The project's bindings are grouped by principal first, and each
+// principal's bindings are checked in turn until one is usable, so a
+// principal is counted once however many owner bindings it holds. Only
+// bindings inside their active window reach GetUser, so the cost is in
+// practice one GetUser per active owner.
+func usableOwnerPrincipals(ctx context.Context, s store.Store, projectID string, now time.Time, excludeUserID string, firstOnly bool) ([]string, error) {
+	ownerRDID, err := projectOwnerRoleDefinitionID(ctx, s)
+	if err != nil {
+		return nil, err
+	}
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
-		return false, fmt.Errorf("list bindings for project %s: %w", projectID, err)
+		return nil, fmt.Errorf("list bindings for project %s: %w", projectID, err)
 	}
-	// One candidate per principal: an active-window owner binding.
-	candidates := make(map[string]bool)
+	byPrincipal := make(map[string][]*store.RoleBinding)
 	for _, b := range bindings {
-		if b == nil || b.RoleDefinitionID != ownerRDID || b.PrincipalType != store.RoleBindingPrincipalUser {
+		if b == nil || (excludeUserID != "" && b.PrincipalID == excludeUserID) {
 			continue
 		}
-		if excludeUserID != "" && b.PrincipalID == excludeUserID {
-			continue
-		}
-		if !isBindingActive(b, now) {
-			continue
-		}
-		candidates[b.PrincipalID] = true
+		byPrincipal[b.PrincipalID] = append(byPrincipal[b.PrincipalID], b)
 	}
-	ids := make([]string, 0, len(candidates))
-	for id := range candidates {
+	ids := make([]string, 0, len(byPrincipal))
+	for id := range byPrincipal {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	var out []string
 	for _, id := range ids {
-		ok, err := userIsActive(ctx, s, id)
-		if err != nil {
-			return false, err
+		for _, b := range byPrincipal[id] {
+			ok, err := bindingIsUsableOwner(ctx, s, b, ownerRDID, now)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				out = append(out, id)
+				break
+			}
 		}
-		if ok {
-			return true, nil
+		if firstOnly && len(out) > 0 {
+			return out, nil
 		}
 	}
-	return false, nil
+	return out, nil
 }
 
 // projectOwnerBindingCount returns the number of project-owner bindings of

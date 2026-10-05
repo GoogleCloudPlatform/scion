@@ -1295,11 +1295,16 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // delete; if its role definition, principal or scope no longer matches the
 // listed one (an in-place change under the same ID), the function returns
 // errUserRoleBindingsChanged instead of deleting a binding the guard never
-// checked; the validity window (NotBefore/ExpiresAt) is deliberately not
-// compared: it does not affect the guard, since the target's own bindings are
-// never counted and are all deleted. On PostgreSQL an in-place change that commits between that re-read
-// and the delete is still not detected, so the immutability invariant remains
-// the primary guarantee.
+// checked. The validity window (NotBefore/ExpiresAt) is not compared, although
+// it does feed the guard: whether the target's own owner binding is usable
+// (removedUsable in userDeleteOrphansProjectTx) depends on its window, read
+// from the pre-lock list. That is safe only because bindings are immutable: a
+// window change is a delete plus a create with a new ID, which the by-ID
+// re-read catches (the listed ID is gone, and the predicate delete below then
+// finds the new ID and aborts with errUserRoleBindingsChanged). On
+// PostgreSQL an in-place change that commits between that re-read and the
+// delete is still not detected, so the immutability invariant remains the
+// primary guarantee.
 //
 // The by-ID pass deletes in binding ID order. On PostgreSQL a concurrent
 // change that deletes several of the user's bindings (for example
@@ -1436,18 +1441,27 @@ func userDeleteOrphansProjectTx(ctx context.Context, tx store.Store, projectID, 
 			own = append(own, b)
 		}
 	}
-	removedUsable, err := anyUsableOwnerBinding(ctx, tx, own, now)
-	if err != nil {
-		return false, fmt.Errorf("check owner bindings of project %s: %w", projectID, err)
+	// ownerRDID is passed through, so the role definition is not resolved
+	// again for every owned project.
+	removedUsable := false
+	for _, b := range own {
+		ok, err := bindingIsUsableOwner(ctx, tx, b, ownerRDID, now)
+		if err != nil {
+			return false, fmt.Errorf("check owner bindings of project %s: %w", projectID, err)
+		}
+		if ok {
+			removedUsable = true
+			break
+		}
 	}
 	if removedUsable {
 		ok, err := projectHasUsableOwner(ctx, tx, projectID, now, userID)
 		if err != nil {
 			return false, fmt.Errorf("check usable owners of project %s: %w", projectID, err)
 		}
-		if !ok {
-			return true, nil
-		}
+		// A usable other owner is itself another owner binding, so I2
+		// holds too and the binding count is not needed.
+		return !ok, nil
 	}
 	others, err := projectOwnerBindingCount(ctx, tx, projectID, userID)
 	if err != nil {

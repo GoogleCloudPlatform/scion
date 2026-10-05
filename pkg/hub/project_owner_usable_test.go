@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,23 +37,13 @@ import (
 // owner binding of any kind (I2, ptone/scion#2554).
 
 // usableOwnerCount returns the number of distinct principals on projectID
-// that hold a usable owner binding, using the production predicate.
+// that hold a usable owner binding. It goes through usableOwnerPrincipals,
+// the same path projectHasUsableOwner (and so enforcement) uses.
 func usableOwnerCount(t *testing.T, s store.Store, projectID string) int {
 	t.Helper()
-	ctx := context.Background()
-	ownerRDID, err := projectOwnerRoleDefinitionID(ctx, s)
+	ids, err := usableOwnerPrincipals(context.Background(), s, projectID, time.Now(), "", false)
 	require.NoError(t, err)
-	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
-	require.NoError(t, err)
-	seen := map[string]bool{}
-	for _, b := range bindings {
-		ok, err := bindingIsUsableOwner(ctx, s, b, ownerRDID, time.Now())
-		require.NoError(t, err)
-		if ok {
-			seen[b.PrincipalID] = true
-		}
-	}
-	return len(seen)
+	return len(ids)
 }
 
 // requireLastOwner409 asserts a 409 last_owner refusal.
@@ -239,7 +231,12 @@ func TestLastOwner_RemoveExpiredOwnerBindingAllowed(t *testing.T) {
 }
 
 // Test 4: one real owner plus a ghost owner binding; removing the ghost
-// succeeds.
+// succeeds. (This case also passed before ptone/scion#2769: the old count
+// included the ghost. The discriminating case is
+// TestLastOwner_NoUsableOwner_RemoveGhostKeepsExpired.)
+//
+// Revert proof: making userIsActive turn ErrNotFound into an error (instead
+// of "not usable") fails this test with 500 ("look up user …: not found").
 func TestLastOwner_RemoveGhostOwnerBindingAllowed(t *testing.T) {
 	f := setupUsableOwnerFixture(t)
 	ghost := f.addUnusableCoOwner(t, "deleted")
@@ -248,6 +245,103 @@ func TestLastOwner_RemoveGhostOwnerBindingAllowed(t *testing.T) {
 		"/api/v1/projects/"+f.projectID+"/members/"+ghost.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{f.ownerBinding.ID}, ownerBindingIDs(t, f.s, f.projectID))
+	assert.Equal(t, 1, usableOwnerCount(t, f.s, f.projectID))
+}
+
+// newNoOwnerProject creates a project with no owner bindings and a hub
+// admin to act on it at the service level (see removeAsService).
+func newNoOwnerProject(t *testing.T) (*Server, store.Store, string, *store.User) {
+	t.Helper()
+	srv, s := testServer(t)
+	projectID := tid(t.Name() + "-project")
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
+		ID: projectID, Name: "No Usable Owner", Slug: tid("no-usable-owner"),
+	}))
+	hubAdmin := createHubAdminUser(t, s, tid(t.Name()+"-hub-admin"), "ha-"+projectID[:8]+"@test.com")
+	return srv, s, projectID, hubAdmin
+}
+
+// L3(b) of review r1: a project whose only owner bindings are a ghost and an
+// expired binding (no usable owner). Removing the ghost succeeds and the
+// expired binding remains, because one owner binding of any kind is left.
+//
+// Revert proof: restoring the old pre-state count in RemoveMember (active
+// user owner bindings before the delete <= 1 gives 409) returns 409 here,
+// since the old count was 1 (the ghost; the expired binding is not active).
+func TestLastOwner_NoUsableOwner_RemoveGhostKeepsExpired(t *testing.T) {
+	srv, s, projectID, hubAdmin := newNoOwnerProject(t)
+	ghost := createGhostOwnerBinding(t, s, tid(t.Name()+"-ghost"), projectID)
+	expiredUser := newUserWithStatus(t, s, tid(t.Name()+"-expired"), store.UserStatusActive)
+	past := time.Now().Add(-time.Hour)
+	expired := createOwnerBindingRB(t, s, expiredUser.ID, projectID, nil, &past)
+
+	_, denial := removeAsService(srv, hubAdmin, projectID, ghost.ID)
+	require.Nil(t, denial, "removing the ghost binding must succeed: %+v", denial)
+	assert.Equal(t, []string{expired.ID}, ownerBindingIDs(t, s, projectID))
+}
+
+// N3 of review r1: I2 counts owner bindings of any principal. A group
+// owner binding that is the project's last owner binding cannot be removed.
+// The store refuses new non-user owner bindings (ErrDirectUserOnly), so the
+// binding is inserted with raw SQL, as a legacy row would exist.
+func TestLastOwner_LastGroupOwnerBindingKept(t *testing.T) {
+	srv, s, projectID, hubAdmin := newNoOwnerProject(t)
+	ctx := context.Background()
+	ownerRDID, err := projectOwnerRoleDefinitionID(ctx, s)
+	require.NoError(t, err)
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store must expose DB()")
+	groupBindingID := uuid.New().String()
+	_, err = dbProvider.DB().ExecContext(ctx, `INSERT INTO role_bindings `+
+		`(id, role_definition_id, principal_type, principal_id, scope_type, scope_id, membership_kind, created_by, created) `+
+		`VALUES (?, ?, 'group', ?, 'project', ?, 'builtin', 'test', datetime('now'))`,
+		groupBindingID, ownerRDID, uuid.New().String(), projectID)
+	require.NoError(t, err)
+	require.Equal(t, []string{groupBindingID}, ownerBindingIDs(t, s, projectID))
+
+	_, denial := removeAsService(srv, hubAdmin, projectID, groupBindingID)
+	requireLastOwnerDecision(t, denial)
+	assert.Equal(t, []string{groupBindingID}, ownerBindingIDs(t, s, projectID))
+}
+
+// N3 of review r1: removing or demoting an unusable owner binding is
+// allowed through every members path while a usable owner remains.
+func TestLastOwner_UnusableOwnerBindingChangeAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(t *testing.T, f *usableOwnerFixture) *httptest.ResponseRecorder
+		want int
+	}{
+		{"PATCH expired owner to member", func(t *testing.T, f *usableOwnerFixture) *httptest.ResponseRecorder {
+			b := f.addExpiredCoOwner(t)
+			return doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+				"/api/v1/projects/"+f.projectID+"/members/"+b.ID,
+				updateProjectMemberRequest{RoleDefinitionID: f.memberRD.ID})
+		}, http.StatusOK},
+		{"PUT expired owner to member", func(t *testing.T, f *usableOwnerFixture) *httptest.ResponseRecorder {
+			b := f.addExpiredCoOwner(t)
+			return putMemberRoles(t, f.srv, f.owner, f.projectID, "user", b.PrincipalID, []string{f.memberRD.ID}, nil)
+		}, http.StatusOK},
+		{"DELETE principal on a ghost owner", func(t *testing.T, f *usableOwnerFixture) *httptest.ResponseRecorder {
+			b := f.addUnusableCoOwner(t, "deleted")
+			return deleteMemberRoles(t, f.srv, f.owner, f.projectID, "user", b.PrincipalID)
+		}, http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupUsableOwnerFixture(t)
+			rec := tc.do(t, f)
+			require.Equal(t, tc.want, rec.Code, rec.Body.String())
+			assert.Equal(t, []string{f.ownerBinding.ID}, ownerBindingIDs(t, f.s, f.projectID))
+		})
+	}
+}
+
+// addExpiredCoOwner adds an expired owner binding held by an active user.
+func (f *usableOwnerFixture) addExpiredCoOwner(t *testing.T) *store.RoleBinding {
+	t.Helper()
+	u := newUserWithStatus(t, f.s, tid(t.Name()+"-expired"), store.UserStatusActive)
+	past := time.Now().Add(-time.Hour)
+	return createOwnerBindingRB(t, f.s, u.ID, f.projectID, nil, &past)
 }
 
 // removeAsService calls RemoveMember on the server's membership service as
@@ -330,8 +424,10 @@ func (f *flipStatusStore) GetUser(ctx context.Context, id string) (*store.User, 
 // after the pre-check gives 400 principal_ineligible; deleted gives 400
 // not_found. Nothing changes.
 //
-// Revert proof: removing the in-tx GetUser re-check lets the transfer
-// commit (200) to a suspended (or missing) user.
+// Revert proof: without the in-tx GetUser re-check the transfer still does
+// not commit, but it returns the wrong code: 409 last_owner for the
+// suspended case (the post-state check blocks it) and 500 for the deleted
+// case (creating the owner binding fails), instead of 400.
 func TestTransferOwnership_NewOwnerChangedAfterPreCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -509,4 +605,50 @@ func TestLastOwner_HubOverrideActorStillSubject(t *testing.T) {
 	})
 	requireLastOwnerDecision(t, denial)
 	assert.Equal(t, 1, usableOwnerCount(t, f.s, f.projectID))
+}
+
+// preTxFaultStore makes GetUser(failID) fail with a non-NotFound error
+// outside transactions only (WithTx passes the real store through).
+type preTxFaultStore struct {
+	store.Store
+	failID string
+}
+
+func (f *preTxFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == f.failID {
+		return nil, errInjectedGetUser
+	}
+	return f.Store.GetUser(ctx, id)
+}
+
+// L6 and N3 of review r1: a non-NotFound GetUser fault on the new owner is
+// 500 internal_error, not 400 not_found, both in the pre-transaction check
+// and in the in-transaction re-check. Nothing changes.
+//
+// Revert proof (pre-tx): mapping every pre-check error to 400 not_found (the
+// old code) fails the "pre-tx" case with 400.
+func TestTransferOwnership_GetUserFaultIs500(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(s store.Store, id string) store.Store
+	}{
+		{"pre-tx", func(s store.Store, id string) store.Store { return &preTxFaultStore{Store: s, failID: id} }},
+		{"in-tx", func(s store.Store, id string) store.Store { return &faultingGetUserStore{Store: s, failID: id} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupUsableOwnerFixture(t)
+			target := newUserWithStatus(t, f.s, tid(t.Name()+"-target"), store.UserStatusActive)
+			svc := NewProjectMembershipService(tc.wrap(f.s, target.ID), NewAuthzService(f.s, nil), nil)
+
+			_, denial := svc.TransferOwnership(mmrServiceCtx(f.owner.ID, f.owner.Email), MembershipRequest{
+				Op: MembershipOpTransfer, ProjectID: f.projectID,
+				Actor: mmrServiceIdentity(f.owner.ID, f.owner.Email), NewOwnerID: target.ID,
+			})
+			require.NotNil(t, denial)
+			assert.Equal(t, http.StatusInternalServerError, denial.HTTPStatus, denial.Reason)
+			assert.Equal(t, "internal_error", denial.DenialCode)
+			assert.Contains(t, denial.Reason, errInjectedGetUser.Error())
+			assert.Equal(t, []string{f.ownerBinding.ID}, ownerBindingIDs(t, f.s, f.projectID), "nothing may change")
+		})
+	}
 }

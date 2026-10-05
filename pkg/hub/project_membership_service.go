@@ -926,6 +926,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			// Last-owner guard for demotions (ptone/scion#2769): note
 			// whether a usable owner binding is being replaced, then check
 			// the post-state after the replacement.
+			// One instant for the pre-state and post-state checks.
+			now := svc.nowFunc()
 			var demotedOwners []*store.RoleBinding
 			removedUsable := false
 			if roleDef.Name != store.ProjectRoleOwner {
@@ -933,7 +935,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 				if demotedOwners, oErr = ownerBindingsAmong(ctx, tx, existingBindings); oErr != nil {
 					return oErr
 				}
-				if removedUsable, oErr = anyUsableOwnerBinding(ctx, tx, demotedOwners, svc.nowFunc()); oErr != nil {
+				if removedUsable, oErr = anyUsableOwnerBinding(ctx, tx, demotedOwners, now); oErr != nil {
 					return fmt.Errorf("cannot verify usable owner: %w", oErr)
 				}
 			}
@@ -942,7 +944,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 				return rErr
 			}
 			if len(demotedOwners) > 0 {
-				if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, svc.nowFunc(), removedUsable); err != nil {
+				if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
 					return err
 				}
 			}
@@ -1165,9 +1167,10 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		// note whether the demoted binding is a usable owner, then check the
 		// post-state after the delete and re-create below.
 		demotesOwner := oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner
+		now := svc.nowFunc() // one instant for the pre-state and post-state checks
 		removedUsable := false
 		if demotesOwner {
-			if removedUsable, err = anyUsableOwnerBinding(ctx, tx, []*store.RoleBinding{existing}, svc.nowFunc()); err != nil {
+			if removedUsable, err = anyUsableOwnerBinding(ctx, tx, []*store.RoleBinding{existing}, now); err != nil {
 				return fmt.Errorf("cannot verify usable owner: %w", err)
 			}
 		}
@@ -1191,7 +1194,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			return fmt.Errorf("create replacement binding: %w", err)
 		}
 		if demotesOwner {
-			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, svc.nowFunc(), removedUsable); err != nil {
+			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
 				return err
 			}
 		}
@@ -1332,9 +1335,10 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		// note whether the removed binding is a usable owner, then check the
 		// post-state after the delete.
 		removesOwner := roleDef.Name == store.ProjectRoleOwner
+		now := svc.nowFunc() // one instant for the pre-state and post-state checks
 		removedUsable := false
 		if removesOwner {
-			if removedUsable, err = anyUsableOwnerBinding(ctx, tx, []*store.RoleBinding{binding}, svc.nowFunc()); err != nil {
+			if removedUsable, err = anyUsableOwnerBinding(ctx, tx, []*store.RoleBinding{binding}, now); err != nil {
 				return fmt.Errorf("cannot verify usable owner: %w", err)
 			}
 		}
@@ -1343,7 +1347,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			return err
 		}
 		if removesOwner {
-			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, svc.nowFunc(), removedUsable); err != nil {
+			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
 				return err
 			}
 		}
@@ -1413,10 +1417,15 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: "cannot transfer ownership to yourself", HTTPStatus: 409}
 	}
 
-	// Verify new owner is a valid user.
+	// Verify new owner is a valid user. Only ErrNotFound is 400 not_found;
+	// any other lookup error is a store fault and gives 500, as in the
+	// in-transaction re-check below (D1 of ptone/scion#2769).
 	newOwner, err := svc.store.GetUser(ctx, req.NewOwnerID)
 	if err != nil {
-		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "target user not found", HTTPStatus: 400}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "target user not found", HTTPStatus: 400}
+		}
+		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "ownership transfer failed: look up target user: " + err.Error(), HTTPStatus: 500}
 	}
 	if newOwner.Status != "active" {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodePrincipalIneligible, Reason: "target user is not active", HTTPStatus: 400}
