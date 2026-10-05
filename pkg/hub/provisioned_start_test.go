@@ -151,3 +151,90 @@ func TestProvisionedStart_FailedCreateRowThatCannotBeRemoved(t *testing.T) {
 	assert.Equal(t, "error", got.Phase)
 	assert.Equal(t, createRowRemoveFailedMessage, got.Message)
 }
+
+// A provisioned agent's start that reached the broker keeps intent running
+// and gets no failure message, even when the status write after it fails:
+// the agent is starting, and the heartbeat records it running.
+func TestProvisionedStart_StartedButStatusWriteFailedKeepsIntent(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("started-unrecorded", "created", "")
+	_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	err = f.srv.startAgentCore(context.Background(), getAgent(t, f.s, a.ID), StartOpts{Kind: store.StartClaimUser})
+	require.ErrorIs(t, err, errStartedStatusWrite)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "a start that reached the broker is not reverted")
+	assert.Empty(t, got.Message)
+}
+
+// Only a start that definitely did not happen sends a provisioned agent
+// back to rest. An ambiguous dispatch error, or a launch in flight that may
+// still start a container, keeps intent running and leaves no message.
+func TestProvisionedStart_UncertainFailureKeepsIntent(t *testing.T) {
+	for name, startErr := range map[string]error{
+		"ambiguous":        errors.New("connection reset by peer"),
+		"launch in flight": fmt.Errorf("x: %w", ErrLaunchInFlight),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, d, _ := newClaimFixture(t)
+			a := f.addAgent("uncertain", "created", "")
+			_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			d.start = func(ctx context.Context, cur *store.Agent) error { return startErr }
+			err = f.srv.startAgentCore(context.Background(), getAgent(t, f.s, a.ID), StartOpts{Kind: store.StartClaimUser})
+			require.Error(t, err)
+			got := getAgent(t, f.s, a.ID)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			assert.Empty(t, got.Message)
+		})
+	}
+}
+
+// A start refused by another start's claim leaves that claimant's intent
+// and the row's message alone.
+func TestProvisionedStart_ClaimRefusalLeavesTheClaimantsIntent(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("claimed-elsewhere", "created", "")
+	claim, err := f.s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	require.NoError(t, err)
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusConflict, code, body)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	require.NotNil(t, got.RunIntentAt)
+	assert.True(t, got.RunIntentAt.Equal(claim.RunIntentAt), "the claimant's intent is untouched")
+	assert.Empty(t, got.Message)
+}
+
+// The settle writes its message only when its intent compare-and-set wins:
+// a newer start keeps its intent and gets no message.
+func TestProvisionedStart_SettleLeavesANewerStartAlone(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("newer-start", "created", "")
+	old, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	_, err = f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.srv.settleFailedProvisionedStart(ctx, a.ID, old, provisionedStartNotCompletedMessage)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.Empty(t, got.Message, "no message for a start the settle did not revert")
+}
+
+// The backstop leaves a provisioned agent alone until the create hold has
+// passed since its last change.
+func TestProvisionedStart_ReaperBackstopWaitsForTheCreateHold(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	ctx := context.Background()
+	young := f.addAgent("young", "created", "")
+	_, err := f.s.SetRunIntent(ctx, young.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.heartbeat(completeInventory())
+	f.srv.reapStartClaims(ctx)
+	got := getAgent(t, f.s, young.ID)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.Empty(t, got.Message)
+}

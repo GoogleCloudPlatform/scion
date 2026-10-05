@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,4 +220,182 @@ func TestQueuedStop_SupersededClaimDoesNotBlockTheDrain(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), d.stops.Load())
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the superseded claim is released after the stop")
+}
+
+// A start that takes the agent after its stop was queued is not settled as
+// the queued stop: a fresh inventory without its container (the start is
+// still dispatching) keeps the start's reservation and status.
+func TestQueuedStop_SettleLeavesAConcurrentStartAlone(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	f.srv.SetDispatcher(nil) // no drain in this test
+	queueStop(t, f, a, "")
+	_, err := f.s.ClaimAgentStart(ctx, a.ID, "user-hub", store.StartClaimUser, "", time.Minute)
+	require.NoError(t, err)
+	_, err = f.srv.checkAndReserveBrokerQuota(ctx, getAgent(t, f.s, a.ID))
+	require.NoError(t, err)
+
+	f.heartbeat(completeInventory())
+	assert.True(t, reserved(t, f, a.ID), "the start's reservation is kept")
+	assert.NotEqual(t, "stopped", getAgent(t, f.s, a.ID).ContainerStatus)
+}
+
+// A start that succeeds after a queued stop supersedes it: stop_queued and
+// its notice are cleared, and a later report applies as usual.
+func TestQueuedStop_StartAfterQueuedStopClearsTheQueuedStatus(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	queueStop(t, f, a, "")
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusOK, code, body)
+	got := getAgent(t, f.s, a.ID)
+	assert.NotEqual(t, containerStatusStopQueued, got.ContainerStatus, "the start superseded the queued stop")
+	assert.NotEqual(t, offlineStopMessage, got.Message)
+
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "running", ContainerStatus: "Up 1 minute", RuntimeTarget: "docker"},
+		}}},
+	})
+	assert.Equal(t, "Up 1 minute", getAgent(t, f.s, a.ID).ContainerStatus)
+}
+
+// With run intent running, a report never keeps a stale stop_queued.
+func TestQueuedStop_ReportReplacesStopQueuedOnceIntentIsRunning(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	f.srv.SetDispatcher(nil)
+	queueStop(t, f, a, "")
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "running", ContainerStatus: "Up 1 minute", RuntimeTarget: "docker"},
+		}}},
+	})
+	assert.Equal(t, "Up 1 minute", getAgent(t, f.s, a.ID).ContainerStatus)
+}
+
+// timeoutStopDispatcher fails every stop, as a broker that times out would.
+type timeoutStopDispatcher struct{ *claimTestDispatcher }
+
+func (d timeoutStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	d.stops.Add(1)
+	return errors.New("broker timeout")
+}
+
+// A drained stop that failed leaves the row failed; once the broker reports
+// the container terminal in a fresh complete inventory, the queued stop is
+// confirmed: capacity released and the notice cleared.
+func TestQueuedStop_FailedDrainSettledByATerminalReport(t *testing.T) {
+	f, base, a := newClaimFixture(t)
+	d := timeoutStopDispatcher{base}
+	f.srv.SetDispatcher(d)
+	setBrokerAgentCeiling(t, f.s, 5)
+	_, err := f.srv.checkAndReserveBrokerQuota(context.Background(), a)
+	require.NoError(t, err)
+	httpOnlyBroker(t, f)
+	queueStop(t, f, a, "")
+
+	f.heartbeat(completeInventory(), a.Slug)
+	require.Eventually(t, func() bool { return d.stops.Load() == 1 && pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.True(t, reserved(t, f, a.ID), "a failed stop releases nothing")
+
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "stopped", ContainerStatus: "Exited (0)", RuntimeTarget: "docker"},
+		}}},
+	})
+	assert.False(t, reserved(t, f, a.ID), "a terminal container confirms the stop")
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+	assert.Empty(t, got.Message)
+}
+
+func TestQueuedStop_BrokerHasNoControlChannel(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	other := "other-hub"
+	empty := ""
+	cases := []struct {
+		name   string
+		broker *store.RuntimeBroker
+		want   bool
+	}{
+		{"no broker", nil, false},
+		{"no endpoint", &store.RuntimeBroker{ID: "b1"}, false},
+		{"owned by another hub node", &store.RuntimeBroker{ID: "b1", Endpoint: "http://b", ConnectedHubID: &other}, false},
+		{"HTTP only", &store.RuntimeBroker{ID: "b1", Endpoint: "http://b"}, true},
+		{"HTTP only, empty hub ID", &store.RuntimeBroker{ID: "b1", Endpoint: "http://b", ConnectedHubID: &empty}, true},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, f.srv.brokerHasNoControlChannel(tc.broker), tc.name)
+	}
+}
+
+// A broker whose control channel another hub node holds is drained there
+// on reconnect, never from its heartbeat on this node.
+func TestQueuedStop_BrokerOwnedByAnotherNodeNotDrainedFromHeartbeat(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	httpOnlyBroker(t, f)
+	b, err := f.s.GetRuntimeBroker(context.Background(), f.brokerID)
+	require.NoError(t, err)
+	other := "other-hub"
+	b.ConnectedHubID = &other
+	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), b))
+	queueStop(t, f, a, "")
+
+	f.heartbeat(completeInventory(), a.Slug)
+	f.heartbeat(completeInventory(), a.Slug)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), d.stops.Load())
+	assert.Equal(t, 1, pendingStops(t, f))
+}
+
+// countingDispatchStore counts pending-dispatch reads.
+type countingDispatchStore struct {
+	store.Store
+	lists *atomic.Int32
+}
+
+func (s countingDispatchStore) ListPendingDispatch(ctx context.Context, brokerID string) ([]store.BrokerDispatch, error) {
+	s.lists.Add(1)
+	return s.Store.ListPendingDispatch(ctx, brokerID)
+}
+
+// At most one heartbeat drain per broker runs at a time on a node: a second
+// heartbeat while one drain is applying a stop does not start another.
+func TestQueuedStop_OneHeartbeatDrainPerBroker(t *testing.T) {
+	f, base, a := newClaimFixture(t)
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	d := &stopHookDispatcher{claimTestDispatcher: base, onStop: func(context.Context, *store.Agent) {
+		entered <- struct{}{}
+		<-release
+	}}
+	f.srv.SetDispatcher(d)
+	httpOnlyBroker(t, f)
+	queueStop(t, f, a, "")
+	second := f.addAgent("second", "running", "")
+	queueStop(t, f, second, "") // still pending while the first stop runs
+	var lists atomic.Int32
+	f.srv.store = countingDispatchStore{Store: f.s, lists: &lists}
+	b, err := f.s.GetRuntimeBroker(context.Background(), f.brokerID)
+	require.NoError(t, err)
+	hb := &brokerHeartbeatRequest{Status: store.BrokerStatusOnline}
+
+	f.srv.drainQueuedStopsFromHeartbeat(context.Background(), f.brokerID, b, hb, newHeartbeatReport())
+	<-entered // the first drain is applying the stop
+	before := lists.Load()
+	f.srv.drainQueuedStopsFromHeartbeat(context.Background(), f.brokerID, b, hb, newHeartbeatReport())
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, before+1, lists.Load(), "only the second heartbeat's own read: no second drain")
+	close(release) // the first drain then applies the second stop too
+	require.Eventually(t, func() bool { return pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, int32(2), base.stops.Load(), "each queued stop applied once")
 }

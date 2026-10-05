@@ -424,6 +424,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		return errors.New("no dispatcher")
 	}
 	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
+	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
@@ -457,7 +458,10 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		// hold was settled or rolled back.
 		sd.rollback(ctx)
 	}
-	if err != nil && provisioned && startOutcomeOf(err) == startReleased && !isClaimRefusal(err) && agent.RunIntentAt != nil {
+	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
+		s.clearSupersededQueuedStop(ctx, agent)
+	}
+	if err != nil && provisioned && startDidNotHappen(err) && agent.RunIntentAt != nil {
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
 	}
 	return err
@@ -467,26 +471,65 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 // start did not happen: it is back at rest and can be started again.
 const provisionedRestingNote = "The agent is still provisioned and can be started again."
 
-// isClaimRefusal reports whether err is a start refused before dispatch by
-// its claim (held, not eligible, lost, or a delete holding the row).
-func isClaimRefusal(err error) bool {
-	var held *store.ClaimHeldError
-	return errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) ||
-		errors.Is(err, errStartClaimLost) || errors.Is(err, store.ErrDeleteInProgress)
+// clearSupersededQueuedStop clears the queued-stop status and notice of an
+// agent whose start succeeded after a stop was queued for its offline
+// broker: the start superseded the stop. The container status becomes
+// running unless the broker reported one.
+func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
+	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
+	if agent.ContainerStatus == "" || agent.ContainerStatus == containerStatusStopQueued {
+		upd.ContainerStatus = "running"
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
+		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
+		return
+	}
+	if upd.ContainerStatus != "" {
+		agent.ContainerStatus = upd.ContainerStatus
+	}
+}
+
+// startDidNotHappen reports whether err is a start that definitely never
+// reached a runtime: refused before dispatch for capacity, missing
+// environment, a credential that could not be issued, a broker without the
+// required capability, a create left incomplete, a phase that no longer
+// allows a launch, or a broker that confirmed it did not act. Anything else,
+// including a start that succeeded but whose status write failed, an
+// ambiguous dispatch error, a claim refusal (the earlier claimant owns the
+// intent) or a launch in flight (which may still start a container), is not.
+func startDidNotHappen(err error) bool {
+	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) {
+		return false
+	}
+	var quotaErr *startQuotaError
+	var stillMissing *ErrEnvStillMissing
+	var tokenErr *agentTokenIssueError
+	var incomplete *AgentCreateIncompleteError
+	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
+		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
+		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
 }
 
 // settleFailedProvisionedStart returns a provisioned agent (phase created)
-// whose start definitely did not happen to its resting state: the message
-// says why, and run intent goes back to stopped, compare-and-set on the
-// intent the start recorded at intentAt, so a newer start or stop wins.
+// whose start definitely did not happen to its resting state: run intent
+// goes back to stopped, compare-and-set on the intent the start recorded at
+// intentAt, and only when that wins the message says why. A newer start or
+// stop since keeps its intent and gets no message.
 func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
+	reverted, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped)
+	if err != nil {
+		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
+		return
+	}
+	if !reverted {
+		return
+	}
 	if err := s.store.UpdateAgentStatus(sctx, agentID, store.AgentStatusUpdate{Message: message}); err != nil {
 		slog.Warn("Failed provisioned start: message write failed", "agent_id", agentID, "error", err)
-	}
-	if _, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped); err != nil {
-		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
 	}
 }
 

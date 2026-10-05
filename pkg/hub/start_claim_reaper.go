@@ -295,7 +295,7 @@ func (s *Server) reapProvisionedStartsLeftRunning(ctx context.Context, now time.
 		for _, a := range res.Items {
 			if a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil && a.StartClaimID == "" &&
 				a.LaunchState != store.LaunchStateActive && a.DeletedAt.IsZero() &&
-				time.Since(a.Updated) > holds.Create {
+				now.Sub(a.Updated) > holds.Create {
 				candidates = append(candidates, a)
 			}
 		}

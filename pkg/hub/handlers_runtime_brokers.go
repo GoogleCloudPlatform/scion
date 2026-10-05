@@ -896,10 +896,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				Message:         agentHB.Message,
 			}
 			// A stop queued while the broker was offline keeps its
-			// stop_queued status and notice until the stop is applied or the
-			// container is confirmed gone: a running report means it has not
-			// been applied yet.
-			if agent.ContainerStatus == containerStatusStopQueued {
+			// stop_queued status and notice while it is still the agent's
+			// intent, until the stop is applied or the container is
+			// confirmed gone: any report of the agent means it has not been
+			// applied yet. A start recorded since supersedes the queued
+			// stop, and the report then applies as usual.
+			if agent.ContainerStatus == containerStatusStopQueued && agent.RunIntent == store.RunIntentStopped {
 				statusUpdate.ContainerStatus = ""
 				statusUpdate.Message = ""
 			}
@@ -1304,7 +1306,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// Settle queued stops of a broker reached over HTTP only: confirm the
 	// ones its complete inventory shows terminated, and apply the rest.
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
-	s.drainQueuedStopsFromHeartbeat(id, &heartbeat)
+	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
 
 	w.WriteHeader(http.StatusOK)
 }
