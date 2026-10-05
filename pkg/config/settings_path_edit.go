@@ -335,9 +335,13 @@ func yamlValueAtPath(root *yamlv3.Node, path []string) (interface{}, bool) {
 
 // SettingsEffective is what the server derives from a global settings file:
 //
-//   - Server: the hub's server config, built exactly as the hub builds it
-//     (typed decode of the server block, ConvertV1ServerToGlobalConfig, then
-//     the top-level hub sections);
+//   - Server: the hub's server config, built as the hub builds it from a
+//     settings.yaml that has a server key (typed decode of the server block,
+//     ConvertV1ServerToGlobalConfig, then the top-level hub sections). When
+//     settings.yaml has no server key the hub falls back to the deprecated
+//     server.yaml (loadGlobalConfigLegacy), which this does not model; the
+//     workstation server-config PUT refuses to create a server block in that
+//     case instead (409 legacy_server_yaml);
 //   - Typed: the typed VersionedSettings decode, normalised so an absent
 //     key, a null and the zero value compare equal (nil pointers to structs
 //     and nil slices/maps become their zero/empty values). It covers fields

@@ -61,6 +61,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"reflect"
@@ -190,7 +191,9 @@ func presentBodyLeaves(obj map[string]json.RawMessage, t reflect.Type, prefix []
 // zero-valued blocks, an unchanged active_profile); anything else, an
 // explicit zero such as dev_mode:false over a stored true included, is a
 // change the hub will not make, so the PUT must reject it rather than
-// report "saved". Leaves under the unpersisted lists are left to
+// report "saved". Layer-0 leaves are classified first, so they are
+// layer0_rejected even under the unpersisted lists (server.shared_dir_storage);
+// only unclassified leaves under those lists are left to
 // rejectUnpersistedKeys.
 func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSettings, rawBody []byte) (layer0, unclassified []string, err error) {
 	var top map[string]json.RawMessage
@@ -704,8 +707,25 @@ func prepareSettingsFileTxn(build func(*config.GlobalConfig, *config.VersionedSe
 		unlock()
 		return nil, err
 	}
+	// A settings.yaml without a server key makes the hub load its server
+	// config from the deprecated server.yaml. Creating the server block here
+	// would silently switch it to settings.yaml and drop every server.yaml
+	// setting at the next start, so refuse instead.
+	if config.GetServerConfigPath(globalDir) != "" && typed.Server == nil {
+		for _, p := range staged.Changed {
+			if p == "server" || strings.HasPrefix(p, "server.") {
+				unlock()
+				return nil, errLegacyServerYAML
+			}
+		}
+	}
 	return &settingsFileTxn{unlock: unlock, staged: staged}, nil
 }
+
+// errLegacyServerYAML is returned when a workstation PUT would create the
+// server block in a settings.yaml whose server config still comes from the
+// deprecated server.yaml.
+var errLegacyServerYAML = errors.New("the server configuration is still read from the deprecated server.yaml")
 
 // abort drops the prepared edit and releases the lock.
 func (t *settingsFileTxn) abort() {

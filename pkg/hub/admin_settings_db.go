@@ -999,6 +999,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		})
 		if err != nil {
 			slog.Error("PUT server-config: failed to prepare settings.yaml edit", "error", err)
+			if errors.Is(err, errLegacyServerYAML) {
+				writeError(w, http.StatusConflict, "legacy_server_yaml",
+					"The server configuration is still read from the deprecated server.yaml. Move its contents under a top-level `server:` key in settings.yaml (see the Server Configuration reference, docs/reference/server-config), remove server.yaml, then save again.", nil)
+				return
+			}
 			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)

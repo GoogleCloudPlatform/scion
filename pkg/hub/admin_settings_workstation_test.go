@@ -1002,3 +1002,43 @@ func TestWorkstation_PutServerConfig_UntouchedFormZerosWriteNothing(t *testing.T
 		t.Errorf("settings.yaml changed:\n%s", after)
 	}
 }
+
+// Review r5 N2: a settings.yaml without a server key makes the hub read its
+// server config from the deprecated server.yaml. A workstation PUT that
+// would create the server block (and so drop every server.yaml setting at
+// the next start) is refused with 409; top-level edits still work.
+func TestWorkstation_PutServerConfig_LegacyServerYAMLRefused(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	globalDir := filepath.Dir(settingsPath)
+	settings := "schema_version: \"1\"\nactive_profile: local\n"
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "server.yaml"), []byte("hub:\n  port: 7000\n  host: 10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+
+	rr := putServerConfig(t, srv, `{"server":{"log_level":"debug"}}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "server.yaml") {
+		t.Fatalf("expected 409 naming server.yaml, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if after := readFileString(t, settingsPath); after != settings {
+		t.Errorf("settings.yaml changed:\n%s", after)
+	}
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gc.Hub.Port != 7000 {
+		t.Errorf("server.yaml settings must stay in effect, hub port = %d", gc.Hub.Port)
+	}
+
+	if rr := putServerConfig(t, srv, `{"active_profile":"dev"}`); rr.Code != http.StatusOK {
+		t.Errorf("a top-level edit: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// No-effect server edits create nothing and are not refused.
+	if rr := putServerConfig(t, srv, `{"server":{"log_format":""}}`); rr.Code != http.StatusOK {
+		t.Errorf("a no-effect server edit: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
