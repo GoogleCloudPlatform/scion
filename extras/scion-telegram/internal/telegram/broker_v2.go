@@ -1907,18 +1907,17 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	listUnavailable := func(replyTo string) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
 	}
-
-	// A sender the hub denies (including a link it no longer accepts) is
-	// not routed by any path, including replies to the bot.
-	if isForbiddenHubError(agentsErr) {
-		if !b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
-			replyTo := ""
-			if tgMsg.MessageID != 0 {
-				replyTo = strconv.FormatInt(tgMsg.MessageID, 10)
-			}
-			listUnavailable(replyTo)
+	// replyDenied tells a sender the hub denies why their message was not
+	// routed, at most once per suppression window.
+	replyDenied := func() {
+		if b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
+			return
 		}
-		return
+		replyTo := ""
+		if tgMsg.MessageID != 0 {
+			replyTo = strconv.FormatInt(tgMsg.MessageID, 10)
+		}
+		listUnavailable(replyTo)
 	}
 
 	b.mu.RLock()
@@ -2038,6 +2037,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
 				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+			} else if isForbiddenHubError(agentsErr) {
+				// The bot was addressed by a sender the hub denies.
+				replyDenied()
 			}
 		} else {
 			// Check for @tokens not matching any known agent. Filter out
@@ -2060,6 +2062,15 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				}
 			}
 		}
+		return
+	}
+
+	// A sender the hub denies (including a link it no longer accepts) is
+	// never routed. The message resolved to a target (e.g. a reply to a bot
+	// message), so the sender is told why instead of it being delivered.
+	// Messages that resolve to no target were answered or ignored above.
+	if isForbiddenHubError(agentsErr) {
+		replyDenied()
 		return
 	}
 

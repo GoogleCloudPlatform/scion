@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -384,5 +385,72 @@ func TestV2_AgentRefresh_DeniedSenderIsNotServedFromStaleCache(t *testing.T) {
 				assert.Equal(t, ec.want, sent[0].Text)
 			})
 		}
+	}
+}
+
+func TestV2_DeniedSender_ChatterNotAddressedToBotIsIgnored(t *testing.T) {
+	leadingUserMention := func() *TGMessage {
+		msg := plainGroupMessage(456, "@bob anyone up for lunch?")
+		msg.Entities = []MessageEntity{{Type: "mention", Offset: 0, Length: 4}}
+		return msg
+	}
+	cases := map[string]func() *TGMessage{
+		"plain text":            func() *TGMessage { return plainGroupMessage(456, "anyone up for lunch?") },
+		"leading @user mention": leadingUserMention,
+	}
+	for _, staleCache := range []bool{true, false} {
+		for name, mk := range cases {
+			t.Run(fmt.Sprintf("%s/stale cache=%v", name, staleCache), func(t *testing.T) {
+				b, tgSrv, hub := newRoutingTestBroker(t)
+				saveTestGroupLink(t, b.store, -200, "proj-1", "my-project", "") // no default agent
+				hub.listAgentsErr = forbiddenListAgents()
+				if staleCache {
+					saveStaleAgentCache(t, b.store, "proj-1", "coder")
+				}
+				linkTestUser(t, b.store, 456, "alice@example.com")
+				delivered := false
+				b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+				b.handleGroupMessage(mk())
+
+				assert.False(t, delivered)
+				assert.Empty(t, tgSrv.getSentMessages(), "no reply to chatter not addressed to the bot")
+			})
+		}
+	}
+}
+
+func TestV2_DeniedSender_AddressedMessagesGetDenialText(t *testing.T) {
+	const want = "Your Scion account (alice@example.com) doesn't have permission to list agents in my-project. Ask a project owner."
+	botMention := func() *TGMessage {
+		msg := plainGroupMessage(456, "@test_bot hello")
+		msg.Entities = []MessageEntity{{Type: "mention", Offset: 0, Length: 9}}
+		return msg
+	}
+	cases := map[string]struct {
+		msg          func() *TGMessage
+		defaultAgent string
+	}{
+		"bot mention with default":    {botMention, "coder"},
+		"bot mention without default": {botMention, ""},
+		"unknown agent @token":        {func() *TGMessage { return plainGroupMessage(456, "hey @reviewer take a look") }, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			b, tgSrv, hub := newRoutingTestBroker(t)
+			saveTestGroupLink(t, b.store, -200, "proj-1", "my-project", tc.defaultAgent)
+			hub.listAgentsErr = forbiddenListAgents()
+			saveStaleAgentCache(t, b.store, "proj-1", "coder")
+			linkTestUser(t, b.store, 456, "alice@example.com")
+			delivered := false
+			b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+			b.handleGroupMessage(tc.msg())
+
+			assert.False(t, delivered)
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1)
+			assert.Equal(t, want, sent[0].Text)
+		})
 	}
 }
