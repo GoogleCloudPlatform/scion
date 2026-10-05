@@ -2927,10 +2927,13 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_agents_core.go — agent lifecycle
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_agents_core.go", Function: "cleanupFailedCreate", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
-	// pkg/hub/agent_create_tx.go — agent create rollback
-	{File: "pkg/hub/agent_create_tx.go", Function: "compensateAgentCreate", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback transaction, deletes the agent row on creation failure", Scope: "pkg/hub/agent_create_tx.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "handleAgentTokenRefresh", Symbol: "RevokeAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent token refresh, agent-JWT auth; old credential revoked on refresh", Scope: "pkg/hub/handlers_agents_core.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "ensureHostSARecord", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Host SA record creation during agent assignment, broker-HMAC authenticated", Scope: "pkg/hub/handlers_agents_core.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/agent_create_tx.go — agent create rollback
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/agent_create_tx.go", Function: "compensateAgentCreate", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback transaction, deletes the agent row on creation failure", Scope: "pkg/hub/agent_create_tx.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/agent_delete_engine.go — agent delete engine (ptone/scion#2483)
