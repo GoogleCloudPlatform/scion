@@ -1494,7 +1494,15 @@ export class ScionPageChat extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    if (changedProperties.has('v2Conversation')) this.dismissPromotedThreadLinkToast();
+    // Only a move to another conversation retires the link toast; a same-key
+    // update (e.g. toggling mute on the DM) keeps it.
+    if (
+      changedProperties.has('v2Conversation') &&
+      (changedProperties.get('v2Conversation') as V2ConversationState | null | undefined)
+        ?.conversationKey !== this.v2Conversation?.conversationKey
+    ) {
+      this.dismissPromotedThreadLinkToast();
+    }
     const pending = this._pendingScrollRestore;
     if (
       pending &&
@@ -2475,7 +2483,6 @@ export class ScionPageChat extends LitElement {
       : `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
     // One at a time: a newer promotion replaces any link still showing.
     this.dismissPromotedThreadLinkToast();
-    document.querySelectorAll('.dm-promoted-toast').forEach((el) => el.remove());
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant: 'primary',
       closable: true,

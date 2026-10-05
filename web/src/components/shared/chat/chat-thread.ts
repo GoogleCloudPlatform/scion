@@ -2893,10 +2893,6 @@ export class ScionChatThread extends LitElement {
     if (!anchor || anchor === this._usedRestoreAnchor) return null;
     if (anchor.conversationKey !== this.conversationKey) return null;
     this._usedRestoreAnchor = anchor;
-    // Until a real capture replaces it, the restore target is this thread's
-    // position: leaving while the restore is still loading (slow network)
-    // must hand it on rather than lose it.
-    this._scrollAnchor ??= { ...anchor };
     this.dispatchEvent(
       new CustomEvent<ChatScrollAnchor>('scroll-restore-consumed', { detail: anchor })
     );
@@ -2911,6 +2907,11 @@ export class ScionChatThread extends LitElement {
    */
   private async restoreScrollPosition(anchor: ChatScrollAnchor): Promise<void> {
     const restoreSeq = this._restoreSeq;
+    // Until a real capture replaces it, the restore target is this thread's
+    // position: leaving while the restore is still loading (slow network)
+    // must hand it on rather than lose it. Seeded here, not where the anchor
+    // is taken, so an anchor used up by a jump is never handed on.
+    this._scrollAnchor ??= { ...anchor };
     if (anchor.pinnedToBottom || !anchor.messageId) {
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();

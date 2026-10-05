@@ -6689,6 +6689,7 @@ describe('scion-chat-thread scroll position hand-over', () => {
       const scroller = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
       expect(scroller.scrollTop).not.toBe(400);
       expect((el as unknown as { _usedRestoreAnchor: unknown })._usedRestoreAnchor).toBe(anchor);
+      expect(el.scrollAnchor?.messageId).not.toBe('m4');
     } finally {
       window.history.replaceState({}, '', window.location.pathname);
     }
@@ -6731,6 +6732,9 @@ describe('scion-chat-thread scroll position hand-over', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const scroller = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
     expect(scroller.scrollTop).not.toBe(400);
+    // A position this view never showed is not handed on either.
+    el.remove();
+    expect(el.scrollAnchor?.messageId).not.toBe('m4');
   });
 
   it('a jump made while the anchor is still being located stands the restore down', async () => {

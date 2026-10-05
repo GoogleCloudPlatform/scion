@@ -1955,9 +1955,19 @@ describe('chat page — late conversation switches while composing', () => {
     const el = pageOnDM(true);
     el.handleDMPromoted(promoted());
     expect(document.querySelector('.dm-promoted-toast')).not.toBeNull();
+    const previous = el.v2Conversation;
     el.v2Conversation = { conversationKey: 'topic-3', projectId: 'p1' };
-    el.willUpdate(new Map([['v2Conversation', null]]));
+    el.willUpdate(new Map([['v2Conversation', previous]]));
     expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it('the link toast survives a same-conversation update such as a mute toggle', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    const previous = el.v2Conversation;
+    el.v2Conversation = { ...previous, muted: true };
+    el.willUpdate(new Map([['v2Conversation', previous]]));
+    expect(document.querySelector('.dm-promoted-toast')).not.toBeNull();
   });
 
   it('the link toast goes away with the page', () => {
