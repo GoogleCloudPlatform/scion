@@ -72,7 +72,7 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub (plus perf/bench/seed, pkg/store/entadapter) tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed and pkg/store/entadapter tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
 # perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,

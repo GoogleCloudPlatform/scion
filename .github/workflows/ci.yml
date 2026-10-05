@@ -311,15 +311,14 @@ jobs:
       # make test-hub-sqlite.
       #
       # It is scoped to pkg/hub, perf/bench/seed and pkg/store/entadapter
-      # (not the whole module)
-      # and runs as its own parallel job so it doesn't add to the
-      # wall-clock time of Build & Test. Clean CI runs range from ~770s to
-      # ~1480s, close to the old 25m (1500s) go test timeout
-      # (ptone/scion#2732; GoogleCloudPlatform/scion#2031 hit the earlier
-      # 15m limit). The 40m go test timeout / 50m job timeout give headroom
-      # above that, with the job limit kept far enough above the go test
-      # timeout (~3m of build and setup overhead) that a real hang still
-      # produces go's goroutine dump instead of a bare job kill. The
+      # (not the whole module) and runs as its own parallel job so it
+      # doesn't add to the wall-clock time of Build & Test. Clean CI runs
+      # range from ~770s to ~1480s, close to the old 25m (1500s) go test
+      # timeout (ptone/scion#2732; GoogleCloudPlatform/scion#2031 hit the
+      # earlier 15m limit). The 40m go test timeout / 50m job timeout give
+      # headroom above that, with the job limit kept far enough above the
+      # go test timeout (~3m of build and setup overhead) that a real hang
+      # still produces go's goroutine dump instead of a bare job kill. The
       # longer-term fix is splitting pkg/hub into smaller suites
       # (ptone/scion#1847).
       #
@@ -327,7 +326,7 @@ jobs:
       # unrelated to this job (ptone/scion#1847) that already reproduce on
       # main today under `go test ./pkg/hub/...`. They are not new failures
       # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
-      - name: Run pkg/hub + perf/bench/seed + entadapter tests (SQLite-enabled)
+      - name: Run SQLite-enabled tests (make test-hub-sqlite)
         run: make test-hub-sqlite
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
