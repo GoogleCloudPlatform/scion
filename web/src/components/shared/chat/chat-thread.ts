@@ -1649,11 +1649,14 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async initialLoadV2(): Promise<void> {
+    const loadId = this.fetchId;
     this.loading = true;
     this.error = null;
 
     try {
-      await this.fetchHistoryV2();
+      // A switch while the history loads hands over to the next
+      // conversation's own load; this one stops here.
+      if (!(await this.fetchHistoryV2())) return;
       this.startStreamV2();
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
@@ -1672,48 +1675,57 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
-      this.loading = false;
-      // Determine scroll target: permalink hash > restored position >
-      // unread divider > bottom. A restored position that was following the
-      // bottom yields to the unread divider: messages that arrived while the
-      // user was away should be met at "New messages", not scrolled past.
-      // The anchor is taken (used up) even when the hash wins.
-      const hashMsgId = this.parseMessageHash();
-      const restore = this.takeRestoreScrollAnchor();
-      if (hashMsgId) {
-        void this.scrollToMessageById(hashMsgId, true);
-      } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
-        void this.restoreScrollPosition(restore);
-      } else if (this.showUnreadDivider) {
-        this.scrollToUnreadDivider();
-      } else {
-        this.scrollToBottomAfterRender();
-      }
-      // Advance read watermark after a delay so the blue dot clears. When
-      // showUnreadDivider is true, use a longer delay so the user can see the
-      // "New messages" divider before it is acknowledged. When it is false
-      // (first DM open — no prior read state), a shorter settle delay is
-      // enough to let the render commit.
-      if (this.messages.length > 0) {
-        const delay = this.showUnreadDivider ? 2000 : 500;
-        if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
-        this._initialWatermarkTimer = setTimeout(() => {
-          this._initialWatermarkTimer = null;
-          // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
-          // gates — a mark-unread landing during this delay (e.g. another tab,
-          // or this one via the rail) must not be undone the instant this
-          // timer fires.
-          if (this._autoAdvanceSuppressed) return;
-          const messageId = this.lastReadableMessageId();
-          if (messageId) {
-            void this.advanceReadWatermark(messageId);
-          }
-        }, delay);
+      // The loading flag, the restore anchor, the scroll target and the
+      // watermark timer all belong to the conversation now on screen.
+      if (loadId === this.fetchId) {
+        this.loading = false;
+        // Determine scroll target: permalink hash > restored position >
+        // unread divider > bottom. A restored position that was following the
+        // bottom yields to the unread divider: messages that arrived while the
+        // user was away should be met at "New messages", not scrolled past.
+        // The anchor is taken (used up) even when the hash wins.
+        const hashMsgId = this.parseMessageHash();
+        const restore = this.takeRestoreScrollAnchor();
+        if (hashMsgId) {
+          void this.scrollToMessageById(hashMsgId, true);
+        } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
+          void this.restoreScrollPosition(restore);
+        } else if (this.showUnreadDivider) {
+          this.scrollToUnreadDivider();
+        } else {
+          this.scrollToBottomAfterRender();
+        }
+        // Advance read watermark after a delay so the blue dot clears. When
+        // showUnreadDivider is true, use a longer delay so the user can see the
+        // "New messages" divider before it is acknowledged. When it is false
+        // (first DM open — no prior read state), a shorter settle delay is
+        // enough to let the render commit.
+        if (this.messages.length > 0) {
+          const delay = this.showUnreadDivider ? 2000 : 500;
+          if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
+          this._initialWatermarkTimer = setTimeout(() => {
+            this._initialWatermarkTimer = null;
+            // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
+            // gates — a mark-unread landing during this delay (e.g. another tab,
+            // or this one via the rail) must not be undone the instant this
+            // timer fires.
+            if (this._autoAdvanceSuppressed) return;
+            const messageId = this.lastReadableMessageId();
+            if (messageId) {
+              void this.advanceReadWatermark(messageId);
+            }
+          }, delay);
+        }
       }
     }
   }
 
-  private async fetchHistoryV2(cursor?: string): Promise<void> {
+  /**
+   * Fetch a page of history and merge it. Resolves false, having changed
+   * nothing, when the thread switched conversations before the page
+   * arrived; callers then leave the new conversation alone too.
+   */
+  private async fetchHistoryV2(cursor?: string): Promise<boolean> {
     const currentId = this.fetchId;
     // Captured before the request starts: a response landing after the user
     // has logged out (or switched accounts) must not repopulate a store that
@@ -1728,7 +1740,7 @@ export class ScionChatThread extends LitElement {
       `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
     );
 
-    if (currentId !== this.fetchId) return;
+    if (currentId !== this.fetchId) return false;
 
     if (!res.ok) {
       throw new Error(await extractApiError(res, 'Failed to fetch messages'));
@@ -1748,7 +1760,7 @@ export class ScionChatThread extends LitElement {
 
     // The body can still be arriving after the headers; a conversation
     // switch in the meantime must not merge this page into the new one.
-    if (currentId !== this.fetchId) return;
+    if (currentId !== this.fetchId) return false;
 
     const items = data?.items ?? data?.messages ?? [];
 
@@ -1781,6 +1793,7 @@ export class ScionChatThread extends LitElement {
 
     this.mergeMessages(items);
     this.recordRecentFilesForHistory(items, recentFilesGeneration);
+    return true;
   }
 
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
@@ -2406,6 +2419,9 @@ export class ScionChatThread extends LitElement {
     // whatever conversation/project the thread has since moved on to.
     const sendConversationKey = this.conversationKey;
     const sendProjectId = this.resolvePathLinkProjectId(optimisticMsg);
+    // A failure that lands after a conversation switch must not put this
+    // send's reply bar or error on the conversation now on screen.
+    const sendFetchId = this.fetchId;
 
     try {
       const body: Record<string, unknown> = {
@@ -2459,10 +2475,13 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
-        // Restore reply-to state so the reply bar comes back for retry.
-        this.composerReplyTo = savedReplyTo;
-        this.sendError = await extractApiError(res, 'Failed to send message');
-        onError?.(this.sendError ?? 'Failed to send message');
+        const error = await extractApiError(res, 'Failed to send message');
+        if (sendFetchId === this.fetchId) {
+          // Restore reply-to state so the reply bar comes back for retry.
+          this.composerReplyTo = savedReplyTo;
+          this.sendError = error;
+        }
+        onError?.(error ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -2573,10 +2592,13 @@ export class ScionChatThread extends LitElement {
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort(compareMessageOrder);
-      // Restore reply-to state so the reply bar comes back for retry.
-      this.composerReplyTo = savedReplyTo;
-      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
-      onError?.(this.sendError ?? 'Failed to send message');
+      const error = err instanceof Error ? err.message : 'Failed to send message';
+      if (sendFetchId === this.fetchId) {
+        // Restore reply-to state so the reply bar comes back for retry.
+        this.composerReplyTo = savedReplyTo;
+        this.sendError = error;
+      }
+      onError?.(error);
     } finally {
       this.sending = false;
     }
@@ -2941,15 +2963,19 @@ export class ScionChatThread extends LitElement {
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
+    let stale = false;
     try {
-      await this.fetchHistoryV2(this.nextCursor || undefined);
+      stale = !(await this.fetchHistoryV2(this.nextCursor || undefined));
     } catch {
       // Silently fail for older messages
     } finally {
       this.loadingOlder = false;
-      await this.updateComplete;
-      const newScrollHeight = scrollEl.scrollHeight;
-      scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      // The height delta was measured on the conversation the user left.
+      if (!stale) {
+        await this.updateComplete;
+        const newScrollHeight = scrollEl.scrollHeight;
+        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      }
     }
   }
 
@@ -3171,7 +3197,8 @@ export class ScionChatThread extends LitElement {
       this.pinnedToBottom = true;
 
       try {
-        await this.fetchHistoryV2();
+        // Switched away meanwhile: the new conversation keeps its own view.
+        if (!(await this.fetchHistoryV2())) return;
         this.viewingAroundMessage = false;
       } catch (err) {
         this.error = err instanceof Error ? err.message : 'Failed to load messages';

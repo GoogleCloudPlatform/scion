@@ -4720,7 +4720,9 @@ describe('scion-chat-thread recent-files capture', () => {
             }),
         }) as unknown as Promise<Response>
     );
-    apiFetch.mockResolvedValue(emptyHistory());
+    // The new conversation's own load stays pending, so whatever the
+    // pagination state reads afterwards was left by the stale page alone.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
 
     const el = document.createElement('scion-chat-thread') as ScionChatThread;
     el.conversationKey = CONVERSATION_KEY;
@@ -4749,14 +4751,27 @@ describe('scion-chat-thread recent-files capture', () => {
           createdAt: '2026-01-01T00:00:00Z',
         },
       ],
+      nextCursor: 'stale-cursor',
+      messageAttachments: {
+        'hist-stale': [{ id: 'att-stale', name: 'a.md', mime: 'text/markdown', size: 1 }],
+      },
     });
 
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 
     // The page belongs to the conversation the thread has left: it is
     // neither shown in the new one nor recorded as its files.
-    const internals = el as unknown as { messageMap: Map<string, unknown> };
+    const internals = el as unknown as {
+      messageMap: Map<string, unknown>;
+      v2AttachmentMap: Map<string, unknown>;
+      nextCursor: string | null;
+      hasOlderMessages: boolean;
+    };
     expect(internals.messageMap.has('hist-stale')).toBe(false);
+    expect(internals.v2AttachmentMap.has('hist-stale')).toBe(false);
+    // A one-item page would mark the history exhausted and set a cursor.
+    expect(internals.nextCursor).toBeNull();
+    expect(internals.hasOlderMessages).toBe(true);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 
@@ -4922,14 +4937,27 @@ describe('scion-chat-thread recent-files capture', () => {
           createdAt: '2026-01-01T00:00:00Z',
         },
       ],
+      messageAttachments: {
+        'backfill-stale': [{ id: 'att-stale', name: 'b.md', mime: 'text/markdown', size: 1 }],
+      },
+      messageExtensions: { 'backfill-stale': { messageId: 'backfill-stale', replyToId: 'x' } },
+      replyPreviews: { 'backfill-stale': { messageId: 'x', senderName: 'A', content: 'c' } },
     });
 
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 
     // The page belongs to the conversation the thread has left: it is
     // neither shown in the new one nor recorded as its files.
-    const internals = el as unknown as { messageMap: Map<string, unknown> };
+    const internals = el as unknown as {
+      messageMap: Map<string, unknown>;
+      v2AttachmentMap: Map<string, unknown>;
+      v2MessageExtMap: Map<string, unknown>;
+      v2ReplyPreviewMap: Map<string, unknown>;
+    };
     expect(internals.messageMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2AttachmentMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2MessageExtMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2ReplyPreviewMap.has('backfill-stale')).toBe(false);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 
@@ -6903,5 +6931,217 @@ describe('scion-chat-thread scroll position hand-over', () => {
     el.conversationKey = 'topic-2';
     await el.updateComplete;
     expect(el.scrollAnchor).toBeNull();
+  });
+});
+
+describe('scion-chat-thread work finishing after a conversation switch', () => {
+  type Internals = {
+    loading: boolean;
+    loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void>;
+    handleJumpToLatest(): Promise<void>;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    startStreamV2(): void;
+    viewingAroundMessage: boolean;
+    pinnedToBottom: boolean;
+    composerReplyTo: { messageId: string; senderName: string; content: string } | null;
+    sendError: string | null;
+  };
+
+  const REPLY_TO = { messageId: 'm-1', senderName: 'Ada', content: 'hello' };
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /** The next request answers at once, but its body waits for `release`. */
+  function holdNextBody(): { release: (body: unknown) => void } {
+    const held = { release: (_body: unknown): void => {} };
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((resolve) => {
+            held.release = resolve;
+          }),
+      } as unknown as Response)
+    );
+    return held;
+  }
+
+  function stalePage(id: string): unknown {
+    return {
+      items: [
+        {
+          id,
+          projectId: '',
+          sender: 'agent:coder',
+          senderId: 'agent-1',
+          recipient: '',
+          recipientId: '',
+          msg: 'old thread',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    };
+  }
+
+  function send(el: ScionChatThread): Promise<void> {
+    return (el as unknown as Internals).handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hi',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+  }
+
+  async function switchConversation(el: ScionChatThread): Promise<void> {
+    el.conversationKey = 'other-thread';
+    await el.updateComplete;
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('a stale initial load leaves the next conversation loading, its anchor and stream alone', async () => {
+    const held = holdNextBody();
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    // The next conversation's own history stays pending.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    const consumed = vi.fn();
+    el.addEventListener('scroll-restore-consumed', consumed);
+    el.restoreScrollAnchor = {
+      conversationKey: 'other-thread',
+      pinnedToBottom: false,
+      messageId: 'x',
+      offset: 0,
+    };
+    await switchConversation(el);
+    const internals = el as unknown as Internals;
+    const startStream = vi.spyOn(internals, 'startStreamV2');
+    expect(internals.loading).toBe(true);
+
+    held.release(stalePage('stale-1'));
+    await flush();
+
+    expect(startStream).not.toHaveBeenCalled();
+    expect(internals.loading).toBe(true);
+    expect(consumed).not.toHaveBeenCalled();
+  });
+
+  it('a stale older page does not shift the new conversation’s scroll position', async () => {
+    const el = await mount();
+    const held = holdNextBody();
+    let height = 100;
+    const scrollEl = {
+      scrollTop: 50,
+      get scrollHeight(): number {
+        return height;
+      },
+    } as unknown as HTMLElement;
+    const loading = (el as unknown as Internals).loadOlderMessagesV2(scrollEl);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    height = 400;
+
+    held.release(stalePage('stale-older'));
+    await loading;
+
+    expect(scrollEl.scrollTop).toBe(50);
+  });
+
+  it('a stale jump to latest leaves the new conversation’s view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    const held = holdNextBody();
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    // The new conversation opened on a message further up its history.
+    internals.viewingAroundMessage = true;
+    internals.pinnedToBottom = false;
+
+    held.release(stalePage('stale-latest'));
+    await jumping;
+
+    expect(internals.viewingAroundMessage).toBe(true);
+    expect(internals.pinnedToBottom).toBe(false);
+  });
+
+  it('a send refused after a switch puts no reply bar or error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let resolveSend!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((resolve) => (resolveSend = resolve)));
+    const sending = send(el);
+    await switchConversation(el);
+
+    resolveSend({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    await sending;
+
+    expect(internals.composerReplyTo).toBeNull();
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a send that throws after a switch puts no reply bar or error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let rejectSend!: (err: Error) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((_, reject) => (rejectSend = reject)));
+    const sending = send(el);
+    await switchConversation(el);
+
+    rejectSend(new Error('offline'));
+    await sending;
+
+    expect(internals.composerReplyTo).toBeNull();
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a send refused in the same conversation restores the reply bar and shows the error', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) });
+
+    await send(el);
+
+    expect(internals.composerReplyTo).toEqual(REPLY_TO);
+    expect(internals.sendError).toBe('error');
+  });
+
+  it('a send that throws in the same conversation restores the reply bar and shows the error', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    apiFetch.mockRejectedValueOnce(new Error('offline'));
+
+    await send(el);
+
+    expect(internals.composerReplyTo).toEqual(REPLY_TO);
+    expect(internals.sendError).toBe('offline');
   });
 });
