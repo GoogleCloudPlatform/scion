@@ -138,6 +138,7 @@ func TestHandleStatus_RequestWithLinkedUser(t *testing.T) {
 	reqs := f.hub.recorded()
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 	assert.Contains(t, f.slack.lastText(t), "working")
 }
 
