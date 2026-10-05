@@ -45,7 +45,6 @@ import {
 } from './header.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
 import {
   GRAPH_PALETTE_AVAILABILITY_EVENT,
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
@@ -277,27 +276,20 @@ describe('palette button: render conditions (chat route x user)', () => {
     expect(paletteButton(el)).toBeNull();
   });
 
-  it('renders on /terminals and a per-agent terminal route, labeled "Open Jump to agent"', async () => {
-    let el = await mountHeader({ currentPath: '/terminals' });
-    let button = paletteButton(el);
-    expect(button).not.toBeNull();
-    expect(button?.getAttribute('aria-label')).toBe('Open Jump to agent');
-    el.remove();
-
-    el = await mountHeader({ currentPath: '/terminals/00000000-0000-0000-0000-000000000001' });
-    button = paletteButton(el);
-    expect(button).not.toBeNull();
-    expect(button?.getAttribute('aria-label')).toBe('Open Jump to agent');
-  });
-
-  it('renders on the multi-pane URL form (/terminals?lv=1&...), not just the bare path', async () => {
-    // The router's currentPath still carries the query string here — a
-    // bare `=== '/terminals'` check would never match, since the real
-    // query-string suffix is still attached.
-    const el = await mountHeader({
-      currentPath: '/terminals?lv=1&lp=two-columns&s0=&s1=',
-    });
-    expect(paletteButton(el)).not.toBeNull();
+  it('is absent on every terminal route: Jump to agent lives in the terminal list footer', async () => {
+    // The terminal view's palette opener is a labelled button pinned to
+    // the bottom of its Open terminals column (TerminalWorkspaceRoot), so
+    // the header must not duplicate it on /terminals, a per-agent route,
+    // or the multi-pane URL form (whose currentPath keeps its query).
+    for (const currentPath of [
+      '/terminals',
+      '/terminals/00000000-0000-0000-0000-000000000001',
+      '/terminals?lv=1&lp=two-columns&s0=&s1=',
+    ]) {
+      const el = await mountHeader({ currentPath });
+      expect(paletteButton(el)).toBeNull();
+      el.remove();
+    }
   });
 
   it('labels the chat route button "Quick switcher", not "Jump to agent"', async () => {
@@ -341,7 +333,7 @@ describe('palette button: graph views', () => {
     expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open Jump to agent');
   });
 
-  it('dispatches GRAPH_PALETTE_OPEN_REQUEST_EVENT, not the chat or terminal event, after focusing the button', async () => {
+  it('dispatches GRAPH_PALETTE_OPEN_REQUEST_EVENT, not the chat event, after focusing the button', async () => {
     setGraphPaletteAvailable(graphOwner, true);
     const el = await mountHeader({ currentPath: '/agents' });
     const button = paletteButton(el) as HTMLElement;
@@ -349,7 +341,6 @@ describe('palette button: graph views', () => {
     const received: string[] = [];
     let graphEvent: CustomEvent | undefined;
     el.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, () => received.push('chat'));
-    el.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => received.push('terminal'));
     el.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, (e) => {
       received.push('graph');
       graphEvent = e as CustomEvent;
@@ -369,12 +360,9 @@ describe('palette button: graph views', () => {
     expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open quick switcher');
     el.remove();
 
+    // The terminal view opens its palette from its own list footer.
     el = await mountHeader({ currentPath: '/terminals' });
-    const received: string[] = [];
-    el.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => received.push('terminal'));
-    el.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, () => received.push('graph'));
-    (paletteButton(el) as HTMLElement).click();
-    expect(received).toEqual(['terminal']);
+    expect(paletteButton(el)).toBeNull();
   });
 
   it('is absent when no user is signed in', async () => {
@@ -415,27 +403,6 @@ describe('palette button: click dispatch', () => {
     expect(received).toBeDefined();
     expect(received!.bubbles).toBe(true);
     expect(received!.composed).toBe(true);
-  });
-
-  it('dispatches TERMINAL_PALETTE_OPEN_REQUEST_EVENT (not the chat event) on /terminals', async () => {
-    const el = await mountHeader({ currentPath: '/terminals' });
-    const button = paletteButton(el) as HTMLElement;
-    expect(button).not.toBeNull();
-    let chatReceived = false;
-    let terminalReceived: CustomEvent | undefined;
-    el.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, () => {
-      chatReceived = true;
-    });
-    el.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, (e) => {
-      terminalReceived = e as CustomEvent;
-    });
-
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
-
-    expect(chatReceived).toBe(false);
-    expect(terminalReceived).toBeDefined();
-    expect(terminalReceived!.bubbles).toBe(true);
-    expect(terminalReceived!.composed).toBe(true);
   });
 
   it('calls focus() before dispatching the event, not after', async () => {
@@ -503,18 +470,6 @@ describe('palette button: tooltip and aria-keyshortcuts follow the mocked modali
     const tooltip = paletteTooltip(el);
     expect(tooltip?.getAttribute('content')).toBe('Quick switcher (⌘K)');
     expect(paletteButton(el)?.getAttribute('aria-keyshortcuts')).toBe('Meta+K');
-  });
-
-  it('on /terminals: tooltip reads "Jump to agent" with the platform shortcut', async () => {
-    stubTouchPrimary(false);
-    setPlatform('MacIntel');
-    let el = await mountHeader({ currentPath: '/terminals' });
-    expect(paletteTooltip(el)?.getAttribute('content')).toBe('Jump to agent (⌘K)');
-    el.remove();
-
-    setPlatform('Linux x86_64');
-    el = await mountHeader({ currentPath: '/terminals' });
-    expect(paletteTooltip(el)?.getAttribute('content')).toBe('Jump to agent (Ctrl+K)');
   });
 
   it('the button always has aria-haspopup="dialog", on both touch and desktop', async () => {
