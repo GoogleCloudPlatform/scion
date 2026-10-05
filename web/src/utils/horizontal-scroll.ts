@@ -33,12 +33,17 @@ const EDGE_SLACK_PX = 1;
  * Measure the horizontal scroll room of every element on an event's
  * composed path (so scrollers inside shadow roots count) that scrolls
  * sideways: `overflow-x` of `auto` or `scroll` with content wider than its
- * box. Right-to-left scrollers are handled: their offset runs negative.
+ * box. The `html` and `body` elements are skipped. Right-to-left scrollers
+ * are handled: their offset runs negative.
  */
 export function horizontalScrollRoom(path: readonly EventTarget[]): HorizontalScrollRoom {
   const room: HorizontalScrollRoom = { rightward: false, leftward: false };
   for (const target of path) {
-    if (!(target instanceof Element)) continue;
+    // The page root never claims a drag: page-level scrolling is not a
+    // scroller under the touch.
+    if (!(target instanceof Element) || target.tagName === 'HTML' || target.tagName === 'BODY') {
+      continue;
+    }
     const max = target.scrollWidth - target.clientWidth;
     if (max <= EDGE_SLACK_PX) continue;
     const style = getComputedStyle(target);

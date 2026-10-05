@@ -97,4 +97,27 @@ describe('horizontalScrollRoom', () => {
     const outer = scroller({ scrollWidth: 800, clientWidth: 300, scrollLeft: 500 });
     expect(horizontalScrollRoom([inner, outer])).toEqual({ rightward: true, leftward: true });
   });
+
+  it('never counts the page root as a sideways scroller', () => {
+    const roots = [document.documentElement, document.body];
+    for (const root of roots) {
+      root.style.overflowX = 'auto';
+      Object.defineProperty(root, 'scrollWidth', { value: 800, configurable: true });
+      Object.defineProperty(root, 'clientWidth', { value: 300, configurable: true });
+      Object.defineProperty(root, 'scrollLeft', { value: 200, configurable: true });
+    }
+    try {
+      expect(horizontalScrollRoom([document.body, document.documentElement])).toEqual({
+        rightward: false,
+        leftward: false,
+      });
+    } finally {
+      for (const root of roots) {
+        root.style.overflowX = '';
+        Reflect.deleteProperty(root, 'scrollWidth');
+        Reflect.deleteProperty(root, 'clientWidth');
+        Reflect.deleteProperty(root, 'scrollLeft');
+      }
+    }
+  });
 });
