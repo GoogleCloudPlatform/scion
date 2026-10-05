@@ -163,6 +163,9 @@ export class ScionHeader extends LitElement {
   @state()
   private notificationCount = 0;
 
+  /** The user id that inboxCount and notificationCount belong to. */
+  private countsUserId: string | null = null;
+
   /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
   private touchPrimary = new TouchPrimaryController(this);
 
@@ -1470,8 +1473,26 @@ export class ScionHeader extends LitElement {
     });
   }
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('user')) this.resetCountsOnUserChange();
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) this.rememberModePath();
+  }
+
+  /**
+   * Clears the badge counts when the signed-in user id changes, then re-reads
+   * them from the trays, so the badges never show the previous user's counts.
+   * A new user object with the same id keeps the counts.
+   */
+  private resetCountsOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.countsUserId) return;
+    this.countsUserId = id;
+    this.inboxCount = 0;
+    this.notificationCount = 0;
+    this.syncTrayCounts();
   }
 
   // =========================================================================

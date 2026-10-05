@@ -52,6 +52,7 @@ import {
   setGraphPaletteAvailable,
 } from '../../client/graph-palette-events.js';
 import type { User } from '../../shared/types.js';
+import { apiFetch } from '../../client/api.js';
 
 describe('projectIdFromDashboardPath', () => {
   it('extracts the project ID from /projects/:id', () => {
@@ -524,5 +525,85 @@ describe('palette button: tooltip and aria-keyshortcuts follow the mocked modali
     stubTouchPrimary(false);
     el = await mountHeader();
     expect(paletteButton(el)?.getAttribute('aria-haspopup')).toBe('dialog');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tray badge counts follow the signed-in user.
+// ---------------------------------------------------------------------------
+
+describe('tray badge counts: user switch', () => {
+  /** How many unread items each tray list request returns. */
+  let unread = 0;
+
+  function serveUnread(): void {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const items = Array.from({ length: unread }, (_, i) => ({
+        id: `item-${i}`,
+        status: 'COMPLETED',
+        message: `item ${i}`,
+        sender: 'agent:helper',
+        msg: `item ${i}`,
+        type: 'instruction',
+        agentId: 'agent-1',
+        createdAt: new Date().toISOString(),
+      }));
+      let body: unknown = {};
+      if (url.startsWith('/api/v1/notifications')) body = items;
+      else if (url.startsWith('/api/v1/messages')) body = { items };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+  }
+
+  /** The inbox and notification counts shown on the wide-layout trigger badges. */
+  function badges(el: ScionHeader): string[] {
+    return [...(el.shadowRoot?.querySelectorAll('.wide-right .trigger-badge') ?? [])].map(
+      (b) => b.textContent?.trim() ?? ''
+    );
+  }
+
+  async function switchUser(el: ScionHeader, u: User): Promise<void> {
+    el.user = u;
+    await el.updateComplete;
+  }
+
+  /** Waits past the header's delayed count sync. */
+  async function afterCountSync(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 700));
+  }
+
+  afterEach(() => {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 200 }))
+    );
+  });
+
+  it('shows the next user counts after a user switch', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    unread = 0;
+    await switchUser(el, { id: 'u2', email: 'u2@example.com', name: 'U2' });
+    expect(badges(el)).toEqual([]);
+    await afterCountSync();
+    expect(badges(el)).toEqual([]);
+
+    unread = 1;
+    await switchUser(el, { id: 'u3', email: 'u3@example.com', name: 'U3' });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['1', '1']), { timeout: 3000 });
+  });
+
+  it('keeps the counts when the same user is handed over as a new object', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    await switchUser(el, { id: 'u1', email: 'u1@example.com', name: 'U1' });
+    expect(badges(el)).toEqual(['2', '2']);
+    await afterCountSync();
+    expect(badges(el)).toEqual(['2', '2']);
   });
 });
