@@ -1745,3 +1745,79 @@ describe('chat page — late DM peer lookups', () => {
     errorSpy.mockRestore();
   });
 });
+
+describe('chat page — startup after the page is removed', () => {
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /**
+   * Load initV2's lazy modules up front. Its own imports then come from the
+   * module cache, but initV2 still resumes only after an await, so a page
+   * removed in the same task as it was connected is removed first.
+   */
+  async function loadLazyModules(): Promise<void> {
+    await Promise.all([
+      import('../shared/chat/chat-space-rail.js'),
+      import('../shared/chat/chat-members.js'),
+    ]);
+  }
+
+  const FALLBACK_POLL_MS = 60_000;
+
+  /**
+   * A page that never renders: these tests are about initV2's side effects,
+   * and happy-dom mishandles the members element a disconnected page renders
+   * (it calls attribute callbacks on the never-upgraded instance).
+   */
+  function createUnrenderedPage(): any {
+    const el = createPage();
+    el.shouldUpdate = () => false;
+    return el;
+  }
+
+  function dmListLoads(): number {
+    return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
+  }
+
+  function fallbackPolls(spy: { mock: { calls: unknown[][] } }): number {
+    return spy.mock.calls.filter(([, ms]) => ms === FALLBACK_POLL_MS).length;
+  }
+
+  it('a page removed before its lazy imports resolve loads nothing and starts no poll', async () => {
+    vi.mocked(apiFetch).mockClear();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    await loadLazyModules();
+    const el = createUnrenderedPage();
+    window.history.replaceState({}, '', '/chat');
+    document.body.appendChild(el);
+    // The router replaces the page before initV2's imports come back.
+    el.remove();
+
+    await flush();
+
+    expect(dmListLoads()).toBe(0);
+    expect(fallbackPolls(setIntervalSpy)).toBe(0);
+    expect(el.v2SpaceRailLoaded).toBe(false);
+  });
+
+  it('a page removed and connected again before its imports resolve initialises once', async () => {
+    vi.mocked(apiFetch).mockClear();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    await loadLazyModules();
+    const el = createUnrenderedPage();
+    window.history.replaceState({}, '', '/chat');
+    document.body.appendChild(el);
+    el.remove();
+    document.body.appendChild(el);
+
+    await flush();
+
+    expect(el.v2SpaceRailLoaded).toBe(true);
+    expect(dmListLoads()).toBe(1);
+    // One poll, owned by the connected page; the first initV2 started none
+    // that its disconnect could no longer clear.
+    expect(fallbackPolls(setIntervalSpy)).toBe(1);
+    el.remove();
+  });
+});

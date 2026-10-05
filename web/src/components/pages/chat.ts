@@ -442,6 +442,12 @@ export class ScionPageChat extends LitElement {
    */
   private _hubPresenceGeneration: number | null = null;
   /**
+   * Bumped by each `initV2` and by `disconnectedCallback`. An `initV2`
+   * resuming after its lazy imports goes on only if it is still the latest
+   * and the page is still connected.
+   */
+  private _initV2Generation = 0;
+  /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
    * `updated()`'s `v2Conversation` branch) — both retire any hub-members
@@ -1352,6 +1358,7 @@ export class ScionPageChat extends LitElement {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
+    ++this._initV2Generation;
     ++this._hubMembersGeneration;
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
@@ -1480,8 +1487,14 @@ export class ScionPageChat extends LitElement {
   // =========================================================================
 
   private async initV2(): Promise<void> {
+    const generation = ++this._initV2Generation;
     // Lazy-load the space rail and members components
     await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    // Removed while the imports were in flight (the router replaced the
+    // page), or removed and connected again, which started its own initV2:
+    // disconnectedCallback has already run its cleanup, so subscribing,
+    // polling or loading now would leak on a page nothing uses.
+    if (!this.isConnected || generation !== this._initV2Generation) return;
     this.v2SpaceRailLoaded = true;
 
     // Parse initial route
