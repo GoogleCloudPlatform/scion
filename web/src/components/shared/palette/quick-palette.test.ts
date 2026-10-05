@@ -26,7 +26,7 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi, type Mock } from 'vitest';
 
 await import('./quick-palette.js');
 type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
@@ -37,6 +37,7 @@ import type {
 } from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { PaletteTypeahead } from './palette-typeahead.js';
 
 function agentsGroup(
   candidates: Array<{
@@ -1187,5 +1188,168 @@ describe('scion-quick-palette: --palette-vvh tracks window.visualViewport while 
     await el.updateComplete;
 
     expect(vv.listenerCount).toBe(1);
+  });
+});
+
+describe('scion-quick-palette: keys typed before the query input has focus', () => {
+  let outside: HTMLTextAreaElement;
+  let onOutsideKeydown: Mock<(e: Event) => void>;
+
+  beforeEach(() => {
+    // Stands in for whatever had focus when the palette opened: the chat
+    // composer, a terminal pane, the button that opened it.
+    outside = document.createElement('textarea');
+    document.body.appendChild(outside);
+    onOutsideKeydown = vi.fn<(e: Event) => void>();
+    outside.addEventListener('keydown', onOutsideKeydown);
+    outside.focus();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function typeOutside(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      ...init,
+    });
+    outside.dispatchEvent(e);
+    return e;
+  }
+
+  /** Mounts the palette closed, as every host does, so `open` really changes. */
+  async function mountClosed(typeahead?: PaletteTypeahead): Promise<ScionQuickPalette> {
+    const el = document.createElement('scion-quick-palette');
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Alpha' },
+      { peerId: 'b1', label: 'Bravo' },
+    ]);
+    if (typeahead) el.typeahead = typeahead;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    return el;
+  }
+
+  async function show(el: ScionQuickPalette): Promise<void> {
+    el.open = true;
+    await el.updateComplete;
+  }
+
+  function input(el: ScionQuickPalette): HTMLInputElement {
+    return el.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+  }
+
+  /** Fires the dialog's own sl-initial-focus, as Shoelace does once the shown dialog can take focus. */
+  async function fireInitialFocus(el: ScionQuickPalette): Promise<void> {
+    el.shadowRoot!.querySelector('sl-dialog')!.dispatchEvent(
+      new CustomEvent('sl-initial-focus', { cancelable: true })
+    );
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+  }
+
+  function optionLabels(el: ScionQuickPalette): string[] {
+    return [...el.shadowRoot!.querySelectorAll('.palette-option')].map(
+      (o) => o.textContent?.trim() ?? ''
+    );
+  }
+
+  it('keys typed between the open and the initial focus reach nothing else, and filter once it lands', async () => {
+    const el = await mountClosed();
+    await show(el);
+    const typed = ['b', 'r', 'a'].map((key) => typeOutside(key));
+
+    expect(typed.every((e) => e.defaultPrevented)).toBe(true);
+    expect(onOutsideKeydown).not.toHaveBeenCalled();
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('bra');
+    expect(input(el).selectionStart).toBe(3);
+    expect(optionLabels(el)).toHaveLength(1);
+    expect(optionLabels(el)[0]).toContain('Bravo');
+    // Capture ended with the focus.
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it('nothing is captured while the palette is closed', async () => {
+    await mountClosed();
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+    expect(onOutsideKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the host's type-ahead, keeping what it captured before the element mounted", async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    typeOutside('b');
+    const el = await mountClosed(typeahead);
+    expect(typeahead.isCapturing).toBe(true);
+    await show(el);
+    typeOutside('r');
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('br');
+    expect(typeahead.isCapturing).toBe(false);
+  });
+
+  it('a close before the input has focus stops capturing and discards the keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    el.open = false;
+    await el.updateComplete;
+
+    expect(typeOutside('b').defaultPrevented).toBe(false);
+    await show(el);
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('');
+  });
+
+  it('removing the element stops capturing', async () => {
+    const el = await mountClosed();
+    await show(el);
+    el.remove();
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+  });
+
+  it('focusing the input any other way, such as a click, also applies the keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    typeOutside('l');
+    input(el).focus();
+    await el.updateComplete;
+
+    expect(input(el).value).toBe('al');
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it('Escape and modifier chords between the open and the initial focus pass through', async () => {
+    const el = await mountClosed();
+    await show(el);
+    expect(typeOutside('Escape').defaultPrevented).toBe(false);
+    expect(typeOutside('k', { metaKey: true }).defaultPrevented).toBe(false);
+    expect(typeOutside('k', { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(onOutsideKeydown).toHaveBeenCalledTimes(3);
+  });
+
+  it('every open captures afresh: a reopen focuses with only its own keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('a');
+    el.open = false;
+    await el.updateComplete;
+
+    outside.focus();
+    await show(el);
+    typeOutside('b');
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('b');
   });
 });

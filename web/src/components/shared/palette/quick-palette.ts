@@ -50,6 +50,7 @@ import {
   type RankedCandidate,
 } from '../../../utils/chat-palette-match.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
+import { PaletteTypeahead } from './palette-typeahead.js';
 
 /** Rows shown per group before "show more". */
 const PALETTE_GROUP_VISIBLE_LIMIT = 10;
@@ -90,6 +91,17 @@ export class ScionQuickPalette extends LitElement {
   groups: Partial<Record<PaletteGroup, GroupState>> = {
     agents: { status: 'loading', candidates: [] },
   };
+
+  /**
+   * The host's type-ahead, when the host starts capturing keys at its open
+   * request (before this element exists, on a first open). Without one the
+   * palette uses its own, started when `open` turns true. Either way the
+   * captured text becomes the query once the input has focus.
+   */
+  @property({ attribute: false }) typeahead: PaletteTypeahead | null = null;
+
+  /** The palette's own type-ahead, for a host that passes none. */
+  private readonly ownTypeahead = new PaletteTypeahead();
 
   @state() private queryText = '';
   /** The globally-selected candidate ID, or null when nothing matches. */
@@ -466,8 +478,13 @@ export class ScionQuickPalette extends LitElement {
     if (changed.has('open')) {
       if (this.open) {
         this._startVisualViewportTracking();
+        // Keys typed until the input takes focus belong to the query.
+        this.activeTypeahead.start();
       } else {
         this._stopVisualViewportTracking();
+        // Only a close: a host may start its type-ahead before mounting
+        // this element closed, and that first render must not discard it.
+        if (changed.get('open') === true) this.activeTypeahead.stop();
       }
     }
     if (changedKeys.has('queryText')) {
@@ -496,6 +513,12 @@ export class ScionQuickPalette extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._stopVisualViewportTracking();
+    this.activeTypeahead.stop();
+  }
+
+  /** The type-ahead in use: the host's, else the palette's own. */
+  private get activeTypeahead(): PaletteTypeahead {
+    return this.typeahead ?? this.ownTypeahead;
   }
 
   /**
@@ -756,9 +779,34 @@ export class ScionQuickPalette extends LitElement {
     // its own sl-initial-focus here and steal focus back to the query input.
     if (e.target !== e.currentTarget) return;
     e.preventDefault();
-    void this.updateComplete.then(() => {
-      this.paletteInputEl?.focus();
-    });
+    void this.updateComplete.then(() => this.focusQueryInput());
+  }
+
+  /** Focuses the query input, which applies any type-ahead (see {@link applyTypeahead}). */
+  private focusQueryInput(): void {
+    const input = this.paletteInputEl;
+    if (!this.open || !input) return;
+    input.focus();
+    // Already focused: no focus event, so apply it here.
+    void this.applyTypeahead();
+  }
+
+  private readonly handleQueryInputFocus = (): void => {
+    void this.applyTypeahead();
+  };
+
+  /**
+   * Once the query input has focus, by the open or by a click, the keys
+   * typed since the open was requested become the query, caret at the end,
+   * as if typed into the input.
+   */
+  private async applyTypeahead(): Promise<void> {
+    const typed = this.activeTypeahead.take();
+    const input = this.paletteInputEl;
+    if (!typed || !this.open || !input) return;
+    this.queryText = input.value + typed;
+    await this.updateComplete;
+    input.setSelectionRange(input.value.length, input.value.length);
   }
 
   private handlePaletteRequestClose(
@@ -962,6 +1010,7 @@ export class ScionQuickPalette extends LitElement {
             .value=${this.queryText}
             autocomplete="off"
             @input=${this.handlePaletteQueryInput}
+            @focus=${this.handleQueryInputFocus}
             @keydown=${this.handlePaletteKeydown}
             @compositionstart=${this.handlePaletteCompositionStart}
             @compositionend=${this.handlePaletteCompositionEnd}
