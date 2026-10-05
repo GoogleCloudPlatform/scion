@@ -216,13 +216,6 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 // identity's UAT was issued under.
 func (s *ScopedUserIdentity) Boundary() TokenBoundary { return s.boundary }
 
-// ScopedProjectID returns the project this identity is restricted to, or ""
-// for a hub-boundary identity. An empty value is never a positive claim of
-// hub access by itself: every consumer must treat it as no project, not as
-// unscoped. It is derived from the boundary field. A caller that needs to
-// distinguish hub from project must use Boundary().
-func (s *ScopedUserIdentity) ScopedProjectID() string { return s.boundary.ProjectID }
-
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
 
