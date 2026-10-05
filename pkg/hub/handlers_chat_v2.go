@@ -961,6 +961,16 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		// and a reincarnating secondary ignore it. It only affects
 		// agent-routed sends; human-to-human sends ignore it.
 		Interrupt bool `json:"interrupt,omitempty"`
+		// Wake resumes a suspended primary recipient before delivery, so
+		// the message becomes its first input. It requires the lifecycle
+		// permission the agent start route requires. See
+		// chatSendOptions.Wake.
+		Wake bool `json:"wake,omitempty"`
+		// OfferWake asks the hub to answer 409 agent_not_running (details
+		// canWake=true) instead of persisting a failed row when the
+		// primary is suspended and the caller may wake it, so the client
+		// can ask the user first. See chatSendOptions.OfferWake.
+		OfferWake bool `json:"offer_wake,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -1153,7 +1163,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata, body.Interrupt)
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata,
+			chatSendOptions{Interrupt: body.Interrupt, Wake: body.Wake, OfferWake: body.OfferWake})
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
@@ -1339,11 +1350,48 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	return false, ""
 }
 
+// chatSendOptions carries the per-send flags of a chat v2 agent-routed send.
+type chatSendOptions struct {
+	// Interrupt interrupts each running agent recipient before delivery.
+	Interrupt bool
+	// Wake resumes a suspended primary before delivery through the shared
+	// wake helper (wakeAgentForDM), which waits for the agent to be ready,
+	// so the message is its first input. It applies only to a suspended
+	// primary: other phases keep the ordinary phase gate. It is refused
+	// with 403 when the caller lacks the lifecycle permission the start
+	// route requires, and a failed wake persists nothing.
+	Wake bool
+	// OfferWake makes a suspended primary that the caller may wake answer
+	// 409 agent_not_running with details canWake=true, persisting nothing,
+	// instead of a failed "Agent unreachable (suspended)" row. The client
+	// then asks the user and resends with Wake. Without the permission the
+	// failed row is kept, so the user sees the ordinary non-wake error.
+	OfferWake bool
+}
+
+// suspendedPrimaryWakeable reports whether a chat v2 send may wake agent:
+// it is suspended, not deleted, not mid-reincarnation, runs on a runtime
+// with suspend/resume and has a broker, and the caller holds the lifecycle
+// permission the start route requires.
+func (s *Server) suspendedPrimaryWakeable(ctx context.Context, user UserIdentity, agent *store.Agent) bool {
+	if agent == nil || !agent.DeletedAt.IsZero() || reincarnationInFlight(agent) {
+		return false
+	}
+	if state.Phase(agent.Phase) != state.PhaseSuspended {
+		return false
+	}
+	if isManagedAgentRuntime(agent.Runtime) || agent.RuntimeBrokerID == "" {
+		return false
+	}
+	return s.agentLifecycleAllowed(ctx, user, agent)
+}
+
 // sendAgentRouted sends a message through the existing agent dispatch path.
 // Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, interrupt bool) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, opts chatSendOptions) string {
+	interrupt := opts.Interrupt
 
 	ctx := r.Context()
 
@@ -1515,6 +1563,42 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return ""
+	}
+
+	// Wake (suspended primary): after authorization and validation, so a
+	// denied or invalid send cannot resume an agent, and before
+	// persistence, so a refused or failed wake leaves no row behind and
+	// the client keeps the draft.
+	if !primaryReincarnating && state.Phase(primaryAgent.Phase) == state.PhaseSuspended &&
+		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake) {
+		switch {
+		case opts.Wake && !s.agentLifecycleAllowed(ctx, user, primaryAgent):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to wake this agent", map[string]interface{}{
+					"agentId":   primaryAgent.ID,
+					"agentSlug": primaryAgent.Slug,
+					"phase":     primaryAgent.Phase,
+				})
+			return ""
+		case opts.Wake:
+			// wakeAgentForDM reports managed runtimes, a missing broker,
+			// the start gate and readiness failures as typed errors.
+			if _, wakeErr := s.wakeAgentForDM(ctx, primaryAgent); wakeErr != nil {
+				WriteAgentDMError(w, wakeErr)
+				return ""
+			}
+			// wakeAgentForDM moved the agent to running in place.
+			primaryUnreachable, primaryUnreachableReason = isAgentUnreachable(primaryAgent)
+		case s.suspendedPrimaryWakeable(ctx, user, primaryAgent):
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is suspended", primaryAgent.Slug), map[string]interface{}{
+					"agentId":   primaryAgent.ID,
+					"agentSlug": primaryAgent.Slug,
+					"phase":     primaryAgent.Phase,
+					"canWake":   true,
+				})
+			return ""
+		}
 	}
 
 	// Persist the message.
