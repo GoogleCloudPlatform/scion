@@ -274,7 +274,7 @@ func TestControlChannel_DeleteNotAfter(t *testing.T) {
 				log:         slog.Default(),
 				streams:     make(map[string]*StreamHandler),
 				dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-				cancels:     make(map[string]context.CancelFunc),
+				cancels:     make(map[string]*requestCancel),
 				ctx:         ctx,
 				cancel:      cancel,
 			}

@@ -3790,18 +3790,21 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 			// Refused as stale on the executing node: nothing was done.
 			return nil, fmt.Errorf("dispatch %s failed: %w (%s)", op, errStaleDeleteDispatch, result.Error)
 		}
-		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
+		return nil, dispatchFailureError(result)
 	}
 	return result, nil
 }
 
 // deferredLifecycle is the common flow for cross-node start/stop/restart:
-//  1. Subscribe to agent.<id>.status BEFORE writing intent (no missed events)
+//  1. Mint the dispatch ID, then subscribe to agent.<id>.status and
+//     broker.dispatch.<dispatchID>.done BEFORE writing intent, so no event
+//     for the row can be missed and the row cannot be terminal yet
 //  2. InsertBrokerDispatch with serialized resolved args
 //  3. Best-effort SignalBrokerCmd (the row is durable; reconnect-drain backstop)
-//  4. waitForAgentTransition with the op's terminal set
-//  5. Return nil on success-terminal, ErrDispatchFailed on timeout, wrapped
-//     error on error-terminal
+//  4. waitForLifecycleOutcome: nil on the op's success phase; the row's
+//     failure (the broker's typed error when recorded) once the row fails;
+//     ErrDispatchFailed on timeout; a generic error on an error phase with
+//     no failed row
 func (d *HTTPAgentDispatcher) deferredLifecycle(
 	ctx context.Context,
 	agent *store.Agent,
@@ -3813,8 +3816,10 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
 	}
 
+	dispatchID := uuid.NewString()
+
 	// 1. Subscribe BEFORE writing intent so we don't miss events.
-	eventCh, unsub := d.events.Subscribe("agent." + agent.ID + ".status")
+	eventCh, unsub := d.events.Subscribe("agent."+agent.ID+".status", "broker.dispatch."+dispatchID+".done")
 
 	// 2. Serialize args and insert the durable intent row.
 	argsJSON, err := MarshalDispatchArgs(args)
@@ -3824,7 +3829,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	}
 
 	dispatch := &store.BrokerDispatch{
-		ID:        uuid.NewString(),
+		ID:        dispatchID,
 		BrokerID:  agent.RuntimeBrokerID,
 		AgentID:   agent.ID,
 		AgentSlug: agent.Slug,
@@ -3848,17 +3853,8 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
 	}
 
-	// 4. Wait for terminal phase.
-	phase, err := waitForAgentTransition(ctx, eventCh, unsub, terminal)
-	if err != nil {
-		return err
-	}
-
-	// 5. Map terminal phase.
-	if phase == "error" {
-		return fmt.Errorf("agent entered error phase during %s", op)
-	}
-	return nil
+	// 4. Wait for the outcome.
+	return waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal)
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

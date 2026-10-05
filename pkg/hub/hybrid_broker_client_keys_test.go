@@ -222,3 +222,130 @@ func TestHybridBrokerClient_ExecuteKeys_HTTPClientMissingSupport(t *testing.T) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched (a wiring defect proven before any request could be built), got %v", err)
 	}
 }
+
+// droppingTunnel reports the control-channel session as connected on the
+// first IsConnected call (the one route() makes) and disconnected after that,
+// modelling a session that drops between the routing decision and the
+// control-channel client's own pre-send check.
+type droppingTunnel struct {
+	*mockControlChannelTunnel
+	checks int
+}
+
+func (d *droppingTunnel) IsConnected(string) bool {
+	d.checks++
+	return d.checks == 1
+}
+
+// TestHybridBrokerClient_ExecuteKeys_NeverDispatchedIsUnavailableOnEveryRoute
+// pins ptone/scion#2628 across every route HybridBrokerClient can pick: when
+// the Hub can prove the keys request never reached the broker, the outcome is
+// keys_unavailable (503), never keys_outcome_unknown (502). The two HTTP-route
+// cases use the real HTTP keys transport with a dial that never completes, so
+// the failure surfaces only as the request context's deadline error.
+func TestHybridBrokerClient_ExecuteKeys_NeverDispatchedIsUnavailableOnEveryRoute(t *testing.T) {
+	const brokerID = "broker-2628"
+	req := agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)}
+
+	cases := []struct {
+		name      string
+		build     func(t *testing.T) (*HybridBrokerClient, func() int)
+		endpoint  string
+		wantRoute routeDecision
+	}{
+		{
+			name:      "routeHTTP/stateless local broker",
+			endpoint:  "http://broker.invalid:9800",
+			wantRoute: routeHTTP,
+			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
+				httpClient, dials := pendingDialKeysClient(t, 0)
+				c := NewHybridBrokerClient(NewControlChannelManager(DefaultControlChannelConfig(), slog.Default()), httpClient, nil, false)
+				c.SetStatelessLocalBrokers([]string{brokerID})
+				return c, func() int { return int(dials.Load()) }
+			},
+		},
+		{
+			name:      "routeHTTP/no control-channel session, no live affinity owner",
+			endpoint:  "http://broker.invalid:9800",
+			wantRoute: routeHTTP,
+			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
+				httpClient, dials := pendingDialKeysClient(t, 0)
+				c := NewHybridBrokerClient(NewControlChannelManager(DefaultControlChannelConfig(), slog.Default()), httpClient, nil, false)
+				c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hub-gone", false })
+				return c, func() int { return int(dials.Load()) }
+			},
+		},
+		{
+			name:      "routeLocal/session drops before send",
+			wantRoute: routeLocal,
+			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
+				tunnel := &droppingTunnel{mockControlChannelTunnel: &mockControlChannelTunnel{}}
+				c := &HybridBrokerClient{
+					controlChannel: &ControlChannelBrokerClient{manager: tunnel},
+					httpClient:     &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}},
+				}
+				return c, func() int { return tunnel.calls }
+			},
+		},
+		{
+			name:      "routeForward",
+			endpoint:  "http://broker.invalid:9800",
+			wantRoute: routeForward,
+			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
+				httpClient := &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
+				c := NewHybridBrokerClient(NewControlChannelManager(DefaultControlChannelConfig(), slog.Default()), httpClient, nil, false)
+				c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hub-a", true })
+				return c, func() int { return httpClient.calls }
+			},
+		},
+		{
+			name:      "routeUndeliverable",
+			wantRoute: routeUndeliverable,
+			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
+				httpClient := &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
+				c := NewHybridBrokerClient(NewControlChannelManager(DefaultControlChannelConfig(), slog.Default()), httpClient, nil, false)
+				return c, func() int { return httpClient.calls }
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, attempts := tc.build(t)
+			tunnel, dropping := c.controlChannel.manager.(*droppingTunnel)
+			if !dropping {
+				// route() has no side effects for these cases, so the
+				// decision can be asserted directly before the real call.
+				if got := c.route(context.Background(), brokerID, tc.endpoint); got != tc.wantRoute {
+					t.Fatalf("route = %v, want %v", got, tc.wantRoute)
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := c.ExecuteKeys(ctx, brokerID, tc.endpoint, "agent-1", req)
+			if !errors.Is(err, agentkeys.ErrNotDispatched) {
+				t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+			}
+			if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
+				t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
+			}
+			if dropping && tunnel.checks != 2 {
+				// One check by route() (connected -> routeLocal), one by
+				// the control-channel client's pre-send guard
+				// (disconnected).
+				t.Fatalf("expected 2 connection checks, got %d", tunnel.checks)
+			}
+			switch tc.wantRoute {
+			case routeHTTP:
+				if attempts() == 0 {
+					t.Fatal("expected the HTTP route to start a dial")
+				}
+			default:
+				if got := attempts(); got != 0 {
+					t.Fatalf("expected no send attempt, got %d", got)
+				}
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -223,7 +224,8 @@ func TestDeleteFence_DeferredIntentCarriesClaim_StaleIsAbandoned(t *testing.T) {
 			}
 			claims <- args.Claim
 			if ok, _ := f.store.ClaimBrokerDispatch(context.Background(), d.ID, "test-owner"); ok {
-				_ = f.store.FailBrokerDispatch(context.Background(), d.ID, "dispatch delete: "+errStaleDeleteDispatch.Error())
+				execErr := fmt.Errorf("dispatch delete: %w", errStaleDeleteDispatch)
+				_ = f.store.FailBrokerDispatch(context.Background(), d.ID, execErr.Error(), dispatchFailureResult(execErr))
 			}
 			f.bus.PublishDispatchDone(context.Background(), d.ID)
 			return true

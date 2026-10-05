@@ -234,7 +234,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
 			// Cross-broker agent move is not implemented by this broker.
-			AgentMove: false,
+			AgentMove:      false,
+			StartsInFlight: s.startsInFlight != nil,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1176,8 +1177,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+ssErr.Error())
 			return
 		}
+		// Tracked as a start in flight until Manager.Start, Run's deferred
+		// cleanup and ss.finish have all returned: finishTracked is
+		// deferred first, so it runs last.
+		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
+		defer finishTracked()
 		defer ss.finish()
-		ctx = startCtx
+		ctx = trackCtx
 	}
 
 	// Branch based on provision-only flag
@@ -1309,11 +1315,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// guard, this covers every Start failure, including a skill
 		// resolution failure above (#2546). It covers broker files only,
 		// not the hub's agent record.
+		// The files must also still be this run's (ptone/scion#2675): a
+		// newer run recorded in agent-info.json owns them otherwise.
 		if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 		} else if opts.ProjectPath != "" {
-			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+			if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
+					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+					"run_id", opts.RunID, "files_run_id", owner)
+			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
@@ -1877,7 +1889,9 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// Resolution can be slow (it lists every runtime), so check the deadline
 	// again before the first side effect after it: the leftover cleanup of
 	// a not-found, the launch cancel, the soft-delete marking and
-	// DeleteTarget. Nothing slow runs between here and DeleteTarget.
+	// DeleteTarget. Only a small marker-file read (agentFilesRunOwner) and
+	// in-memory launch-registry checks (otherRunInFlight) run between here
+	// and DeleteTarget.
 	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
 		span.SetStatus(codes.Error, "stale delete dispatch")
 		return
@@ -1898,7 +1912,19 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// No container and no files, but per-agent runtime objects
 			// may remain when the container was removed outside scion.
 			// Beyond that, no side effects: the hub's broker clients
-			// treat a 404 on delete as an idempotent success.
+			// treat a 404 on delete as an idempotent success. A start
+			// of another run in flight here may be creating such objects
+			// under this name right now (ptone/scion#2675): leave them.
+			// Launch keys use the request's slug; also check the
+			// slugified id, the name cleanupLeftoverAgentResources acts on.
+			if s.otherRunInFlight(runID,
+				launchKey{ProjectID: projectID, Slug: id},
+				launchKey{ProjectID: projectID, Slug: api.Slugify(id)}) {
+				s.agentLifecycleLog.Info("Agent delete: no matching agent in project; a start of another run is in flight, leaving per-agent objects untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID)
+				NotFound(w, "Agent")
+				return
+			}
 			s.cleanupLeftoverAgentResources(ctx, id, projectID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
@@ -1945,6 +1971,40 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		filesToDelete = false
 	}
 
+	// Agent files, worktree and leftover per-agent objects are addressed by
+	// name only, so a delete naming a run must not remove those of another
+	// run that reuses the name (ptone/scion#2675): the run recorded in
+	// agent-info.json, or a start of another run still in flight on this
+	// broker (which may not have recorded its run on disk yet). Without a
+	// run ID, or with no run recorded (legacy files), nothing changes.
+	var filesOwnerRun string
+	var otherRunInFlight bool
+	if runID != "" && isSingleCleanPathElement(target.name) {
+		filesOwnerRun = agentFilesRunOwner(target.name, projectPath, runID)
+		otherRunInFlight = s.otherRunInFlight(runID,
+			launchKey{ProjectID: projectID, Slug: id},
+			launchKey{ProjectID: agentProjectID, Slug: target.name})
+	}
+	filesOfOtherRun := filesOwnerRun != "" || otherRunInFlight
+	if filesOfOtherRun {
+		if target.containerID == "" {
+			// Files only: they are the other run's, and so is anything
+			// left beside them. The run the hub meant is gone; touch
+			// nothing and answer 404, as for errDeleteTargetRunMismatch.
+			s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; leaving them untouched",
+				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+				"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight)
+			NotFound(w, "Agent")
+			return
+		}
+		// Remove the requested run's entry, but not the other run's files.
+		s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; deleting the runtime entry only",
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+			"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight,
+			"container_id", target.containerID)
+		filesToDelete = false
+	}
+
 	// target.name is joined onto a project directory as a single path
 	// segment by every file operation below -- the soft-delete
 	// agent-info.json update and DeleteTarget's eventual filesystem cleanup
@@ -1973,8 +2033,9 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		}
 	}
 
-	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
-	if softDelete && projectPath != "" {
+	// If this is a soft-delete, mark agent-info.json with deleted status
+	// before cleanup -- unless that file is another run's.
+	if softDelete && projectPath != "" && !filesOfOtherRun {
 		deletedAtStr := query.Get("deletedAt")
 		if err := agent.UpdateAgentConfig(target.name, projectPath, "deleted", "", ""); err != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
@@ -2069,7 +2130,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 }
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	ctx := r.Context()
+	// Tracked until Manager.Start and Run's deferred cleanup have returned.
+	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	defer finishTracked()
 
 	// ProjectID reaches filesystem paths further on (the project-marker
 	// block in buildStartContext, and worktree provisioning); an empty
@@ -2599,6 +2662,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// Wake any local launch waiting on this agent (design §3.8.1); see the
 	// identical comment in deleteAgent.
 	s.cancelLocalLaunch(launchKey{ProjectID: projectID, Slug: id})
+	// Cancel a start of this agent still running on this broker and wait
+	// for its cleanup before stopping, so a start whose hub cancel was lost
+	// cannot create a container after this stop.
+	s.cancelInFlightStart(ctx, launchKey{ProjectID: projectID, Slug: id})
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
@@ -2704,7 +2771,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	ctx := r.Context()
+	// Tracked until the start leg, including Run's deferred cleanup, has
+	// returned.
+	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	defer finishTracked()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {
@@ -3168,7 +3238,7 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	message := ""
 	switch {
 	case outcome == agentkeys.OutcomeKeysUnavailable && err != nil:
-		message = "admission deadline expired before dispatch"
+		message = "keys did not start before the admission deadline or cancellation"
 	case outcome == agentkeys.OutcomeKeysUnsupported:
 		message = "this backend does not support keys delivery"
 	}

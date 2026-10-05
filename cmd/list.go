@@ -752,6 +752,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		CreatedBy:         a.CreatedBy,
 		OwnerID:           a.OwnerID,
 		StateVersion:      a.StateVersion,
+		ProvisionedOnly:   a.ProvisionedOnly,
 	}
 
 	// Fall back to AppliedConfig fields if top-level fields are empty
@@ -952,6 +953,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
 			phase = a.Activity
 		}
+		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
 			containerStatus = "none"
@@ -1105,6 +1107,16 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// provisionedPhaseLabel shows phase "created" as "created (not started)"
+// when the Hub reports the agent provisioned but not started
+// (ptone/scion#2929), so it does not read as a stuck start.
+func provisionedPhaseLabel(phase string, provisionedOnly bool) string {
+	if provisionedOnly && phase == string(state.PhaseCreated) {
+		return phase + " (not started)"
+	}
+	return phase
 }
 
 // hubAgentPhaseActivity returns the phase and activity for a Hub agent,
