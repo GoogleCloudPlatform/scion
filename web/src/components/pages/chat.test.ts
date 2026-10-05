@@ -1567,6 +1567,11 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat');
     document.body.appendChild(el);
+    // Connecting fires a DM-list request of its own (the unread dots), but
+    // only once the lazy rail and members imports resolve, which can take
+    // longer than one flush on a slow runner. Those imports resolving is
+    // what issues it, so wait for that before taking the baseline.
+    await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
     await flush();
     const pending = releases.length;
     el.openDM('agent-1', 'agent', 'Coder One');
