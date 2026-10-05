@@ -1042,3 +1042,71 @@ func TestWorkstation_PutServerConfig_LegacyServerYAMLRefused(t *testing.T) {
 		t.Errorf("a no-effect server edit: expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// Review r6 N1: the guard finds the legacy server.yaml where the loader
+// does: the --config file the server was started with, and ./server.yaml in
+// the working directory, not only the global dir.
+func TestWorkstation_PutServerConfig_LegacyServerYAMLSources(t *testing.T) {
+	for _, tc := range []string{"--config file", "cwd server.yaml"} {
+		t.Run(tc, func(t *testing.T) {
+			settingsPath := tempSettingsHome(t)
+			settings := "schema_version: \"1\"\nactive_profile: local\n"
+			if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			legacyDir := t.TempDir()
+			srv, _, _ := newSQLiteHubInMode(t, true, nil)
+			var configPath string
+			if tc == "--config file" {
+				configPath = filepath.Join(legacyDir, "hub-server.yaml")
+				srv.config.ConfigPath = configPath
+			} else {
+				configPath = ""
+				t.Chdir(legacyDir)
+			}
+			legacyFile := filepath.Join(legacyDir, "server.yaml")
+			if configPath != "" {
+				legacyFile = configPath
+			}
+			if err := os.WriteFile(legacyFile, []byte("hub:\n  port: 7000\n  host: 10.0.0.1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rr := putServerConfig(t, srv, `{"server":{"log_level":"debug"}}`)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "legacy_server_yaml") {
+				t.Fatalf("expected 409 legacy_server_yaml, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if after := readFileString(t, settingsPath); after != settings {
+				t.Errorf("settings.yaml changed:\n%s", after)
+			}
+			gc, err := config.LoadGlobalConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.Hub.Port != 7000 {
+				t.Errorf("legacy settings must stay in effect, hub port = %d", gc.Hub.Port)
+			}
+		})
+	}
+}
+
+// Review r6 N3: with a server.yaml present but a settings.yaml that already
+// has a server key, the loader reads settings.yaml, so the PUT edits it.
+func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	globalDir := filepath.Dir(settingsPath)
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nserver:\n  log_level: info\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "server.yaml"), []byte("hub:\n  port: 7000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	rr := putServerConfig(t, srv, `{"server":{"log_level":"debug"}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := yamlAt(readYAMLMap(t, settingsPath), "server", "log_level"); got != "debug" {
+		t.Errorf("server.log_level = %v, want debug written", got)
+	}
+}

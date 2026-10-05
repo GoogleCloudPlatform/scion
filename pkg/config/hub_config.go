@@ -1067,7 +1067,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 
 	// Emit deprecation warning if server.yaml also exists
 	if hasServerYAML(globalDir) {
-		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; run 'scion config migrate --server' to consolidate.\n", globalDir)
+		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; move its contents under the server key in settings.yaml and remove it (ptone/scion#3116).\n", globalDir)
 	}
 	if configPath != "" {
 		info, err := os.Stat(configPath)
@@ -1108,6 +1108,14 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 // a hub or broker log where the process's cwd isn't obvious. Like
 // settingsHierarchySources, a resolved path already seen (e.g. configPath, or
 // the cwd it defaults to, is the global dir itself) is not listed twice.
+// LegacyServerConfigSources returns the legacy server.yaml files the server
+// config would be loaded from when no settings.yaml has a server key (the
+// global dir, the --config path or file, else ./server.yaml), as
+// loadGlobalConfigLegacy resolves them.
+func LegacyServerConfigSources(configPath string) []string {
+	return serverConfigSources(configPath)
+}
+
 func serverConfigSources(configPath string) []string {
 	seen := make(map[string]struct{}, 2)
 	add := func(out []string, path string) []string {

@@ -679,7 +679,10 @@ type settingsFileTxn struct {
 // settings file, builds the edits from it (build gets the current server
 // config and typed decode) and prepares them, keeping only the edits that
 // change the effective settings. On error the lock is released.
-func prepareSettingsFileTxn(build func(*config.GlobalConfig, *config.VersionedSettings) []config.SettingsPathEdit) (*settingsFileTxn, error) {
+//
+// configPath is the server's --config path, used to find the legacy
+// server.yaml sources the loader would fall back to.
+func prepareSettingsFileTxn(configPath string, build func(*config.GlobalConfig, *config.VersionedSettings) []config.SettingsPathEdit) (*settingsFileTxn, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, err
@@ -708,10 +711,11 @@ func prepareSettingsFileTxn(build func(*config.GlobalConfig, *config.VersionedSe
 		return nil, err
 	}
 	// A settings.yaml without a server key makes the hub load its server
-	// config from the deprecated server.yaml. Creating the server block here
-	// would silently switch it to settings.yaml and drop every server.yaml
-	// setting at the next start, so refuse instead.
-	if config.GetServerConfigPath(globalDir) != "" && typed.Server == nil {
+	// config from a deprecated server.yaml (global dir, --config, or
+	// ./server.yaml; resolved as the loader does). Creating the server block
+	// here would silently switch it to settings.yaml and drop every
+	// server.yaml setting at the next start, so refuse instead.
+	if typed.Server == nil && len(config.LegacyServerConfigSources(configPath)) > 0 {
 		for _, p := range staged.Changed {
 			if p == "server" || strings.HasPrefix(p, "server.") {
 				unlock()

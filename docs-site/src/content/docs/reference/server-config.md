@@ -10,11 +10,10 @@ This document describes the configuration for the Scion Hub (State Server) and t
 Server configuration is defined in the `server` section of your `settings.yaml` file.
 
 - **Primary**: `~/.scion/settings.yaml` (Global settings)
-- **Legacy**: `~/.scion/server.yaml` (Deprecated, but supported as fallback)
+- **Legacy**: `server.yaml` in `~/.scion`, in the `--config` path, or in the working directory (Deprecated, but supported as a fallback when `settings.yaml` has no `server` key)
 
 :::tip[Migration]
-If you are using `server.yaml`, you can migrate it to `settings.yaml` using:
-`scion config migrate --server`
+To move a `server.yaml` into `settings.yaml`, copy its contents under a top-level `server:` key in `~/.scion/settings.yaml`, then remove `server.yaml`. `scion config migrate` merges a `server.yaml` only while it converts a legacy (unversioned) `settings.yaml`; it skips a file that already has `schema_version`. There is no `--server` flag yet (ptone/scion#3116).
 :::
 
 ## Structure

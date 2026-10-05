@@ -322,6 +322,11 @@ type ServerConfig struct {
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).
 	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
 	Workstation bool
+
+	// ConfigPath is the --config path the server was started with ("" for
+	// none). The workstation server-config PUT uses it to find the legacy
+	// server.yaml sources the config loader would read.
+	ConfigPath string
 	// DevUserConfig holds optional identity overrides for the development user.
 	DevUserConfig DevUserConfig
 

@@ -994,7 +994,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
-		fileTxn, err = prepareSettingsFileTxn(func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
+		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
 			return workstationFileEdits(&req, fileLeaves, gc, typed)
 		})
 		if err != nil {

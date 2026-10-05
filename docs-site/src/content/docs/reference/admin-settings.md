@@ -52,7 +52,7 @@ On a workstation Hub the file edit follows the request body field by field:
 - Fields the body leaves out are kept.
 - Creating a `cors` block (`server.hub.cors` or `server.broker.cors`) without sending `enabled` also writes `enabled` with its current value. Inside the block a missing `enabled` means off, while a missing block means on, so adding an origin does not silently turn CORS off.
 - `server.broker.broker_id` and `broker_token` are written by the Hub itself. A save may send them back unchanged (the token as `********`), but changing or clearing them is rejected with `422 hub_owned_keys_rejected`. A `null` on a block that contains them (`{"server":null}` or `{"server":{"broker":null}}`) removes everything else in that block and keeps them.
-- If `settings.yaml` has no `server` key and a deprecated `server.yaml` sits next to it, the Hub still reads its server configuration from `server.yaml`. A save that would create the `server` block in `settings.yaml` (and so drop every `server.yaml` setting at the next start) is refused with `409 legacy_server_yaml`. Move the contents of `server.yaml` under a top-level `server:` key in `settings.yaml`, remove `server.yaml`, then save again.
+- If `settings.yaml` has no `server` key and a deprecated `server.yaml` is in effect (in `~/.scion`, in the server's `--config` path, or in its working directory), the Hub still reads its server configuration from `server.yaml`. A save that would create the `server` block in `settings.yaml` (and so drop every `server.yaml` setting at the next start) is refused with `409 legacy_server_yaml`. Move the contents of `server.yaml` under a top-level `server:` key in `settings.yaml`, remove `server.yaml`, then save again.
 - The admin UI sends only the fields you changed since the page loaded, so defaults the form shows for keys the file does not have are never written.
 - The file is edited in place: comments, key order and keys the Hub does not know survive. A `settings.yaml` that uses YAML anchors or aliases on an edited path cannot be edited in place, and the save is rejected with `422` (edit that file by hand).
 
@@ -248,5 +248,6 @@ The admin UI provides structured feedback on save:
 | **200** | Success; shows ignored-keys notice if applicable |
 | **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
+| **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |
