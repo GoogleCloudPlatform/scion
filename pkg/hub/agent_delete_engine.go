@@ -707,6 +707,22 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 				f.Activity = &noActivity
 				return
 			}
+			// A delete that claimed the row during a start dispatch
+			// captured the "starting" that beginStartDispatch wrote
+			// (ptone/scion#2014). With no start still in flight (no active
+			// launch, run intent not running, no lifecycle op on this
+			// replica), restoring starting would leave a counted phase with
+			// no container that nothing moves on; restore stopped instead,
+			// which a heartbeat corrects if a container exists. A stopped
+			// hook firing on this failed delete is intended, as for the
+			// launch exception above.
+			if prior.Phase == string(state.PhaseStarting) && startNotInFlight(e.s, cur) {
+				stopped := string(state.PhaseStopped)
+				noActivity := ""
+				f.Phase = &stopped
+				f.Activity = &noActivity
+				return
+			}
 			if prior.Phase != "" {
 				phase, activity := prior.Phase, prior.Activity
 				f.Phase = &phase
@@ -730,6 +746,21 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+}
+
+// startNotInFlight reports, for the delete rollback, whether no start of cur
+// can still bring a container up: the row reads stopping or starting, has no
+// active launch and no running intent, and this replica holds no lifecycle
+// op for it.
+func startNotInFlight(s *Server, cur *store.Agent) bool {
+	switch state.Phase(cur.Phase) {
+	case state.PhaseStopping, state.PhaseStarting:
+	default:
+		return false
+	}
+	return cur.LaunchState != store.LaunchStateActive &&
+		cur.RunIntent != store.RunIntentRunning &&
+		!s.lifecycleOps.active(cur.ID)
 }
 
 // deleteInDoubtMessage is the in_doubt banner text.
