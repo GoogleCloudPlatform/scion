@@ -67,9 +67,14 @@ export class ScionInboxTray extends LitElement {
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    // Clear the previous user's state before this render, so no render pairs
+    // the new user with the previous user's list.
+    if (changed.has('user')) this.resetOnUserChange();
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('user')) {
-      this.resetOnUserChange();
       if (this.user) {
         void this.fetchMessages();
         this.startPolling();

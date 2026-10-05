@@ -162,6 +162,9 @@ describe('notification tray: user switch', () => {
 
     await respond(u2Req, [notif('u2-a')]);
     expect(ids(tray)).toEqual(['u2-a']);
+    // The dropped response did not count as a first load, so u2's first
+    // fetch still suppresses push.
+    expect(popups).toEqual([]);
   });
 
   it('drops a poll response for a previous user', async () => {
@@ -195,6 +198,15 @@ describe('notification tray: user switch', () => {
 
     await respond(sseReq, [notif('u1-a'), notif('u1-b')]);
     expect(ids(tray)).toEqual(['u2-a']);
+    // Push is armed for u2 here, yet the dropped response pushes nothing.
+    expect(popups).toEqual([]);
+
+    // The dropped response did not mark u1's items as seen for u2: the next
+    // fetch pushes only the item that is new to u2.
+    stateManager.dispatchEvent(new Event('notification-created'));
+    await respond(takeList(), [notif('u2-a'), notif('u2-b')]);
+    expect(ids(tray)).toEqual(['u2-a', 'u2-b']);
+    expect(popups).toEqual(['u2-b']);
   });
 
   it('drops a refresh-on-open response for a previous user', async () => {
@@ -310,10 +322,46 @@ describe('notification tray: user switch', () => {
 
     await setUser(tray, user('u1'));
     expect(ids(tray)).toEqual(['a']);
-    await respond(takeList(), [notif('a'), notif('b')]);
+    expect([...tray.seenIds]).toEqual(['a']);
+    expect(tray.initialFetchDone).toBe(true);
 
+    // A refetch for the same user may or may not start; answer it if it does.
+    for (const req of pending.splice(0)) await respond(req, [notif('a')]);
+    expect(ids(tray)).toEqual(['a']);
+
+    stateManager.dispatchEvent(new Event('notification-created'));
+    await respond(takeList(), [notif('a'), notif('b')]);
     expect(ids(tray)).toEqual(['a', 'b']);
     expect(popups).toEqual(['b']);
+  });
+
+  it('drops a response that starts with no user signed in', async () => {
+    const tray: any = document.createElement('scion-notification-tray');
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+    expect(pending).toHaveLength(0);
+
+    tray.toggle();
+    await respond(takeList(), [notif('a')]);
+    expect(ids(tray)).toEqual([]);
+    expect(popups).toEqual([]);
+  });
+
+  it('never renders the next user with the previous user list', async () => {
+    const tray = await trayAs(user('u1'), [notif('u1-a')]);
+    const renders: { userId: string | null; ids: string[] }[] = [];
+    const render = tray.render.bind(tray);
+    tray.render = () => {
+      renders.push({ userId: tray.user?.id ?? null, ids: ids(tray) });
+      return render();
+    };
+
+    await setUser(tray, user('u2'));
+    await respond(takeList(), [notif('u2-a')]);
+
+    const u2Renders = renders.filter((r) => r.userId === 'u2');
+    expect(u2Renders.length).toBeGreaterThan(0);
+    for (const r of u2Renders) expect(r.ids.filter((id) => id.startsWith('u1-'))).toEqual([]);
   });
 
   it('drops acknowledge responses for a previous user', async () => {

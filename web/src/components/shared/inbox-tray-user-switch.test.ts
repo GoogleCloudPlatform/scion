@@ -268,8 +268,43 @@ describe('inbox tray: user switch', () => {
 
     await setUser(tray, user('u1'));
     expect(ids(tray)).toEqual(['a']);
+
+    // A refetch for the same user may or may not start; answer it if it does.
+    for (const req of pending.splice(0)) await respond(req, page(msg('a')));
+    expect(ids(tray)).toEqual(['a']);
+
+    stateManager.dispatchEvent(new Event('user-message-created'));
     await respond(takeList(), page(msg('a'), msg('b')));
     expect(ids(tray)).toEqual(['a', 'b']);
+  });
+
+  it('drops a response that starts with no user signed in', async () => {
+    const tray: any = document.createElement('scion-inbox-tray');
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+    expect(pending).toHaveLength(0);
+
+    tray.toggle();
+    await respond(takeList(), page(msg('a')));
+    expect(ids(tray)).toEqual([]);
+    expect(badgeCount(tray)).toBe(0);
+  });
+
+  it('never renders the next user with the previous user list', async () => {
+    const tray = await trayAs(user('u1'), page(msg('u1-a')));
+    const renders: { userId: string | null; ids: string[] }[] = [];
+    const render = tray.render.bind(tray);
+    tray.render = () => {
+      renders.push({ userId: tray.user?.id ?? null, ids: ids(tray) });
+      return render();
+    };
+
+    await setUser(tray, user('u2'));
+    await respond(takeList(), page(msg('u2-a')));
+
+    const u2Renders = renders.filter((r) => r.userId === 'u2');
+    expect(u2Renders.length).toBeGreaterThan(0);
+    for (const r of u2Renders) expect(r.ids.filter((id) => id.startsWith('u1-'))).toEqual([]);
   });
 
   it('drops a mark-all-read response for a previous user', async () => {
