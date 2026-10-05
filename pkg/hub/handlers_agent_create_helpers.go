@@ -1123,6 +1123,12 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
 		if req.Task != "" {
 			if existingAgent.AppliedConfig == nil {
 				existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -1222,6 +1228,12 @@ func (s *Server) handleExistingAgent(
 			if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 					"cannot resume agent: no runtime broker available", nil)
+				return existingAgentErrored
+			}
+
+			// Fail fast on a GCP identity the token-mint gate would refuse,
+			// before any quota reservation or run-intent write.
+			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
 				return existingAgentErrored
 			}
 
@@ -1377,6 +1389,12 @@ func (s *Server) handleExistingAgent(
 		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				"cannot start agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
 			return existingAgentErrored
 		}
 

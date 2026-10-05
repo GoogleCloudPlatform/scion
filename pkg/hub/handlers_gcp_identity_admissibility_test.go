@@ -136,6 +136,8 @@ func TestGCPVerificationResult_PersistFailureSurfaces(t *testing.T) {
 						require.Equal(t, http.StatusInternalServerError, code, body)
 						assert.Contains(t, body, ErrCodeInternalError)
 						assert.NotContains(t, body, `"verificationStatus"`, "no outcome reported when it was not stored")
+						assert.Contains(t, body, `"serviceAccountId"`, "the existing account is named so it can be re-verified")
+						assert.Contains(t, body, "re-run verification on the existing account")
 						if saID != "" {
 							stored, err := s.GetGCPServiceAccount(context.Background(), saID)
 							require.NoError(t, err)
@@ -323,4 +325,129 @@ func TestAgentLifecycle_StartRefusedForHubScopedSAWithoutEnforce(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.True(t, strings.Contains(rec.Body.String(), "gcpIamCheckMode=enforce"), rec.Body.String())
 	assert.Zero(t, disp.starts)
+}
+
+// A restart refused on a running agent leaves it running: phase and run
+// intent are untouched, and nothing is stopped or started.
+func TestAgentLifecycle_RunningRestartRefusedLeavesAgentRunning(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &deleteGuardDispatcher{}
+	srv.SetDispatcher(disp)
+	ctx := context.Background()
+	agent := setupBrokerAgentInPhase(t, s, "gcp-running-restart", state.PhaseRunning)
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	assignAgentGCPSA(t, s, agent, "gcp-running-restart", false, store.GCPVerificationFailed)
+	before, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, before.RunIntentAt)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Zero(t, disp.stops, "the running agent must not be stopped")
+	assert.Zero(t, disp.starts)
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase)
+	assert.Equal(t, store.RunIntentRunning, after.RunIntent)
+	require.NotNil(t, after.RunIntentAt)
+	assert.True(t, before.RunIntentAt.Equal(*after.RunIntentAt), "run intent must not be rewritten")
+}
+
+// failingSAGetStore makes GetGCPServiceAccount fail with a store error that
+// is not ErrNotFound while failGet is set.
+type failingSAGetStore struct {
+	store.Store
+	failGet atomic.Bool
+}
+
+func (f *failingSAGetStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
+	if f.failGet.Load() {
+		return nil, errors.New("injected lookup failure")
+	}
+	return f.Store.GetGCPServiceAccount(ctx, id)
+}
+
+func (f *failingSAGetStore) DB() *sql.DB {
+	if p, ok := f.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+// A store failure while checking admissibility is a 500, not a 400: the
+// assignment was not shown to be inadmissible, and the start does not proceed.
+func TestAgentLifecycle_StartAdmissibilityStoreErrorIs500(t *testing.T) {
+	base, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	wrapped := &failingSAGetStore{Store: base}
+	srv, s := testServerWithStore(t, wrapped)
+	disp := &deleteGuardDispatcher{}
+	srv.SetDispatcher(disp)
+	agent := setupBrokerAgentInPhase(t, s, "gcp-store-err", state.PhaseStopped)
+	assignAgentGCPSA(t, s, agent, "gcp-store-err", true, store.GCPVerificationVerified)
+	wrapped.failGet.Store(true)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "injected lookup failure", "internal error detail is not echoed")
+	assert.Zero(t, disp.starts)
+}
+
+// handleExistingAgent is the path the CLI uses to start or resume an
+// existing agent (POST /agents with the agent's name). Each branch that
+// starts or resumes applies the same refusal as the lifecycle route.
+func TestHandleExistingAgent_GCPIdentityStartRefusal(t *testing.T) {
+	branches := []struct {
+		name   string
+		phase  state.Phase
+		resume bool
+		verb   string
+	}{
+		{name: "suspended resume", phase: state.PhaseSuspended, verb: "resume"},
+		{name: "stopped resume in place", phase: state.PhaseStopped, resume: true, verb: "resume"},
+		{name: "created start", phase: state.PhaseCreated, verb: "start"},
+	}
+	for i, br := range branches {
+		for _, admissible := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/admissible=%v", br.name, admissible), func(t *testing.T) {
+				f := handleExistingAgentAuthzSetup(t)
+				disp := &deleteGuardDispatcher{}
+				f.srv.SetDispatcher(disp)
+				ctx := context.Background()
+				name := fmt.Sprintf("hea-gcp-%d-%v", i, admissible)
+				agent := f.agent(t, name, string(br.phase))
+				before, err := f.store.GetAgent(ctx, agent.ID)
+				require.NoError(t, err)
+				status := store.GCPVerificationFailed
+				if admissible {
+					status = store.GCPVerificationVerified
+				}
+				assignAgentGCPSA(t, f.store, agent, name, admissible, status)
+
+				body := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID}
+				if br.resume {
+					body["resume"] = true
+				}
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", body)
+
+				if admissible {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					assert.Equal(t, 1, disp.starts, "an admissible assignment proceeds to dispatch")
+					return
+				}
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "Cannot "+br.verb+" agent")
+				assert.Contains(t, rec.Body.String(), "not verified")
+				assert.Zero(t, disp.starts, "nothing dispatched")
+				assert.False(t, disp.deleteCalled)
+
+				got, err := f.store.GetAgent(ctx, agent.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(br.phase), got.Phase)
+				assert.Equal(t, before.RunIntent, got.RunIntent, "no run-intent write before the refusal")
+			})
+		}
+	}
 }

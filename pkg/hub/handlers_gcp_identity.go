@@ -356,7 +356,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if s.gcpTokenGenerator != nil {
 		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
-			writeGCPVerificationPersistError(w)
+			writeGCPVerificationPersistError(w, sa.ID)
 			return
 		}
 		resp.GCPServiceAccount = *sa
@@ -604,7 +604,7 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 	// is what later checks read, so it must match what the caller is told.
 	verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 	if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
-		writeGCPVerificationPersistError(w)
+		writeGCPVerificationPersistError(w, sa.ID)
 		return
 	}
 
@@ -652,9 +652,15 @@ func (s *Server) applyGCPVerificationResult(ctx context.Context, sa *store.GCPSe
 // writeGCPVerificationPersistError answers a request whose verification
 // result could not be stored. Always 500: a missing row or a conflict here
 // is a server-side failure to record the outcome, not a client error.
-func writeGCPVerificationPersistError(w http.ResponseWriter) {
+//
+// On the create paths the account row already exists at this point, so a
+// retried create would conflict on the email. The message and details
+// therefore point at re-verifying the existing account by ID.
+func writeGCPVerificationPersistError(w http.ResponseWriter, saID string) {
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-		"failed to record the service account verification result; retry the verification", nil)
+		fmt.Sprintf("failed to record the verification result for service account %s; "+
+			"re-run verification on the existing account (POST .../gcp-service-accounts/%s/verify)", saID, saID),
+		map[string]interface{}{"serviceAccountId": saID})
 }
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
@@ -1147,8 +1153,10 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPI
 // gcpIdentityStartRefusal applies the token-mint admissibility rule at
 // start and restart, so an agent whose assigned GCP service account would be
 // refused a token fails fast with an actionable message instead of starting
-// and failing later inside the container. Agents without an applied
-// assign-mode GCP identity are unaffected.
+// and failing later inside the container. It runs on the lifecycle
+// start/restart route and on each branch of handleExistingAgent that starts
+// or resumes an existing agent (the create-endpoint path the CLI uses).
+// Agents without an applied assign-mode GCP identity are unaffected.
 //
 // It writes the response and returns true when the start must not proceed:
 // 400 for an inadmissible assignment, 500 when the check could not be made.
@@ -1164,7 +1172,7 @@ func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWri
 	if !isGCPAssignmentInadmissible(err) {
 		slog.Error("GCP identity admissibility check failed at agent start",
 			"agent_id", agent.ID, "action", action, "error", err)
-		writeErrorFromErr(w, err, "")
+		InternalError(w)
 		return true
 	}
 	slog.Info("agent start refused: GCP identity assignment is not admissible",

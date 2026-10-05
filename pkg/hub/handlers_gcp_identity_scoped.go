@@ -656,7 +656,7 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	if s.gcpTokenGenerator != nil {
 		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
-			writeGCPVerificationPersistError(w)
+			writeGCPVerificationPersistError(w, sa.ID)
 			return
 		}
 		resp.GCPServiceAccount = *sa
