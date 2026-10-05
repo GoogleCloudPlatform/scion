@@ -249,7 +249,7 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		// by the same rule — the rail already hides the mention dot on a
 		// muted thread, and a rollup that disagreed with it would put two
 		// numbers on screen.
-		if !(ok && rs.Muted) && t.LastMessageID != "" &&
+		if (!ok || !rs.Muted) && t.LastMessageID != "" &&
 			(!ok || rs.LastReadMessageID == "" || t.LastMessageID != rs.LastReadMessageID) {
 			ru.unreadCount++
 		}
