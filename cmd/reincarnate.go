@@ -150,12 +150,19 @@ copied. Only --dry-run is supported with --broker for now: it reports each
 eligibility check and changes nothing.
 
 Use --shared-dir-backend NAME=nfs to move a shared dir's recorded storage
-backend from local to nfs. Only the agent's record changes: copy the data
-from the local directory to the nfs directory before the agent starts. The
-local directory is never moved or deleted. The start refuses an empty nfs
-directory while the previous local directory is not empty (on Kubernetes,
-whenever the nfs directory is empty); add --allow-empty-shared-dir to start
-anyway.`,
+backend from local to nfs. Only this agent's record changes, while the
+directory belongs to the project: stop every agent that uses it, copy the
+local directory to the nfs directory, then reincarnate each of those agents
+with the flag. The local directory is never moved or deleted. The start
+refuses an empty nfs directory while the previous local directory is not
+empty (on Kubernetes, whenever the nfs directory is empty); add
+--allow-empty-shared-dir to start anyway.
+
+The broker checks the change (the dir is one of the agent's shared dirs,
+the nfs settings are complete, the broker supports it) after the hub has
+stopped the agent. If the broker refuses, the reincarnation fails and the
+agent stays stopped with its record unchanged. --dry-run does not run these
+broker checks.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
@@ -237,6 +244,14 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
 		return err
 	}
+	// Checked before any hub request.
+	sharedDirBackends, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD)
+	if err != nil {
+		return err
+	}
+	if isSelf && len(sharedDirBackends) > 0 {
+		return fmt.Errorf("an agent cannot change its own shared dir backend; ask a user or another agent to run scion reincarnate --shared-dir-backend")
+	}
 	PrintUsingHub(hubCtx.Endpoint)
 
 	projectID, err := GetProjectID(hubCtx)
@@ -249,13 +264,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	sharedDirBackends, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD)
-	if err != nil {
-		return err
-	}
-	if isSelf && len(sharedDirBackends) > 0 {
-		return fmt.Errorf("an agent cannot change its own shared dir backend; ask a user or another agent to run scion reincarnate --shared-dir-backend")
-	}
 	req := &hubclient.ReincarnateAgentRequest{
 		Handoff:             handoff,
 		DryRun:              reincarnateDryRun,

@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -152,7 +153,7 @@ type checkFixture struct {
 	rec        *sharedDirStorageRecord
 	dirs       []api.SharedDir
 	res        *runtime.SharedDirRealization
-	volumes    []api.VolumeMount
+	volumes    map[string]api.VolumeMount
 }
 
 func newCheckFixture(t *testing.T) checkFixture {
@@ -170,9 +171,9 @@ func newCheckFixture(t *testing.T) checkFixture {
 		dirs:       notesAndCache(),
 		res: &runtime.SharedDirRealization{Backend: "nfs", PVClaimName: "pv",
 			SubPaths: map[string]string{"notes": "x"}, LocalDirs: map[string]bool{"gocache": true}},
-		volumes: []api.VolumeMount{
-			{Source: nfsLeaf, Target: "/scion-volumes/notes"},
-			{Source: "/local/gocache", Target: "/scion-volumes/gocache"},
+		volumes: map[string]api.VolumeMount{
+			"notes":   {Source: nfsLeaf, Target: "/scion-volumes/notes"},
+			"gocache": {Source: "/local/gocache", Target: "/scion-volumes/gocache"},
 		},
 	}
 }
@@ -184,7 +185,7 @@ func writeFileIn(t *testing.T, dir, name string) {
 }
 
 func (c checkFixture) check(runtimeName string) ([]string, error) {
-	return checkChangedSharedDirs(c.rec, c.dirs, c.res, c.volumes, c.projectDir, runtimeName, "/workspace")
+	return checkChangedSharedDirs(c.rec, c.dirs, c.res, c.volumes, c.projectDir, runtimeName)
 }
 
 func TestCheckChangedSharedDirs_EmptyNFSWithLocalDataRefused(t *testing.T) {
@@ -432,4 +433,126 @@ func TestSharedDirBackendChange_AgentWithoutRecord(t *testing.T) {
 		Dirs:     map[string]string{"notes": "nfs", "gocache": "nfs"},
 		Previous: map[string]string{"notes": "local"},
 	}, perDirRecord(t, f, "agent"))
+}
+
+// A passing start drops only the previous entries it checked: a dir with an
+// entry that this start does not mount from nfs keeps it.
+func TestSharedDirBackendChange_StartDropsOnlyPassedEntries(t *testing.T) {
+	f, mountRoot := newPerDirFixture(t)
+	f.writeRawGlobalSettings(t, perDirSettingsYAML(mountRoot, ""))
+	workspace := filepath.Join(f.tmpDir, "checkout")
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	opts := perDirStartOpts(f, "agent", "local")
+	opts.Workspace = workspace
+	opts.SharedDirs = []api.SharedDir{{Name: "notes"}, {Name: "gocache"}, {Name: "later"}}
+	_, err := NewManager(newSDSMockRuntime("docker", &sdsCapture{})).Start(context.Background(), opts)
+	require.NoError(t, err)
+
+	agentDir := config.ResolveAgentDir(f.projectScionDir, "agent")
+	writeRawSharedDirRecord(t, agentDir, `{"backend":"local","dirs":{"notes":"nfs"},"previous":{"notes":"local","later":"local"}}`)
+	writeFileIn(t, filepath.Join(mountRoot, sdsProfileShareID, "projects", "pid-sds", "shared-dirs", "notes"), "note.md")
+
+	var started sdsCapture
+	_, err = NewManager(newSDSMockRuntime("docker", &started)).Start(context.Background(), opts)
+	require.NoError(t, err)
+	require.Equal(t, 1, started.ran)
+	assert.Equal(t, map[string]string{"later": "local"}, perDirRecord(t, f, "agent").Previous)
+}
+
+// An agent without a record, reprovisioned without a profile, gets the
+// record of the profile it was created under, not the active profile's.
+func TestSharedDirBackendChange_AgentWithoutRecordUsesCreatedProfile(t *testing.T) {
+	f, mountRoot := newPerDirFixture(t)
+	f.writeRawGlobalSettings(t, fmt.Sprintf(`schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  k8s:
+    type: kubernetes
+profiles:
+  local:
+    runtime: docker
+  gke:
+    runtime: k8s
+    shared_dir_storage_backends:
+      gocache: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: %s
+      shares:
+        - id: %s
+          pv_name: pv-1
+`, mountRoot, sdsProfileShareID))
+	workspace := filepath.Join(f.tmpDir, "checkout")
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	opts := perDirStartOpts(f, "agent", "gke")
+	opts.Workspace = workspace
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Start(context.Background(), opts)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(config.ResolveAgentDir(f.projectScionDir, "agent"), sharedDirStorageRecordFile)))
+
+	_, err = NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Reprovision(context.Background(), api.StartOptions{
+		Name: "agent", ProjectPath: f.projectScionDir, Workspace: workspace,
+		SharedDirs: opts.SharedDirs, SharedDirBackendChanges: map[string]string{"notes": "nfs"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, &sharedDirStorageRecord{
+		Backend:  "local",
+		Dirs:     map[string]string{"notes": "nfs", "gocache": "nfs"},
+		Previous: map[string]string{"notes": "local"},
+	}, perDirRecord(t, f, "agent"), "gocache follows the gke profile the agent was created under")
+}
+
+// A dir mounted inside the workspace is checked like any other.
+func TestSharedDirBackendChange_InWorkspaceDir(t *testing.T) {
+	f, mountRoot := newPerDirFixture(t)
+	f.writeRawGlobalSettings(t, perDirSettingsYAML(mountRoot, ""))
+	workspace := filepath.Join(f.tmpDir, "checkout")
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	opts := perDirStartOpts(f, "agent", "local")
+	opts.Workspace = workspace
+	opts.SharedDirs = []api.SharedDir{{Name: "notes", InWorkspace: true}, {Name: "gocache"}}
+
+	var first sdsCapture
+	_, err := NewManager(newSDSMockRuntime("docker", &first)).Start(context.Background(), opts)
+	require.NoError(t, err)
+	var localNotes string
+	for _, v := range first.cfg.Volumes {
+		if filepath.Base(v.Target) == "notes" {
+			localNotes = v.Source
+			assert.Contains(t, v.Target, ".scion-volumes/notes")
+		}
+	}
+	require.NotEmpty(t, localNotes)
+	writeFileIn(t, localNotes, "note.md")
+
+	_, err = NewManager(newSDSMockRuntime("docker", &sdsCapture{})).Reprovision(context.Background(), api.StartOptions{
+		Name: "agent", ProjectPath: f.projectScionDir, Profile: "local", Workspace: workspace,
+		SharedDirs: opts.SharedDirs, SharedDirBackendChanges: map[string]string{"notes": "nfs"},
+	})
+	require.NoError(t, err)
+
+	var refused sdsCapture
+	_, err = NewManager(newSDSMockRuntime("docker", &refused)).Start(context.Background(), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--allow-empty-shared-dir")
+	assert.Equal(t, 0, refused.ran)
+
+	writeFileIn(t, filepath.Join(mountRoot, sdsProfileShareID, "projects", "pid-sds", "shared-dirs", "notes"), "note.md")
+	var started sdsCapture
+	_, err = NewManager(newSDSMockRuntime("docker", &started)).Start(context.Background(), opts)
+	require.NoError(t, err)
+	assert.Nil(t, perDirRecord(t, f, "agent").Previous)
+}
+
+// A dir with no volume in the map fails the check instead of passing it.
+func TestCheckChangedSharedDirs_MissingVolumeFails(t *testing.T) {
+	c := newCheckFixture(t)
+	delete(c.volumes, "notes")
+	_, err := c.check("docker")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot find its nfs directory")
 }

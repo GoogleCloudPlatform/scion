@@ -151,18 +151,6 @@ func changeSharedDirBackends(rec *sharedDirStorageRecord, changes map[string]str
 	return out
 }
 
-// sharedDirContainerTarget returns the container path a shared dir is
-// mounted at, as the volume builders compute it.
-func sharedDirContainerTarget(d api.SharedDir, containerWorkspace string) string {
-	if containerWorkspace == "" {
-		containerWorkspace = "/workspace"
-	}
-	if d.InWorkspace {
-		return containerWorkspace + "/.scion-volumes/" + d.Name
-	}
-	return "/scion-volumes/" + d.Name
-}
-
 // dirIsEmpty reports whether the directory at path has no entries.
 func dirIsEmpty(path string) (bool, error) {
 	f, err := os.Open(path)
@@ -200,8 +188,9 @@ func localLeafIsEmpty(path string) (bool, error) {
 // for the first dir whose nfs directory is empty while its previous local
 // directory is not. On Kubernetes the previous local storage is a volume
 // the broker cannot read, so an empty nfs directory is refused. A dir this
-// start does not mount from nfs is skipped and keeps its entry.
-func checkChangedSharedDirs(rec *sharedDirStorageRecord, dirs []api.SharedDir, realization *runtime.SharedDirRealization, volumes []api.VolumeMount, projectDir, runtimeName, containerWorkspace string) ([]string, error) {
+// start does not mount from nfs is skipped and keeps its entry. volumes maps
+// each mounted dir's name to its volume (from resolveSharedDirsPerDir).
+func checkChangedSharedDirs(rec *sharedDirStorageRecord, dirs []api.SharedDir, realization *runtime.SharedDirRealization, volumes map[string]api.VolumeMount, projectDir, runtimeName string) ([]string, error) {
 	if rec == nil || len(rec.Previous) == 0 {
 		return nil, nil
 	}
@@ -210,14 +199,7 @@ func checkChangedSharedDirs(rec *sharedDirStorageRecord, dirs []api.SharedDir, r
 		if _, ok := rec.Previous[d.Name]; !ok || !realization.Serves(d.Name) {
 			continue
 		}
-		target := sharedDirContainerTarget(d, containerWorkspace)
-		nfsLeaf := ""
-		for _, v := range volumes {
-			if v.Target == target {
-				nfsLeaf = v.Source
-				break
-			}
-		}
+		nfsLeaf := volumes[d.Name].Source
 		if nfsLeaf == "" {
 			return nil, fmt.Errorf("shared dir %q: cannot find its nfs directory to check it after the backend change", d.Name)
 		}
@@ -259,6 +241,18 @@ type pendingSharedDirBackendChange struct {
 	gs       *config.VersionedSettings
 	dirs     []api.SharedDir
 	rec      *sharedDirStorageRecord // nil when the agent has no record yet
+	// createdProfile is the profile in the agent's agent-info.json before
+	// Reprovision re-renders it, used when the request names no profile.
+	createdProfile string
+}
+
+// savedAgentProfile returns the profile recorded for the agent before this
+// reprovision, or "" when none is recorded.
+func savedAgentProfile(opts api.StartOptions) string {
+	if info := getSavedAgentInfo(opts.Name, opts.ProjectPath); info != nil {
+		return info.Profile
+	}
+	return ""
 }
 
 // prepareSharedDirBackendChange loads what an explicit backend change needs
@@ -281,16 +275,20 @@ func prepareSharedDirBackendChange(projectDir, agentDir string, opts api.StartOp
 	if err != nil {
 		return nil, err
 	}
-	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec}, nil
+	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec, createdProfile: savedAgentProfile(opts)}, nil
 }
 
 // record writes the changed record. An agent without a record first gets
-// the record its next start would have written, using the profile the
-// agent was provisioned with.
+// the record its next start would have written, using the request's
+// profile, else the profile the agent had before this reprovision, else
+// the re-rendered config's.
 func (c *pendingSharedDirBackendChange) record(opts api.StartOptions, cfg *api.ScionConfig) error {
 	rec := c.rec
 	if rec == nil {
 		profile := opts.Profile
+		if profile == "" {
+			profile = c.createdProfile
+		}
 		if profile == "" && cfg != nil && cfg.Info != nil {
 			profile = cfg.Info.Profile
 		}

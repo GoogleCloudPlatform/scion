@@ -1416,7 +1416,7 @@ authDone:
 	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
 	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
 		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
-	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirsPerDir(
+	sharedDirVolumes, sharedDirStorage, sharedDirVolumesByName, err := resolveSharedDirsPerDir(
 		sharedDirStorageCfg, sharedDirBackendOverrides, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
@@ -1424,7 +1424,7 @@ authDone:
 	// After an explicit backend change to nfs, refuse an empty nfs
 	// directory while the previous local directory is not empty. Dirs that
 	// pass are not checked again.
-	if passed, err := checkChangedSharedDirs(sharedDirRecord, effectiveSharedDirs, sharedDirStorage, sharedDirVolumes, projectDir, m.Runtime.Name(), containerWorkspace); err != nil {
+	if passed, err := checkChangedSharedDirs(sharedDirRecord, effectiveSharedDirs, sharedDirStorage, sharedDirVolumesByName, projectDir, m.Runtime.Name()); err != nil {
 		return nil, err
 	} else if len(passed) > 0 {
 		updated := *sharedDirRecord

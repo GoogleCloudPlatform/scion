@@ -205,3 +205,31 @@ func TestHTTPAgentDispatcher_ProvisionOmitsSharedDirBackendChange(t *testing.T) 
 	assert.Nil(t, captured.SharedDirBackendChanges)
 	assert.False(t, captured.AllowEmptySharedDir)
 }
+
+// A shared dir backend change cannot be combined with a move to another
+// broker; a dry run is refused with 400 and nothing is written.
+func TestReincarnateAgent_SharedDirBackends_WithMoveRefused(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	count := f.agentCount(t)
+	identity := sessionAdminFor(t, f.s, f.project, "sd-move")
+	for name, body := range map[string]ReincarnateAgentRequest{
+		"change":      {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
+		"allow empty": {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}, AllowEmptySharedDir: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, identity, body), f.agent.ID)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "cannot be combined with a move")
+			f.assertNoMoveSideEffects(t, count)
+		})
+	}
+
+	// The same change with the agent's current broker as the target is a
+	// plain reincarnation and is accepted.
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, identity, ReincarnateAgentRequest{
+		DryRun: true, TargetBroker: f.src.ID, SharedDirBackends: map[string]string{"notes": "nfs"},
+	}), f.agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
