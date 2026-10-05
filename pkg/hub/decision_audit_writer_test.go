@@ -509,12 +509,14 @@ func TestDecisionAuditWriter_DecisionPathNeverBlocksOnSlowStore(t *testing.T) {
 
 // TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath checks that a
 // drop on the decision path only counts, and that the writer-owned loop
-// logs it on the next tick without needing a later drop.
+// logs it on the next tick without needing a later drop. The test drives
+// the ticks itself, so no assertion races a real ticker.
 func TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath(t *testing.T) {
 	fs := &fakeDecisionAuditStore{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	tick := make(chan time.Time) // unbuffered: a send returns once the loop has the tick
 	cfg := testDecisionAuditConfig()
 	cfg.queueSize = 1
-	cfg.dropLogEvery = 50 * time.Millisecond
+	cfg.dropLogTick = tick
 	h := &recordingHandler{}
 	e := newStoreDecisionAuditEmitter(fs, slog.New(h), cfg)
 	t.Cleanup(func() {
@@ -529,6 +531,7 @@ func TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath(t *testing.T) {
 	e.EmitDecisionAudit(ctx, auditRec("deny", "d2")) // first drop ever
 	assert.Empty(t, h.messages(), "the first drop is not logged inline")
 
+	tick <- time.Now()
 	waitFor(t, "first summary", func() bool { return len(h.messages()) == 1 })
 	assert.Contains(t, h.messages()[0], "queue_full/deny=1")
 
@@ -537,9 +540,54 @@ func TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath(t *testing.T) {
 	e.EmitDecisionAudit(ctx, auditRec("deny", "d3"))
 	e.EmitDecisionAudit(ctx, auditRec("allow", "a1"))
 	assert.Len(t, h.messages(), 1)
+	tick <- time.Now()
 	waitFor(t, "second summary", func() bool { return len(h.messages()) == 2 })
 	assert.Contains(t, h.messages()[1], "queue_full/allow=1 queue_full/deny=1")
 	assert.Contains(t, h.messages()[1], "dropped=2")
+
+	// A tick with no new drops logs nothing.
+	tick <- time.Now()
+	tick <- time.Now() // the loop has finished the previous tick
+	assert.Len(t, h.messages(), 2)
+}
+
+// abortingDecisionAuditStore aborts the writer during each write, then
+// returns err: the drain deadline passes right after the write failed.
+type abortingDecisionAuditStore struct {
+	store.Store
+	e   *StoreDecisionAuditEmitter
+	err error
+}
+
+func (s *abortingDecisionAuditStore) CreateDecisionAudit(context.Context, *store.DecisionAuditRecord) error {
+	s.e.abort()
+	return s.err
+}
+
+// TestDecisionAuditWriter_FailedWriteKeepsReasonWhenAbortFollows checks
+// that a write that failed for good (a permanent error, or the last
+// attempt) stays write_failed when the abort lands right after it.
+func TestDecisionAuditWriter_FailedWriteKeepsReasonWhenAbortFollows(t *testing.T) {
+	for name, err := range map[string]error{
+		"permanent error":  store.ErrInvalidInput,
+		"attempts used up": errors.New("connection reset"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := &abortingDecisionAuditStore{err: err}
+			cfg := testDecisionAuditConfig()
+			cfg.maxAttempts = 1
+			e := newTestDecisionAuditEmitter(t, fs, cfg)
+			fs.e = e
+
+			e.EmitDecisionAudit(context.Background(), auditRec("deny", "d1"))
+			waitFor(t, "drop counted", func() bool {
+				return e.droppedCount(DecisionAuditDropWriteFailed, "deny")+
+					e.droppedCount(DecisionAuditDropShutdown, "deny") == 1
+			})
+			assert.Equal(t, int64(1), e.droppedCount(DecisionAuditDropWriteFailed, "deny"))
+			assert.Zero(t, e.droppedCount(DecisionAuditDropShutdown, "deny"))
+		})
+	}
 }
 
 func TestDecisionAuditWriter_CloseLifecycle(t *testing.T) {

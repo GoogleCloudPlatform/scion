@@ -30,11 +30,15 @@ import (
 )
 
 // installTestDecisionAuditWriter replaces srv's decision audit writer with
-// one backed by fs.
+// one backed by fs. It closes the writer hub.New built first, so that
+// writer's goroutines do not outlive the test.
 func installTestDecisionAuditWriter(t *testing.T, srv *Server, fs *fakeDecisionAuditStore) *StoreDecisionAuditEmitter {
 	t.Helper()
 	w := newStoreDecisionAuditEmitter(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), testDecisionAuditConfig())
 	t.Cleanup(func() { w.Close(context.Background()) })
+	if srv.decisionAuditWriter != nil {
+		srv.decisionAuditWriter.Close(context.Background())
+	}
 	srv.decisionAuditWriter = w
 	srv.authzService.SetDecisionAuditEmitter(w)
 	return w

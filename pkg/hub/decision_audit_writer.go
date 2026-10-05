@@ -120,6 +120,7 @@ type decisionAuditWriterConfig struct {
 	drainTimeout   time.Duration
 	abortGrace     time.Duration
 	dropLogEvery   time.Duration
+	dropLogTick    <-chan time.Time // tests only; nil means a dropLogEvery ticker
 }
 
 func defaultDecisionAuditWriterConfig() decisionAuditWriterConfig {
@@ -243,7 +244,8 @@ func decisionAuditLabel(record *store.DecisionAuditRecord) string {
 	}
 }
 
-// QueueDepth reports the number of records waiting to be written. It reads
+// QueueDepth reports the number of queued records waiting to be written. It
+// does not count records a worker is writing or retrying (in-flight). It reads
 // the queue under the lock, so a metric observing it is never stale.
 func (e *StoreDecisionAuditEmitter) QueueDepth() int {
 	e.mu.Lock()
@@ -354,6 +356,7 @@ func (e *StoreDecisionAuditEmitter) write(record *store.DecisionAuditRecord) {
 		record.ID = uuid.NewString()
 	}
 	var err error
+	aborted := false
 	backoff := e.cfg.backoffBase
 	for attempt := 1; attempt <= e.cfg.maxAttempts; attempt++ {
 		start := time.Now()
@@ -369,15 +372,22 @@ func (e *StoreDecisionAuditEmitter) write(record *store.DecisionAuditRecord) {
 		if outcome != DecisionAuditWriteError {
 			return
 		}
-		if !decisionAuditRetryable(err) || attempt == e.cfg.maxAttempts || !e.sleep(backoff) {
+		if !decisionAuditRetryable(err) || attempt == e.cfg.maxAttempts {
+			break
+		}
+		if !e.sleep(backoff) {
+			aborted = true
 			break
 		}
 		if backoff *= 2; backoff > e.cfg.backoffMax {
 			backoff = e.cfg.backoffMax
 		}
 	}
+	// The reason comes from how the loop ended, not from the abort state
+	// now: a permanent error stays write_failed even if the drain deadline
+	// passes right after it.
 	reason := DecisionAuditDropWriteFailed
-	if e.abortCtx.Err() != nil {
+	if aborted || (errors.Is(err, context.Canceled) && e.abortCtx.Err() != nil) {
 		reason = DecisionAuditDropShutdown
 	}
 	e.recordDrop(reason, decisionAuditLabel(record), err)
@@ -432,11 +442,15 @@ func (e *StoreDecisionAuditEmitter) recordDrop(reason DecisionAuditDropReason, d
 // Close, which logs the final summary itself.
 func (e *StoreDecisionAuditEmitter) dropLogLoop() {
 	defer e.wg.Done()
-	t := time.NewTicker(e.cfg.dropLogEvery)
-	defer t.Stop()
+	tick := e.cfg.dropLogTick
+	if tick == nil {
+		t := time.NewTicker(e.cfg.dropLogEvery)
+		defer t.Stop()
+		tick = t.C
+	}
 	for {
 		select {
-		case <-t.C:
+		case <-tick:
 			e.logDrops()
 		case <-e.stop:
 			return

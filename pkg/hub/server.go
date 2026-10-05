@@ -3188,7 +3188,8 @@ func (s *Server) SetDecisionAuditMetrics(m DecisionAuditMetricsRecorder) {
 }
 
 // DecisionAuditQueueDepth reports the number of decision audit records
-// waiting to be written. It is the source for the queue depth gauge.
+// queued to be written (not in-flight: records a worker is writing or
+// retrying are not counted). It is the source for the queue depth gauge.
 func (s *Server) DecisionAuditQueueDepth() int64 {
 	if s.decisionAuditWriter == nil {
 		return 0

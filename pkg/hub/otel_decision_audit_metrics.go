@@ -41,8 +41,10 @@ var _ DecisionAuditMetricsRecorder = (*OTelDecisionAuditMetrics)(nil)
 //     not produced by the current record builder.
 //   - scion.hub.decision_audit.write.duration (histogram, ms; outcome =
 //     ok, duplicate or error), one sample per write attempt.
-//   - scion.hub.decision_audit.queue_depth (observable gauge). queueDepth
-//     is called at each collection, so the value is current even when the
+//   - scion.hub.decision_audit.queue_depth (observable gauge): records
+//     queued, not in-flight; up to one record per worker may be in a
+//     write or a retry backoff without being counted. queueDepth is
+//     called at each collection, so the value is current even when the
 //     hub is idle. Pass Server.DecisionAuditQueueDepth.
 func NewOTelDecisionAuditMetrics(mp metric.MeterProvider, queueDepth func() int64) (*OTelDecisionAuditMetrics, error) {
 	if mp == nil {
