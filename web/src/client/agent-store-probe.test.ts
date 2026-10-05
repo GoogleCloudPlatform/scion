@@ -680,7 +680,6 @@ describe('AgentStore delta probe', () => {
   });
 
   describe('sustained churn the probe cannot catch up with', () => {
-    // The periodic full walk is off here, so the back-off is measured alone.
     const fleet = (): Agent[] => Array.from({ length: 400 }, (_, i) => row(`a${i}`, 1));
 
     /** Heartbeat every row before each probe for `intervals`; the minutes walks started at. */
@@ -695,20 +694,24 @@ describe('AgentStore delta probe', () => {
       return walkMinutes;
     }
 
-    it('walks on overflow at most at doubling intervals, and probes read one page meanwhile', async () => {
-      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
+    it('walks on overflow at doubling intervals after the last walk, then with the periodic walk', async () => {
+      const h = await loaded(fleet());
       const requests = h.server.requests.length;
       const walkMinutes = await churn(h, 120);
 
-      expect(walkMinutes).toEqual([0.5, 2.5, 6.5, 14.5, 30.5, 46.5]);
-      // Each overflowing probe reads five pages; each probe in between, one.
-      expect(h.server.probes()).toBe(6 * 5 + (120 - 6));
-      // One hour: 144 probe requests plus six walks of two pages.
-      expect(h.server.requests.length - requests).toBe(h.server.probes() + 6 * 2);
+      // Overflow walks 2 and 4 minutes after the walk before; from then on,
+      // the periodic walk comes first.
+      const periodic = Array.from({ length: 10 }, (_, i) => 11.5 + 5 * i);
+      expect(walkMinutes).toEqual([0.5, 2.5, 6.5, ...periodic]);
+      // The three overflowing probes read five pages each, every other probe
+      // one; the periodic walks replace ten probes.
+      expect(h.server.probes()).toBe(3 * 5 + (120 - 10 - 3));
+      // One hour: the probe requests plus 13 walks of two pages.
+      expect(h.server.requests.length - requests).toBe(h.server.probes() + 13 * 2);
     });
 
     it('keeps the list ready during an overflow walk', async () => {
-      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
+      const h = await loaded(fleet());
       const statuses: string[] = [];
       h.store.retain(HUB, (snapshot) => statuses.push(snapshot.status));
       expect(await churn(h, 1)).toEqual([0.5]);
@@ -716,10 +719,10 @@ describe('AgentStore delta probe', () => {
     });
 
     it('walks at once again on overflow after a probe has caught up', async () => {
-      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
+      const h = await loaded(fleet());
       expect(await churn(h, 14)).toEqual([0.5, 2.5, 6.5]);
       await tick();
-      // Without the catch-up, the next walk would wait until 14.5 minutes.
+      // Without the catch-up, the next walk would wait for the periodic walk at 11.5.
       expect(await churn(h, 2, 15)).toEqual([8]);
     });
   });

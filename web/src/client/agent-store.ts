@@ -175,11 +175,11 @@ export const AGENT_PROBE_LIMIT = 50;
 export const AGENT_PROBE_MAX_EXTRA_PAGES = 4;
 /**
  * After a probe that does not catch up walks, the next such walk waits at
- * least this long, doubling while probes keep overflowing, up to
- * {@link AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS}. Meanwhile probes read one page.
+ * least this long after the last walk of any kind, doubling while probes
+ * keep overflowing; meanwhile probes read one page. The periodic full walk
+ * bounds the wait.
  */
 export const AGENT_PROBE_OVERFLOW_BACKOFF_MS = 2 * 60_000;
-export const AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS = 16 * 60_000;
 /** A probe still running after this long is abandoned; the next one is scheduled. */
 export const AGENT_PROBE_TIMEOUT_MS = 30_000;
 /** After the server refuses a list's sorted view, wait this long before probing it again. */
@@ -242,9 +242,7 @@ interface Entry {
   probeRefusalLogged: boolean;
   /** The server count that last made a probe walk, so the same mismatch walks once. */
   countWalkTotal?: number | undefined;
-  /** When the last overflow walk started (epoch ms), while probes keep overflowing. */
-  overflowWalkAt?: number | undefined;
-  /** How long after that the next overflow walk may start. */
+  /** While probes keep overflowing, how long after the last walk began the next overflow walk may start. */
   overflowBackoffMs: number;
   /** When the last walk began (epoch ms). */
   walkedAt?: number | undefined;
@@ -1055,8 +1053,7 @@ export class AgentStore {
     const previous = entry.highWater;
     let highWater = previous;
     const backingOff =
-      entry.overflowWalkAt !== undefined &&
-      this.now() - entry.overflowWalkAt < entry.overflowBackoffMs;
+      entry.overflowBackoffMs > 0 && this.now() - (entry.walkedAt ?? 0) < entry.overflowBackoffMs;
     const extraPages = backingOff ? 0 : AGENT_PROBE_MAX_EXTRA_PAGES;
     const token = feed.beginSeedEpoch();
     const changed: Agent[] = [];
@@ -1128,13 +1125,11 @@ export class AgentStore {
       // Churn faster than the probe reads would otherwise walk every time.
       if (backingOff) return;
       entry.overflowBackoffMs = entry.overflowBackoffMs
-        ? Math.min(2 * entry.overflowBackoffMs, AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS)
+        ? 2 * entry.overflowBackoffMs
         : AGENT_PROBE_OVERFLOW_BACKOFF_MS;
-      entry.overflowWalkAt = this.now();
       this.startWalk(entry, { background: true });
       return;
     }
-    entry.overflowWalkAt = undefined;
     entry.overflowBackoffMs = 0;
     if (total === undefined || !entry.complete) return;
     if (total === entry.agents.length) {
