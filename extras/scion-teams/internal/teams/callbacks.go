@@ -120,13 +120,13 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
 	}
 
 	pending, err := store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to look up pending ask-user", "request_id", requestID, "error", err)
-		return h.respondWithUpdatedCard(activity, "An error occurred processing your response."), nil
+		return h.respondWithMessage("An error occurred processing your response. Please try again."), nil
 	}
 
 	if pending == nil {
@@ -149,21 +149,22 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		}
 	}
 
-	// Answers are sent as the linked user. Without a usable link, reply with
-	// what to do next and leave the request open so it can still be answered.
+	// Answers are sent as the linked user. Without a usable link, show what to
+	// do next and keep the card so the request can still be answered.
 	teamsUserID := teamsUserIDOf(activity)
 	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserID)
 	if problem := linkProblem(mapping, err, registerHint); problem != "" {
 		if err != nil {
 			h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
 		}
-		return h.respondWithUpdatedCard(activity, problem), nil
+		return h.respondWithMessage(problem), nil
 	}
 
-	// Deliver the response to the hub.
+	// Deliver the response to the hub. On failure keep the card so the
+	// answer can be retried.
 	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		return h.respondWithUpdatedCard(activity,
+		return h.respondWithMessage(
 			hubErrorText(err, mapping, h.projectSlugFor(ctx, pending.ConversationID), "Failed to deliver your response. Please try again.")), nil
 	}
 
@@ -381,6 +382,23 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 
 	return hubClient.DeliverInbound(ctx, topic, msg)
 }
+
+// respondWithMessage creates an InvokeResponse that shows text to the user
+// and leaves the original card in place.
+func (h *CallbackHandler) respondWithMessage(text string) *InvokeResponse {
+	return &InvokeResponse{
+		Status: 200,
+		Body: map[string]interface{}{
+			"statusCode": 200,
+			"type":       invokeMessageResponseType,
+			"value":      text,
+		},
+	}
+}
+
+// invokeMessageResponseType is the invoke response type that shows a message
+// without replacing the card.
+const invokeMessageResponseType = "application/vnd.microsoft.activity.message"
 
 // respondWithUpdatedCard creates an InvokeResponse that replaces the original
 // card with a simple text card (buttons removed).

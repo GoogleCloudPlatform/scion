@@ -510,3 +510,93 @@ func TestCallbackHandler_SetupConfirm_UnlinkedUserInLinkedChannelGetsRegisterHin
 	assert.Contains(t, string(body), "`register`")
 	assert.NotContains(t, string(body), "existing")
 }
+
+func TestCallbackHandler_AskResponse_RetryableFailuresKeepCard(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, broker *TeamsBroker)
+		hub   http.HandlerFunc
+		want  string
+	}{
+		{
+			name: "unlinked user",
+			hub:  func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
+			want: registerHint,
+		},
+		{
+			name: "link lookup error",
+			setup: func(t *testing.T, broker *TeamsBroker) {
+				broker.store = mappingErrorStore{Store: broker.store}
+			},
+			hub:  func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
+			want: linkCheckFailedText,
+		},
+		{
+			name:  "delivery failure",
+			setup: linkTestUser,
+			hub: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":{"code":"internal_error","message":"boom"}}`))
+			},
+			want: "Failed to deliver your response. Please try again.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			broker, _ := testBrokerWithStore(t, tt.hub)
+			require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+				RequestID:      "req-1",
+				ConversationID: "conv-1",
+				AgentSlug:      "dev-1",
+				ProjectID:      "proj-1",
+				Choices:        []string{"approve"},
+				ExpiresAt:      time.Now().Add(10 * time.Minute),
+			}))
+			if tt.setup != nil {
+				tt.setup(t, broker)
+			}
+
+			resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+				"action":     "ask_response",
+				"request_id": "req-1",
+				"choice":     "approve",
+			}))
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+
+			body, ok := resp.Body.(map[string]interface{})
+			require.True(t, ok, "unexpected body %T", resp.Body)
+			assert.Equal(t, "application/vnd.microsoft.activity.message", body["type"], "card must not be replaced")
+			assert.NotEqual(t, "application/vnd.microsoft.card.adaptive", body["type"])
+			assert.Equal(t, tt.want, body["value"])
+
+			pending, err := broker.store.GetPendingAskUser(context.Background(), "req-1")
+			require.NoError(t, err)
+			require.NotNil(t, pending)
+			assert.False(t, pending.Responded)
+		})
+	}
+}
+
+func TestCallbackHandler_AskResponse_SuccessReplacesCard(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	linkTestUser(t, broker)
+	require.NoError(t, broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+		RequestID:      "req-1",
+		ConversationID: "conv-1",
+		AgentSlug:      "dev-1",
+		ProjectID:      "proj-1",
+		Choices:        []string{"approve"},
+		ExpiresAt:      time.Now().Add(10 * time.Minute),
+	}))
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":     "ask_response",
+		"request_id": "req-1",
+		"choice":     "approve",
+	}))
+	require.NoError(t, err)
+	body, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "application/vnd.microsoft.card.adaptive", body["type"])
+}
