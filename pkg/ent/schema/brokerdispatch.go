@@ -65,8 +65,9 @@ func (BrokerDispatch) Fields() []ent.Field {
 		// On a failed row it carries the typed failure envelope
 		// (hub dispatchFailureEnvelope): brokerError
 		// ({status,code,body,retryAfter}) when the broker answered with an
-		// HTTP error status, and/or envStillMissing (the env requirements a
-		// finalize still lacks).
+		// HTTP error status, envStillMissing (the env requirements a
+		// finalize still lacks), and/or hubErrors (hub sentinel errors such
+		// as a delete holding the row).
 		field.String("result").
 			Optional(),
 		// claimed_by: hub instanceID that reconciled this intent.

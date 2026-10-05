@@ -43,13 +43,40 @@ type dispatchBrokerError struct {
 
 // dispatchFailureEnvelope is the JSON shape of a failed row's result. It
 // carries the typed failures the originating node's callers act on:
-// BrokerError is the broker's HTTP error answer; EnvStillMissing is the
-// requirements of an *ErrEnvStillMissing (a finalize that still lacks
-// required env keys). When both are present BrokerError wins.
+//   - BrokerError is the broker's HTTP error answer;
+//   - EnvStillMissing is the requirements of an *ErrEnvStillMissing (a
+//     finalize that still lacks required env keys);
+//   - HubErrors names the hub sentinel errors in the executing node's error
+//     chain (see dispatchHubSentinels), such as a delete holding the row.
+//
+// They are rebuilt in that order of precedence.
 type dispatchFailureEnvelope struct {
 	BrokerError     *dispatchBrokerError           `json:"brokerError,omitempty"`
 	EnvStillMissing *RemoteEnvRequirementsResponse `json:"envStillMissing,omitempty"`
+	HubErrors       []string                       `json:"hubErrors,omitempty"`
 }
+
+// dispatchHubSentinels are the hub sentinel errors the HTTP handlers answer
+// with their own status when a dispatch fails with them, keyed by the name
+// recorded on a failed row. An unknown name read from a row is ignored.
+var dispatchHubSentinels = []struct {
+	name string
+	err  error
+}{
+	{"delete_in_progress", store.ErrDeleteInProgress},
+	{"launch_invalid_phase", ErrLaunchInvalidPhase},
+}
+
+// dispatchHubError is a failure the executing node returned with hub
+// sentinel errors in its chain, rebuilt on the originating node: the
+// original error text, matching the same sentinels under errors.Is.
+type dispatchHubError struct {
+	msg       string
+	sentinels []error
+}
+
+func (e *dispatchHubError) Error() string   { return e.msg }
+func (e *dispatchHubError) Unwrap() []error { return e.sentinels }
 
 // dispatchFailureResult returns the result to record on a failed dispatch row
 // for execErr: an envelope carrying the broker's HTTP error answer and/or the
@@ -71,7 +98,12 @@ func dispatchFailureResult(execErr error) string {
 	if errors.As(execErr, &missing) && hasEnvNeeds(missing.Requirements) {
 		env.EnvStillMissing = missing.Requirements
 	}
-	if env.BrokerError == nil && env.EnvStillMissing == nil {
+	for _, hs := range dispatchHubSentinels {
+		if errors.Is(execErr, hs.err) {
+			env.HubErrors = append(env.HubErrors, hs.name)
+		}
+	}
+	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 {
 		return ""
 	}
 	out, err := json.Marshal(env)
@@ -83,9 +115,9 @@ func dispatchFailureResult(execErr error) string {
 
 // dispatchFailureError returns the error for a failed dispatch row. When the
 // row carries a valid envelope the typed failure is rebuilt and wrapped, so
-// errors.As finds the same *brokerStatusError or *ErrEnvStillMissing a
-// direct dispatch returns. Otherwise the row's error text is returned, as
-// before.
+// errors.As and errors.Is find the same *brokerStatusError,
+// *ErrEnvStillMissing or hub sentinel a direct dispatch returns. Otherwise
+// the row's error text is returned, as before.
 func dispatchFailureError(d *store.BrokerDispatch) error {
 	env := decodeDispatchFailure(d.Result)
 	if se := brokerErrorFromEnvelope(env); se != nil {
@@ -93,6 +125,9 @@ func dispatchFailureError(d *store.BrokerDispatch) error {
 	}
 	if env != nil && hasEnvNeeds(env.EnvStillMissing) {
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, &ErrEnvStillMissing{Requirements: env.EnvStillMissing})
+	}
+	if sentinels := hubSentinelsFromEnvelope(env); len(sentinels) > 0 {
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &dispatchHubError{msg: d.Error, sentinels: sentinels})
 	}
 	return fmt.Errorf("dispatch %s failed: %s", d.Op, d.Error)
 }
@@ -128,6 +163,23 @@ func brokerErrorFromEnvelope(env *dispatchFailureEnvelope) *brokerStatusError {
 		return nil
 	}
 	return &brokerStatusError{StatusCode: be.Status, Body: be.Body, RetryAfter: be.RetryAfter}
+}
+
+// hubSentinelsFromEnvelope returns the known hub sentinel errors named by
+// the envelope, ignoring unknown names.
+func hubSentinelsFromEnvelope(env *dispatchFailureEnvelope) []error {
+	if env == nil {
+		return nil
+	}
+	var out []error
+	for _, name := range env.HubErrors {
+		for _, hs := range dispatchHubSentinels {
+			if hs.name == name {
+				out = append(out, hs.err)
+			}
+		}
+	}
+	return out
 }
 
 // hasEnvNeeds reports whether reqs names at least one still-missing key; a

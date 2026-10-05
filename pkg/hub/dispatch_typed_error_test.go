@@ -690,3 +690,77 @@ func TestCrossNodeStopHandler_RelaysRuntimeUnavailable(t *testing.T) {
 	code, _ := errorBody(t, rec)
 	assert.Equal(t, brokerCodeRuntimeUnavailable, code)
 }
+
+// A cross-node finalize_env that the owner refused because a delete holds
+// the row answers 409 delete_in_progress, and one refused because the agent
+// left the launchable phases answers 409 invalid_state, as a direct
+// finalize does.
+func TestCrossNodeFinalizeEnvHandler_RelaysHubRefusals(t *testing.T) {
+	cases := []struct {
+		name     string
+		ownerErr error
+		wantCode string
+	}{
+		{"delete in progress", fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase, store.ErrDeleteInProgress), ErrCodeDeleteInProgress},
+		{"launch invalid phase", fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase), "invalid_state"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, agent, ownerDisp := crossNodeHandlerServerWithOwner(t, nil, state.PhaseProvisioning)
+			ownerDisp.finalizeErr = tc.ownerErr
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent.ProjectID+"/agents/"+agent.Slug+"/env",
+				map[string]interface{}{"env": map[string]string{"A_KEY": "v"}})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			code, _ := errorBody(t, rec)
+			assert.Equal(t, tc.wantCode, code)
+		})
+	}
+}
+
+// A cross-node create the owner refused because a delete claimed the row
+// answers 409 delete_in_progress, as a direct create does.
+func TestCrossNodeCreate_RelaysDeleteInProgress(t *testing.T) {
+	f := newCrossNodeFixture(t, fmt.Errorf("failed to record the run ID for agent x: %w", store.ErrDeleteInProgress), true)
+	_, err := f.requester.deferredCreateWithGather(crossNodeCtx(t), f.agent)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrDeleteInProgress)
+	rec := httptest.NewRecorder()
+	dispatchCreateErrorResponse(rec, err, f.agent.ID)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	code, details := errorBody(t, rec)
+	assert.Equal(t, ErrCodeDeleteInProgress, code)
+	assert.Equal(t, f.agent.ID, details["agentId"])
+}
+
+func TestDispatchFailureError_HubSentinels(t *testing.T) {
+	row := func(result string) *store.BrokerDispatch {
+		return &store.BrokerDispatch{Op: "finalize_env", State: store.DispatchStateFailed, Error: "dispatch finalize_env: refused", Result: result}
+	}
+
+	t.Run("round trip", func(t *testing.T) {
+		execErr := fmt.Errorf("dispatch finalize_env: %w", fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress))
+		err := dispatchFailureError(row(dispatchFailureResult(execErr)))
+		assert.ErrorIs(t, err, store.ErrDeleteInProgress)
+		assert.ErrorIs(t, err, ErrLaunchInvalidPhase)
+		assert.EqualError(t, err, "dispatch finalize_env failed: dispatch finalize_env: refused", "the row's error text is kept")
+	})
+
+	t.Run("no sentinel, no envelope", func(t *testing.T) {
+		assert.Empty(t, dispatchFailureResult(errors.New("plain")))
+	})
+
+	t.Run("unknown names are ignored", func(t *testing.T) {
+		err := dispatchFailureError(row(`{"hubErrors":["not_a_sentinel"]}`))
+		assert.EqualError(t, err, "dispatch finalize_env failed: dispatch finalize_env: refused")
+		assert.NotErrorIs(t, err, store.ErrDeleteInProgress)
+		assert.NotErrorIs(t, err, ErrLaunchInvalidPhase)
+	})
+
+	t.Run("env still missing wins over a sentinel", func(t *testing.T) {
+		execErr := errors.Join(&ErrEnvStillMissing{Requirements: &RemoteEnvRequirementsResponse{Needs: []string{"K"}}}, store.ErrDeleteInProgress)
+		err := dispatchFailureError(row(dispatchFailureResult(execErr)))
+		var missing *ErrEnvStillMissing
+		assert.ErrorAs(t, err, &missing)
+		assert.NotErrorIs(t, err, store.ErrDeleteInProgress)
+	})
+}

@@ -1024,8 +1024,9 @@ type BrokerDispatchStore interface {
 	// FailBrokerDispatch marks a dispatch failed, records the error, bumps
 	// attempts, and records result (when non-empty) in the same update. On a
 	// failed row, result carries the typed failure envelope for the
-	// originating node: the broker's HTTP error answer (brokerError) and/or
-	// the env requirements a finalize still lacks (envStillMissing).
+	// originating node: the broker's HTTP error answer (brokerError), the
+	// env requirements a finalize still lacks (envStillMissing), and/or the
+	// hub sentinel errors it failed with (hubErrors).
 	FailBrokerDispatch(ctx context.Context, id, errMsg, result string) error
 
 	// GetBrokerDispatch returns a single dispatch row by ID (used by the
