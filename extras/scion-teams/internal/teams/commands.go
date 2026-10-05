@@ -705,6 +705,9 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 	}
 }
 
+// saveLinkFailedText is shown when a confirmed link cannot be stored.
+const saveLinkFailedText = "Couldn't save your account link. Please run `register` again."
+
 // saveConfirmedLink stores the confirmed link and tells the user. A link
 // without a Scion email is not stored, because requests are made as
 // "user:<email>".
@@ -718,17 +721,23 @@ func (h *CommandHandler) saveConfirmedLink(ctx context.Context, activity *Activi
 		return
 	}
 
-	if store := h.getStore(); store != nil {
-		mapping := &TeamsUserMapping{
-			TeamsUserID:      teamsUserID,
-			TeamsDisplayName: activity.From.Name,
-			ScionUserID:      userID,
-			ScionEmail:       email,
-			LinkedAt:         time.Now(),
-		}
-		if err := store.CreateUserMapping(ctx, mapping); err != nil {
-			h.log.Error("Failed to save user mapping", "error", err)
-		}
+	store := h.getStore()
+	if store == nil {
+		h.log.Error("Store not initialized, cannot save user mapping")
+		_ = h.sendReply(replyCtx, activity, saveLinkFailedText)
+		return
+	}
+	mapping := &TeamsUserMapping{
+		TeamsUserID:      teamsUserID,
+		TeamsDisplayName: activity.From.Name,
+		ScionUserID:      userID,
+		ScionEmail:       email,
+		LinkedAt:         time.Now(),
+	}
+	if err := store.CreateUserMapping(ctx, mapping); err != nil {
+		h.log.Error("Failed to save user mapping", "error", err)
+		_ = h.sendReply(replyCtx, activity, saveLinkFailedText)
+		return
 	}
 
 	_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))

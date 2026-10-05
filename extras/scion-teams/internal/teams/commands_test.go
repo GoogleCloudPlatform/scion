@@ -17,6 +17,7 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1059,4 +1060,24 @@ func TestSetupCommand_UnlinkedUserInLinkedChannelGetsRegisterHint(t *testing.T) 
 	require.Len(t, ms.sent, 1)
 	assert.Contains(t, ms.sent[0].Text, "`register`")
 	assert.NotContains(t, ms.sent[0].Text, "test-project")
+}
+
+// mappingSaveErrorStore fails every user mapping write.
+type mappingSaveErrorStore struct {
+	Store
+}
+
+func (mappingSaveErrorStore) CreateUserMapping(context.Context, *TeamsUserMapping) error {
+	return errors.New("database unavailable")
+}
+
+func TestSaveConfirmedLink_SaveErrorAsksToRegisterAgain(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	broker.store = mappingSaveErrorStore{Store: broker.store}
+
+	broker.commandHandler.saveConfirmedLink(context.Background(), testActivity("register"), "aad-user-1", "scion-1", "user@example.com")
+
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, "Couldn't save your account link. Please run `register` again.", ms.sent[0].Text)
+	assert.NotContains(t, ms.sent[0].Text, "Linked!")
 }
