@@ -181,3 +181,37 @@ func TestV2_ResolveRecipientChats_OnlyForReadableProjects(t *testing.T) {
 	assert.Equal(t, []int64{999}, b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder"))
 	assert.Nil(t, b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-2", "coder"))
 }
+
+func inputNeededFor(recipient string) *messages.StructuredMessage {
+	return &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().Format(time.RFC3339Nano),
+		Sender:    "agent:coder",
+		Recipient: recipient,
+		Msg:       "Should I deploy?",
+		Type:      messages.TypeInputNeeded,
+	}
+}
+
+func TestV2_InputNeededDM_SentOnlyForReadableProjects(t *testing.T) {
+	b, tgSrv, hub, principal := newDMScopeBroker(t)
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1", Slug: "alpha"}}}
+	ctx := context.Background()
+
+	require.NoError(t, b.Publish(ctx, "scion.project.proj-2.agent.coder.messages", inputNeededFor("user:alice@example.com")))
+	assert.Empty(t, tgSrv.getSentMessages(), "no ask-user DM for a project the recipient cannot read")
+
+	require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", inputNeededFor("user:alice@example.com")))
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, int64(456), sent[0].ChatID)
+	assert.Contains(t, sent[0].Text, "Should I deploy?")
+}
+
+func TestV2_InputNeededDM_NotSentWhenProjectListFails(t *testing.T) {
+	b, tgSrv, hub, _ := newDMScopeBroker(t)
+	hub.listUserProjectsErr = errors.New("list user projects returned status 500")
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", inputNeededFor("user:alice@example.com")))
+	assert.Empty(t, tgSrv.getSentMessages())
+}

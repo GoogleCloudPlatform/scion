@@ -1236,6 +1236,11 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
+	if !b.recipientCanReadProject(ctx, mapping, projectID) {
+		b.log.Debug("Input-needed recipient cannot read project, dropping DM", "project_id", projectID)
+		return nil
+	}
+
 	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
 	if err != nil {
 		b.log.Warn("Invalid Telegram user ID in mapping", "telegram_user_id", mapping.TelegramUserID, "error", err)
