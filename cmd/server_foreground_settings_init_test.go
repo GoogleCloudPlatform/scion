@@ -299,12 +299,14 @@ func TestColocatedBrokerRegisters(t *testing.T) {
 	}
 }
 
-// TestInitHubServer_CallsInitOperationalSettingsUnconditionally is the
-// caller-level guard for closed issue ptone/scion#1284, which was a
+// TestInitHubServer_CallsInitOperationalSettingsUnconditionally is a cheap
+// structural guard for closed issue ptone/scion#1284, which was a
 // postgres-only `if` around the operational-settings init in initHubServer.
-// It parses server_foreground.go and fails if the
-// initOperationalSettingsWithRetry call in initHubServer is missing or sits
-// under any `if` whose condition mentions the database driver.
+// It parses server_foreground.go and fails if initHubServer no longer calls
+// initOperationalSettingsWithRetry, or if that call sits inside any `if`
+// body/else or `switch` (the call may be the `if`'s own init statement, as
+// in `if err := call(); err != nil`). It is not a semantic check: an early
+// return before the call, or moving the call into a helper, is not seen.
 func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
@@ -337,21 +339,20 @@ func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T)
 			return true
 		}
 		found = true
-		for i, anc := range stack {
-			ifs, ok := anc.(*ast.IfStmt)
-			if !ok || i+1 >= len(stack) {
-				continue
-			}
-			// Only the guarded body/else counts; the call may legitimately
-			// be the if's own init/condition (`if err := call(); err != nil`).
-			if stack[i+1] == ifs.Init || stack[i+1] == ifs.Cond {
-				continue
-			}
-			var cond strings.Builder
-			_ = printer.Fprint(&cond, fset, ifs.Cond)
-			if strings.Contains(strings.ToLower(cond.String()), "driver") {
-				t.Errorf("initOperationalSettingsWithRetry is gated by `if %s` (%s); settings init must run on every driver",
-					cond.String(), fset.Position(ifs.Pos()))
+		for i, anc := range stack[:len(stack)-1] {
+			child := stack[i+1]
+			switch a := anc.(type) {
+			case *ast.IfStmt:
+				if child == a.Init || child == a.Cond {
+					continue
+				}
+				var cond strings.Builder
+				_ = printer.Fprint(&cond, fset, a.Cond)
+				t.Errorf("initOperationalSettingsWithRetry is conditional on `if %s` (%s); settings init must run on every driver",
+					cond.String(), fset.Position(a.Pos()))
+			case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+				t.Errorf("initOperationalSettingsWithRetry is inside a switch/select (%s); settings init must run on every driver",
+					fset.Position(anc.Pos()))
 			}
 		}
 		return true
