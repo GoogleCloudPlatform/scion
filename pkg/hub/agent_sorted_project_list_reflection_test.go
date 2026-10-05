@@ -134,6 +134,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     UpdateAgentDeletion, never by CreateAgent/UpdateAgent, and json:"-".
 //     Deletion is their computed view (ComputeAgentDeletion), set only on
 //     response copies.
+//   - SoftDeleteOpID: written only through SetAgentSoftDeleteOpID, and only
+//     meaningful on a soft-deleted row (see DeletedAt above).
 //
 // Every other exported field, including Slug (which a mutation of
 // agentResource to read ScopeUserID would depend on), is filled and
@@ -179,6 +181,11 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
 	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
 	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
+	// soft_delete_op_id is written only through SetAgentSoftDeleteOpID
+	// (never by CreateAgent/UpdateAgent) and is set only alongside
+	// DeletedAt, which GetAgentsByIDs filters out. It is json:"-" and not
+	// an authz input.
+	"SoftDeleteOpID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
