@@ -428,7 +428,6 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 }
 
 // ListTopics returns non-deleted topics for a project, ordered by last_activity_at DESC.
-// Lazily creates #general if none exists.
 func (s *pgWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
@@ -465,6 +464,55 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
 	}
 
+	return topics, nil
+}
+
+// ListTopicsByProjects returns non-deleted topics for several projects in
+// one query, ordered by project_id and then last_activity_at DESC.
+func (s *pgWebChatStore) ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(projectIDs))
+	args := make([]interface{}, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       last_activity_at, deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s) AND deleted_at IS NULL
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var topics []WebChatTopic
+	for rows.Next() {
+		var t WebChatTopic
+		var activityAt *time.Time
+		var deletedAt *time.Time
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &t.IsGeneral, &t.DefaultAgent,
+			&t.ConversationID,
+			&t.CreatedBy, &t.CreatedAt, &t.LastMessageID, &activityAt, &deletedAt); err != nil {
+			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+		}
+		if activityAt != nil {
+			t.LastActivityAt = *activityAt
+		}
+		t.DeletedAt = deletedAt
+		topics = append(topics, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects rows: %w", err)
+	}
 	return topics, nil
 }
 

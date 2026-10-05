@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -290,4 +291,40 @@ func TestUpdateAgentStatus_DispatchReadyAndHarnessReadyTiming(t *testing.T) {
 		assert.NotContains(t, logged, "dispatch ready")
 		assert.NotContains(t, logged, "harness ready")
 	})
+}
+
+// TestStatusUpdateIsEmpty_EveryFieldCounts catches drift between
+// store.AgentStatusUpdate and statusUpdateIsEmpty: a field added to the
+// struct but not to the predicate would let a report carrying only that
+// field be dropped as a guarded no-op ({"applied":false}) during a delete
+// or reincarnation. Each field is set to a non-zero value in turn.
+func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
+	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{}), "the zero value is empty")
+
+	typ := reflect.TypeOf(store.AgentStatusUpdate{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			var su store.AgentStatusUpdate
+			v := reflect.ValueOf(&su).Elem().Field(i)
+			switch v.Kind() {
+			case reflect.String:
+				v.SetString("x")
+			case reflect.Bool:
+				v.SetBool(true)
+			case reflect.Pointer:
+				elem := reflect.New(v.Type().Elem())
+				v.Set(elem)
+			case reflect.Map:
+				m := reflect.MakeMap(v.Type())
+				m.SetMapIndex(reflect.ValueOf("k").Convert(v.Type().Key()), reflect.Zero(v.Type().Elem()))
+				v.Set(m)
+			default:
+				t.Fatalf("unhandled kind %s for AgentStatusUpdate.%s: extend this test and statusUpdateIsEmpty", v.Kind(), field.Name)
+			}
+			require.False(t, reflect.ValueOf(su).IsZero(), "sanity: the field must be non-zero")
+			assert.False(t, statusUpdateIsEmpty(su),
+				"statusUpdateIsEmpty must report false when AgentStatusUpdate.%s is set", field.Name)
+		})
+	}
 }

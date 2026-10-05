@@ -670,6 +670,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
+		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
 		// shared_dir_storage_backend "nfs" needs a complete
 		// server.shared_dir_storage.nfs block, which lives only in the
 		// global settings file. Configuration only; no mount is checked.
@@ -1144,6 +1148,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
+		}
+		if srv.SharedDirStorage != nil && !isZeroStruct(srv.SharedDirStorage) {
+			keys = append(keys, "server.shared_dir_storage")
+		}
+		if srv.HomeStorage != nil && !isZeroStruct(srv.HomeStorage) {
+			keys = append(keys, "server.home_storage")
 		}
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
