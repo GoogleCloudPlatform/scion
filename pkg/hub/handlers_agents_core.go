@@ -2278,12 +2278,13 @@ func (s *Server) createAgentInProject(
 					})
 					return
 				} else {
-					s.preserveTerminalPhase(ctx, agent)
-					if agent.Phase == string(state.PhaseCreated) {
-						agent.Phase = string(state.PhaseProvisioning)
-					}
-					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
-						warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+					if !s.preserveTerminalPhase(ctx, agent) {
+						if agent.Phase == string(state.PhaseCreated) {
+							agent.Phase = string(state.PhaseProvisioning)
+						}
+						if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+							warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+						}
 					}
 				}
 			} else {
@@ -2342,12 +2343,13 @@ func (s *Server) createAgentInProject(
 					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
-					s.preserveTerminalPhase(ctx, agent)
-					if agent.Phase == string(state.PhaseCreated) {
-						agent.Phase = string(state.PhaseProvisioning)
-					}
-					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
-						warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+					if !s.preserveTerminalPhase(ctx, agent) {
+						if agent.Phase == string(state.PhaseCreated) {
+							agent.Phase = string(state.PhaseProvisioning)
+						}
+						if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+							warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+						}
 					}
 				}
 			}
@@ -2444,13 +2446,20 @@ func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
 // UpdateAgent call does not overwrite it with the broker-reported phase.
 // This prevents a race where sciontool reports an error (e.g. git clone
 // failure) while the broker dispatch is still in flight.
-func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) {
+//
+// It returns true when the row was soft-deleted while the dispatch was in
+// flight. The caller then skips the post-dispatch write: the row belongs to
+// the delete, and writing the in-memory agent would clear its DeletedAt.
+func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) (softDeleted bool) {
 	current, err := s.store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		return false
+	}
 	// A soft-deleted row is left alone: adopting its StateVersion would let
 	// the caller's write (zero DeletedAt in memory) win the CAS and clear
-	// deleted_at. The write then conflicts and the retry merges into the row.
-	if err != nil || !current.DeletedAt.IsZero() {
-		return
+	// deleted_at.
+	if !current.DeletedAt.IsZero() {
+		return true
 	}
 	p := state.Phase(current.Phase)
 	if p == state.PhaseError || p == state.PhaseStopped {
@@ -2459,6 +2468,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 		agent.Message = current.Message
 		agent.StateVersion = current.StateVersion
 	}
+	return false
 }
 
 func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agent) error {
@@ -2474,6 +2484,11 @@ func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agen
 	latest, getErr := s.store.GetAgent(ctx, agent.ID)
 	if getErr != nil {
 		return getErr
+	}
+	if !latest.DeletedAt.IsZero() {
+		// Soft-deleted while the dispatch was in flight: the row belongs to
+		// the delete, so the dispatch result is not written.
+		return nil
 	}
 
 	mergeDispatchedAgent(latest, agent)

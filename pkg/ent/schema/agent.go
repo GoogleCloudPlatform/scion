@@ -429,6 +429,16 @@ func (Agent) Fields() []ent.Field {
 		field.String("start_claim_launch_id").
 			Optional().
 			Default(""),
+
+		// soft_delete_op_id is the operation ID of the soft delete that
+		// produced the current DeletedAt. The soft delete deactivates the
+		// agent's delegation edges under this ID, and restore reactivates
+		// exactly those edges, then clears it. NULL on a live agent and on
+		// an agent soft-deleted before the column existed. Lifecycle
+		// bookkeeping only: no authorization decision reads it.
+		field.String("soft_delete_op_id").
+			Optional().
+			Nillable(),
 	}
 }
 
