@@ -58,6 +58,8 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import {
@@ -138,6 +140,11 @@ function formatDurationHMS(totalSeconds: number): string {
 export class ScionPageAgentDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
   readonly _zone = new DisplayZoneController(this);
+
+  /** Lease timer for this agent's delete view (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agent ? [this.agent] : []
+  );
 
   @property({ type: Object })
   pageData: PageData | null = null;
@@ -755,6 +762,16 @@ export class ScionPageAgentDetail extends LitElement {
     }, DELETE_REDIRECT_DELAY_MS);
   }
 
+  /**
+   * DELETE returned 202: the hub is still deleting (ptone/scion#2483). Stay
+   * on the page with "Deleting…" shown from the response's `deletion`; the
+   * SSE `deleted` event then runs `showDeletedStateThenRedirect` through
+   * `onAgentsUpdated`, as it does for a delete started elsewhere.
+   */
+  private async keepDeletingAgent(response: Response): Promise<void> {
+    stateManager.applyDeleteAccepted(this.agentId, await readAcceptedDeletion(response));
+  }
+
   private onProjectsUpdated(): void {
     if (this.agent?.projectId) {
       const updatedProject = stateManager.getProject(this.agent.projectId);
@@ -964,11 +981,20 @@ export class ScionPageAgentDetail extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
+              if (forceResponse.status === 202) {
+                await this.keepDeletingAgent(forceResponse);
+                return;
+              }
               this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
+        }
+
+        if (response.status === 202) {
+          await this.keepDeletingAgent(response);
+          return;
         }
 
         this.showDeletedStateThenRedirect();
@@ -1285,6 +1311,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderHeader() {
     const agent = this.agent!;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
       <div class="header">
         <div class="header-info">
@@ -1295,6 +1324,10 @@ export class ScionPageAgentDetail extends LitElement {
               status=${getAgentDisplayStatus(agent) as StatusType}
               label=${getAgentDisplayStatus(agent)}
             ></scion-status-badge>
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              live
+            ></scion-deletion-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1380,7 +1413,7 @@ export class ScionPageAgentDetail extends LitElement {
             : nothing}
           ${isAgentRunning(agent)
             ? html`
-                ${canLifecycle(agent._capabilities)
+                ${lifecycleOk
                   ? html`
                       ${agent.harnessCapabilities?.resume?.support !== 'no'
                         ? html`
@@ -1412,7 +1445,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-button
                       variant="success"
@@ -1426,7 +1459,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -1465,7 +1498,7 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
                   variant="danger"
@@ -1532,6 +1565,10 @@ export class ScionPageAgentDetail extends LitElement {
                 label=${agent.phase}
                 size="small"
               ></scion-status-badge>
+              <scion-deletion-badge
+                .deletion=${this.deletionLease.view(agent)}
+                size="small"
+              ></scion-deletion-badge>
             </span>
           </div>
           <div class="info-item">

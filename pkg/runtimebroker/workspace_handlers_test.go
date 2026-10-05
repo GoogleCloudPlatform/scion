@@ -64,7 +64,7 @@ func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles 
 	return true, nil
 }
 
-func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
