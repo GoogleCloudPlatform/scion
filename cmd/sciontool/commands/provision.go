@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/spf13/cobra"
 )
 
@@ -110,6 +111,9 @@ func init() {
 }
 
 func runProvision(ctx context.Context) error {
+	if err := validateProvisionOwner(provisionUID, provisionGID); err != nil {
+		return err
+	}
 	cloneURL := os.Getenv("SCION_CLONE_URL")
 	cloneBranch := os.Getenv("SCION_CLONE_BRANCH")
 	projectID := os.Getenv("SCION_PROJECT_ID")
@@ -402,4 +406,17 @@ func runWaitForSentinel(ctx context.Context) error {
 		case <-time.After(interval):
 		}
 	}
+}
+
+// validateProvisionOwner checks the --uid and --gid values before anything
+// is created or chowned. 0 is accepted and keeps meaning "use the default
+// 1000" (see provision.ProvisionInput.NFSUID).
+func validateProvisionOwner(uid, gid int) error {
+	if err := fsutil.ValidateOwnerID("--uid", uid); err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	if err := fsutil.ValidateOwnerID("--gid", gid); err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -339,5 +340,73 @@ func TestRunProvision_ChownFailure_BestEffortWhenRequested(t *testing.T) {
 	}
 	if !sentinel {
 		t.Error("sentinel must be written after best-effort provisioning")
+	}
+}
+
+// TestValidateProvisionOwner covers the --uid/--gid range check: 0 keeps
+// meaning "use the default 1000" (provision.resolveUID), so it is accepted;
+// negative values (including -1, which chown reads as "leave unchanged")
+// and values above fsutil.MaxOwnerID are rejected with the flag named.
+func TestValidateProvisionOwner(t *testing.T) {
+	tests := []struct {
+		name     string
+		uid, gid int64
+		wantFlag string
+	}{
+		{"defaults", 1000, 1000, ""},
+		{"zero means default", 0, 0, ""},
+		{"maximum", 4294967294, 4294967294, ""},
+		{"negative one uid", -1, 1000, "--uid"},
+		{"negative one gid", 1000, -1, "--gid"},
+		{"negative uid", -5, 1000, "--uid"},
+		{"unsigned sentinel uid", 4294967295, 1000, "--uid"},
+		{"out of range gid", 1000, 1 << 33, "--gid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProvisionOwner(int(tt.uid), int(tt.gid))
+			if tt.wantFlag == "" {
+				if err != nil {
+					t.Fatalf("validateProvisionOwner(%d, %d) = %v, want nil", tt.uid, tt.gid, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantFlag) {
+				t.Fatalf("validateProvisionOwner(%d, %d) = %v, want an error naming %s", tt.uid, tt.gid, err, tt.wantFlag)
+			}
+		})
+	}
+}
+
+// TestRunProvision_RejectsInvalidOwnerBeforeChanges checks that an invalid
+// --uid stops provisioning before anything is created: no workspace
+// directory and no sentinel.
+func TestRunProvision_RejectsInvalidOwnerBeforeChanges(t *testing.T) {
+	for _, uid := range []int{-1, -1000} {
+		t.Run(strconv.Itoa(uid), func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			t.Setenv("SCION_CLONE_URL", "")
+			t.Setenv("SCION_SHARED_DIR_PATHS", "")
+			t.Setenv("SCION_WORKSPACE_MODE", "")
+			t.Setenv("SCION_PROVISION_STATE_DIR", "")
+			t.Setenv("SCION_PROJECT_ID", "proj-owner-check")
+
+			oldWorkspace, oldMode, oldUID, oldGID := provisionWorkspace, provisionMode, provisionUID, provisionGID
+			t.Cleanup(func() {
+				provisionWorkspace, provisionMode, provisionUID, provisionGID = oldWorkspace, oldMode, oldUID, oldGID
+			})
+			provisionWorkspace = workspace
+			provisionMode = "shared-plain"
+			provisionUID = uid
+			provisionGID = os.Getgid()
+
+			err := runProvision(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "--uid") {
+				t.Fatalf("runProvision with --uid %d = %v, want an error naming --uid", uid, err)
+			}
+			if _, statErr := os.Stat(workspace); !os.IsNotExist(statErr) {
+				t.Errorf("workspace %s was created (stat err %v); want no changes", workspace, statErr)
+			}
+		})
 	}
 }

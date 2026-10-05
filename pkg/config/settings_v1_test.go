@@ -5008,6 +5008,49 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	// uid/gid are checked after ApplyNFSDefaults, so an unset (0) value is
+	// already the default 1000 and passes; negative values (including -1,
+	// which chown reads as "leave unchanged") and values above
+	// 4294967294 are rejected with the field named.
+	t.Run("uid and gid range", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			uid, gid  int64
+			wantField string
+		}{
+			{"unset uses defaults", 0, 0, ""},
+			{"explicit", 2000, 3000, ""},
+			{"maximum", 4294967294, 4294967294, ""},
+			{"negative one uid", -1, 1000, "workspace_storage.nfs.uid"},
+			{"negative one gid", 1000, -1, "workspace_storage.nfs.gid"},
+			{"negative uid", -7, 1000, "workspace_storage.nfs.uid"},
+			{"unsigned sentinel gid", 1000, 4294967295, "workspace_storage.nfs.gid"},
+			{"out of range uid", 1 << 33, 1000, "workspace_storage.nfs.uid"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				ws := &V1WorkspaceStorageConfig{
+					Backend: "nfs",
+					NFS: &V1NFSConfig{
+						Shares: []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}},
+						UID:    int(tt.uid),
+						GID:    int(tt.gid),
+					},
+				}
+				ws.ApplyNFSDefaults()
+				err := ws.ValidateNFS()
+				if tt.wantField == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantField)
+				// ValidateWorkspaceStorage (hub startup) reports it too.
+				require.Error(t, ws.ValidateWorkspaceStorage())
+			})
+		}
+	})
+
 	t.Run("local backend skips validation", func(t *testing.T) {
 		ws := &V1WorkspaceStorageConfig{Backend: "local"}
 		err := ws.ValidateNFS()

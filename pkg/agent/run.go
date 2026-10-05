@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/google/uuid"
 )
 
@@ -1569,6 +1570,15 @@ authDone:
 				nfsSubPathRoot = settings.Server.WorkspaceStorage.NFS.SubPathRoot
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
+				// A broker only warns about invalid workspace_storage at
+				// startup, so check the ids here before the runtime uses
+				// them for ownership. 0 still means "use the default 1000".
+				if err := fsutil.ValidateOwnerID("server.workspace_storage.nfs.uid", nfsUID); err != nil {
+					return nil, err
+				}
+				if err := fsutil.ValidateOwnerID("server.workspace_storage.nfs.gid", nfsGID); err != nil {
+					return nil, err
+				}
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
 			}
 		}

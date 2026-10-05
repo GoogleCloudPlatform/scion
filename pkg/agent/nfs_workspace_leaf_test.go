@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -692,4 +693,64 @@ func TestStartNFSWorkspace_PermissionDeniedLeavesDirectoryToNode(t *testing.T) {
 	require.Equal(t, 1, ranCount, "the pod must still be created")
 	assert.False(t, existedAtRun)
 	assert.False(t, cfg.NFSWorkspacePreCreated)
+}
+
+// Start checks the configured workspace_storage.nfs uid/gid before the
+// runtime gets them: a broker only warns about invalid settings at
+// startup, so an out-of-range id must stop the start here with the field
+// named, and the pod is never created. Valid values, including the
+// default, still start.
+func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		ownerYAML string
+		wantField string
+		wantUID   int
+	}{
+		{name: "unset uses default", ownerYAML: "", wantUID: 1000},
+		{name: "explicit", ownerYAML: "      uid: 2000\n      gid: 2000\n", wantUID: 2000},
+		{name: "maximum", ownerYAML: "      uid: 4294967294\n", wantUID: 4294967294},
+		{name: "negative one uid", ownerYAML: "      uid: -1\n", wantField: "nfs.uid"},
+		{name: "negative gid", ownerYAML: "      gid: -5\n", wantField: "nfs.gid"},
+		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "nfs.uid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot+"\n"+strings.TrimSuffix(tt.ownerYAML, "\n")))
+			ran := false
+			var got runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return "kubernetes" },
+				RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					ran = true
+					got = rc
+					return "mock-id", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+				Env:         map[string]string{"SCION_PROJECT_ID": testNFSWorkspaceProjectID},
+				GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+			})
+			if tt.wantField != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantField)
+				assert.False(t, ran, "the pod must not be created")
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, ran)
+			if tt.wantUID == 1000 && tt.ownerYAML == "" {
+				// 0 or 1000: both mean the default to the runtime.
+				assert.Contains(t, []int{0, 1000}, got.NFSUID)
+				return
+			}
+			assert.Equal(t, tt.wantUID, got.NFSUID)
+		})
+	}
 }
