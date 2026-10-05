@@ -396,7 +396,7 @@ func TestK8sPreCleanForRun_RemovesStaleObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _, _, enf := newRunScopeRuntime(t)
 			rsSeedRun(t, rt, tc.labels, tc.phase, "old")
-			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
+			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil); err != nil {
 				t.Fatalf("preCleanForRun: %v", err)
 			}
 			want := rsAllGone
@@ -418,7 +418,7 @@ func TestK8sPreCleanForRun_NoPod_RemovesOtherRunSecrets(t *testing.T) {
 	rsSeedSecret(t, rt, rsAuthSecret, "auth-legacy", rsLabels("", ""))
 	rsSeedSPC(t, rt, "spc-b", rsLabels(rsRunB, ""))
 
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil); err != nil {
 		t.Fatalf("preCleanForRun: %v", err)
 	}
 	rsExpect(t, rt, rsAllGone)
@@ -432,7 +432,7 @@ func TestK8sPreCleanForRun_PodReadError_FailsClosed(t *testing.T) {
 	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, fmt.Errorf("simulated API failure")
 	})
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err == nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil); err == nil {
 		t.Fatal("preCleanForRun succeeded despite the pod read failure")
 	}
 	if n := enf.count(); n != 0 {
@@ -669,7 +669,7 @@ func TestK8sPreCleanForRun_TerminatingOtherRunPod_ForceDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed pod: %v", err)
 	}
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil); err != nil {
 		t.Fatalf("preCleanForRun: %v", err)
 	}
 	if rsPod(t, rt) != nil {
@@ -686,7 +686,7 @@ func TestK8sPreCleanForRun_PodDeleteConflict_RunConflict(t *testing.T) {
 	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("precondition failed"))
 	})
-	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA)
+	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil)
 	if !errors.Is(err, ErrRunConflict) {
 		t.Fatalf("preCleanForRun error = %v, want ErrRunConflict", err)
 	}
@@ -832,7 +832,7 @@ func TestK8sRunScope_InvalidRunID_Refused(t *testing.T) {
 	if err := rt.Delete(context.Background(), RunRef{ID: rsAgent, RunID: bad}); !errors.Is(err, errInvalidRunID) || errors.Is(err, ErrRunMismatch) {
 		t.Errorf("Delete error = %v, want the invalid run ID error", err)
 	}
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, bad); !errors.Is(err, errInvalidRunID) {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, bad, false, nil); !errors.Is(err, errInvalidRunID) {
 		t.Errorf("preCleanForRun error = %v, want the invalid run ID error", err)
 	}
 	rsExpect(t, rt, rsAllPresent)
@@ -865,7 +865,7 @@ func TestK8sPreCleanForRun_PodDeleteError_FailsStart(t *testing.T) {
 	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("rbac"))
 	})
-	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA)
+	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, false, nil)
 	if err == nil || !k8serrors.IsForbidden(err) {
 		t.Fatalf("preCleanForRun error = %v, want the Forbidden error", err)
 	}
@@ -909,7 +909,7 @@ func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
 	t.Run("pod read error", func(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
 		cs.PrependReactor("get", "pods", forbidden("pods"))
-		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA)
+		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA, false, nil)
 		check(t, err)
 		if !k8serrors.IsForbidden(err) {
 			t.Errorf("cause lost: %v", err)
@@ -919,7 +919,7 @@ func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
 		seedPodIn(t, rt)
 		cs.PrependReactor("delete", "pods", forbidden("pods"))
-		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA)
+		err := rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA, false, nil)
 		check(t, err)
 		if !k8serrors.IsForbidden(err) {
 			t.Errorf("cause lost: %v", err)
@@ -927,7 +927,7 @@ func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
 	})
 	t.Run("invalid run ID", func(t *testing.T) {
 		rt, _, _, _ := newRunScopeRuntime(t)
-		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA+",x"))
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA+",x", false, nil))
 	})
 	t.Run("AlreadyExists list error", func(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
@@ -1011,13 +1011,13 @@ func TestK8sRunScope_RunConflictErrorsCarryNoIdentity(t *testing.T) {
 	t.Run("live pod of another run", func(t *testing.T) {
 		rt, _, _, _ := newRunScopeRuntime(t)
 		seedPod(t, rt, corev1.PodRunning)
-		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA))
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA, false, nil))
 	})
 	t.Run("pre-clean pod delete conflict", func(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
 		seedPod(t, rt, corev1.PodSucceeded)
 		cs.PrependReactor("delete", "pods", conflict)
-		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA))
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA, false, nil))
 	})
 	t.Run("existing object of another run", func(t *testing.T) {
 		rt, _, _, _ := newRunScopeRuntime(t)

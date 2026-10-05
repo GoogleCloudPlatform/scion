@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -201,10 +202,9 @@ func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, na
 //     the delete, the newer pod survives and ErrRunMismatch is returned, so
 //     the caller leaves the newer run's files alone too.
 //
-// The pod is deleted immediately (grace period 0), as the name-based path
-// does. ptone/scion#2956 (NFS agent home) changes the name-based path to
-// podDeleteOptions(pod); the same options apply here, alongside the UID
-// precondition, when the two are combined.
+// The pod is deleted with podDeleteOptions(pod), as on the name-based path:
+// immediately (grace period 0), except an NFS-home pod, which is deleted
+// with its own grace period. The UID precondition applies either way.
 func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, runID string) error {
 	if err := validateRunIDLabel(runID); err != nil {
 		return err
@@ -236,11 +236,11 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 	}
 	r.deleteAgentSecretsBySelector(ctx, namespace, podName, selector, warn)
 
-	gracePeriod := int64(0)
-	err = pods.Delete(ctx, podName, metav1.DeleteOptions{
-		GracePeriodSeconds: &gracePeriod,
-		Preconditions:      k8sUIDPrecondition(pod.UID),
-	})
+	// Immediate deletion, except an NFS-home pod, which is deleted with its
+	// grace period (podDeleteOptions), as on the name-based path.
+	opts := podDeleteOptions(pod)
+	opts.Preconditions = k8sUIDPrecondition(pod.UID)
+	err = pods.Delete(ctx, podName, opts)
 	switch {
 	case err == nil, k8serrors.IsNotFound(err):
 		return nil
@@ -272,10 +272,19 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 //     deleted) makes Run fail with ErrRunConflict before anything is
 //     deleted;
 //   - otherwise the per-agent Secrets and SecretProviderClass not labelled
-//     with the new run are deleted with UID preconditions, and then the pod
+//     with the new run are deleted with UID preconditions, and the pod
 //     (finished, legacy, or a retry of this same run), also with a UID
-//     precondition. A pod replaced between the Get and the delete belongs
-//     to a concurrent start; Run then fails with ErrRunConflict.
+//     precondition (removePreviousPodForRun). A pod replaced between the
+//     Get and the delete belongs to a concurrent start; Run then fails with
+//     ErrRunConflict.
+//
+// NFS-home agents (GoogleCloudPlatform/scion#2534): Run holds the home start
+// lock around this call. A previous NFS-home pod is deleted gracefully and
+// waited for (removePreviousPodForRun), including one already terminating.
+// For an NFS-home start (nfsHomeStart) the Secrets/SPC are deleted only
+// after that, and a pod read failure or an unconfirmed stop carries
+// errPreviousPodUnconfirmed. These are the rules of the name-based
+// cleanupStalePod path.
 //
 // A failure to read the pod, or to delete it (other than NotFound), fails
 // the start (retryable) rather than deleting without knowing whose pod
@@ -291,7 +300,7 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 // of the start. It is therefore selected by the run label and the object
 // name only, never by other labels (a project recreated under the same
 // name gets a new project ID but the same object names).
-func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string) error {
+func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string, nfsHomeStart bool, hs *HomeStorageRealization) error {
 	if err := validateRunIDLabel(runID); err != nil {
 		return err
 	}
@@ -301,7 +310,13 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	case k8serrors.IsNotFound(err):
 		pod = nil
 	case err != nil:
-		return opaqueStartError("failed to read the existing agent pod before start", err,
+		cause := err
+		if nfsHomeStart {
+			// An NFS-home start never proceeds past a pod it could not
+			// read: it may be a previous pod still writing to the home.
+			cause = fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err)
+		}
+		return opaqueStartError("failed to read the existing agent pod before start", cause,
 			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
 	if pod != nil {
@@ -317,34 +332,45 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	}
 	// Every per-agent object Run creates carries scion.agent (see
 	// createAgentSecret); "!=" also selects objects with no run label.
-	r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, warn)
+	deleteSecrets := func() {
+		r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, warn)
+	}
 
+	// An NFS-home start deletes the Secrets/SPC only after the previous pod
+	// is confirmed stopped, so a pod still shutting down keeps the secrets
+	// it mounted (as cleanupStalePod's caller does); other starts delete
+	// them first, as before.
+	if !nfsHomeStart {
+		deleteSecrets()
+	}
+	if err := r.removePreviousPodForRun(ctx, namespace, podName, runID, pod, hs); err != nil {
+		return err
+	}
+	if nfsHomeStart {
+		deleteSecrets()
+	}
+	return nil
+}
+
+// removePreviousPodForRun deletes pod (the previous pod holding the agent
+// name, nil if none), already checked by preCleanForRun, with a UID
+// precondition. A pod that is not an NFS-home pod is deleted immediately,
+// as before. An NFS-home pod (isNFSHomePod) is never force-deleted: it is
+// deleted with its own grace period (podDeleteOptions) and the start waits
+// until its containers are confirmed stopped (waitForPodTermination), so the
+// new pod never writes to the home while the old one still does. That also
+// covers a pod that is already terminating: the graceful delete does not
+// shorten its grace period, and the wait still applies. These are the
+// rules cleanupStalePod applies on the name-based path (GoogleCloudPlatform/scion#2534).
+func (r *KubernetesRuntime) removePreviousPodForRun(ctx context.Context, namespace, podName, runID string, pod *corev1.Pod, hs *HomeStorageRealization) error {
 	if pod == nil {
 		return nil
 	}
-	// MERGE NOTE (ptone/scion#2956, NFS agent home): this pre-clean replaces
-	// cleanupStalePod for every run-labelled start, so 2956's NFS-home
-	// branch of cleanupStalePod must be ported here, or two pods can write
-	// to one home. For an NFS-home pod (isNFSHomePod) it must:
-	//   1. take the home start lock, as cleanupStalePod's caller does;
-	//   2. delete the old pod gracefully (podDeleteOptions(pod)), keeping
-	//      this UID precondition, and wait for it to stop
-	//      (waitForPodTermination);
-	//   3. delete the Secrets/SPC only after the pod has stopped (above,
-	//      they are deleted first);
-	//   4. wait for a pod that is already terminating rather than
-	//      force-delete it.
-	// A pod read error already fails the start, as 2956 requires.
-	// Whichever of ptone/scion#3100 and ptone/scion#2956 lands second does
-	// the port.
-	gracePeriod := int64(0)
-	err = pods.Delete(ctx, podName, metav1.DeleteOptions{
-		GracePeriodSeconds: &gracePeriod,
-		Preconditions:      k8sUIDPrecondition(pod.UID),
-	})
+	opts := podDeleteOptions(pod)
+	opts.Preconditions = k8sUIDPrecondition(pod.UID)
+	err := r.Client.Clientset.CoreV1().Pods(namespace).Delete(ctx, podName, opts)
 	switch {
 	case err == nil, k8serrors.IsNotFound(err):
-		return nil
 	case k8serrors.IsConflict(err):
 		return runConflictError("Start refused: the agent pod was recreated by another start",
 			"pod", podName, "namespace", namespace, "run_id", runID)
@@ -352,9 +378,39 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 		// Fail the start (retryable) rather than go on to a pod create
 		// that would only report the old pod as still there; a Forbidden
 		// or API error is surfaced as itself.
-		return opaqueStartError("failed to delete the stale agent pod before start", err,
+		cause := err
+		if isNFSHomePod(pod) {
+			cause = fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err)
+		}
+		return opaqueStartError("failed to delete the stale agent pod before start", cause,
 			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
+	if !isNFSHomePod(pod) {
+		return nil
+	}
+	bound := nfsHomeTerminationBound(pod, hs)
+	runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace,
+		"run_id", runID, "bound", bound.String(), "phase", "home-wait")
+	if err := r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound); err != nil {
+		return opaqueStartError("the previous agent pod has not been confirmed stopped", err,
+			"pod", podName, "namespace", namespace, "run_id", runID)
+	}
+	return nil
+}
+
+// nfsHomeTerminationBound is how long a start waits for the previous
+// NFS-home pod to stop: its own grace period (or the default) plus the
+// configured termination wait (or the default).
+func nfsHomeTerminationBound(pod *corev1.Pod, hs *HomeStorageRealization) time.Duration {
+	wait := defaultHomeTerminationWaitSeconds
+	if hs != nil && hs.TerminationWaitSeconds > 0 {
+		wait = hs.TerminationWaitSeconds
+	}
+	grace := defaultHomeStopGraceSeconds
+	if g := pod.Spec.TerminationGracePeriodSeconds; g != nil && *g > 0 {
+		grace = int(*g)
+	}
+	return time.Duration(grace+wait) * time.Second
 }
 
 // replaceExistingAgentObject makes room for a per-agent Secret or
