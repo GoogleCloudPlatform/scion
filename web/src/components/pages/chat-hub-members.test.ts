@@ -423,6 +423,10 @@ describe('hub members: hub presence fetch', () => {
     });
     const page = await mountPage();
     try {
+      // Rail reloads here stand for later messages; the route re-parse a real
+      // rail-loaded triggers would claim the sidebar again and is not under
+      // test.
+      (page as unknown as { parseV2Route: () => void }).parseV2Route = vi.fn();
       railLoaded(page);
       await settle();
       // Request A in flight; a space expands, then the hub view returns.
@@ -435,6 +439,60 @@ describe('hub members: hub presence fetch', () => {
 
       // A lands for a view that moved on: dropped, but B keeps its claim.
       held[0]?.resolve(new Response(JSON.stringify({ humans: [] }), { status: 200 }));
+      await settle();
+      railLoaded(page);
+      await settle();
+
+      expect(presenceReads()).toBe(2);
+
+      // B merges, and keeps the view's presence claimed.
+      held[1]?.resolve(
+        new Response(JSON.stringify({ humans: [{ id: 'u1', presenceState: 'active' }] }), {
+          status: 200,
+        })
+      );
+      await settle();
+      expect(page.v2HumanMembers.find((h) => h.id === 'u1')?.presenceState).toBe('active');
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it("a poll resync overlapping the first presence request takes the claim: the first one's failure does not release it", async () => {
+    const held: Array<Deferred<Response>> = [];
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p1/members') {
+        const d = deferred<Response>();
+        held.push(d);
+        return d.promise;
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      // Request M, held.
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(1);
+
+      // The poll's resync P, held too.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(presenceReads()).toBe(2);
+
+      held[1]?.resolve(
+        new Response(JSON.stringify({ humans: [{ id: 'u1', presenceState: 'active' }] }), {
+          status: 200,
+        })
+      );
+      await settle();
+      expect(page.v2HumanMembers.find((h) => h.id === 'u1')?.presenceState).toBe('active');
+
+      held[0]?.resolve(new Response('', { status: 500 }));
       await settle();
       railLoaded(page);
       await settle();
