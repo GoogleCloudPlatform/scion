@@ -58,7 +58,9 @@ type RuntimeBrokerHostingError struct {
 }
 
 // Code returns the frozen error code.
-func (e *RuntimeBrokerHostingError) Code() string { return api.ErrCodeFlatRuntimeBrokerRemoteUnsupported }
+func (e *RuntimeBrokerHostingError) Code() string {
+	return api.ErrCodeFlatRuntimeBrokerRemoteUnsupported
+}
 
 func (e *RuntimeBrokerHostingError) Error() string {
 	return fmt.Sprintf("%s: server.broker.instances requires the Hub in the same process in this release; "+
