@@ -346,6 +346,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 		ProjectPath: projectPath,
 		ResolvedEnv: map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 		HTTPRequest: r,
@@ -367,6 +368,13 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // a verified Kubernetes runtime must keep passthrough rather than downgrade
 // to block. srv.resolveAuxiliaryRuntime returns a mock "kubernetes" runtime
 // so the outcome never depends on ambient cluster reachability.
+//
+// Like every env-carried fixture in this file, resolvedEnv includes
+// SCION_METADATA_MODE_SOURCE=hub, as the hub sends on real start/restart
+// dispatches. Without it, effectiveGCPMetadataMode treats the elevated mode
+// as unattributed and lowers it to block before the downgrade logic runs:
+// here that is rejected on Kubernetes, and the "downgraded" tests would pass
+// without exercising downgradeUnverifiedHubDefaultPassthrough at all.
 func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
@@ -380,6 +388,7 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *t
 		ProjectPath: projectPath,
 		ResolvedEnv: map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 		HTTPRequest: r,
@@ -542,6 +551,7 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})
@@ -632,6 +642,7 @@ func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})
