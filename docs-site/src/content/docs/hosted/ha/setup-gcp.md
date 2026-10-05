@@ -1007,10 +1007,10 @@ gcloud run deploy scion-hub \
 ```
 
 :::note[Why min-instances=2?]
-An HA Hub needs at least two running replicas, so that one instance can fail
-or be replaced during a redeploy while the other keeps serving. With
-`--min-instances=1` there is no failover peer, and the deployment is not HA
-(see [HA overview](/scion/hosted/ha/overview/)). `--max-instances=3` leaves
+An HA Hub needs at least two running replicas, so that losing one instance
+(crash, host maintenance, scale-in) never leaves the Hub with zero warm
+replicas. With `--min-instances=1` there is no failover peer, and the
+deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)). `--max-instances=3` leaves
 room for Cloud Run to scale up under load.
 :::
 
@@ -1179,9 +1179,10 @@ gcloud run deploy scion-discord \
 ```
 
 :::note[The Discord service is a singleton, not HA]
-`--min-instances=1 --max-instances=1` is intentional. Discord allows one
-Gateway session per bot token, so the Discord service runs as a single
-instance and is not replicated like the Hub. It is not covered by the HA
+`--min-instances=1 --max-instances=1` is intentional. The Discord plugin
+holds a single, unsharded Gateway connection per bot token; a second instance
+would receive and process every event twice, so the service runs as exactly
+one instance and is not replicated like the Hub. It is not covered by the HA
 guarantee. While it is down or restarting (for example during the redeploy
 checklist in Section 7a), the Hub keeps serving but the Discord integration is
 unavailable.
