@@ -232,36 +232,46 @@ var unresolvedSenders = map[string]unresolvedSender{
 }
 
 // unresolvedMessage is a message shape sent by an unresolved sender.
+// toDefault marks messages that would go to the default agent on the
+// legacy and on the routed path.
 type unresolvedMessage struct {
 	msg          func() *discordgo.MessageCreate
 	defaultAgent string
 	addressed    bool
-	toDefault    bool
+	toDefault    [2]bool // [legacy, routed]
 }
 
 func unresolvedMessages() map[string]unresolvedMessage {
+	both, neither := [2]bool{true, true}, [2]bool{false, false}
+	routedOnly := [2]bool{false, true}
 	return map[string]unresolvedMessage{
-		"plain text, default agent":    {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "hello") }, "worker", false, true},
-		"plain text, no default agent": {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "hello") }, "", false, false},
+		"plain text, default agent":    {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "hello") }, "worker", false, both},
+		"plain text, no default agent": {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "hello") }, "", false, neither},
+		"command-like text":            {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "/notacommand") }, "worker", false, neither},
 		"attachment, default agent": {func() *discordgo.MessageCreate {
 			m := luChannelMessage(luOtherUser, "")
 			m.Attachments = []*discordgo.MessageAttachment{{ID: "att-1", Filename: "a.txt", URL: "https://cdn.example/a.txt"}}
 			return m
-		}, "worker", false, true},
-		"agent mention":           {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "@worker hello") }, "worker", false, false},
-		"unknown agent mention":   {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "@nobody hello") }, "", false, false},
-		"bot mention":             {func() *discordgo.MessageCreate { return botMention(luOtherUser, "hello") }, "worker", true, false},
-		"bot mention, no default": {func() *discordgo.MessageCreate { return botMention(luOtherUser, "hello") }, "", true, false},
-		"bot mention plus agent":  {func() *discordgo.MessageCreate { return botMention(luOtherUser, "@worker hello") }, "worker", true, false},
+		}, "worker", false, routedOnly},
+		"mention of another user, default agent": {func() *discordgo.MessageCreate {
+			m := luChannelMessage(luOtherUser, "<@U-HUMAN> hey")
+			m.Mentions = []*discordgo.User{{ID: "U-HUMAN"}}
+			return m
+		}, "worker", false, routedOnly},
+		"agent mention, default agent": {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "@worker hello") }, "worker", false, both},
+		"unknown agent mention":        {func() *discordgo.MessageCreate { return luChannelMessage(luOtherUser, "@nobody hello") }, "", false, neither},
+		"bot mention":                  {func() *discordgo.MessageCreate { return botMention(luOtherUser, "hello") }, "worker", true, neither},
+		"bot mention, no default":      {func() *discordgo.MessageCreate { return botMention(luOtherUser, "hello") }, "", true, neither},
+		"bot mention plus agent":       {func() *discordgo.MessageCreate { return botMention(luOtherUser, "@worker hello") }, "worker", true, neither},
 		"reply to agent message": {func() *discordgo.MessageCreate {
 			return replyTo(luOtherUser, &discordgo.Message{ID: "agent-msg", WebhookID: luPluginWebhook, Author: &discordgo.User{ID: luPluginWebhook, Username: "worker"}})
-		}, "", true, false},
+		}, "", true, neither},
 		"reply to bot message": {func() *discordgo.MessageCreate {
 			return replyTo(luOtherUser, &discordgo.Message{ID: "bot-msg", Author: &discordgo.User{ID: "BOT123", Bot: true}})
-		}, "", true, false},
+		}, "", true, neither},
 		"reply to another webhook's message": {func() *discordgo.MessageCreate {
 			return replyTo(luOtherUser, &discordgo.Message{ID: "other-msg", WebhookID: "wh-other", Author: &discordgo.User{ID: "wh-other", Username: "worker"}})
-		}, "", false, false},
+		}, "", false, neither},
 	}
 }
 
@@ -354,7 +364,11 @@ func TestUnresolvedSender_Replies(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					replies := unresolvedSenderReplies(t, senderName, msgName, routed, nil)
-					if mc.addressed || (sc.repliesToDefault && mc.toDefault) {
+					path := 0
+					if routed {
+						path = 1
+					}
+					if mc.addressed || (sc.repliesToDefault && mc.toDefault[path]) {
 						assert.Equal(t, []string{sc.want}, replies)
 					} else {
 						assert.Empty(t, replies, "no reply")
@@ -633,4 +647,22 @@ func TestWebhookManagerOwns_CacheMiss(t *testing.T) {
 		}
 		assert.LessOrEqual(t, len(wm.ownMisses), maxOwnMisses)
 	})
+}
+
+func TestAgentListFailureReply_ThrottleIsPerKind(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+	e.setDefaultAgent(t, "worker")
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+	var d deliveries
+	b.InboundHandler = d.handler
+
+	e.hub.failRequest(http.MethodGet, luAgentsPath, http.StatusInternalServerError, serverErrorBody)
+	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "@nobody hello"))
+	e.hub.failRequest(http.MethodGet, luAgentsPath, http.StatusForbidden, deniedBody("list", "agent"))
+	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "@nobody hello"))
+
+	assert.Equal(t, []string{agentListUnavailableText, luDeniedAgents}, channelReplies(t, e.discord),
+		"a different kind of failure is reported within the cooldown")
+	assert.Empty(t, d.topics)
 }

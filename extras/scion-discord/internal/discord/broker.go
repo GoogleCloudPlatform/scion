@@ -1340,7 +1340,8 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	senderMapping, lookupErr := getUserMapping(ctx, store, b.log, m.Author.ID)
 	if lookupErr != nil || principalForMapping(senderMapping) == "" {
 		b.log.Debug("Message from unresolved sender not routed", "channel_id", channelID, "sender_id", m.Author.ID)
-		b.replyUnresolvedSender(s, m, channelID, botUserID, effectiveDefault, senderMapping, lookupErr)
+		routed := config != nil && config.RoutedInboundEnabled
+		b.replyUnresolvedSender(s, m, channelID, botUserID, effectiveDefault, routed, senderMapping, lookupErr)
 		return
 	}
 
@@ -1375,9 +1376,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// replyAgentListErr tells the sender why their message was not routed.
 	// A message addressed to the bot is always answered; otherwise the
 	// reply is sent at most once per cooldown per sender and kind.
-	addressedToBot := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
 	replyAgentListErr := func() {
-		if !addressedToBot && b.shouldSuppressReply(channelID, m.Author.ID, "agent_list:"+agentListErrorKind(agentsErr)) {
+		addressed := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
+		if !addressed && b.shouldSuppressReply(channelID, m.Author.ID, "agent_list:"+agentListErrorKind(agentsErr)) {
 			return
 		}
 		s.ChannelMessageSend(channelID, agentListErrText())
@@ -2126,7 +2127,7 @@ const msgSomethingWentWrong = "Something went wrong. Please try again."
 // told what to do. A sender with a link that needs re-registering, or whose
 // link could not be read, is also told when the message would go to the
 // default agent. Other messages are ignored.
-func (b *DiscordBroker) replyUnresolvedSender(s *discordgo.Session, m *discordgo.MessageCreate, channelID, botUserID, effectiveDefault string, mapping *DiscordUserMapping, lookupErr error) {
+func (b *DiscordBroker) replyUnresolvedSender(s *discordgo.Session, m *discordgo.MessageCreate, channelID, botUserID, effectiveDefault string, routed bool, mapping *DiscordUserMapping, lookupErr error) {
 	addressed := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
 	text, kind := msgRegisterToInteract, ""
 	switch {
@@ -2138,7 +2139,7 @@ func (b *DiscordBroker) replyUnresolvedSender(s *discordgo.Session, m *discordgo
 	if !addressed {
 		// A message that would go to the default agent is answered for a
 		// link that needs attention, at most once per cooldown per sender.
-		if kind == "" || !defaultAgentApplies(m, botUserID, effectiveDefault) {
+		if kind == "" || !defaultAgentApplies(m, botUserID, effectiveDefault, routed) {
 			return
 		}
 		if b.shouldSuppressReply(channelID, m.Author.ID, "unresolved_sender:"+kind) {
@@ -2219,18 +2220,24 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to
-// the channel's default agent: text that is not a command and does not
-// lead with an @mention, or attachments, and no mention of another user.
-// It does not use the agent list.
-func defaultAgentApplies(m *discordgo.MessageCreate, botUserID, effectiveDefault string) bool {
-	if effectiveDefault == "" || hasNonBotMentions(m.Message, botUserID) {
+// the channel's default agent. It does not use the agent list. On the
+// routed path any text that is not a command, or an attachment, counts
+// when a default is set: the hub decides the routing. On the legacy path
+// the message needs text that is not a command and must not mention
+// another Discord user; a leading @name counts because the default agent
+// receives it either as the implicit primary or as the fallback.
+func defaultAgentApplies(m *discordgo.MessageCreate, botUserID, effectiveDefault string, routed bool) bool {
+	if effectiveDefault == "" {
 		return false
 	}
 	text := strings.TrimSpace(m.Content)
-	if text == "" {
-		return len(m.Attachments) > 0
+	if strings.HasPrefix(text, "/") {
+		return false
 	}
-	return !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@")
+	if routed {
+		return text != "" || len(m.Attachments) > 0
+	}
+	return text != "" && !hasNonBotMentions(m.Message, botUserID)
 }
 
 // --- Routing helpers ---
