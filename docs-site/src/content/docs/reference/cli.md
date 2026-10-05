@@ -791,6 +791,10 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
 - `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)).
 - `scion runtime-broker deregister`: Remove this broker's registration from the Hub.
 - `scion runtime-broker provide`: Add this broker as a provider for a project.
+    - `--project <name|id>`: The project to provide for. Without it, the project is resolved from the current directory.
+    - `--path <path>`: The local project path to register for this broker. With `--project`, no path is sent unless `--path` is given: an existing provider path is kept, and otherwise the broker uses its Hub-managed project directory. The broker's global directory (`~/.scion`) is refused as the path of any project other than the global project.
+    - `--make-default`: Make this broker the project's default Runtime Broker.
+    - `--broker <name|id>`, `--hub <name>`: Operate on another broker or Hub connection.
 - `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
 
 ### `scion server`
