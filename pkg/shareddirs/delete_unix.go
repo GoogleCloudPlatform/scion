@@ -74,7 +74,7 @@ func DeleteProjectTree(hostBase, subPathRoot, projectID string) error {
 	defer func() { _ = unix.Close(baseFd) }()
 
 	// subPathRoot may be a multi-component relative path (e.g. "a/b" --
-	// config.validateSubPathRoot allows it); openExistingDirPathNoFollow
+	// config.ValidateSubPathRoot allows it); openExistingDirPathNoFollow
 	// walks it one component at a time, refusing a symlink at any of them,
 	// not just the last.
 	subRootFd, existed, err := openExistingDirPathNoFollow(baseFd, subPathRoot)

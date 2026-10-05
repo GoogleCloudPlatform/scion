@@ -38,6 +38,7 @@
  */
 
 import { apiFetch } from './api.js';
+import type { ApiFetchOptions } from './api.js';
 
 /** One parsed page: its items, plus the cursor for the next page (absent/empty on the last page). */
 export interface ParsedPage<T> {
@@ -77,6 +78,20 @@ export interface PaginateAllOptions<T> {
    * list endpoint's measured response time.
    */
   pageTimeoutMs?: number;
+  /**
+   * Aborts the whole walk: the page in flight is aborted through its own
+   * signal, no further page is requested, and the walk rejects with an
+   * `AbortError` `DOMException`.
+   */
+  signal?: AbortSignal;
+  /**
+   * Called after each page is parsed, with that page's items and every item
+   * accumulated so far (including this page's), before the next page is
+   * requested.
+   */
+  onPage?: (pageItems: readonly T[], all: readonly T[]) => void;
+  /** Issues each page request. Defaults to `apiFetch`. */
+  fetch?: (path: string, options: ApiFetchOptions) => Promise<Response>;
 }
 
 const DEFAULT_MAX_PAGES = 500;
@@ -111,6 +126,26 @@ export class PaginationStoppedError<T = unknown> extends Error {
   }
 }
 
+/**
+ * Raised when the walk reaches `maxPages` with a cursor still pending. A
+ * subclass of {@link PaginationError}, so callers that treat any pagination
+ * failure alike need no change, but it carries every item accumulated up to
+ * the bound for a caller that can show a truncated list.
+ */
+export class PaginationTruncatedError<T = unknown> extends PaginationError {
+  readonly items: T[];
+
+  constructor(label: string, items: T[]) {
+    super(`${label} did not terminate within the page safety bound`);
+    this.name = 'PaginationTruncatedError';
+    this.items = items;
+  }
+}
+
+function walkAbortedError(): DOMException {
+  return new DOMException('pagination aborted', 'AbortError');
+}
+
 function pageTimeoutError(label: string, timeoutMs: number): PaginationError {
   return new PaginationError(`${label} page request timed out after ${timeoutMs}ms`);
 }
@@ -129,7 +164,8 @@ function pageTimeoutError(label: string, timeoutMs: number): PaginationError {
  * a complete one.
  */
 export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[]> {
-  const { path, pageSize, parsePage, shouldContinue } = options;
+  const { path, pageSize, parsePage, shouldContinue, signal, onPage } = options;
+  const fetchPage = options.fetch ?? apiFetch;
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const label = options.label ?? path;
   const pageTimeoutMs = options.pageTimeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
@@ -140,6 +176,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
   let pages = 0;
 
   do {
+    if (signal?.aborted) throw walkAbortedError();
     if (shouldContinue && !shouldContinue()) throw new PaginationStoppedError<T>(all);
     const separator = path.includes('?') ? '&' : '?';
     const url = cursor
@@ -151,12 +188,15 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
     // timeout. The timer is cleared once the page has settled either way.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), pageTimeoutMs);
+    const onWalkAbort = (): void => controller.abort();
+    signal?.addEventListener('abort', onWalkAbort);
     let raw: unknown;
     try {
       let res: Response;
       try {
-        res = await apiFetch(url, { signal: controller.signal });
+        res = await fetchPage(url, { signal: controller.signal });
       } catch (err) {
+        if (signal?.aborted) throw walkAbortedError();
         if (controller.signal.aborted) throw pageTimeoutError(label, pageTimeoutMs);
         throw err;
       }
@@ -166,12 +206,15 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
       try {
         raw = await res.json();
       } catch {
+        if (signal?.aborted) throw walkAbortedError();
         if (controller.signal.aborted) throw pageTimeoutError(label, pageTimeoutMs);
         throw new PaginationError(`${label} response was not valid JSON`);
       }
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onWalkAbort);
     }
+    if (signal?.aborted) throw walkAbortedError();
     // A JSON body can be any of null, an array, or a primitive (string,
     // number, boolean) and still parse successfully — none of those are a
     // valid list page, and handing one to `parsePage` would either silently
@@ -183,6 +226,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
     }
     const page = parsePage(raw);
     all.push(...page.items);
+    onPage?.(page.items, all);
     const next = page.nextCursor ?? '';
     if (next) {
       if (seenCursors.has(next)) {
@@ -195,7 +239,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
   } while (cursor && pages < maxPages);
 
   if (cursor && pages >= maxPages) {
-    throw new PaginationError(`${label} did not terminate within the page safety bound`);
+    throw new PaginationTruncatedError<T>(label, all);
   }
 
   return all;
