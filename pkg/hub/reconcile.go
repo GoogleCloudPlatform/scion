@@ -229,6 +229,7 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		s.logStopRunMismatch(agent, "queued stop", err)
 		return "", fmt.Errorf("dispatch stop: %w", err)
 	}
 	if intentAt != nil {

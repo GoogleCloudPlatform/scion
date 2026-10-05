@@ -439,8 +439,17 @@ func TestDeferredStop_IntentCarriesRunID(t *testing.T) {
 	}
 	agent.RunID = "run-d"
 
+	// Publish the terminal event only once the intent row is visible: the
+	// dispatcher subscribes before it writes the row, so the event cannot
+	// arrive before the subscription.
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if pending, err := cs.ListPendingDispatch(ctx, remoteBroker); err == nil && len(pending) > 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 		stopped := *agent
 		stopped.Phase = "stopped"
 		events.PublishAgentStatus(ctx, &stopped)

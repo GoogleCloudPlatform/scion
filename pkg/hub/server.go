@@ -680,8 +680,10 @@ type RuntimeBrokerClient interface {
 	// projectID scopes the lookup to a specific project (required for uniqueness).
 	// runID, when non-empty, names the run the stop is for
 	// (ptone/scion#2550): the broker then stops only that run's entry and
-	// answers 404 (ErrStopRunNotFound here) when only another run holds the
-	// name. An empty runID keeps the legacy name-scoped stop.
+	// answers a run_mismatch 404 (api.BrokerErrorCodeRunMismatch) when
+	// another run holds the name; only that 404 is returned as
+	// ErrStopRunNotFound, and any other 404 as a plain broker error. An
+	// empty runID keeps the legacy name-scoped stop.
 	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error
 
 	// RestartAgent restarts an agent on a remote runtime broker.
@@ -3861,6 +3863,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 				// This stop was the system's, not the user's: if it

@@ -2596,14 +2596,19 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// a run leaves a start of a different run alone.
 	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, runID)
 
-	target, mgr, err := s.projectScopedTargetFrom(ctx, id, projectID, match, lookupErr)
-	if err == nil && runID != "" && match.containerID == "" {
-		// A run-scoped stop never acts on the bare slug, which
-		// projectScopedTargetFrom falls back to for a project-blind request:
-		// a container of another run could take the name between the lookup
-		// and the Stop. Nothing of the requested run was found, so take the
-		// not-found path below.
-		target = ""
+	// A run-scoped stop never acts on the bare slug, which
+	// projectScopedTargetFrom falls back to for a project-blind request: a
+	// container of another run could take the name between the lookup and
+	// the Stop. When the lookup found no container (and did not fail),
+	// nothing of the requested run exists, so skip the target resolution
+	// and take the not-found path below.
+	var (
+		target string
+		mgr    agent.Manager
+		err    error
+	)
+	if runID == "" || match.containerID != "" || (lookupErr != nil && !errors.Is(lookupErr, ErrAgentNotFound)) {
+		target, mgr, err = s.projectScopedTargetFrom(ctx, id, projectID, match, lookupErr)
 	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2671,7 +2676,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 	// Stop exactly the resolved entry: StopTarget does not re-resolve by
 	// name, so the run checked above is the run stopped.
-	if err := mgr.StopTarget(ctx, restartStopRef(target, match)); err != nil {
+	if err := mgr.StopTarget(ctx, resolvedStopRef(target, match)); err != nil {
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -2719,11 +2724,12 @@ func (s *Server) stopRunMismatch(key launchKey, runID string, m agentMatch, look
 	return s.launchRegistry.inFlightOtherRun(key, runID)
 }
 
-// restartStopRef is the runtime entry restart's stop leg acts on: the
-// resolved target, with the matched entry's run when the target is that
-// entry's container. Like stopAgent, it stops the resolved entry without
+// resolvedStopRef is the runtime entry a broker stop acts on: the resolved
+// target, with the matched entry's run when the target is that entry's
+// container. Both callers, stopAgent and restartAgent's stop leg, pass it
+// to Manager.StopTarget, so the resolved entry is stopped without
 // re-resolving by name.
-func restartStopRef(target string, m agentMatch) scionrt.RunRef {
+func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {
 	ref := scionrt.RunRef{ID: target}
 	if m.containerID == target {
 		ref.RunID = m.entry.RunID
@@ -2849,7 +2855,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the start below create it.
 	if stopTarget == "" {
 		s.agentLifecycleLog.Warn("Restart: agent not found in project, proceeding with start", "agent_id", id)
-	} else if err := stopMgr.StopTarget(ctx, restartStopRef(stopTarget, match)); err != nil {
+	} else if err := stopMgr.StopTarget(ctx, resolvedStopRef(stopTarget, match)); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -380,5 +381,29 @@ func TestStopAgent_RunIDWithoutProjectNeverStopsBareSlug(t *testing.T) {
 	}
 	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "dev" {
 		t.Errorf("legacy stop: calls = %d, last = %q; want the bare slug passed through as before", f.stopCalls(), f.mgr.lastStopAgentID)
+	}
+}
+
+// Restart's stop leg stops the entry it resolved, with that entry's run on
+// the ref (review round 2, NB1), not the new run the restart starts and
+// not an empty run.
+func TestRestartAgent_StopLegCarriesEntryRun(t *testing.T) {
+	f := newStopRunFixture(t, "")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/restart?projectId="+scopeProjB,
+		strings.NewReader(`{"runId":"run-next"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	if rec.Code >= 300 {
+		t.Fatalf("restart: status %d: %s", rec.Code, rec.Body.String())
+	}
+	if f.stopCalls() != 1 {
+		t.Fatalf("stop calls = %d, want 1", f.stopCalls())
+	}
+	if f.mgr.lastStopAgentID != "cid-new" || f.mgr.lastStopRunID != "run-new" {
+		t.Errorf("restart stop ref = {%q, %q}, want {cid-new, run-new}", f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
+	}
+	if got := f.mgr.LastStartOpts().RunID; got != "run-next" {
+		t.Errorf("restart start run = %q, want run-next", got)
 	}
 }

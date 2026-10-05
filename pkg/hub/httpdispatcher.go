@@ -3306,9 +3306,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	// Send the row's run ID so the broker stops only that run's entry,
 	// never a newer run recreated under the same name (ptone/scion#2550).
 	// A row with no run ID sends none, and the broker stops by name as
-	// before. A broker 404 on a run-scoped stop comes back as
-	// ErrStopRunNotFound: the requested run is already gone, and callers
-	// must not record the current run as stopped because of it.
+	// before. The broker's run_mismatch 404 (api.BrokerErrorCodeRunMismatch)
+	// on a run-scoped stop comes back as ErrStopRunNotFound: the requested
+	// run is already gone, and callers must not record the current run as
+	// stopped because of it. Any other 404 is returned as a plain broker
+	// error.
 	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, agent.RunID)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredStop(ctx, agent)
