@@ -21,10 +21,14 @@
  */
 
 /** Triggers a new subscription starts with. */
-export const DEFAULT_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'];
+export const DEFAULT_TRIGGERS: readonly string[] = [
+  'COMPLETED',
+  'WAITING_FOR_INPUT',
+  'LIMITS_EXCEEDED',
+];
 
 /** Every trigger a subscription can select. */
-export const ALL_TRIGGERS = [
+export const ALL_TRIGGERS: readonly string[] = [
   'COMPLETED',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
@@ -46,12 +50,22 @@ const TRIGGER_LABELS: Record<string, string> = {
 
 /** Title-case label for a trigger; unknown triggers show the raw value. */
 export function triggerLabel(trigger: string): string {
-  return TRIGGER_LABELS[trigger] ?? trigger;
+  return Object.hasOwn(TRIGGER_LABELS, trigger) ? TRIGGER_LABELS[trigger] : trigger;
 }
 
-/** Hint listing the default triggers, e.g. on the agent create form. */
-export function defaultTriggersHint(): string {
-  const labels = DEFAULT_TRIGGERS.map(triggerLabel);
+/**
+ * Hint listing the default triggers, e.g. on the agent create form.
+ * Returns an empty string when there are no triggers.
+ */
+export function defaultTriggersHint(triggers: readonly string[] = DEFAULT_TRIGGERS): string {
+  const labels = triggers.map(triggerLabel);
+  if (labels.length === 0) return '';
   const last = labels.pop();
-  return `You will be notified when this agent reaches: ${labels.join(', ')}, or ${last}.`;
+  const list =
+    labels.length === 0
+      ? last
+      : labels.length === 1
+        ? `${labels[0]} or ${last}`
+        : `${labels.join(', ')}, or ${last}`;
+  return `You will be notified when this agent reaches: ${list}.`;
 }

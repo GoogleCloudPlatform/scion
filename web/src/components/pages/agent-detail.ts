@@ -88,6 +88,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -1068,7 +1069,7 @@ export class ScionPageAgentDetail extends LitElement {
             scope: 'agent',
             agentId: this.agentId,
             projectId: this.agent.projectId,
-            triggerActivities: ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'],
+            triggerActivities: [...DEFAULT_TRIGGERS],
           }),
         });
         if (res.ok) {

@@ -43,6 +43,11 @@ describe('triggerLabel', () => {
     expect(triggerLabel('SOMETHING_NEW')).toBe('SOMETHING_NEW');
   });
 
+  it('falls back to the raw value for inherited object keys', () => {
+    expect(triggerLabel('constructor')).toBe('constructor');
+    expect(triggerLabel('toString')).toBe('toString');
+  });
+
   it('keeps the API trigger values unchanged', () => {
     expect(DEFAULT_TRIGGERS).toEqual(['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED']);
   });
@@ -53,5 +58,21 @@ describe('defaultTriggersHint', () => {
     expect(defaultTriggersHint()).toBe(
       'You will be notified when this agent reaches: Completed, Waiting for User, or Limits Exceeded.'
     );
+  });
+
+  it('handles a single default trigger', () => {
+    expect(defaultTriggersHint(['COMPLETED'])).toBe(
+      'You will be notified when this agent reaches: Completed.'
+    );
+  });
+
+  it('joins two default triggers with or', () => {
+    expect(defaultTriggersHint(['COMPLETED', 'ERROR'])).toBe(
+      'You will be notified when this agent reaches: Completed or Error.'
+    );
+  });
+
+  it('returns an empty hint with no default triggers', () => {
+    expect(defaultTriggersHint([])).toBe('');
   });
 });
