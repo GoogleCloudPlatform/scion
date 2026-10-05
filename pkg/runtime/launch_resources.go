@@ -99,11 +99,21 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 	case api.ResourceKindSecretProviderClass:
 		err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(h.Namespace).Delete(ctx, h.Name, opts)
 	case api.ResourceKindPod:
-		// Immediate termination, as Delete does for force-removal: the pod
-		// belongs to a launch that has already ended.
-		gracePeriod := int64(0)
-		opts.GracePeriodSeconds = &gracePeriod
-		err = r.Client.Clientset.CoreV1().Pods(h.Namespace).Delete(ctx, h.Name, opts)
+		// The pod belongs to a launch that has already ended. Other pods
+		// are deleted immediately; an NFS-home pod is deleted with its own
+		// grace period (podDeleteOptions), so its containers stop writing
+		// to the home before the agent's next start, which waits for them.
+		// A pod that cannot be read gets the graceful delete.
+		pods := r.Client.Clientset.CoreV1().Pods(h.Namespace)
+		pod, getErr := pods.Get(ctx, h.Name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(getErr) {
+			return nil
+		}
+		if getErr == nil {
+			opts = podDeleteOptions(pod)
+			opts.Preconditions = &metav1.Preconditions{UID: &uid}
+		}
+		err = pods.Delete(ctx, h.Name, opts)
 	default:
 		return fmt.Errorf("unsupported resource kind %q for the kubernetes runtime", h.Kind)
 	}
