@@ -114,7 +114,7 @@ The user who registers a broker becomes its owner. Registration admits a CLI or 
 | Operation | Who may perform it |
 |---|---|
 | Register a new broker | A user who holds `broker.create` (sign-in, or hub token with `broker:create`). |
-| Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner or a super-admin. This includes the embedded broker's registration path. |
+| Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner, or a super-admin with a sign-in. This includes the embedded broker's registration path. |
 | Rotate the broker's HMAC secret | The broker itself (HMAC), or its owner or a super-admin with a sign-in. No user access token can rotate a secret. |
 | Turn on auto-provide | Additionally requires `broker.auto_provide`, held by super-admins. |
 

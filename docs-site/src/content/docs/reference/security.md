@@ -63,7 +63,7 @@ User-credentialed broker operations admit a fixed set of credential kinds. A Run
 | Operation | Endpoint | Admitted credentials | Additional checks |
 |---|---|---|---|
 | Register a new broker | `POST /api/v1/brokers` | Interactive session, dev credential, hub-boundary UAT with `broker:create` | The user must hold `broker.create` (hub members). The caller's user becomes the owner. Turning on auto-provide also requires `broker.auto_provide` (super-admins). |
-| Re-register (re-mint the join token) | `POST /api/v1/brokers` matching an existing broker | Same as registration | The user must also be the broker's owner or a super-admin. |
+| Re-register (re-mint the join token) | `POST /api/v1/brokers` matching an existing broker | Same as registration | The user must also be the broker's owner, or a super-admin with an interactive session or dev credential. |
 | Rotate the HMAC secret | `POST /api/v1/brokers/{id}/rotate-secret` | Broker HMAC for its own ID; interactive session or dev credential | A user must be the broker's owner or a super-admin. No UAT is admitted. |
 | Associate with a project | `POST /api/v1/projects/{id}/providers`, `brokerId` in `POST /api/v1/projects/register`, explicit broker on agent create | Interactive session, dev credential, or UAT for the project side | `project.update` on the project **and** `broker.update` on the broker (owner or super-admin). No UAT selector carries `broker.update`. |
 | Remove an association | `DELETE /api/v1/projects/{id}/providers/{brokerId}` | Interactive session, dev credential, UAT | `project.update` on the project, or `broker.update` on that broker. |
