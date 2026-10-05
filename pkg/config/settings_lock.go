@@ -26,7 +26,7 @@ import (
 // enough that a single lock costs nothing.
 //
 // It does not coordinate with other processes (a CLI command writing the
-// same file while the server runs); that part of #3047 remains open.
+// same file while the server runs); that part of ptone/scion#3047 remains open.
 var settingsFileMu sync.Mutex
 
 // LockSettingsFile takes the process-wide settings-file lock and returns the

@@ -389,7 +389,7 @@ func TestUpdateVersionedSetting_EdgeCases(t *testing.T) {
 }
 
 // updateVersionedSettingKeys lists every key handled by the switch in
-// updateVersionedSettingStruct (the pre-#1800 behaviour), plus the project
+// updateVersionedSettingStruct (the pre-ptone/scion#1800 behaviour), plus the project
 // ID aliases and the ignored keys.
 var updateVersionedSettingKeys = []string{
 	"active_profile", "default_template", "default_harness_config", "workspace_path",
@@ -486,7 +486,7 @@ var structParityBases = []structParityBase{
 
 // runStructParity checks, for every key and a spread of values, that the
 // settings loaded after UpdateVersionedSetting equal those loaded after the
-// pre-#1800 struct round-trip (updateVersionedSettingStruct).
+// pre-ptone/scion#1800 struct round-trip (updateVersionedSettingStruct).
 func runStructParity(t *testing.T, bases []structParityBase) {
 	t.Helper()
 	values := []string{"new-value", "", "true", "false", "yes", "123"}

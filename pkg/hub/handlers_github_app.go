@@ -159,7 +159,7 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	// these fields is the DB-owned `github_app` opsettings section: writing
 	// only to settings.yaml loses the change on restart (ephemeral
 	// filesystems) and lets the next ops.Update / ApplySnapshot revert it to
-	// the stale DB value (#1091). Only a hub with no OperationalSettings
+	// the stale DB value (ptone/scion#1091). Only a hub with no OperationalSettings
 	// service keeps settings.yaml as the durable home (best-effort write).
 	if ops := s.GetOperationalSettings(); ops != nil {
 		// A failed DB write is fatal to the request even though the in-memory

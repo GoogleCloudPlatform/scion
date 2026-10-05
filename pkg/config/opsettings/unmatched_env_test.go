@@ -38,7 +38,7 @@ func unmatchedByName(environ []string) map[string]config.UnmatchedEnvName {
 func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 	cases := map[string]string{
 		// Underscored multi-word names bind only to a VersionedSettings
-		// field the hub ignores (ptone/scion#1081, #1284).
+		// field the hub ignores (ptone/scion#1081, ptone/scion#1284).
 		"SCION_SERVER_HUB_ADMIN_EMAILS":           "SCION_SERVER_HUB_ADMINEMAILS",
 		"SCION_SEED_SERVER_HUB_ADMIN_EMAILS":      "SCION_SEED_SERVER_HUB_ADMINEMAILS",
 		"SCION_SERVER_HUB_READ_TIMEOUT":           "SCION_SERVER_HUB_READTIMEOUT",

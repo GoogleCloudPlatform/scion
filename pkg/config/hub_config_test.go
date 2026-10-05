@@ -1967,7 +1967,7 @@ func TestLoadGlobalConfig_TopLevelYAML11Bools(t *testing.T) {
 
 // TestLoadGlobalConfig_TopLevelQuotedBools pins that quoted "no"/"yes"
 // decode as booleans in the top-level sections (yaml.v3 behaviour via
-// decodeTopLevelSection; the pre-#2284 raw .(bool) path ignored them), and
+// decodeTopLevelSection; the pre-ptone/scion#2284 raw .(bool) path ignored them), and
 // that a non-boolean value is still ignored, on both load paths.
 func TestLoadGlobalConfig_TopLevelQuotedBools(t *testing.T) {
 	const top = "quotas:\n  enforce_broker_quotas: \"no\"\nagent_secrets:\n  user_scope_only: \"yes\"\nproject_defaults:\n  default_scratchpad: maybe\n"

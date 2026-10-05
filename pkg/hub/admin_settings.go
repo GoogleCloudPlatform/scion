@@ -172,7 +172,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 	// reads/writes go through the DB (design §3.8) and Layer-0 keys are
 	// rejected with 422 exactly as on postgres. Writing settings.yaml on a
 	// DB-backed SQLite hub let the next ops.Update re-apply the stale DB rows
-	// and silently revert the write (#1091). Only a hub with no
+	// and silently revert the write (ptone/scion#1091). Only a hub with no
 	// OperationalSettings service keeps the file read/write path.
 	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {

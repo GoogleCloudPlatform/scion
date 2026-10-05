@@ -23,7 +23,7 @@ import (
 
 // TestConfigValidateCmd_DriftKeysValidate checks that `scion config validate`
 // accepts each settings key that settings-v1.schema.json was missing even
-// though the Go settings types load it (ptone/scion#2654, #2285, #2259).
+// though the Go settings types load it (ptone/scion#2654, ptone/scion#2285, ptone/scion#2259).
 func TestConfigValidateCmd_DriftKeysValidate(t *testing.T) {
 	tests := []struct {
 		name string

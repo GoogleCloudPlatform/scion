@@ -83,7 +83,7 @@ func newSQLiteOpsServer(t *testing.T, bootstrap *koanf.Koanf, seed map[string]st
 	return srv, st, ops
 }
 
-// unrelatedLifecycleUpdate is the trigger from the #1091 repro: another admin
+// unrelatedLifecycleUpdate is the trigger from the ptone/scion#1091 repro: another admin
 // write to a different section, which re-applies the whole DB snapshot.
 func unrelatedLifecycleUpdate(t *testing.T, ops *OperationalSettings) {
 	t.Helper()

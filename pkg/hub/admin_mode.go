@@ -214,7 +214,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 	// delegate to DB-backed handlers: maintenance is durable (persisted in
 	// hub_settings) and, on postgres, cluster-wide (LISTEN/NOTIFY). An
 	// in-memory-only write on a DB-backed hub would be reverted by the next
-	// ops.Update re-applying the maintenance row (#1091). Only a hub with no
+	// ops.Update re-applying the maintenance row (ptone/scion#1091). Only a hub with no
 	// OperationalSettings keeps the in-memory state.
 	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {

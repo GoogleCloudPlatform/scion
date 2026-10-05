@@ -26,7 +26,7 @@ import (
 
 // schemaV1DriftKeysDoc is a settings.yaml that uses every key added to
 // settings-v1.schema.json to close the drift TestSettingsSchema_NoDriftFromGoTypes
-// found (ptone/scion#2654, #2285, #2259). Each of these keys is accepted by
+// found (ptone/scion#2654, ptone/scion#2285, ptone/scion#2259). Each of these keys is accepted by
 // the Go settings types, so a file using them must validate.
 const schemaV1DriftKeysDoc = `schema_version: "1"
 project_type: shadow
