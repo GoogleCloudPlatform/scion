@@ -178,10 +178,13 @@ function ms(value: string | undefined): number {
 
 /**
  * The hub's `sort=updated` order, newest first: the last activity time when
- * set, else `updated`; ties on `created`, then id, both descending.
+ * set, else `updated`; ties on `created`, then id, both descending. A Go zero
+ * time (`0001-01-01T00:00:00Z`) is how the hub writes an unset activity time.
  */
 function compareUpdatedKey(a: Agent, b: Agent): number {
-  const key = (x: Agent): number => ms(x.lastActivityEvent) || ms(x.updated);
+  const activity = (x: Agent): number =>
+    x.lastActivityEvent?.startsWith('0001') ? 0 : ms(x.lastActivityEvent);
+  const key = (x: Agent): number => activity(x) || ms(x.updated);
   return (
     key(b) - key(a) || ms(b.created) - ms(a.created) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
   );
