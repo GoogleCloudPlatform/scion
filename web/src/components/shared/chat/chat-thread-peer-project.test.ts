@@ -201,6 +201,42 @@ describe('agent DM peer project', () => {
     expect(peerProject(el)).toBe('');
   });
 
+  for (const status of [403, 404]) {
+    it(`a ${status} read leaves the project empty and raises no access-denied toast`, async () => {
+      if (status === 404) delete peers.coder;
+      else peerStatus = status;
+      const el = await openDM('coder');
+
+      expect(peerProject(el)).toBe('');
+      const reads = apiFetch.mock.calls.filter(([path]) => path === '/api/v1/agents/coder');
+      expect(reads).toHaveLength(1);
+      expect(reads[0]?.[1]).toMatchObject({ suppressAccessDeniedToast: true });
+    });
+  }
+
+  it("a late failed read for the previous DM does not clear the next DM's read", async () => {
+    peers.reviewer = 'proj-reviewer';
+    let failCoder = (): void => {};
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) => {
+      if (path === '/api/v1/agents/coder') {
+        return new Promise<Response>((resolve) => {
+          failCoder = () => resolve(json({ error: 'x' }, 500));
+        });
+      }
+      return base(path, init);
+    });
+    const el = await openDM('coder');
+    expect(singleAgentReads('coder')).toBe(1);
+
+    await openDM('reviewer', el);
+    await vi.waitFor(() => expect(peerProject(el)).toBe('proj-reviewer'));
+
+    failCoder();
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(peerProject(el)).toBe('proj-reviewer');
+  });
+
   it('a failed read is not cached: the next open of the conversation reads again', async () => {
     peerStatus = 500;
     const el = await openDM('coder');
