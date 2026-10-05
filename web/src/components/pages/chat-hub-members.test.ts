@@ -1677,6 +1677,48 @@ describe('hub members: hung page', () => {
 });
 
 describe('hub members: reconnect and disconnect', () => {
+  it('a DM opened after the store answered, before updated() bumps the generation, gets no hub list', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      page.v2AgentMembers = [];
+      const generation = page._hubMembersGeneration;
+      const answer = harness.store.peek({ scope: 'hub' });
+      vi.spyOn(harness.store, 'ensure').mockImplementation(() => {
+        // Runs before the load resumes; updated()'s bump runs after it.
+        queueMicrotask(() => {
+          page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
+        });
+        return Promise.resolve(answer!);
+      });
+      await page._loadHubAgents(generation);
+      // The load resumed in the lag window: same generation, the hub's claim.
+      expect(page._sidebarOwner).toBe('hub');
+      await settle();
+      expect(page.v2AgentMembers).toEqual([]);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a disconnect landing after the store answered, before the load resumes, is caught by the generation check', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    page.v2AgentMembers = [];
+    const answer = harness.store.peek({ scope: 'hub' });
+    vi.spyOn(harness.store, 'ensure').mockImplementation(() => {
+      // The store has already answered, so the detach's abort cannot reject it.
+      queueMicrotask(() => document.body.removeChild(page));
+      return Promise.resolve(answer!);
+    });
+    await page._loadHubAgents(page._hubMembersGeneration);
+    await settle();
+    expect(page.isConnected).toBe(false);
+    expect(page.v2AgentMembers).toEqual([]);
+  });
+
   it('a disconnect-then-reconnect while the users walk is in flight starts a fresh walk, and the stale walk does not overwrite it', async () => {
     let userCall = 0;
     const staleUsers = deferred<Response>();
