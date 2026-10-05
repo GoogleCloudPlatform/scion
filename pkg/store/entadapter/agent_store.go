@@ -2323,9 +2323,9 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 			return "", mapError(err)
 		}
 		if n > 0 {
-			for _, r := range dropped {
+			if len(dropped) > 0 {
 				slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
-					"agent_id", agentID, "dropped_run_id", r, "cap", store.MaxPreviousRunIDs)
+					"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
 			}
 			return row.RunID, nil
 		}
@@ -2351,17 +2351,29 @@ func runIDWritable(now time.Time) predicate.Agent {
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
-// The swap also clears previous_run_ids: every caller settles the run.
+// The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true)
+}
+
+// RevertAgentRunID implements store.AgentStore.RevertAgentRunID: the same
+// swap, leaving previous_run_ids as they are.
+func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
+}
+
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
-	n, err := s.client.Agent.Update().
+	upd := s.client.Agent.Update().
 		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
-		SetRunID(newRunID).
-		ClearPreviousRunIds().
-		Save(ctx)
+		SetRunID(newRunID)
+	if clearPrevious {
+		upd = upd.ClearPreviousRunIds()
+	}
+	n, err := upd.Save(ctx)
 	if err != nil {
 		return false, mapError(err)
 	}

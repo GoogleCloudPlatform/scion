@@ -371,10 +371,19 @@ type AgentStore interface {
 	// overwriting a newer run ID a later dispatch has since recorded. Like
 	// SetAgentRunID it neither checks nor bumps state_version. A missing
 	// agent reports false with no error. A swap also clears the row's
-	// PreviousRunIDs: every caller settles the run (the broker reported or
-	// replaced the entry, or the dispatch reverted to the run the entry
-	// still carries), so no other run's entry is left to delete.
+	// PreviousRunIDs: callers use it only to settle the run (the broker
+	// reported the run its runtime holds, or a start landed and so replaced
+	// every entry of the name), so no other run's entry is left to delete.
 	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
+	// RevertAgentRunID is CompareAndSwapAgentRunID (mintedRunID to
+	// previousRunID) for a dispatch the broker never acted on, and leaves
+	// PreviousRunIDs untouched (ptone/scion#3097): the restored run may
+	// itself be unsettled, so the runs listed before the dispatch may still
+	// have entries. The list then holds the restored run too, which is
+	// harmless: a delete skips the current run, and AppendPreviousRunID
+	// drops it.
+	RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.

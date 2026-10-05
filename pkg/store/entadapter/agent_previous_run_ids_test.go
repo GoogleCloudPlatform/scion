@@ -78,24 +78,41 @@ func TestPreviousRunIDs_SetAppendsAndCASClears(t *testing.T) {
 	assert.Empty(t, got.PreviousRunIDs)
 }
 
-// Reverting to the previous run (a start that was never sent) leaves that
-// run current with no previous runs.
-func TestPreviousRunIDs_RevertClears(t *testing.T) {
+// Reverting to the previous run (a start the broker never acted on) does
+// not settle it: the runs listed before the start are kept, since the
+// restored run may itself be unsettled. The list then also holds the
+// restored run, which the next run-ID write drops.
+func TestPreviousRunIDs_RevertKeepsList(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "prev-revert")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+	for _, r := range []string{"run-1", "run-2"} {
+		_, err := s.SetAgentRunID(ctx, a.ID, r)
+		require.NoError(t, err)
+	}
+	prev, err := s.SetAgentRunID(ctx, a.ID, "run-3")
 	require.NoError(t, err)
-	prev, err := s.SetAgentRunID(ctx, a.ID, "run-2")
+	require.Equal(t, "run-2", prev)
+
+	// A revert that misses (another run is recorded) changes nothing.
+	swapped, err := s.RevertAgentRunID(ctx, a.ID, "run-x", prev)
 	require.NoError(t, err)
-	swapped, err := s.CompareAndSwapAgentRunID(ctx, a.ID, "run-2", prev)
+	require.False(t, swapped)
+
+	swapped, err = s.RevertAgentRunID(ctx, a.ID, "run-3", prev)
 	require.NoError(t, err)
 	require.True(t, swapped)
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "run-1", got.RunID)
-	assert.Empty(t, got.PreviousRunIDs)
+	assert.Equal(t, "run-2", got.RunID)
+	assert.Equal(t, []string{"run-1", "run-2"}, got.PreviousRunIDs, "the earlier unsettled run is kept")
+
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-4")
+	require.NoError(t, err)
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"run-1", "run-2"}, got.PreviousRunIDs, "no duplicate of the restored run")
 }
 
 // The list never holds the current run or a duplicate: a run that comes

@@ -149,9 +149,10 @@ type Agent struct {
 
 	// PreviousRunIDs are the runs, oldest first, whose runtime entries may
 	// still exist besides RunID's (ptone/scion#3097): SetAgentRunID appends
-	// the run it replaced (see AppendPreviousRunID), and
-	// CompareAndSwapAgentRunID, which settles the run, clears them. A
-	// delete names each of them as well as RunID. Like RunID, UpdateAgent
+	// the run it replaced (see AppendPreviousRunID),
+	// CompareAndSwapAgentRunID, which settles the run, clears them, and
+	// RevertAgentRunID leaves them (so the list may also hold RunID). A
+	// delete names each of them other than RunID. Like RunID, UpdateAgent
 	// never writes it.
 	PreviousRunIDs []string `json:"-"`
 

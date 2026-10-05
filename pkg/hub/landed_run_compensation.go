@@ -108,7 +108,14 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 
 	target := *agent
 	target.RunID = runID
-	// Only the run that landed: its start replaced any previous entry.
+	// Only the run that landed: its start replaced any previous entry
+	// (ptone/scion#3097). This must stay. The row is gone or held by a
+	// delete, so a same-name successor may already exist, and a run-scoped
+	// delete of a run with no entry is not side-effect-free on the broker:
+	// with no entry of any run it falls through to the broker's file-only
+	// path, which acts by name (agent files, leftover runtime objects) and
+	// could hit the successor's. The struct's list is still set here when
+	// the settle swap missed the gone row.
 	target.PreviousRunIDs = nil
 	d.log.Info("Dispatcher: agent was deleted while the broker started it; deleting the run it started",
 		"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID)

@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,15 +229,15 @@ func TestPreviousRunDelete_SparesSameNameSuccessor(t *testing.T) {
 }
 
 // Semantics (2): a start that was never sent reverts the row to the
-// previous run with no previous runs recorded; a later delete names the
-// old run only.
+// previous run. A revert keeps the list (here just the restored run, which
+// a delete skips), so a later delete names the old run only.
 func TestPreviousRunDelete_RevertedStart_LaterDeleteNamesOldRun(t *testing.T) {
 	f := newPrevRunFixture(t, "prevrevert", state.PhaseStopped)
 	f.broker.onStart = func(string) (*RemoteAgentResponse, error) { return nil, errStartRequestNotSent }
 	doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	require.Equal(t, f.firstRun, got.RunID, "the start reverted the run")
-	assert.Empty(t, got.PreviousRunIDs, "the reverted run is current again, not previous")
+	assert.Equal(t, []string{f.firstRun}, got.PreviousRunIDs, "a revert keeps the list; it holds only the restored run")
 
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+f.agent.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
@@ -353,4 +355,155 @@ func TestPreviousRunDelete_DeferredCarriesPreviousRuns(t *testing.T) {
 	_, err = f.srv.execDispatchDelete(ctx, store.BrokerDispatch{AgentID: f.agent.ID, Args: raw})
 	require.NoError(t, err)
 	assert.Equal(t, []string{f.firstRun, "run-x"}, f.broker.deleted())
+}
+
+// stopAgent puts the row back in phase stopped, as a failed start may not.
+func (f *prevRunFixture) stopAgent(t *testing.T) {
+	t.Helper()
+	a := mustGetAgent(t, f.store, f.agent.ID)
+	if a.Phase != string(state.PhaseStopped) {
+		a.Phase = string(state.PhaseStopped)
+		require.NoError(t, f.store.UpdateAgent(context.Background(), a))
+	}
+}
+
+// Review B1 regression: a start that fails in doubt, then a start the
+// broker never acts on (never sent, or handed to another node) that is
+// reverted. The revert restores the in-doubt run but must not forget the
+// first run, whose entry is the live one: the delete still removes it.
+func TestPreviousRunDelete_InDoubtThenRevertedStart_KeepsEarlierRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"not-sent", errStartRequestNotSent},
+		// No cross-node deps are wired, so the hand-off fails right after
+		// the revert.
+		{"deferred", ErrLifecycleDeferred},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrevRunFixture(t, "prevb1-"+tc.name, state.PhaseStopped)
+			var runs []string
+			f.broker.onStart = func(runID string) (*RemoteAgentResponse, error) {
+				runs = append(runs, runID)
+				if len(runs) == 1 {
+					return nil, errors.New("connection reset by peer")
+				}
+				return nil, tc.err
+			}
+			doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
+			f.stopAgent(t)
+			got := mustGetAgent(t, f.store, f.agent.ID)
+			require.Equal(t, runs[0], got.RunID, "the in-doubt start keeps its run")
+			require.Equal(t, []string{f.firstRun}, got.PreviousRunIDs)
+
+			doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
+			f.stopAgent(t)
+			require.Len(t, runs, 2)
+			got = mustGetAgent(t, f.store, f.agent.ID)
+			require.Equal(t, runs[0], got.RunID, "the second start reverted")
+			assert.Equal(t, []string{f.firstRun, runs[0]}, got.PreviousRunIDs, "the revert kept the first run")
+
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+f.agent.ID, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			assert.False(t, f.broker.has(f.firstRun), "the first run's entry is not orphaned (broker deletes: %v)", f.broker.deleted())
+			assert.Equal(t, []string{runs[0], f.firstRun}, f.broker.deleted(), "the current run, then the first run; the restored run is not repeated")
+		})
+	}
+}
+
+// Review N3: a failed start whose broker reports the minted run as the one
+// its runtime holds (the entry was created, then the start failed) settles
+// that run: the previous runs are cleared, and a later delete names only
+// the minted run.
+func TestPreviousRunDelete_FailedStartReportsMintedRun_Settles(t *testing.T) {
+	f := newPrevRunFixture(t, "prevreportedminted", state.PhaseStopped)
+	var minted string
+	f.broker.onStart = func(runID string) (*RemoteAgentResponse, error) {
+		minted = runID
+		f.broker.landStart(f.agent.Slug, runID)
+		return nil, brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt(runID, runID))
+	}
+	doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	require.Equal(t, minted, got.RunID)
+	assert.Empty(t, got.PreviousRunIDs, "the reported run settles the row")
+
+	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+f.agent.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{minted}, f.broker.deleted())
+	assert.Zero(t, f.broker.live())
+}
+
+// deferOnSecondDelete answers the first broker delete itself and defers
+// every later one to the owning node.
+type deferOnSecondDelete struct {
+	*mockRuntimeBrokerClient
+	mu      sync.Mutex
+	deletes []string
+}
+
+func (c *deferOnSecondDelete) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deletes = append(c.deletes, opts.RunID)
+	if len(c.deletes) == 1 {
+		return nil
+	}
+	return ErrLifecycleDeferred
+}
+
+// Review N1: the current run's delete succeeds and the first previous
+// run's delete is handed to the owning node. The intent names the runs not
+// yet deleted, oldest first, including the one that was deferred, and the
+// outcome is in doubt as for any deferred delete still outstanding.
+func TestPreviousRunDelete_MidLoopDeferral_HandsOffRemainingRuns(t *testing.T) {
+	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
+	df := newDeferredDeleteFixture(t, "prevmidloop", nil)
+	client := &deferOnSecondDelete{mockRuntimeBrokerClient: df.client}
+	d := NewHTTPAgentDispatcherWithClient(df.store, client, false, slog.Default())
+	d.SetCrossNodeDeps(df.bus, NoopCommandBus{})
+	df.srv.SetDispatcher(d)
+	ctx := context.Background()
+	for _, r := range []string{"run-1", "run-2", "run-3"} {
+		_, err := df.store.SetAgentRunID(ctx, df.agent.ID, r)
+		require.NoError(t, err)
+	}
+
+	requireInDoubt(t, df, df.del(t, ""))
+	assert.Equal(t, []string{"run-3", "run-2"}, client.deletes, "the current run, then the newest previous run, which was deferred")
+	intents := df.pendingDeleteIntents(t)
+	require.Len(t, intents, 1)
+	args, err := UnmarshalDeleteArgs(intents[0].Args)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"run-1", "run-2"}, args.PreviousRunIDs, "the runs not yet deleted, oldest first")
+}
+
+// Review N2: a compensating delete names only the run that landed, even
+// when the dispatch's struct still lists previous runs (the settle swap
+// missed the hard-deleted row, so it did not clear them).
+func TestPreviousRunDelete_CompensationNamesOnlyLandedRun(t *testing.T) {
+	f, c := newLandingFixture(t, "prevcomp")
+	f.agent.PreviousRunIDs = []string{"older-run"}
+	c.onLand = func() { require.NoError(t, f.store.DeleteAgent(context.Background(), f.agent.ID)) }
+	require.NoError(t, f.dispatcher.DispatchAgentStart(context.Background(), f.agent, "", false))
+	require.NotEmpty(t, f.agent.PreviousRunIDs, "the struct still lists previous runs")
+	assert.Equal(t, []string{c.lastStartExtras.RunID}, c.deleteRuns, "only the landed run")
+}
+
+// Review nit 4: deletePreviousRuns names every listed run other than the
+// current one, newest first, and nothing for a row with no run ID (its
+// delete resolved by name, which covers every run).
+func TestDeletePreviousRuns_Direct(t *testing.T) {
+	f, c := newLandingFixture(t, "prevdirect")
+	a := *f.agent
+	a.RunID = "cur"
+	a.PreviousRunIDs = []string{"a", "cur", "", "b"}
+	require.NoError(t, f.dispatcher.deletePreviousRuns(context.Background(), &a, "http://broker", DeleteAgentOptions{DeleteFiles: true}))
+	assert.Equal(t, []string{"b", "a"}, c.deleteRuns)
+
+	c.deleteRuns = nil
+	a.RunID = ""
+	require.NoError(t, f.dispatcher.deletePreviousRuns(context.Background(), &a, "http://broker", DeleteAgentOptions{}))
+	assert.Empty(t, c.deleteRuns)
 }
