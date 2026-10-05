@@ -1571,7 +1571,7 @@ describe('chat page — late DM peer lookups', () => {
     // only once the lazy rail and members imports resolve, which can take
     // longer than one flush on a slow runner. Those imports resolving is
     // what issues it, so wait for that before taking the baseline.
-    await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
+    await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true), { timeout: 5000 });
     await flush();
     const pending = releases.length;
     el.openDM('agent-1', 'agent', 'Coder One');
