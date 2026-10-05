@@ -837,15 +837,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// A successful start/stop/restart clears a failed delete marker
 	// (design ptone/scion#2483 §2.1); publish and respond from the stored
 	// row, which a racing delete claim may have kept off newPhase.
-	s.settleLifecycleWrite(ctx, agent, newPhase)
+	reloaded := s.settleLifecycleWrite(ctx, agent, newPhase)
 	// A stopped report about the old container (its own status POST still
 	// in flight, or a heartbeat handled by another replica) can land after
 	// the restart's post-stop re-assert and release the slot during the
 	// start leg. Re-assert once more now that the final write landed, if the
-	// stored row is counted and no delete holds it. A report after this
-	// point heals itself: the next running heartbeat re-reserves on
-	// stopped -> running.
-	if action == api.AgentActionRestart && sd != nil &&
+	// reloaded row is counted and no delete holds it (skipped when the
+	// reload failed: the gate would decide on stale columns). A report after
+	// this point heals itself: the next running heartbeat re-reserves on
+	// stopped -> running (best-effort, with the cap check; at the cap the
+	// hourly backfill records it).
+	if action == api.AgentActionRestart && sd != nil && reloaded &&
 		isBrokerQuotaCountedPhase(agent.Phase) && agent.DeletedAt.IsZero() && !deletionActive(agent) {
 		s.reassertBrokerReservation(ctx, agent)
 	}

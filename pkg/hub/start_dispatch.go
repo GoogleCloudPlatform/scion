@@ -113,7 +113,8 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     again after its final write, for a report (a late POST, or a
 //     heartbeat on another replica) that lands during the start leg. A
 //     report after the final write heals itself: the next running heartbeat
-//     re-reserves on stopped -> running.
+//     re-reserves on stopped -> running (best-effort, with the cap check; at
+//     the cap the hourly backfill records it).
 //   - rollback restores priorPhase with one conditional write (IfPhase
 //     starting), so a phase written meanwhile (a heartbeat from another
 //     replica, a launch reaper) is kept. Under a live delete claim the
@@ -279,7 +280,8 @@ func (d *startDispatch) settle() {
 // reconcile's age gate is the backstop. It covers only the broker heartbeat:
 // the agent's own status report (a dying container reporting stopped during
 // a restart's stop leg) still applies, and the restart re-asserts its
-// reservation after the stop leg (startDispatch.reassertReservation).
+// reservation after the stop leg and again after its final write (see
+// beginStartDispatch's contract).
 func (s *Server) heartbeatPhaseGuarded(agent *store.Agent, hbPhase string) bool {
 	if hbPhase == "" || isBrokerQuotaCountedPhase(hbPhase) {
 		return false

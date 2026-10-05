@@ -561,7 +561,7 @@ func TestStartDispatch_RestartGuardedHeartbeatLeavesNoStaleMessage(t *testing.T)
 			srv.SetDispatcher(disp)
 			setBrokerAgentCeiling(t, s, 2)
 			ctx := context.Background()
-			sfx := "sd-f1-" + string(phase)
+			sfx := "sd-restart-msg-" + string(phase)
 			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
 			a := newQuotaTestAgent(t, s, broker, project, sfx, phase)
 			if phase == state.PhaseRunning {
@@ -680,8 +680,8 @@ func TestStartDispatch_FailedStartThenFailedDeleteEndsStopped(t *testing.T) {
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-f3", state.PhaseStopped)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-del-fail")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-del-fail", state.PhaseStopped)
 
 	var plan *agentDeletionPlan
 	disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
@@ -712,8 +712,8 @@ func TestStartDispatch_FailedDeleteDuringStartRestoresStarting(t *testing.T) {
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-guard")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-f3-guard", state.PhaseStopped)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-del-guard")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-del-guard", state.PhaseStopped)
 
 	var midPhase string
 	disp.onStart = func(*store.Agent) {
@@ -742,8 +742,8 @@ func TestStartDispatch_FailedDeleteIntentRefusedUnderClaim(t *testing.T) {
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-intent")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-f3-intent", state.PhaseStopped)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-del-intent")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-del-intent", state.PhaseStopped)
 	var plan *agentDeletionPlan
 	disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
@@ -768,8 +768,8 @@ func TestStartDispatch_FailedDeleteKeepsStartingUnderLiveLaunch(t *testing.T) {
 	disp.deleteErr = errors.New("simulated broker delete failure")
 	srv.SetDispatcher(disp)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f3-launch")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-f3-launch", state.PhaseProvisioning)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-del-launch")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-del-launch", state.PhaseProvisioning)
 	_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
@@ -840,8 +840,8 @@ func TestStartDispatch_DeleteClaimBeforeStartingWrite(t *testing.T) {
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 2)
 		ctx := context.Background()
-		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f2-"+name)
-		a := newQuotaTestAgent(t, s, broker, project, "sd-f2-"+name, snapshot)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-del-before-write-"+name)
+		a := newQuotaTestAgent(t, s, broker, project, "sd-del-before-write-"+name, snapshot)
 		// The row moves on (running) after the caller's snapshot, and a
 		// delete claims it, moving it to stopping.
 		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
@@ -916,8 +916,8 @@ func TestStartDispatch_StartingWriteFailure(t *testing.T) {
 		disp := &hookedStartDispatcher{}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 2)
-		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f6a-"+name)
-		a := newQuotaTestAgent(t, s, broker, project, "sd-f6a-"+name, phase)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-starting-fail-"+name)
+		a := newQuotaTestAgent(t, s, broker, project, "sd-starting-fail-"+name, phase)
 		return srv, s, broker, a, disp
 	}
 	assertUnchanged := func(t *testing.T, s store.Store, broker *store.RuntimeBroker, a *store.Agent, phase state.Phase, disp *hookedStartDispatcher) {
@@ -954,8 +954,8 @@ func TestStartDispatch_RestartFailedUnderClaimThenFailedDeleteEndsStopped(t *tes
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-f6b")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-f6b", state.PhaseStopped)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-restart-del-fail")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-restart-del-fail", state.PhaseStopped)
 
 	var plan *agentDeletionPlan
 	disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
@@ -982,8 +982,8 @@ func TestStartDispatch_StartOnRunningAgentKeepsLiveStatus(t *testing.T) {
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
 	ctx := context.Background()
-	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-r3-running")
-	a := newQuotaTestAgent(t, s, broker, project, "sd-r3-running", state.PhaseRunning)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "sd-run-live")
+	a := newQuotaTestAgent(t, s, broker, project, "sd-run-live", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, a.ID)
 	row, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -1231,4 +1231,50 @@ func TestRestart_StoppedReportDuringStartLegKeepsReservation(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the restart keeps its slot")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+}
+
+// ptone/scion#2010, ptone/scion#2014: the restart's re-assert after its
+// final write is skipped when a delete owns the row: a delete that claimed
+// it during the start leg (the row reads stopping, deleting), or a soft
+// delete. The slot released during the start leg (as by a report handled on
+// another replica) is not re-created for the agent being deleted.
+func TestRestart_FinalReassertSkippedWhenDeleteOwnsRow(t *testing.T) {
+	for _, mode := range []string{"claimed", "soft-deleted"} {
+		t.Run(mode, func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &hookedStartDispatcher{}
+			srv.SetDispatcher(disp)
+			setBrokerAgentCeiling(t, s, 2)
+			ctx := context.Background()
+			sfx := "rs-final-del-" + mode
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			a := newQuotaTestAgent(t, s, broker, project, sfx, state.PhaseRunning)
+			reserveBrokerSlot(t, s, broker, a.ID)
+			disp.onStart = func(*store.Agent) {
+				srv.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, a.ID)
+				if mode == "claimed" {
+					plan, err := srv.claimAgentDeletion(ctx, a.ID, agentDeleteParams{requestedBy: "test"})
+					require.NoError(t, err)
+					require.NotNil(t, plan)
+					return
+				}
+				row, err := s.GetAgent(ctx, a.ID)
+				require.NoError(t, err)
+				row.DeletedAt = time.Now()
+				require.NoError(t, s.UpdateAgent(ctx, row))
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+			require.Less(t, rec.Code, 500, rec.Body.String())
+			assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID),
+				"no reservation is re-created for an agent a delete owns")
+			assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
+			if mode == "claimed" {
+				got, err := s.GetAgent(ctx, a.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.PhaseStopping), got.Phase)
+				assert.Equal(t, store.DeletionStateDeleting, got.DeletionState)
+			}
+		})
+	}
 }
