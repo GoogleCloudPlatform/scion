@@ -5667,15 +5667,23 @@ func trustedEntryProjectPath(path, projectID string) bool {
 // findAgentInHubManagedProjects scans hub-managed project directories
 // (~/.scion/projects/<slug>/.scion/) for an agent directory matching the
 // given name and returns that project's .scion dir path, or "" if none. A
-// project moved from its pre-rename location by config.MigrateLegacyGlobalLayout
-// is found here directly, since the migration runs at broker boot, before this
-// function is ever reached.
+// project moved from its pre-rename location by
+// config.MigrateLegacyGlobalLayout is found here directly, since the
+// migration runs at broker boot, before this function is ever reached.
 //
-// When projectID is set, only a project directory whose recorded project ID
-// (the project-id file) equals projectID is considered, so a same-named
-// agent in another project is never returned (ptone/scion#1819). When
-// projectID is empty, the name must be found in exactly one project; more
-// than one is reported as an ambiguity error rather than a guess.
+// When .scion is a marker file (a hub-managed project with no git remote),
+// the returned path is the project's external .scion dir under
+// project-configs, where its agent directories live. Only a lookup with a
+// projectID considers such a project, and only through
+// hubMarkerProjectScionDir, which accepts the dir named by the directory's
+// slug and projectID and nothing else.
+//
+// When projectID is set, only a project directory whose recorded project
+// ID (the project-id file, or the marker file's project-id) equals
+// projectID is considered, so a same-named agent in another project is
+// never returned (ptone/scion#1819). When projectID is empty, the name must
+// be found in exactly one project; more than one is reported as an
+// ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion/project-configs/ (shared-workspace agents,
@@ -5696,11 +5704,25 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			if projectID != "" {
-				recorded, err := config.ReadProjectID(scionDir)
-				if err != nil || recorded != projectID {
+			if projectID != "" && projectIDAtPath(scionDir) != projectID {
+				continue
+			}
+			// A hub-managed project with no git remote has a .scion marker
+			// file rather than a directory; its agents live under its
+			// external project-configs dir (ptone/scion#2839). That dir is
+			// computed from the directory name and the requested project
+			// ID, never from the marker alone, so an unscoped lookup
+			// (no projectID) skips marker projects.
+			if config.IsProjectMarkerFile(scionDir) {
+				resolved := hubMarkerProjectScionDir(globalDir, entry.Name(), projectID, scionDir)
+				if resolved == "" {
 					continue
 				}
+				agentDir := filepath.Join(resolved, "agents", agentName)
+				if _, err := os.Lstat(agentDir); err == nil && !projectConfigPathContained(globalDir, agentDir) {
+					continue
+				}
+				scionDir = resolved
 			}
 			if hubManagedProjectHasAgent(scionDir, agentName) {
 				found = append(found, scionDir)
