@@ -116,8 +116,10 @@ scion harness-config pull <name>          # download from the Hub to the global 
 scion harness-config pull <name> --to <path>
 ```
 
-`sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
-hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
+`sync`/`push` upload only changed files (compared by content hash) and mirror local deletions: a
+file removed from the local directory is removed from the Hub record, and the removed paths are
+printed. Backup and temp files (`*.bak.<timestamp>`, `.*.tmp-*`) are never uploaded, so any left
+on the Hub are removed the same way. `pull` verifies each file's hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
 default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
 the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
 it must live there. They create the config in that scope or update an existing one of the same name,
