@@ -449,6 +449,26 @@ describe('AgentStore delta probe', () => {
     expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
   });
 
+  it('walks for a changed count after a count walk fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = await loaded([row('a1', 1), row('a2', 2)], HUB, { probeFullWalkMs: Infinity });
+    // a2 goes without an event; the walk its count starts fails.
+    h.server.agents.pop();
+    h.server.status = 500;
+    h.server.sortedStatus = (): number => 200;
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    expect(h.store.peek(HUB)?.complete).toBe(true);
+
+    h.server.status = 200;
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    h.server.agents.push(row('a3', 3));
+    await tick();
+    expect(h.server.walks()).toBe(3);
+    expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a3']);
+  });
+
   it('stops at a full page without a next cursor', async () => {
     const h = await loaded([row('a0', 0)]);
     // Every row is newer than the last probe's newest, and a0 is gone.
