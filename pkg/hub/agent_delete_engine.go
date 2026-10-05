@@ -535,6 +535,13 @@ func (e *deletionEngine) run() deletionOutcome {
 
 	// Release quotas and the topic default binding (each bounded).
 	e.tailStep("release quotas", func() { s.releaseAgentQuotas(e.base, agent.ID, agent.RuntimeBrokerID) })
+	// Close the agent's conduit sessions and drop its registry rows (a
+	// no-op when no relay runs).
+	e.tailStep("forget conduit sessions", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.conduitForgetAgent(ctx, agent.ID)
+	})
 	e.tailStep("clear topic default", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 		defer cancel()
@@ -707,6 +714,22 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 				f.Activity = &noActivity
 				return
 			}
+			// A delete that claimed the row during a start dispatch
+			// captured the "starting" that beginStartDispatch wrote
+			// (ptone/scion#2014). With no start still in flight (no active
+			// launch, run intent not running, no lifecycle op on this
+			// replica), restoring starting would leave a counted phase with
+			// no container that nothing moves on; restore stopped instead,
+			// which a heartbeat corrects if a container exists. A stopped
+			// hook firing on this failed delete is intended, as for the
+			// launch exception above.
+			if prior.Phase == string(state.PhaseStarting) && startNotInFlight(e.s, cur) {
+				stopped := string(state.PhaseStopped)
+				noActivity := ""
+				f.Phase = &stopped
+				f.Activity = &noActivity
+				return
+			}
 			if prior.Phase != "" {
 				phase, activity := prior.Phase, prior.Activity
 				f.Phase = &phase
@@ -730,6 +753,29 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+}
+
+// startNotInFlight reports, for the delete rollback, whether no start of cur
+// can still bring a container up: the row reads stopping or starting, has no
+// active launch and no running intent, and this replica holds no lifecycle
+// op for it (replica-local). Under a live claim only the lifecycle-op and
+// launch checks do any work: the row reads stopping (the claim wrote it, and
+// a start's IfPhase restore cannot overwrite it), and the run intent stays
+// stopped (the engine records it before dispatching, and a running intent
+// cannot be recorded under the claim since ptone/scion#2550); the starting
+// and intent checks are defensive. lifecycleOps is per replica, so a start
+// still in flight on another replica passes this check; the rollback then
+// writes stopped, and the next heartbeat (or that start's own status write)
+// corrects stopped -> running if that start brings a container up.
+func startNotInFlight(s *Server, cur *store.Agent) bool {
+	switch state.Phase(cur.Phase) {
+	case state.PhaseStopping, state.PhaseStarting:
+	default:
+		return false
+	}
+	return cur.LaunchState != store.LaunchStateActive &&
+		cur.RunIntent != store.RunIntentRunning &&
+		!s.lifecycleOps.active(cur.ID)
 }
 
 // deleteInDoubtMessage is the in_doubt banner text.
@@ -871,21 +917,22 @@ func (e *deletionEngine) rowGone() bool {
 	return errors.Is(err, store.ErrNotFound)
 }
 
-// agentDeletionFinalizeSeam runs inside the finalize transaction (soft and
-// hard, including the hard delete of an incomplete create), just before
-// commit, with a transaction-scoped store. A non-nil error rolls the
-// finalize back, and the engine fails with finalize_failed. It is the
-// attachment point for lifecycle hooks and op-ID stamping
-// (ptone/scion#2121); a no-op until then. Tests may replace it.
+// agentDeletionFinalizeSeam is a test seam. It runs inside the finalize
+// transaction (soft and hard, including the hard delete of an incomplete
+// create), with a transaction-scoped store, before the Server's lifecycle
+// finalize (agentFinalizeHook). A non-nil error rolls the finalize back, and
+// the engine fails with finalize_failed. Production code leaves it a no-op.
 var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context, store.Store, *store.Agent, store.DeletionFinalizeMode) error {
 	return nil
 }
 
 // finalizeAgentDeletion is the delete engine's single terminal write: one
 // store transaction that re-checks the claim, applies the soft or hard
-// delete, and runs agentDeletionFinalizeSeam before commit.
+// delete, and runs s.agentFinalizeHook before commit (the
+// agentDeletionFinalizeSeam var first, then the Server's lifecycle finalize,
+// agent_lifecycle_tx.go).
 func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields) (int, error) {
-	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, agentDeletionFinalizeSeam)
+	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
 }
 
 // --- Request side (design §2.4) ---

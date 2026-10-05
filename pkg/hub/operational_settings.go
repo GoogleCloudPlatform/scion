@@ -71,15 +71,16 @@ type sectionState struct {
 // external source.
 //
 // Field population depends on the source:
-//   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
+//   - DB-backed, any driver (OperationalSettings.Snapshot): ALL fields are populated via
 //     the koanf merge (DB > bootstrap merge). This includes
 //     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
-//   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
+//   - No OperationalSettings (BuildLayer1SnapshotFromFile): only the fields that the old
 //     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
 //     DefaultTimezone, which are read from the top-level
-//     default_harness_config and default_timezone keys in settings.yaml.
+//     default_harness_config and default_timezone keys in settings.yaml,
+//     and HubName (see the HubName field: every constructor must set it).
 //     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
 //     values because the old reloadSettings never applied them on reload — they
 //     are consumed only at startup. This maintains file-mode parity (the
@@ -93,9 +94,9 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
-	StalledThreshold      string // postgres-mode only (see type comment)
-	SoftDeleteRetention   string // postgres-mode only (see type comment)
-	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
+	StalledThreshold      string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
 
 	// Start claim timing (durations as strings; empty keeps the startup value)
 	StartClaimLeaseTTL         string
@@ -109,8 +110,9 @@ type Layer1Snapshot struct {
 	// HasMaintenanceRow indicates whether a maintenance section row exists in
 	// the DB. When false (row absent), ApplyMaintenanceFromSnapshot leaves
 	// MaintenanceState as initialized at startup rather than resetting to
-	// defaults. This field is only meaningful in postgres mode — file-mode
-	// snapshots should never apply maintenance state.
+	// defaults. This field is only meaningful for DB-backed snapshots (any
+	// driver) — snapshots built from the file should never apply maintenance
+	// state.
 	HasMaintenanceRow bool
 
 	// Telemetry
@@ -141,12 +143,16 @@ type Layer1Snapshot struct {
 	DefaultRuntimeBroker string
 	DefaultTimezone      string
 	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
-	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	// hub-wide GCP identity default, DB-backed snapshots only (see type
+	// comment).
 	DefaultGCPIdentityMode             string
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
-	PublicURL     string
+	PublicURL string
+	// HubName is the configured hub_name. "" does NOT mean "leave alone":
+	// ApplySnapshot resets the running name (and the GCP secret label) to
+	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
 
@@ -201,7 +207,8 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
-	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
+	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
+	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
 
 	// server is set by StartPropagation — used for self-apply in Update
@@ -384,6 +391,17 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+
+	// hub_name is the one endpoints key that keeps its bootstrap value when
+	// a DB row omits it: a managed endpoints row carries hub_name only after
+	// an admin sets it, and clearing it returns to the bootstrap name. The
+	// snapshot holds the configured value only; "" means unset, and
+	// ApplySnapshot then uses the name this replica resolved at startup
+	// (startupHubNameOrDefault). A replica's hostname must not appear
+	// here: GET returns this value and clients echo it back to any replica.
+	if snap.HubName == "" && o.bootstrapKoanf != nil {
+		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
+	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
@@ -592,8 +610,9 @@ func (o *OperationalSettings) Update(
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). The event publisher
-	// is nil in file/SQLite mode — no-op there.
+	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
+	// publisher is an in-process ChannelEventPublisher (single replica); it
+	// is nil only before StartPropagation is wired, e.g. in tests.
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
@@ -654,7 +673,8 @@ func (o *OperationalSettings) EnvOverriddenKeys() []string {
 
 // SetEventPublisher wires the event publisher for cross-replica propagation.
 // Must be called before StartPropagation. Nil is safe (disables publishing
-// in Update). In file/SQLite mode this is never called.
+// in Update). Called on every DB driver: postgres wires the LISTEN/NOTIFY
+// publisher, SQLite an in-process ChannelEventPublisher.
 func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 	o.events = ep
 }
@@ -663,8 +683,9 @@ func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 // §3.6). It subscribes to admin.settings.updated events, starts a 60s jittered
 // poll backstop, and wires the reconnect callback for unconditional refresh.
 //
-// Must be called after SetEventPublisher. Postgres mode only; in file/SQLite
-// mode this is never called (the writing handler applies synchronously).
+// Must be called after SetEventPublisher. Runs on every DB driver; on SQLite
+// (single replica, in-process publisher) the writing node's synchronous
+// self-apply is what matters and the poll backstop is a harmless re-read.
 //
 // The ctx should be the server's lifetime context; cancellation stops the
 // propagation goroutines.
@@ -748,7 +769,8 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 
 // runPollBackstop runs a ticker at the configured PollInterval (default 60s,
 // with ±10s jitter) that calls Refresh and applies any changes. This is the
-// backstop for missed NOTIFY events (design §3.6). Postgres mode only.
+// backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
+// where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
 	interval := o.PollInterval
 	if interval == 0 {
@@ -955,20 +977,24 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 }
 
 // BuildLayer1SnapshotFromFile constructs a Layer1Snapshot from the current
-// GlobalConfig, i.e. from settings.yaml + env. This is used in file/SQLite
-// mode where there is no DB tier for operational settings.
+// GlobalConfig, i.e. from settings.yaml + env. This is used only by a hub
+// with no OperationalSettings (no DB tier for operational settings).
 //
 // NOTE: Only fields that the old reloadSettings() consumed are populated here.
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
 // ImageRegistry, DefaultResources, and NotificationChannels remain at zero
 // values — the old reloadSettings never applied those on config reload (they
-// are consumed at startup, not on reload). In postgres mode, the full koanf-based
-// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+// are consumed at startup, not on reload). With OperationalSettings (any DB
+// driver), the full koanf-based Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 //
 // Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
 // hubAgentDefaults() reflects them in file mode, including immediately after a
 // file-mode admin PUT (reloadSettings).
+//
+// HubName is populated too: "" in a snapshot makes ApplySnapshot reset the
+// running name to the startup name, so leaving it out would rename a
+// configured hub on every file-mode reload.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -979,6 +1005,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		TelemetryEnabled:   gc.TelemetryEnabled,
 		AdminMode:          gc.AdminMode,
 		MaintenanceMessage: gc.MaintenanceMessage,
+		// The configured hub_name ("" when unset); ApplySnapshot resolves
+		// "" to the startup default, as at startup.
+		HubName: gc.Hub.HubName,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1039,6 +1068,13 @@ func boolPtrEqual(a, b *bool) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// startupHubNameOrDefault returns the hub name resolved at startup, or the
+// startup default (config.ResolveHubNameOrDefault) for a Server not built
+// by New.
+func (s *Server) startupHubNameOrDefault() string {
+	return config.ResolveHubNameOrDefault(s.startupHubName)
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -1195,9 +1231,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
-	// Hub name
-	if snap.HubName != "" {
-		s.config.HubName = snap.HubName
+	// Hub name: the configured value, or when unset the name this replica
+	// resolved at startup, so a cleared hub_name does not leave a stale
+	// managed name in use and a name set only through --config survives.
+	// Reported as applied only when it changes. (Other Layer-1 keys set
+	// only in a --config file are still overridden; tracked in ptone/scion#3070.)
+	hubName := snap.HubName
+	if hubName == "" {
+		hubName = s.startupHubNameOrDefault()
+	}
+	if s.config.HubName != hubName {
+		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
 	}
 
@@ -1255,10 +1299,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
-	if snap.HubName != "" {
-		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
-			gcpBackend.SetHubName(snap.HubName)
-		}
+	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+		gcpBackend.SetHubName(hubName)
 	}
 
 	// Runtimes, profiles, and harness configs: update the global settings
@@ -1288,10 +1330,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
-	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
-	// must never touch MaintenanceState (restoring pre-refactor behavior).
-	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
-	// separately, which respects env > DB precedence (§3.4/§3.8).
+	// Maintenance is runtime/API-owned state. On a hub without
+	// OperationalSettings, reloadSettings must never touch MaintenanceState
+	// (restoring pre-refactor behavior). With OperationalSettings (any DB
+	// driver), the caller uses ApplyMaintenanceFromSnapshot separately.
 
 	// Federation (outside mutex — atomic.Pointer swap is lock-free,
 	// and NewFederationAuthenticator may do network I/O)
@@ -1360,27 +1402,46 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 }
 
-// ApplyMaintenanceFromSnapshot applies maintenance state from a postgres-mode
-// snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+// ApplyMaintenanceFromSnapshot applies maintenance state from a DB-backed
+// (any driver) snapshot.
 //
-// This function must be called ONLY in postgres-mode paths — file-mode
-// reloadSettings must never touch MaintenanceState (it is runtime/API-owned).
+// This function must be called ONLY on DB-backed paths (any driver) — the
+// file-mode reloadSettings must never touch MaintenanceState (it is
+// runtime/API-owned).
 //
 // Behavior:
 //   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState
-//     keeps its current value (which honors the env var set at startup).
-//   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
-//     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
-//
-// ApplyMaintenanceFromSnapshot applies the maintenance settings from the
-// snapshot to the server's maintenance state. In HA mode, maintenance must
-// be cluster-consistent — per-node env force-win is removed.
+//     keeps its current value (which honors the startup admin mode).
+//   - If snap.HasMaintenanceRow is true on a hosted hub: apply the DB values.
+//     Maintenance must be cluster-consistent, so there is no per-node
+//     override.
+//   - If snap.HasMaintenanceRow is true on a workstation hub whose startup
+//     admin mode is on (SCION_SERVER_ADMIN_MODE=true or settings.yaml
+//     admin_mode: true): the hub stays in maintenance — the break-glass wins
+//     over the row for the life of the process (ptone/scion#1091 option C).
+//     The row's message is still used when it has one.
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
 	}
 
+	if s.maintenanceBreakGlass() {
+		_, msg := s.maintenance.State()
+		if snap.MaintenanceMessage != "" {
+			msg = snap.MaintenanceMessage
+		}
+		s.maintenance.Set(true, msg)
+		return
+	}
 	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
+}
+
+// maintenanceBreakGlass reports whether a workstation hub was started in
+// admin mode (SCION_SERVER_ADMIN_MODE=true or settings.yaml admin_mode: true).
+// That startup state wins over a DB maintenance row; on hosted hubs the row
+// wins.
+func (s *Server) maintenanceBreakGlass() bool {
+	return s.workstation && s.config.AdminMode
 }
 
 // ProjectDefaultScratchpad returns whether the default scratchpad shared

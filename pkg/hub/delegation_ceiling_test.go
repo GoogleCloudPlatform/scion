@@ -574,7 +574,7 @@ func TestDelegationEdgeStore_CRUD(t *testing.T) {
 	assert.Equal(t, tid("dc-edge-agent-1"), edges[0].DelegateID)
 
 	// Deactivate
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge.ID))
+	revokeDelegateEdges(t, s, tid("dc-edge-agent-1"))
 
 	// Should not appear in active queries
 	edges, err = s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, tid("dc-edge-agent-1"))
@@ -909,7 +909,7 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 	require.NoError(t, s.CreateDelegationEdge(ctx, edge1), "first edge creation should succeed")
 
 	// Revoke first edge
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge1.ID), "first revocation should succeed")
+	revokeDelegateEdges(t, s, agentID)
 
 	// Create second edge (same delegate + scope)
 	edge2 := &store.DelegationEdge{
@@ -927,7 +927,7 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 	// Revoke second edge — this MUST NOT fail with a unique violation.
 	// Before the partial index fix, the second revocation would conflict
 	// with edge1's inactive row on the unique index.
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge2.ID), "second revocation must not fail (R2-1)")
+	revokeDelegateEdges(t, s, agentID)
 
 	// Verify both edges are now inactive
 	edges, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID)

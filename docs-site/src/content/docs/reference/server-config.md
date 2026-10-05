@@ -10,11 +10,10 @@ This document describes the configuration for the Scion Hub (State Server) and t
 Server configuration is defined in the `server` section of your `settings.yaml` file.
 
 - **Primary**: `~/.scion/settings.yaml` (Global settings)
-- **Legacy**: `~/.scion/server.yaml` (Deprecated, but supported as fallback)
+- **Legacy**: `server.yaml` in `~/.scion`, in the `--config` path, or in the working directory (Deprecated, but supported as a fallback when `settings.yaml` has no `server` key)
 
 :::tip[Migration]
-If you are using `server.yaml`, you can migrate it to `settings.yaml` using:
-`scion config migrate --server`
+To move a `server.yaml` into `settings.yaml`, copy its contents under a top-level `server:` key in `~/.scion/settings.yaml`, then remove `server.yaml`. `scion config migrate` merges a `server.yaml` only while it converts a legacy (unversioned) `settings.yaml`; it skips a file that already has `schema_version`. There is no `--server` flag yet (ptone/scion#3116).
 :::
 
 ## Structure
@@ -72,6 +71,7 @@ Controls the central Hub API server.
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `cors` | object | | CORS configuration (see below). |
+| `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -79,6 +79,33 @@ Controls the central Hub API server.
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable CORS. |
 | `allowed_origins` | list | `["*"]` | Allowed origins. |
+
+#### Conduit (`server.hub.conduit`)
+
+Settings for the in-process conduit relay and its stream grants. They take effect only when the `hub.conduit` [experiment](/scion/reference/experiments/) is on. All of them are read at startup, so a change needs a restart. An invalid value is a startup error, not silently ignored.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `grant_key_activation` | duration | `"15m"` | Delay between publishing a new grant signing key and signing with it. Minimum `"1m"`. Targets must refresh their keys at least this often. Flag: `--conduit-grant-key-activation`. Env: `SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION`. |
+| `tcp_allowed_ports` | list of int | `[]` | Additional agent-local ports a TCP stream grant may target, on every agent, besides that agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty means exposed ports only; this setting never narrows access to exposed ports. Flag: `--conduit-tcp-allowed-ports`. Env: `SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS` (comma-separated). |
+| `internal_listen` | string | | `host:port` of the internal relay API listener, used by multi-node deployments. It serves only the internal relay API and must be reachable only inside the cluster or VPC, never publicly. Flag: `--internal-listen`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN`. |
+| `internal_advertise` | string | | Base URL (`http(s)://host:port`) other hub nodes use to reach this node's internal listener. Default: `POD_IP` with the listen port, else the listen host if it is not a wildcard. Flag: `--internal-advertise`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE`. |
+| `peer_auth` | string | `"auto"` | Relay-peer authentication: `auto`, `oidc` or `hmac`. Requests between relays are always signed with a key derived from the hub's signing secret, which is required in every mode. `oidc` also requires a Google OIDC ID token, `auto` adds the ID token on GCP, and `hmac` uses the signature alone. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUTH`. |
+| `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
+| `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
+| `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
+| `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
+
+**TLS on the internal hop.** Use TLS for the internal relay endpoint (for example a service mesh or a TLS-terminating proxy) and advertise it as `https://`. Plain `http://` is accepted.
+
+**Hosted HA.** In an HA deployment each hub node runs a relay that other nodes must reach directly, so the hub refuses to start when:
+
+- the grant key ring is not stored with the shared at-rest key;
+- it runs on Cloud Run (`K_SERVICE` is set), whose instances are not individually addressable;
+- `internal_advertise` uses the public hub host or a `*.run.app` host;
+- the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
+
+Outside HA, a relay that cannot start is logged and the hub serves without it.
 
 #### Asynchronous agent create
 
@@ -403,6 +430,59 @@ server:
 - **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
 - **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
 
+### Agent Home Storage (`server.home_storage`)
+
+Selects where the home directory of Kubernetes agents lives. With the default `local` backend the home is inside the pod and is filled from the broker's copy at every start. With `nfs`, each agent's home is a directory on the NFS export of its profile's [shared-dir storage](#shared-directory-storage-servershared_dir_storage), kept across stops, restarts and pod replacements.
+
+The `nfs` backend is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set. The export's group must be the pod group (gid 1000). See [Persistent Agent Home](/scion/hosted/ha/kubernetes/#persistent-agent-home-nfs) for how the home is created and used.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `local` | `local` or `nfs`. A runtime entry or profile can override it with `home_storage_backend`. |
+| `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at the shared-dir storage `mount_root`). A runtime entry or profile can override it with `home_storage_leaf`. |
+| `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
+| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. Keep `stop_grace_seconds` plus this below 90 (the hub's start window; the broker request timeout is 120); the server warns at startup and `scion config validate` warns when it is not. |
+| `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
+| `allow_incomplete_phases` | bool | `false` | Development only. Allows the `nfs` backend while the feature is incomplete. |
+
+The backend and leaf mode for an agent are resolved when it first starts, each in this order:
+
+1. `profiles.<name>.home_storage_backend` (or `home_storage_leaf`) for the agent's profile.
+2. `runtimes.<name>.home_storage_backend` (or `home_storage_leaf`) for that profile's runtime entry.
+3. `server.home_storage.backend` (or `leaf`).
+4. `local` (or `pod`).
+
+```yaml
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          pv_name: scion-shared-pvc
+  home_storage:
+    allow_incomplete_phases: true
+runtimes:
+  gke:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: gke
+    shared_dir_storage_backend: nfs
+    home_storage_backend: nfs
+    home_storage_leaf: pod
+  docker:
+    runtime: docker
+```
+
+- **Kubernetes only**: agents on any other runtime always get a local home, whatever the settings say. An `nfs` value on a non-Kubernetes runtime entry or profile is accepted with a warning.
+- **Share**: the home uses the first share and claim of the profile's resolved `shared_dir_storage` `nfs` block. A profile that selects `home_storage_backend: nfs` without `shared_dir_storage` `nfs` fails to start agents, with an error naming the profile.
+- **Hub agents only**: an NFS home is named after the agent's hub ID, at `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export. A start without a hub agent ID fails.
+- **Chosen from global settings**: like `server.shared_dir_storage`, the per-profile and per-runtime keys are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply, and an edit takes effect at the next agent start with no restart. `server.home_storage` itself is read from `settings.yaml` only.
+- **Recorded per agent**: a new agent's home storage is decided at its first start and recorded in `home-storage.json` in the agent's directory on the broker, next to `shared-dir-storage.json`. Later starts, restarts and reincarnations use the record, so a settings change never moves an existing home. A recorded `nfs` home whose share is no longer configured, or whose agent is started with the experiment off, fails to start rather than getting a new, empty home. Agents created before the record existed keep a local home.
+- **Startup summary**: the startup log has a warning for each invalid value and one line per profile that resolves to `nfs`.
+
 ### Scheduler (`server.scheduler`)
 
 Controls the background task scheduler in the Hub. This regulates the tick interval and concurrency of recurring maintenance tasks (such as telemetry aggregation, session cleanups, and heartbeats) to match database capacity.
@@ -513,23 +593,34 @@ project_defaults:
 When running with a postgres database, operational settings (Layer-1) can be configured via `SCION_SEED_*` environment variables and managed in the admin UI. See the [Admin Settings Model](/scion/reference/admin-settings/) for details on the seeded/managed lifecycle and the `SCION_SEED_*` namespace.
 :::
 
-All server settings can be overridden via environment variables using the `SCION_SERVER_` prefix and snake_case naming.
+Most server settings can be overridden via environment variables using the `SCION_SERVER_` prefix. Write each path segment in upper case and drop the underscores inside a multi-word field name: `read_timeout` becomes `READTIMEOUT`, not `READ_TIMEOUT`. A name that the Hub does not recognise is ignored and logged as a warning at startup, with a suggested spelling where one exists. Each key's working variable is listed as `x-env-var` in the [settings schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json).
+
+There are two exceptions to the pattern:
+
+- The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.
+- The broker identity keys keep their underscores: `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`, and likewise `BROKER_BROKER_NAME`, `BROKER_BROKER_NICKNAME`, `BROKER_BROKER_TOKEN` and `BROKER_AUTO_PROVIDE`.
+
+`server.log_format` and `server.env` have no environment variable. There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
 
 **Examples:**
 - `server.hub.port` -> `SCION_SERVER_HUB_PORT`
 - `server.hub.gcp_project_id` -> `SCION_SERVER_HUB_GCPPROJECTID`
 - `server.hub.gcp_iam_check_mode` -> `SCION_SERVER_HUB_GCPIAMCHECKMODE`
 - `server.hub.gcp_iam_deny_unknown_policy` -> `SCION_SERVER_HUB_GCPIAMDENYUNKNOWNPOLICY`
-- `server.broker.enabled` -> `SCION_SERVER_BROKER_ENABLED`
-- `server.broker.container_hub_endpoint` -> `SCION_SERVER_BROKER_CONTAINERHUBENDPOINT`
+- `server.hub.admin_emails` -> `SCION_SERVER_HUB_ADMINEMAILS`
+- `server.hub.stalled_threshold` -> `SCION_SERVER_HUB_STALLEDTHRESHOLD`
+- `server.auth.user_access_mode` -> `SCION_SERVER_AUTH_USERACCESSMODE`
+- `server.broker.enabled` -> `SCION_SERVER_RUNTIMEBROKER_ENABLED`
+- `server.broker.container_hub_endpoint` -> `SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT`
+- `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`
 - `server.database.url` -> `SCION_SERVER_DATABASE_URL`
 - `server.auth.dev_mode` -> `SCION_SERVER_AUTH_DEVMODE`
 - `server.secrets.backend` -> `SCION_SERVER_SECRETS_BACKEND`
 - `server.secrets.gcp_project_id` -> `SCION_SERVER_SECRETS_GCPPROJECTID`
 - `server.secrets.gcp_credentials` -> `SCION_SERVER_SECRETS_GCPCREDENTIALS`
 - `server.secrets.gcp_replication_locations` -> `SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS`
-- `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVAL_SECONDS`
-- `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAX_CONCURRENCY`
+- `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
+- `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
 
 ### Logging Environment Variables
 
@@ -538,7 +629,7 @@ These environment variables control server-side logging behavior. They are not p
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
-| `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `SCION_LOG_LEVEL` | Set to `debug` to log at DEBUG level from startup. Any other value leaves the level at `info`. | `info` |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
@@ -568,7 +659,7 @@ For server and infrastructure configurations, Scion parses several boolean envir
 
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
-1. `SCION_SERVER_HUB_PUBLIC_URL` or `server.hub.public_url` — explicit Hub public URL.
+1. `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` — explicit Hub public URL.
 2. Project-level `hub.endpoint` setting.
 3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
@@ -767,6 +858,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
+| Conduit relay | `hub.conduit.*` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 
@@ -819,6 +911,8 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 **Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. The `access` section is the exception: it is merged onto the current row, and a concurrent change to that row between read and write returns 409 even without `expected_revisions`. Sections are written in alphabetical order for deterministic partial-apply behavior.
 
 **Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, and public_url without sending every field.
+
+**Masked secrets**: `GET /api/v1/admin/server-config` masks secrets (OAuth client secrets, GitHub App keys, notification channel parameters, and other credentials). A PUT may send a masked placeholder back only inside a block that exactly matches the stored block once masked; the Hub then keeps the stored secret. The block is the structure the secret sits in (for example one OAuth provider, the GitHub App, or one notification channel). To change any field of such a block, send every secret in that block in clear. Any other placeholder is rejected with `400`, so it is never stored over a real value. The admin web UI leaves unedited masked blocks out of its saves.
 
 **Maintenance durability**: `PUT /api/v1/admin/maintenance` writes to the `maintenance` section in DB, making admin/maintenance mode durable across restarts and propagated to all replicas. `SCION_SERVER_ADMINMODE` env var still force-enables per node for break-glass access. In file/SQLite mode, maintenance changes are ephemeral (in-memory only, lost on restart). Use `SCION_SERVER_ADMINMODE=true` env var for persistent control.
 

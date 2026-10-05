@@ -16,37 +16,153 @@ package opsettings
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
 
-// TestAccessSection_RegistryPathsInBothMaps guards the explicit koanf<->doc
-// maps for the access section: every registry KoanfPaths entry must appear in
-// both koanfPathToJSONField (seeding: koanf → doc) and jsonFieldToKoanfPaths
-// (Refresh/Snapshot: doc → koanf). A path missing from either map is silently
-// dropped on seed or ignored when read back, which is how default_user_role
-// was lost (design §5.A item 7).
-//
-// Scoped to access for this change; other sections (e.g. endpoints'
-// server.hub.hub_name) have the same exposure and are tracked separately.
-func TestAccessSection_RegistryPathsInBothMaps(t *testing.T) {
-	sec := SectionByName("access")
-	if sec == nil {
-		t.Fatal("access section not in registry")
-	}
-	fwd := koanfPathToJSONField["access"]
-	rev := jsonFieldToKoanfPaths["access"]
+// leafKoanfPaths returns the section's registry KoanfPaths that hold a
+// value: it drops a path that is only a parent of other paths in the same
+// section (e.g. github_app's "server.github_app"), and a path equal to the
+// section name, which marks a map-of-objects section (runtimes, profiles,
+// harness_configs) whose whole subtree is the document.
+func leafKoanfPaths(sec Section) []string {
+	var out []string
 	for _, kp := range sec.KoanfPaths {
-		field, ok := fwd[kp]
-		if !ok {
-			t.Errorf("access: registry path %q missing from koanfPathToJSONField", kp)
+		if kp == sec.Name {
 			continue
 		}
-		if got, ok := rev[field]; !ok || got != kp {
-			t.Errorf("access: jsonFieldToKoanfPaths[%q] = %q, want %q", field, got, kp)
+		parent := false
+		for _, other := range sec.KoanfPaths {
+			if strings.HasPrefix(other, kp+".") {
+				parent = true
+				break
+			}
 		}
+		if !parent {
+			out = append(out, kp)
+		}
+	}
+	return out
+}
+
+// TestMappedSections_RegistryPathsInBothMaps guards the explicit koanf<->doc
+// maps: for every registry section that uses koanfPathToJSONField /
+// jsonFieldToKoanfPaths, every registry KoanfPaths entry must appear in
+// both maps (seeding: koanf → doc; Refresh/Snapshot: doc → koanf), and the
+// two maps must be inverses. A path missing from either map is silently
+// dropped on seed or ignored when read back, which is how default_user_role
+// (design §5.A item 7) and endpoints' server.hub.hub_name
+// (ptone/scion#2073) were lost.
+//
+// The check is derived from the registry and the maps, so a new section or
+// path is covered as soon as it is registered.
+func TestMappedSections_RegistryPathsInBothMaps(t *testing.T) {
+	for name := range koanfPathToJSONField {
+		if _, ok := jsonFieldToKoanfPaths[name]; !ok {
+			t.Errorf("section %q is in koanfPathToJSONField but not jsonFieldToKoanfPaths", name)
+		}
+	}
+	for name := range jsonFieldToKoanfPaths {
+		if _, ok := koanfPathToJSONField[name]; !ok {
+			t.Errorf("section %q is in jsonFieldToKoanfPaths but not koanfPathToJSONField", name)
+		}
+	}
+
+	for _, sec := range Registry {
+		fwd, inFwd := koanfPathToJSONField[sec.Name]
+		rev, inRev := jsonFieldToKoanfPaths[sec.Name]
+		if !inFwd && !inRev {
+			continue
+		}
+		registered := map[string]bool{}
+		for _, kp := range leafKoanfPaths(sec) {
+			registered[kp] = true
+			field, ok := fwd[kp]
+			if !ok {
+				t.Errorf("%s: registry path %q missing from koanfPathToJSONField", sec.Name, kp)
+				continue
+			}
+			if got, ok := rev[field]; !ok || got != kp {
+				t.Errorf("%s: jsonFieldToKoanfPaths[%q] = %q, want %q", sec.Name, field, got, kp)
+			}
+		}
+		for kp := range fwd {
+			if !registered[kp] {
+				t.Errorf("%s: koanfPathToJSONField has %q, which is not a registry KoanfPaths entry", sec.Name, kp)
+			}
+		}
+		for field, kp := range rev {
+			if !registered[kp] {
+				t.Errorf("%s: jsonFieldToKoanfPaths[%q] = %q, which is not a registry KoanfPaths entry", sec.Name, field, kp)
+			}
+		}
+	}
+}
+
+// TestRegistrySections_EveryPathRoundTrips seeds each registry KoanfPaths
+// leaf into a koanf instance, extracts its section document
+// (ExtractSectionFromKoanf, the seeding path), loads the document back
+// (LoadSectionsIntoKoanf, the Refresh/Snapshot path), and checks the value
+// survives. Unlike the map guard above, this also covers sections with
+// hand-written extract/load code (agent_defaults, notifications, ...).
+func TestRegistrySections_EveryPathRoundTrips(t *testing.T) {
+	for _, sec := range Registry {
+		for _, kp := range leafKoanfPaths(sec) {
+			const sentinel = "round-trip-sentinel"
+			k := koanf.New(".")
+			if err := k.Load(confmap.Provider(map[string]interface{}{kp: sentinel}, "."), nil); err != nil {
+				t.Fatal(err)
+			}
+			doc, err := ExtractSectionFromKoanf(k, sec.Name)
+			if err != nil {
+				t.Errorf("%s: ExtractSectionFromKoanf: %v", sec.Name, err)
+				continue
+			}
+			back, err := LoadSectionsIntoKoanf(map[string]json.RawMessage{sec.Name: doc})
+			if err != nil {
+				t.Errorf("%s: LoadSectionsIntoKoanf: %v", sec.Name, err)
+				continue
+			}
+			if got := back.Get(kp); got != sentinel {
+				t.Errorf("%s: %q = %v after extract+load, want %q (doc: %s)", sec.Name, kp, got, sentinel, doc)
+			}
+		}
+	}
+}
+
+// TestEndpointsSection_HubNameRoundTrip pins server.hub.hub_name through
+// seeding and Refresh/Snapshot (ptone/scion#2073).
+func TestEndpointsSection_HubNameRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.hub_name": "prod-hub",
+	}, "."), nil); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ExtractSectionFromKoanf(k, "endpoints")
+	if err != nil {
+		t.Fatalf("ExtractSectionFromKoanf: %v", err)
+	}
+	var endpoints EndpointsSettings
+	if err := json.Unmarshal(doc, &endpoints); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if endpoints.HubName != "prod-hub" {
+		t.Errorf("seeded endpoints doc hub_name = %q, want prod-hub (doc: %s)", endpoints.HubName, doc)
+	}
+	if errs := Validate("endpoints", doc); len(errs) != 0 {
+		t.Errorf("seeded endpoints doc should validate: %v", errs)
+	}
+
+	back, err := LoadSectionsIntoKoanf(map[string]json.RawMessage{"endpoints": doc})
+	if err != nil {
+		t.Fatalf("LoadSectionsIntoKoanf: %v", err)
+	}
+	if got := back.String("server.hub.hub_name"); got != "prod-hub" {
+		t.Errorf("koanf server.hub.hub_name = %q after load, want prod-hub", got)
 	}
 }
 

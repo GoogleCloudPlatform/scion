@@ -213,6 +213,11 @@ type HTTPAgentDispatcher struct {
 	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
+
+	// dispatchExperimentsProvider returns the enabled hub experiments that
+	// change broker behaviour, read on every create, start and restart
+	// dispatch. Nil provider = none sent.
+	dispatchExperimentsProvider func() []string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -369,6 +374,21 @@ func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.A
 // so a settings change reaches an agent at its next start.
 func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
 	d.autoExposePortsDefaultProvider = fn
+}
+
+// SetDispatchExperimentsProvider registers the accessor for the enabled
+// hub experiments sent to brokers with each create, start and restart
+// dispatch, so an admin toggle applies at the agent's next dispatch.
+func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
+	d.dispatchExperimentsProvider = fn
+}
+
+// dispatchExperiments returns the enabled dispatch experiments, or nil.
+func (d *HTTPAgentDispatcher) dispatchExperiments() []string {
+	if d.dispatchExperimentsProvider == nil {
+		return nil
+	}
+	return d.dispatchExperimentsProvider()
 }
 
 // autoExposePortsDefault returns the hub auto-expose default, or nil when no
@@ -755,7 +775,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.hubAgentDefaultsProvider != nil {
 			hubDefaults = d.hubAgentDefaultsProvider()
 		}
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), d.dispatchExperiments())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -1179,6 +1199,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
+	// The global project also sends its slug alongside a provider path.
 	if agent.ProjectID == "" {
 		return projectDispatchInfo{}, nil
 	}
@@ -1218,6 +1239,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
+	} else if isGlobalHubProject(project.Slug) {
+		// The global project's slug travels with its provider path so the
+		// broker can tell the global project apart from another project
+		// whose path points at the broker's global directory. The broker
+		// keeps resolving the project from the path.
+		info.projectSlug = globalProjectSlug
 	}
 	return info, nil
 }
@@ -1252,11 +1279,44 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
 		applyBrokerAgentConfig(agent, resp.Agent)
+		d.recordWorkspacePlacement(ctx, agent, resp.Agent.WorkspacePlacement)
 	} else if d.debug {
 		d.log.Debug("applyBrokerResponse: broker response has nil Agent",
 			"agentName", agent.Name,
 		)
 	}
+}
+
+// recordWorkspacePlacement persists the workspace placement a broker reported
+// for a start (see store.Agent.WorkspacePlacement) with the narrow
+// SetAgentWorkspacePlacement write, and mirrors it on the in-memory agent.
+// Every start that resolves the workspace reports it, so a re-provision
+// overwrites the previous value. An empty or malformed value (a response
+// from no start, or an older broker) records nothing. Best effort: a failed
+// write leaves the previous value, which a move refuses unless it is export.
+func (d *HTTPAgentDispatcher) recordWorkspacePlacement(ctx context.Context, agent *store.Agent, placement string) {
+	if !validWorkspacePlacementReport(placement) {
+		return
+	}
+	agent.WorkspacePlacement = placement
+	if d.store == nil || agent.ID == "" {
+		return
+	}
+	if err := d.store.SetAgentWorkspacePlacement(ctx, agent.ID, placement); err != nil && !errors.Is(err, store.ErrNotFound) {
+		d.log.Warn("Failed to record the agent's workspace placement",
+			"agent_id", agent.ID, "placement", placement, "error", err)
+	}
+}
+
+// maxWorkspacePlacementBytes bounds a reported workspace placement.
+const maxWorkspacePlacementBytes = 64
+
+// validWorkspacePlacementReport reports whether a broker-reported workspace
+// placement should be recorded: non-empty, bounded and free of control
+// characters. Values the hub does not recognise are recorded as reported
+// and read as "not on the export" (isWorkspacePlacementOnExport).
+func validWorkspacePlacementReport(placement string) bool {
+	return placement != "" && len(placement) <= maxWorkspacePlacementBytes && !hasControlCharacter(placement)
 }
 
 // applyBrokerAgentConfig copies the non-status fields of a broker's agent
@@ -1338,10 +1398,11 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 // fail-open for real rows: any other store error, for an agent that does
 // have a row, still fails the dispatch.
 //
-// It returns the minted ID and the value the row held immediately before
+// It returns the minted ID, the value the row held immediately before
 // the write (read from the database, not from the caller's possibly stale
-// struct), for revertRun.
-func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, err error) {
+// struct), for revertRun, and whether the row recorded the run (false for
+// the no-row exception above), for settleLandedRun.
+func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, recorded bool, err error) {
 	previous = agent.RunID
 	runID = uuid.NewString()
 	if d.store != nil && agent.ID != "" {
@@ -1349,17 +1410,18 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) 
 		switch {
 		case err == nil:
 			previous = prior
+			recorded = true
 		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
 				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
 		default:
-			return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
+			return "", "", false, fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
 		}
 	}
 	agent.RunID = runID
 	d.log.Debug("Dispatcher: minted run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "previous_run_id", previous)
-	return runID, previous, nil
+	return runID, previous, recorded, nil
 }
 
 // adoptBrokerRunID records the run ID the broker reports for the entry it
@@ -1538,7 +1600,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}()
 
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -1565,7 +1627,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 
 	d.applyBrokerResponse(ctx, agent, resp)
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil, nil
 }
 
@@ -1799,7 +1861,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// The first pass creates the agent when no env is missing, so it
 	// carries a run ID like any create. A cross-node hand-off re-dispatches
 	// on the owning node, which mints its own.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1847,7 +1909,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	} else if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 
 	// Second pass: if the broker reported needed keys, check whether any can
@@ -1971,7 +2033,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	// finalize_env is the pass that creates the agent after a gather, so it
 	// mints the run ID the new entry carries.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -2050,7 +2112,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
-				d.adoptBrokerRunID(ctx, agent, runID, resp2)
+				d.settleLandedRun(ctx, agent, runID, recorded, resp2)
 			}
 			return nil, nil
 		}
@@ -2059,7 +2121,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 	return nil, nil
 }
@@ -3194,13 +3256,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -3255,7 +3318,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	} else {
 		// The broker accepted the start without a parseable body; the
 		// recorded target is stale all the same.
@@ -3326,14 +3389,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
 	// A restart replaces the runtime entry, so the new one gets a new run.
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -3352,7 +3416,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	d.forgetRuntimeTarget(ctx, agent)
 	// A restart whose stop failed can find the entry still running and
 	// keep it, reporting that entry's (older) run ID.
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil
 }
 
@@ -3746,18 +3810,21 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		return nil, err
 	}
 	if result.State == store.DispatchStateFailed {
-		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
+		return nil, dispatchFailureError(result)
 	}
 	return result, nil
 }
 
 // deferredLifecycle is the common flow for cross-node start/stop/restart:
-//  1. Subscribe to agent.<id>.status BEFORE writing intent (no missed events)
+//  1. Mint the dispatch ID, then subscribe to agent.<id>.status and
+//     broker.dispatch.<dispatchID>.done BEFORE writing intent, so no event
+//     for the row can be missed and the row cannot be terminal yet
 //  2. InsertBrokerDispatch with serialized resolved args
 //  3. Best-effort SignalBrokerCmd (the row is durable; reconnect-drain backstop)
-//  4. waitForAgentTransition with the op's terminal set
-//  5. Return nil on success-terminal, ErrDispatchFailed on timeout, wrapped
-//     error on error-terminal
+//  4. waitForLifecycleOutcome: nil on the op's success phase; the row's
+//     failure (the broker's typed error when recorded) once the row fails;
+//     ErrDispatchFailed on timeout; a generic error on an error phase with
+//     no failed row
 func (d *HTTPAgentDispatcher) deferredLifecycle(
 	ctx context.Context,
 	agent *store.Agent,
@@ -3769,8 +3836,10 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
 	}
 
+	dispatchID := uuid.NewString()
+
 	// 1. Subscribe BEFORE writing intent so we don't miss events.
-	eventCh, unsub := d.events.Subscribe("agent." + agent.ID + ".status")
+	eventCh, unsub := d.events.Subscribe("agent."+agent.ID+".status", "broker.dispatch."+dispatchID+".done")
 
 	// 2. Serialize args and insert the durable intent row.
 	argsJSON, err := MarshalDispatchArgs(args)
@@ -3780,7 +3849,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	}
 
 	dispatch := &store.BrokerDispatch{
-		ID:        uuid.NewString(),
+		ID:        dispatchID,
 		BrokerID:  agent.RuntimeBrokerID,
 		AgentID:   agent.ID,
 		AgentSlug: agent.Slug,
@@ -3804,17 +3873,8 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
 	}
 
-	// 4. Wait for terminal phase.
-	phase, err := waitForAgentTransition(ctx, eventCh, unsub, terminal)
-	if err != nil {
-		return err
-	}
-
-	// 5. Map terminal phase.
-	if phase == "error" {
-		return fmt.Errorf("agent entered error phase during %s", op)
-	}
-	return nil
+	// 4. Wait for the outcome.
+	return waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal)
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

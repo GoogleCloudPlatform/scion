@@ -44,8 +44,8 @@ import {
   isTerminalAvailable,
 } from '../../shared/types.js';
 import {
+  agentStatusBadge,
   getStateDisplay,
-  stateLabel,
   type StatusVariant,
 } from '../../shared/agent-state-display.js';
 import {
@@ -64,8 +64,8 @@ import {
   type PositionedEdge,
   type PositionedUser,
 } from '../../shared/lineage.js';
-import type { StatusType } from './status-badge.js';
 import './status-badge.js';
+import { DeletionLeaseController } from './deletion-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
@@ -183,6 +183,16 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   filterKey = '';
 
+  /**
+   * Mark nodes whose parent agent is not in `agents` with an "ancestor not
+   * loaded" tab. Hosts set it only while `agents` is known to be an
+   * incomplete set (the standalone graph's capped or failed load); on a
+   * complete set a missing parent was deleted or is filtered out, so it is
+   * left unmarked.
+   */
+  @property({ attribute: false })
+  markMissingAncestors = false;
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -196,6 +206,12 @@ export class ScionAgentTreeView extends LitElement {
   @state() private highlightId: string | null = null;
 
   @query('.canvas') private canvasEl?: HTMLDivElement;
+
+  /**
+   * Re-renders when a node's delete lease lapses (it flips to interrupted)
+   * or a failed view expires (ptone/scion#2483 phase 2), like the pages.
+   */
+  private readonly deletionLease = new DeletionLeaseController(this, () => this.agents);
 
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
@@ -508,6 +524,30 @@ export class ScionAgentTreeView extends LitElement {
 
     .node:hover .name {
       text-decoration: underline;
+    }
+
+    /* A node whose parent agent is not loaded: a tab above the card. */
+    .node .ancestor-missing {
+      position: absolute;
+      top: -9px;
+      left: 8px;
+      padding: 0 6px;
+      font-size: 0.65rem;
+      line-height: 16px;
+      white-space: nowrap;
+      border: 1px dashed var(--sl-color-neutral-400);
+      border-radius: 8px;
+      background: var(--sl-color-neutral-50);
+      color: var(--sl-color-neutral-700);
+    }
+
+    /* Status badge plus the compact deletion badge (graph shows the
+       deletion state, never lifecycle actions). */
+    .node .badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
     }
 
     .node .meta {
@@ -1376,9 +1416,14 @@ export class ScionAgentTreeView extends LitElement {
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
-    const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
+    const creator = agent.creatorName || agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
     const isRoot = !parentId || !agentById.has(parentId);
+    // On an incomplete set, a direct parent that is an agent (ancestry
+    // longer than the root user) but is not loaded: the node renders as a
+    // root and says so.
+    const ancestorMissing =
+      this.markMissingAncestors && isRoot && (agent.ancestry?.length ?? 0) > 1;
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
@@ -1404,12 +1449,24 @@ export class ScionAgentTreeView extends LitElement {
           style="border-left-color: ${color}"
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
+          ${ancestorMissing
+            ? html`<span
+                class="ancestor-missing"
+                role="img"
+                aria-label="Ancestor not loaded"
+                title="Ancestor not loaded"
+                ><sl-icon name="diagram-3"></sl-icon> ancestor not loaded</span
+              >`
+            : nothing}
           <span class="name">${agent.name}</span>
-          <scion-status-badge
-            status=${status as StatusType}
-            label=${stateLabel(status)}
-            size="small"
-          ></scion-status-badge>
+          <span class="badges">
+            ${agentStatusBadge(agent, { status, size: 'small' })}
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              size="small"
+              compact
+            ></scion-deletion-badge>
+          </span>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
           <span
             class="mode-icon"
@@ -1486,7 +1543,7 @@ export class ScionAgentTreeView extends LitElement {
     let label = '';
     for (const a of agents) {
       if (a.ancestry?.length !== 1 || a.ancestry[0] !== u.id) continue;
-      label = a.appliedConfig?.creatorName || a.createdBy || '';
+      label = a.creatorName || a.appliedConfig?.creatorName || a.createdBy || '';
       if (label) break;
     }
     if (!label) label = u.id.slice(0, 8);

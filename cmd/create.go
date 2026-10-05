@@ -326,7 +326,7 @@ func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAge
 		fmt.Fprintf(&b, "Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
 		fmt.Fprintf(&b, "Agent Slug: %s\n", resp.Agent.Slug)
 		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		fmt.Fprintf(&b, "Phase: %s\n", phase)
+		fmt.Fprintf(&b, "Phase: %s\n", provisionedPhaseLabel(phase, resp.Agent.ProvisionedOnly))
 		if agentDir != "" {
 			fmt.Fprintf(&b, "Agent directory: %s\n", agentDir)
 		}
