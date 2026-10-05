@@ -32,14 +32,19 @@ type WebhookManager struct {
 	mu    sync.RWMutex
 	cache map[string]*discordgo.Webhook // channelID -> webhook
 
-	// ownMisses remembers, per "channelID:webhookID", when a lookup found
-	// the webhook is not ours, so repeated checks skip Discord's API.
+	// ownMisses remembers, per "channelID:webhookID", until when a webhook
+	// is treated as not ours without asking Discord again.
 	ownMissMu sync.Mutex
 	ownMisses map[string]time.Time
 }
 
-// ownMissTTL is how long a webhook found not to be ours is remembered.
+// ownMissTTL is how long a webhook found not to be ours, or a channel whose
+// webhooks the bot may not list, is remembered.
 const ownMissTTL = 5 * time.Minute
+
+// ownMissRetryTTL is how long a failed webhook list for another reason
+// (rate limit, server or network error) is remembered.
+const ownMissRetryTTL = 30 * time.Second
 
 // maxOwnMisses bounds the remembered misses.
 const maxOwnMisses = 1000
@@ -135,7 +140,12 @@ func (wm *WebhookManager) owns(channelID, webhookID string) bool {
 	webhooks, err := wm.session.ChannelWebhooks(channelID)
 	if err != nil {
 		wm.log.Debug("Failed to list channel webhooks", "channel_id", channelID, "error", err)
-		wm.rememberMiss(missKey)
+		ttl := ownMissRetryTTL
+		var restErr *discordgo.RESTError
+		if errors.As(err, &restErr) && restErr.Response != nil && restErr.Response.StatusCode == http.StatusForbidden {
+			ttl = ownMissTTL
+		}
+		wm.rememberMiss(missKey, ttl)
 		return false
 	}
 	botUserID := ""
@@ -149,36 +159,41 @@ func (wm *WebhookManager) owns(channelID, webhookID string) bool {
 				wm.cache[channelID] = wh
 			}
 			wm.mu.Unlock()
-			if wh.ID != webhookID {
-				wm.rememberMiss(missKey)
-			}
 			return wh.ID == webhookID
 		}
 	}
-	wm.rememberMiss(missKey)
+	wm.rememberMiss(missKey, ownMissTTL)
 	return false
 }
 
-// recentMiss reports whether key was found not to be ours within
-// ownMissTTL.
+// recentMiss reports whether key is still remembered as not ours. An
+// expired entry is removed.
 func (wm *WebhookManager) recentMiss(key string) bool {
 	wm.ownMissMu.Lock()
 	defer wm.ownMissMu.Unlock()
-	at, ok := wm.ownMisses[key]
-	return ok && time.Since(at) < ownMissTTL
+	until, ok := wm.ownMisses[key]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(until) {
+		return true
+	}
+	delete(wm.ownMisses, key)
+	return false
 }
 
-// rememberMiss records that key was found not to be ours, keeping at most
+// rememberMiss records key as not ours for ttl, keeping at most
 // maxOwnMisses entries.
-func (wm *WebhookManager) rememberMiss(key string) {
+func (wm *WebhookManager) rememberMiss(key string, ttl time.Duration) {
 	wm.ownMissMu.Lock()
 	defer wm.ownMissMu.Unlock()
+	now := time.Now()
 	if wm.ownMisses == nil {
 		wm.ownMisses = make(map[string]time.Time)
 	}
 	if len(wm.ownMisses) >= maxOwnMisses {
-		for k, at := range wm.ownMisses {
-			if time.Since(at) >= ownMissTTL {
+		for k, until := range wm.ownMisses {
+			if !now.Before(until) {
 				delete(wm.ownMisses, k)
 			}
 		}
@@ -186,7 +201,7 @@ func (wm *WebhookManager) rememberMiss(key string) {
 			wm.ownMisses = make(map[string]time.Time)
 		}
 	}
-	wm.ownMisses[key] = time.Now()
+	wm.ownMisses[key] = now.Add(ttl)
 }
 
 // invalidate removes a cached webhook for a channel, forcing re-discovery

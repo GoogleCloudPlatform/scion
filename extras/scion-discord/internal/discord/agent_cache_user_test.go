@@ -486,6 +486,18 @@ func TestAgentListDenial_DefaultRoutingReplyIsThrottled(t *testing.T) {
 	assert.Empty(t, d.topics)
 }
 
+func TestIsReplyToBot_ReplyInThreadUsesParentWebhook(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+	usePluginWebhook(b, e) // the plugin webhook lives on luChannel
+	b.threadParents["thread-7"] = luChannel
+
+	m := replyTo(luOtherUser, &discordgo.Message{WebhookID: luPluginWebhook, Author: &discordgo.User{ID: luPluginWebhook}})
+	m.ChannelID = "thread-7"
+
+	assert.True(t, b.isReplyToBot(m, "BOT123"), "an agent message in a thread is posted with the parent's webhook")
+}
+
 func TestIsReplyToBot_OnlyThePluginsOwnMessages(t *testing.T) {
 	e := newLinkedUserEnv(t)
 	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
@@ -544,8 +556,9 @@ func TestAgentCacheTTLsFitWithinRetention(t *testing.T) {
 type webhookListStub struct {
 	mu       sync.Mutex
 	webhooks map[string][]*discordgo.Webhook // channelID -> webhooks
-	fail     bool
-	requests []string // "METHOD path"
+	// failStatus, when set, is the HTTP status of every webhook list.
+	failStatus int
+	requests   []string // "METHOD path"
 }
 
 func (w *webhookListStub) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -563,8 +576,8 @@ func (w *webhookListStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
 	// .../channels/{id}/webhooks
 	if req.Method == http.MethodGet && len(parts) >= 3 && parts[len(parts)-1] == "webhooks" && parts[len(parts)-3] == "channels" {
-		if w.fail {
-			return respond(http.StatusInternalServerError, `{"message":"boom"}`)
+		if w.failStatus != 0 {
+			return respond(w.failStatus, `{"message":"list failed"}`)
 		}
 		body, _ := json.Marshal(w.webhooks[parts[len(parts)-2]])
 		if string(body) == "null" {
@@ -587,6 +600,8 @@ func newWebhookListManager(t *testing.T, stub *webhookListStub) *WebhookManager 
 	require.NoError(t, err)
 	session.Client = &http.Client{Transport: stub}
 	session.MaxRestRetries = 0
+	// Report a rate limit as an error instead of waiting and retrying.
+	session.ShouldRetryOnRateLimit = false
 	session.State = discordgo.NewState()
 	session.State.User = &discordgo.User{ID: "BOT123"}
 	return NewWebhookManager(session, discardLogger())
@@ -629,21 +644,61 @@ func TestWebhookManagerOwns_CacheMiss(t *testing.T) {
 		assertNoWrites(t, stub)
 	})
 
-	t.Run("list error is not ours", func(t *testing.T) {
-		stub := &webhookListStub{fail: true}
+	for name, tc := range map[string]struct {
+		status int
+		ttl    time.Duration
+	}{
+		"permission error is remembered for the full window": {http.StatusForbidden, ownMissTTL},
+		"server error is retried soon":                       {http.StatusInternalServerError, ownMissRetryTTL},
+		"rate limit is retried soon":                         {http.StatusTooManyRequests, ownMissRetryTTL},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &webhookListStub{failStatus: tc.status}
+			wm := newWebhookListManager(t, stub)
+			before := time.Now()
+
+			assert.False(t, wm.owns("C1", "wh-ours"))
+
+			assert.NotContains(t, wm.cache, "C1")
+			assertNoWrites(t, stub)
+			require.NotEmpty(t, stub.snapshot(), "the list was requested")
+			until, ok := wm.ownMisses["C1:wh-ours"]
+			require.True(t, ok, "the failure is remembered")
+			assert.WithinDuration(t, before.Add(tc.ttl), until, 5*time.Second)
+		})
+	}
+
+	t.Run("expired miss triggers a fresh lookup and is pruned", func(t *testing.T) {
+		stub := &webhookListStub{webhooks: map[string][]*discordgo.Webhook{"C1": {foreign}}}
 		wm := newWebhookListManager(t, stub)
+		wm.ownMisses = map[string]time.Time{
+			"C1:wh-ours":  time.Now().Add(-time.Second),
+			"C2:wh-other": time.Now().Add(-time.Second),
+		}
+
+		assert.False(t, wm.recentMiss("C2:wh-other"))
+		assert.NotContains(t, wm.ownMisses, "C2:wh-other", "an expired entry is pruned on read")
 
 		assert.False(t, wm.owns("C1", "wh-ours"))
+		assert.Len(t, stub.snapshot(), 1, "an expired miss leads to a fresh lookup")
+		assert.True(t, wm.ownMisses["C1:wh-ours"].After(time.Now()), "the fresh miss replaces the expired one")
+	})
+
+	t.Run("bot-owned webhook with another name is not ours", func(t *testing.T) {
+		otherName := &discordgo.Webhook{ID: "wh-other-name", Name: "Something Else", User: &discordgo.User{ID: "BOT123"}}
+		stub := &webhookListStub{webhooks: map[string][]*discordgo.Webhook{"C1": {otherName}}}
+		wm := newWebhookListManager(t, stub)
+
+		assert.False(t, wm.owns("C1", "wh-other-name"))
 		assert.NotContains(t, wm.cache, "C1")
 		assertNoWrites(t, stub)
-		require.NotEmpty(t, stub.snapshot(), "the list was requested")
 	})
 
 	t.Run("misses are bounded", func(t *testing.T) {
 		stub := &webhookListStub{}
 		wm := newWebhookListManager(t, stub)
 		for i := 0; i < maxOwnMisses+10; i++ {
-			wm.rememberMiss(fmt.Sprintf("C:%d", i))
+			wm.rememberMiss(fmt.Sprintf("C:%d", i), ownMissTTL)
 		}
 		assert.LessOrEqual(t, len(wm.ownMisses), maxOwnMisses)
 	})
