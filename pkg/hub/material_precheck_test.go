@@ -441,7 +441,7 @@ func TestAgentSecretRead_CustomOnlyProjectBindingAdmits(t *testing.T) {
 	}
 
 	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "scheduled-event-editor-" + f.UserID,
+		Name:        "custom-project-role-" + f.UserID,
 		ScopeType:   store.RoleScopeProject,
 		Permissions: []string{"scheduled_event.update"},
 	})

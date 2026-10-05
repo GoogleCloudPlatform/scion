@@ -92,7 +92,8 @@ type EffectiveMembershipResult struct {
 // owner counts as a member; ownership does not permit piercing a target's
 // mode.
 //
-// Ignored: expired, not-yet-active, or revoked bindings.
+// Ignored: expired, not-yet-active, revoked, and unrelated (other-scope)
+// bindings.
 // NOT membership: public project visibility, generic read grant, shared
 // conversation, or Hub-admin status.
 //
