@@ -220,12 +220,15 @@ func TestProvisionShared_SharedPlain_MarkedEmptyWorkspaceIsCloned(t *testing.T) 
 	// Provisioning artifacts left by earlier starts do not count as content.
 	require.NoError(t, os.MkdirAll(filepath.Join(hostPath, provisionFileLockName+".evict-0123"), 0755))
 	require.NoError(t, os.MkdirAll(filepath.Join(hostPath, cloneTempDirPrefix+"old", "partial"), 0755))
+	// An in-workspace shared-dir mount point does not count as content.
+	require.NoError(t, os.MkdirAll(filepath.Join(hostPath, ".scion-volumes", "scratchpad"), 0755))
 
 	require.NoError(t, ProvisionShared(sharedPlainInput(hostPath, bareRepo)))
 	assert.Equal(t, 1, clones())
 	assert.DirExists(t, filepath.Join(hostPath, ".git"))
 	assert.FileExists(t, filepath.Join(hostPath, "README.md"))
 	assert.FileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
+	assert.DirExists(t, filepath.Join(hostPath, ".scion-volumes", "scratchpad"))
 	assertNoCloneScratch(t, hostPath)
 
 	// The next start finds content and leaves it alone.
@@ -265,8 +268,28 @@ func TestMarkedWorkspaceNeedsClone(t *testing.T) {
 	withFile := t.TempDir()
 	writeMarker(t, withFile)
 	require.NoError(t, os.WriteFile(filepath.Join(withFile, "a"), nil, 0644))
+	// In-workspace shared-dir mount points (empty) are not content.
+	withMountPoint := t.TempDir()
+	writeMarker(t, withMountPoint)
+	require.NoError(t, os.MkdirAll(filepath.Join(withMountPoint, ".scion-volumes", "x"), 0755))
+	// A file in a .scion-volumes child that is not a shared-dir mount is.
+	withVolumeFile := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(withVolumeFile, ".scion-volumes", "x"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(withVolumeFile, ".scion-volumes", "x", "f"), nil, 0644))
+	// ... unless it is the mount of a shared dir.
+	sharedMount := sharedPlainInput(withVolumeFile, "file:///repo.git")
+	sharedMount.Resolved.SharedDirs = map[string]ResolvedSharedDir{"x": {HostPath: filepath.Join(withVolumeFile, ".scion-volumes", "x")}}
+	// A file directly in .scion-volumes is content.
+	volumesRootFile := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(volumesRootFile, ".scion-volumes"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(volumesRootFile, ".scion-volumes", "f"), nil, 0644))
+	// An empty worktrees directory is not content; a non-empty one is.
+	emptyWorktrees := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(emptyWorktrees, "worktrees"), 0755))
+	fullWorktrees := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(fullWorktrees, "worktrees", "a"), 0755))
 	withDir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(withDir, ".scion-volumes", "x"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(withDir, "src"), 0755))
 	// A file (not a directory) under the scratch prefix is not an artifact.
 	scratchFile := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(scratchFile, cloneTempDirPrefix+"x"), nil, 0644))
@@ -284,6 +307,12 @@ func TestMarkedWorkspaceNeedsClone(t *testing.T) {
 		{"worktree-per-agent", worktree, false},
 		{"user file", sharedPlainInput(withFile, "file:///repo.git"), false},
 		{"other directory", sharedPlainInput(withDir, "file:///repo.git"), false},
+		{"empty shared-dir mount point", sharedPlainInput(withMountPoint, "file:///repo.git"), true},
+		{"file in a .scion-volumes child", sharedPlainInput(withVolumeFile, "file:///repo.git"), false},
+		{"shared-dir mount with content", sharedMount, true},
+		{"file directly in .scion-volumes", sharedPlainInput(volumesRootFile, "file:///repo.git"), false},
+		{"empty worktrees dir", sharedPlainInput(emptyWorktrees, "file:///repo.git"), true},
+		{"non-empty worktrees dir", sharedPlainInput(fullWorktrees, "file:///repo.git"), false},
 		{"file named like scratch dir", sharedPlainInput(scratchFile, "file:///repo.git"), false},
 		{"missing workspace", sharedPlainInput(filepath.Join(empty, "nope"), "file:///repo.git"), false},
 	}
@@ -332,6 +361,7 @@ func TestGitCloneWorkspace_RemovesOwnScratchKeepsSharedDirMounts(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(hostPath, "worktrees"), 0755))
 
 	in := sharedPlainInput(hostPath, bareRepo)
+	in.Resolved.SharedDirs = map[string]ResolvedSharedDir{"shared": {HostPath: mountPoint}}
 	require.NoError(t, gitCloneWorkspace(context.Background(), in, func() bool { return true }))
 	assert.NoDirExists(t, leftover)
 	assert.FileExists(t, filepath.Join(mountPoint, "data"))

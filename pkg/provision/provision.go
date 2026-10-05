@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1104,7 +1105,7 @@ const provisionLockEvictedAtFile = "evicted-at"
 var (
 	writeLockFile  = os.WriteFile
 	renameFile     = os.Rename
-	moveRenameFile = os.Rename
+	moveRenameFile = renameNoReplace
 )
 
 // lchownFile is an indirection over os.Lchown, used by chownProjectTree, so
@@ -2210,55 +2211,48 @@ func lockLooksAbandoned(dir, path string) bool {
 }
 
 // markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
-// already has its provisioning marker is still empty and should be cloned.
-// A workspace provisioned before the Kubernetes init container received the
-// project's clone settings has the marker but nothing in it. Only an empty
-// workspace qualifies: it holds no user data, so cloning into it under the
-// lock is safe. A workspace with any entry other than Scion's own
-// provisioning artifacts (provisioningArtifact) is left as it is.
+// already has its provisioning marker still needs its clone:
+//   - it holds nothing but entries that may sit next to a clone
+//     (ignorableWorkspaceEntry); a workspace provisioned before the
+//     Kubernetes init container received the project's clone settings has
+//     the marker and no repository; or
+//   - an earlier clone into it finished but was interrupted while its
+//     entries were being moved into place (a scratch directory holding a
+//     clone manifest, and no .git in the workspace). gitCloneWorkspace then
+//     finishes the move, or refuses with the entries named.
+//
+// A workspace with a .git, or with any other entry, is left as it is.
+//
+// This relies on every start taking the provisioning file lock before it
+// looks at the workspace (no store.AdvisoryLocker; see acquireProvisionLock).
+// A start that only waited for the marker would not wait for this clone.
 func markedWorkspaceNeedsClone(in ProvisionInput) bool {
 	if in.Mode != store.SharingModeSharedPlain || in.GitClone == nil || in.GitClone.URL == "" {
 		return false
 	}
-	entries, err := os.ReadDir(in.Resolved.HostPath)
-	if err != nil {
+	dest := in.Resolved.HostPath
+	if _, err := os.ReadDir(dest); err != nil {
 		return false
 	}
-	for _, e := range entries {
-		if !provisioningArtifact(e) {
-			return false
-		}
+	if _, err := os.Lstat(filepath.Join(dest, ".git")); err == nil {
+		return false
 	}
-	return true
-}
-
-// provisioningArtifact reports whether e is one of Scion's own provisioning
-// artifacts in a workspace, and nothing else:
-//   - the provisioning marker file (ProvisionSentinelFile);
-//   - the filesystem-fallback lock directory (provisionFileLockName) and its
-//     siblings "<lock>.stage-*", "<lock>.evict-*" and "<lock>.clock-probe";
-//   - a scratch directory left by an interrupted clone (cloneTempDirPrefix).
-func provisioningArtifact(e os.DirEntry) bool {
-	name := e.Name()
-	switch {
-	case name == ProvisionSentinelFile:
-		return e.Type().IsRegular()
-	case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
+	if scratch, err := completedCloneScratch(dest); err != nil || scratch != "" {
+		// An interrupted move (or more than one finished clone, which
+		// gitCloneWorkspace reports): never treat it as provisioned.
 		return true
-	case strings.HasPrefix(name, cloneTempDirPrefix):
-		return e.IsDir() && e.Type()&os.ModeSymlink == 0
-	default:
-		return false
 	}
+	other, err := nonIgnorableWorkspaceEntries(in, dest)
+	return err == nil && len(other) == 0
 }
 
-// cloneIntoMarkedWorkspace clones into a marked but empty shared-plain
-// workspace (markedWorkspaceNeedsClone) and chowns the result. The caller
-// holds the provisioning lock and has re-checked the marker under it. The
-// marker is already present, so nothing is written for it; a failed clone
-// leaves the workspace as empty as it was, and the next start tries again.
+// cloneIntoMarkedWorkspace clones into a marked shared-plain workspace that
+// still needs its clone (markedWorkspaceNeedsClone) and chowns the result.
+// The caller holds the provisioning lock and has re-checked the marker under
+// it. The marker is already present, so nothing is written for it; a failed
+// clone leaves the workspace as it was, and the next start tries again.
 func cloneIntoMarkedWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool, sentinelDir string) error {
-	slog.Info("ProvisionShared: workspace has a provisioning marker but is empty, cloning",
+	slog.Info("ProvisionShared: workspace has a provisioning marker but no clone, cloning",
 		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
 	if err := gitCloneWorkspace(ctx, in, stillOwned); err != nil {
 		return fmt.Errorf("ProvisionShared: git clone: %w", err)
@@ -2278,28 +2272,129 @@ func cloneIntoMarkedWorkspace(ctx context.Context, in ProvisionInput, stillOwned
 }
 
 // cloneTempDirPrefix names the scratch directory a clone attempt creates
-// under the workspace. Nothing else creates entries with this prefix, so a
-// leftover one is the remains of an earlier, interrupted attempt and is
-// removed before the next one.
+// under the workspace. Nothing else creates entries with this prefix.
 const cloneTempDirPrefix = ".scion-clone-"
 
+// cloneManifestFile is written into a clone's scratch directory once the
+// clone has succeeded, before any entry is moved into the workspace. It
+// lists the clone's top-level entries, one per line. A scratch directory
+// with a manifest holds a finished clone whose move may have been
+// interrupted; one without a manifest is the remains of a clone that never
+// finished, and is removed.
+const cloneManifestFile = ".scion-clone-entries"
+
+// sharedVolumesDirName is where in-workspace shared dirs are mounted
+// (<workspace>/.scion-volumes/<name>).
+const sharedVolumesDirName = ".scion-volumes"
+
+// ignorableWorkspaceEntry reports whether e, an entry directly in the
+// workspace dir, may sit next to a clone. These are Scion's own entries:
+//   - the provisioning marker file (ProvisionSentinelFile);
+//   - the provisioning file lock directory (provisionFileLockName) and its
+//     siblings "<lock>.stage-*", "<lock>.evict-*" and "<lock>.clock-probe";
+//   - clone scratch directories (cloneTempDirPrefix);
+//   - .scion-volumes, when it is a directory whose children are all
+//     directories that are either empty (mount points created for
+//     in-workspace shared dirs) or the mount of one of in's shared dirs;
+//   - an empty worktrees directory.
+//
+// Anything else is workspace content. Symlinks are never ignorable.
+func ignorableWorkspaceEntry(in ProvisionInput, dir string, e os.DirEntry) (bool, error) {
+	name := e.Name()
+	isDir := e.Type()&os.ModeType == os.ModeDir
+	switch {
+	case name == ProvisionSentinelFile:
+		return e.Type().IsRegular(), nil
+	case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
+		return true, nil
+	case strings.HasPrefix(name, cloneTempDirPrefix):
+		return isDir, nil
+	case name == sharedVolumesDirName && isDir:
+		return onlySharedDirMounts(in, filepath.Join(dir, name))
+	case name == "worktrees" && isDir:
+		nonEmpty, err := dirHasEntries(filepath.Join(dir, name))
+		if err != nil {
+			return false, fmt.Errorf("check %s: %w", filepath.Join(dir, name), err)
+		}
+		return !nonEmpty, nil
+	default:
+		return false, nil
+	}
+}
+
+// onlySharedDirMounts reports whether every entry of volumesDir is a
+// directory that is empty or is the mount of one of in's shared dirs.
+func onlySharedDirMounts(in ProvisionInput, volumesDir string) (bool, error) {
+	entries, err := os.ReadDir(volumesDir)
+	if err != nil {
+		return false, fmt.Errorf("read dir %s: %w", volumesDir, err)
+	}
+	mounts := map[string]bool{}
+	for _, sd := range in.Resolved.SharedDirs {
+		if sd.HostPath != "" {
+			mounts[filepath.Clean(sd.HostPath)] = true
+		}
+	}
+	for _, e := range entries {
+		if e.Type()&os.ModeType != os.ModeDir {
+			return false, nil
+		}
+		p := filepath.Join(volumesDir, e.Name())
+		if mounts[filepath.Clean(p)] {
+			continue
+		}
+		nonEmpty, err := dirHasEntries(p)
+		if err != nil {
+			return false, fmt.Errorf("check %s: %w", p, err)
+		}
+		if nonEmpty {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// nonIgnorableWorkspaceEntries returns the sorted names of the entries in
+// dir that are workspace content (not ignorableWorkspaceEntry).
+func nonIgnorableWorkspaceEntries(in ProvisionInput, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var other []string
+	for _, e := range entries {
+		ok, err := ignorableWorkspaceEntry(in, dir, e)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			other = append(other, e.Name())
+		}
+	}
+	return other, nil
+}
+
 // gitCloneWorkspace clones in.GitClone into in.Resolved.HostPath. The caller
-// holds the provisioning lock and has already checked that the workspace has
-// no provisioning marker.
+// holds the provisioning lock and has already checked the provisioning
+// marker.
 //
 // The workspace is often a mount point (a k8s PVC subPath), so it cannot be
 // swapped out as a whole. The clone runs in a fresh scratch directory under
-// the workspace, and its entries are then renamed into place with .git last
-// (moveDirContentsUp). A clone that fails, or stops before the rename, leaves
-// at most that scratch directory behind. The workspace's own content is never
-// cleared:
+// the workspace. Once it succeeds, a manifest of its entries is written into
+// the scratch directory, and the entries are renamed into place with .git
+// last, never replacing an existing entry (moveDirContentsUp). The
+// workspace's own content is never cleared or overwritten:
 //   - a .git already in the workspace means an earlier clone finished (.git
 //     is always renamed last), so it is reused;
-//   - leftover scratch directories from an earlier attempt are removed;
-//   - any other entry, apart from the provisioning lock's own files, the
-//     mount points of in-workspace shared dirs (.scion-volumes) and an empty
-//     worktrees directory, makes the clone fail with those entries named.
-//     Content the clone did not create is left for an operator to move.
+//   - a scratch directory with a manifest is an earlier clone whose move was
+//     interrupted: its remaining entries are moved, provided every other
+//     entry in the workspace came from it (resumeCloneMove);
+//   - other scratch directories are left over from clones that never
+//     finished, and are removed;
+//   - any workspace content (nonIgnorableWorkspaceEntries) makes the clone
+//     fail with those entries named, both before the clone and again just
+//     before the move, since something may write to the workspace while a
+//     long clone runs.
 //
 // stillOwned reports whether the caller still holds the provisioning lock;
 // nil means not applicable (the store.AdvisoryLocker path).
@@ -2312,17 +2407,27 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 		return nil
 	}
 
-	if err := removeCloneTempDirs(dest); err != nil {
-		return err
-	}
-	unexpected, err := unexpectedWorkspaceEntries(dest)
+	scratch, err := completedCloneScratch(dest)
 	if err != nil {
 		return err
 	}
-	if len(unexpected) > 0 {
+	if scratch != "" {
+		if err := resumeCloneMove(in, scratch); err != nil {
+			return err
+		}
+		excludeProvisioningFiles(in)
+		return finishCloneScratch(scratch)
+	}
+
+	if err := removeCloneTempDirs(dest); err != nil {
+		return err
+	}
+	if other, err := nonIgnorableWorkspaceEntries(in, dest); err != nil {
+		return err
+	} else if len(other) > 0 {
 		return fmt.Errorf("workspace %s is not empty but has no provisioning marker and no .git (found %s); "+
 			"refusing to clone into it or clear it: move those entries out of the workspace and start the agent again",
-			dest, strings.Join(unexpected, ", "))
+			dest, strings.Join(other, ", "))
 	}
 
 	tmpDir, err := os.MkdirTemp(dest, cloneTempDirPrefix+"*")
@@ -2335,58 +2440,202 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 		_ = os.RemoveAll(tmpDir)
 		return cloneErr
 	}
+	if err := writeCloneManifest(tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
 
 	// Re-verify ownership immediately before the irreversible move into
 	// dest: the clone above can take a long time, long enough for this
 	// holder to have silently lost the lock to a reclaimer since the
-	// heartbeat's last check. Moving cloned content into dest while a second
-	// provisioner also believes it owns the lock would let both finish and
-	// contend over the sentinel write.
+	// heartbeat's last check.
 	if stillOwned != nil && !stillOwned() {
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("gitCloneWorkspace: lost the provisioning lock during clone; refusing to move cloned content into %s", dest)
 	}
 
+	// Check the workspace again: an agent already running in it (one
+	// started before it was provisioned) may have written to it during the
+	// clone.
+	if other, err := nonIgnorableWorkspaceEntries(in, dest); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	} else if len(other) > 0 {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("workspace %s changed during the clone (found %s); "+
+			"leaving it as it is and discarding the clone", dest, strings.Join(other, ", "))
+	}
+
 	if err := moveDirContentsUp(tmpDir, dest); err != nil {
-		// moveDirContentsUp has already removed what it moved; drop the
-		// rest of this attempt's scratch directory too.
+		// moveDirContentsUp has moved its entries back; drop the clone.
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
 	}
+	excludeProvisioningFiles(in)
+	return finishCloneScratch(tmpDir)
+}
 
-	// When the filesystem-fallback lock lives in the workspace itself (the
-	// k8s init container, where only the workspace is mounted), keep its
-	// on-disk footprint (the live lock, its clock-probe file and any
-	// stage/evict leftovers) out of git's view: every later start of a
-	// worktree-per-agent project takes the same lock inside the shared
-	// checkout. Anchored with a leading "/", since the lock only ever lives
-	// directly in the sentinel dir (or the legacy lock dir), so an
-	// untracked file elsewhere that shares the prefix stays visible.
-	if sentinelDir := resolveSentinelDir(in); in.Locker == nil && (sentinelDir == dest || legacyDir(in, sentinelDir) == dest) {
-		if err := appendGitExclude(dest, "/"+provisionFileLockName); err != nil {
-			slog.Warn("gitCloneWorkspace: failed to exclude lock marker from git status (non-fatal)",
-				"project_id", in.ProjectID, "path", dest, "error", err)
-		} else if err := appendGitExclude(dest, "/"+provisionFileLockName+".*"); err != nil {
-			slog.Warn("gitCloneWorkspace: failed to exclude lock marker variants from git status (non-fatal)",
-				"project_id", in.ProjectID, "path", dest, "error", err)
+// excludeProvisioningFiles keeps Scion's provisioning files in a freshly
+// cloned workspace out of git's view: leftover clone scratch directories,
+// and, when the provisioning file lock (or the legacy one) lives in the
+// workspace itself (the k8s init container), the lock's on-disk footprint
+// and the marker. Patterns are anchored with a leading "/", so an untracked
+// file elsewhere that shares a prefix stays visible. Best effort.
+func excludeProvisioningFiles(in ProvisionInput) {
+	dest := in.Resolved.HostPath
+	patterns := []string{"/" + cloneTempDirPrefix + "*"}
+	sentinelDir := resolveSentinelDir(in)
+	if in.Locker == nil && (sentinelDir == dest || legacyDir(in, sentinelDir) == dest) {
+		patterns = append(patterns, "/"+provisionFileLockName, "/"+provisionFileLockName+".*")
+	}
+	if sentinelDir == dest {
+		patterns = append(patterns, "/"+ProvisionSentinelFile)
+	}
+	for _, p := range patterns {
+		if err := appendGitExclude(dest, p); err != nil {
+			slog.Warn("gitCloneWorkspace: failed to add a git exclude for provisioning files (non-fatal)",
+				"project_id", in.ProjectID, "path", dest, "pattern", p, "error", err)
+			return
 		}
 	}
-	// An init container without the state-directory mount writes the
-	// sentinel into the workspace too: keep it out of git's view as well.
-	if resolveSentinelDir(in) == dest {
-		if err := appendGitExclude(dest, "/"+ProvisionSentinelFile); err != nil {
-			slog.Warn("gitCloneWorkspace: failed to exclude the sentinel from git status (non-fatal)",
-				"project_id", in.ProjectID, "path", dest, "error", err)
+}
+
+// writeCloneManifest writes cloneManifestFile into scratch, listing its
+// entries. A repository whose top level has an entry with that name cannot
+// be provisioned this way.
+func writeCloneManifest(scratch string) error {
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", scratch, err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.Name() == cloneManifestFile {
+			return fmt.Errorf("the repository has a top-level entry named %s, which workspace provisioning uses itself", cloneManifestFile)
+		}
+		b.WriteString(e.Name())
+		b.WriteByte('\n')
+	}
+	return writeFileAtomic(filepath.Join(scratch, cloneManifestFile), []byte(b.String()), 0o644)
+}
+
+// readCloneManifest returns the entry names listed in scratch's manifest.
+func readCloneManifest(scratch string) (map[string]bool, error) {
+	data, err := os.ReadFile(filepath.Join(scratch, cloneManifestFile))
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line != "" {
+			names[line] = true
 		}
 	}
+	return names, nil
+}
 
-	return os.Remove(tmpDir)
+// finishCloneScratch removes a scratch directory whose entries have all been
+// moved: its manifest, then the directory itself.
+func finishCloneScratch(scratch string) error {
+	if err := os.Remove(filepath.Join(scratch, cloneManifestFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", filepath.Join(scratch, cloneManifestFile), err)
+	}
+	return os.Remove(scratch)
+}
+
+// completedCloneScratch returns the scratch directory in dir that holds a
+// clone manifest, or "" if there is none. More than one is an error: the
+// lock lets only one clone run at a time, and an earlier one is always
+// finished (or refused) before a new one starts.
+func completedCloneScratch(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var found []string
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if fi, err := os.Lstat(filepath.Join(p, cloneManifestFile)); err == nil && fi.Mode().IsRegular() {
+			found = append(found, p)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("workspace %s holds more than one interrupted clone (%s); refusing to pick one: remove them and start the agent again",
+			dir, strings.Join(found, ", "))
+	}
+}
+
+// resumeCloneMove finishes moving the entries of an interrupted clone in
+// scratch into the workspace. Every workspace content entry must be one the
+// clone listed in its manifest and no longer holds, i.e. one this clone
+// moved; anything else makes it fail with those entries named, leaving the
+// workspace and the scratch directory as they are. Nothing is replaced.
+func resumeCloneMove(in ProvisionInput, scratch string) error {
+	dest := in.Resolved.HostPath
+	manifest, err := readCloneManifest(scratch)
+	if err != nil {
+		return fmt.Errorf("read clone manifest in %s: %w", scratch, err)
+	}
+	remaining := map[string]bool{}
+	scratchEntries, err := os.ReadDir(scratch)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", scratch, err)
+	}
+	for _, e := range scratchEntries {
+		if e.Name() != cloneManifestFile {
+			remaining[e.Name()] = true
+		}
+	}
+	other, err := nonIgnorableWorkspaceEntries(in, dest)
+	if err != nil {
+		return err
+	}
+	var foreign []string
+	moved := map[string]bool{}
+	for _, name := range other {
+		if manifest[name] && !remaining[name] {
+			moved[name] = true
+			continue
+		}
+		foreign = append(foreign, name)
+	}
+	if len(foreign) > 0 {
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) and entries that did not come from it (%s); "+
+			"refusing to finish the clone: move those entries out of the workspace and start the agent again",
+			dest, scratch, strings.Join(foreign, ", "))
+	}
+	var missing []string
+	for name := range manifest {
+		if !moved[name] && !remaining[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) that is missing %s; "+
+			"refusing to finish it: remove the clone's entries from the workspace and %s, then start the agent again",
+			dest, scratch, strings.Join(missing, ", "), scratch)
+	}
+	slog.Warn("ProvisionShared: finishing an interrupted clone",
+		"project_id", in.ProjectID, "path", dest, "scratch", scratch, "remaining", len(remaining))
+	if err := moveDirContentsUp(scratch, dest); err != nil {
+		return fmt.Errorf("finish moving cloned contents from %s to %s: %w", scratch, dest, err)
+	}
+	return nil
 }
 
 // removeCloneTempDirs removes the scratch directories (cloneTempDirPrefix)
-// that earlier, interrupted clone attempts left in dir. Only directories are
-// removed; a regular file or symlink with that name is left in place and is
-// then reported by unexpectedWorkspaceEntries.
+// that clones which never finished left in dir: those without a clone
+// manifest. Only directories are removed; a regular file or symlink with
+// that name is left in place and is then reported as workspace content.
 func removeCloneTempDirs(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -2397,49 +2646,15 @@ func removeCloneTempDirs(dir string) error {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
-		slog.Warn("ProvisionShared: removing scratch directory left by an earlier clone attempt", "path", p)
+		if _, err := os.Lstat(filepath.Join(p, cloneManifestFile)); err == nil {
+			continue
+		}
+		slog.Warn("ProvisionShared: removing scratch directory left by an unfinished clone", "path", p)
 		if err := os.RemoveAll(p); err != nil {
 			return fmt.Errorf("remove leftover clone dir %s: %w", p, err)
 		}
 	}
 	return nil
-}
-
-// unexpectedWorkspaceEntries returns the names of the entries in dir that a
-// clone may not be placed next to: everything except the provisioning lock's
-// own files, the provisioning marker, the .scion-volumes directory (mount points of in-workspace
-// shared dirs, created before the pod starts) and an empty worktrees
-// directory. The names are sorted.
-func unexpectedWorkspaceEntries(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	var unexpected []string
-	for _, e := range entries {
-		name := e.Name()
-		isDir := e.Type()&os.ModeType == os.ModeDir
-		switch {
-		case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
-			continue
-		case name == ProvisionSentinelFile && e.Type().IsRegular():
-			// Only present on the marked-but-empty path
-			// (cloneIntoMarkedWorkspace); the marker is kept.
-			continue
-		case name == ".scion-volumes" && isDir:
-			continue
-		case name == "worktrees" && isDir:
-			nonEmpty, checkErr := dirHasEntries(filepath.Join(dir, name))
-			if checkErr != nil {
-				return nil, fmt.Errorf("check %s: %w", filepath.Join(dir, name), checkErr)
-			}
-			if !nonEmpty {
-				continue
-			}
-		}
-		unexpected = append(unexpected, name)
-	}
-	return unexpected, nil
 }
 
 // runGitClone runs git clone into in.Resolved.HostPath, which must be empty
@@ -2495,8 +2710,20 @@ func cloneError(rawURL, output string, runErr error) error {
 }
 
 // redactCloneURL returns rawURL without userinfo, query string or fragment,
-// any of which can carry a token. An unparseable URL is never echoed.
+// any of which can carry a token. For an scp-style URL ("user@host:path")
+// the user is dropped and host and path are kept. An unparseable URL is
+// never echoed.
 func redactCloneURL(rawURL string) string {
+	if !strings.Contains(rawURL, "://") {
+		// scp-style "user@host:path", or a local path: keep host and path,
+		// drop the user.
+		if at := strings.Index(rawURL, "@"); at >= 0 && strings.Contains(rawURL[at:], ":") {
+			return rawURL[at+1:]
+		}
+		if !strings.Contains(rawURL, "@") {
+			return rawURL
+		}
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "<unparseable clone URL>"
@@ -2530,28 +2757,24 @@ func sanitizeCloneOutput(text, rawURL string) string {
 	return out
 }
 
-// moveDirContentsUp moves every entry from src into dest via os.Rename,
-// leaving src empty for the caller to remove. src must be a subdirectory of
-// dest (it is always created under it via os.MkdirTemp) so every move stays
-// on the same filesystem and is a plain, atomic rename.
+// moveDirContentsUp moves every entry from src into dest, leaving src with
+// only its clone manifest (cloneManifestFile, which is never moved) for the
+// caller to remove. src must be a subdirectory of dest (it is always
+// created under it via os.MkdirTemp), so every move stays on the same
+// filesystem and is a plain rename.
+//
+// No entry in dest is ever replaced: each move goes through moveRenameFile
+// (renameNoReplace by default), and a name that already exists in dest makes
+// the move fail.
 //
 // Any ".git" entry is moved LAST, after every other entry has already
-// landed in dest successfully. If a move fails partway through, dest is left
-// with working-tree files but no .git — never the reverse — so a caller
-// that rolls back by deleting only what os.ReadDir originally reported as
-// moved can never mistake the result for a valid clone: a partial move that
-// put .git down early, then failed on a later file, would otherwise leave
-// dest looking like a complete-but-corrupt clone to the ".git present"
-// self-heal check.
-//
-// A repository whose own tracked content includes a top-level entry
-// literally named like the lock (provisionFileLockName or a
-// provisionFileLockName-prefixed name) would collide with the still-live
-// lock directory sitting in dest and fail this move (os.Rename onto an
-// existing non-empty directory errors) — a safe, loud failure rather than
-// silent corruption, just not one self-healed by retrying without operator
-// intervention. Considered acceptable: no real project is expected to track
-// a file named ".scion-provision.lock".
+// landed in dest. If a move fails partway through, the entries this call
+// already moved are moved back into src, so dest is left as it was and src
+// still holds the whole clone. A process killed partway through leaves
+// working-tree files but no .git in dest, never the reverse, so the
+// ".git present" reuse check can never mistake it for a finished clone; the
+// manifest left in src lets the next start finish the move
+// (resumeCloneMove).
 func moveDirContentsUp(src, dest string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -2559,14 +2782,13 @@ func moveDirContentsUp(src, dest string) error {
 	}
 
 	var moved []string
-	// rollback undoes every move already applied to dest, so a caller that
-	// hits an error mid-move gets dest back to exactly how it looked before
-	// this call started — belt-and-suspenders on top of the
-	// .git-last ordering below, which is what actually guarantees dest can
-	// never look like a valid-but-corrupt clone.
 	rollback := func() {
-		for _, name := range moved {
-			_ = os.RemoveAll(filepath.Join(dest, name))
+		for i := len(moved) - 1; i >= 0; i-- {
+			name := moved[i]
+			if err := renameNoReplace(filepath.Join(dest, name), filepath.Join(src, name)); err != nil {
+				slog.Warn("moveDirContentsUp: could not move an entry back after a failed move",
+					"src", src, "dest", dest, "name", name, "error", err)
+			}
 		}
 	}
 
@@ -2580,7 +2802,10 @@ func moveDirContentsUp(src, dest string) error {
 
 	var gitEntryName string
 	for _, e := range entries {
-		if e.Name() == ".git" {
+		switch e.Name() {
+		case cloneManifestFile:
+			continue
+		case ".git":
 			gitEntryName = e.Name()
 			continue
 		}
@@ -2596,6 +2821,18 @@ func moveDirContentsUp(src, dest string) error {
 		}
 	}
 	return nil
+}
+
+// renameNoReplaceFallback renames oldpath to newpath unless newpath exists.
+// The existence check and the rename are two steps, so it is used only where
+// the kernel's atomic no-replace rename is unavailable (for example on NFS).
+func renameNoReplaceFallback(oldpath, newpath string) error {
+	if _, err := os.Lstat(newpath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrExist}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(oldpath, newpath)
 }
 
 // dirHasEntries reports whether dir exists and contains at least one entry.
