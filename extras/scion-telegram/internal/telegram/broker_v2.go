@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -106,19 +107,35 @@ type TelegramBrokerV2 struct {
 	errorCooldownCheckCount int
 
 	// userProjects caches, per linked-user principal, the project IDs that
-	// user can read. Used to scope notification DMs.
-	userProjects   map[string]userProjectsEntry
-	userProjectsMu sync.Mutex
+	// user can read (or that the list failed). Used to scope notification
+	// DMs. userProjectsGroup makes concurrent misses for one user share a
+	// single hub call.
+	userProjects      map[string]userProjectsEntry
+	userProjectsMu    sync.Mutex
+	userProjectsGroup singleflight.Group
 }
 
 type userProjectsEntry struct {
 	ids       map[string]bool
+	failed    bool
 	fetchedAt time.Time
+}
+
+// ttl returns how long the entry is reused.
+func (e userProjectsEntry) ttl() time.Duration {
+	if e.failed {
+		return userProjectsFailureTTL
+	}
+	return userProjectsCacheTTL
 }
 
 // userProjectsCacheTTL bounds how long a user's readable-project set is
 // reused for notification DMs.
 const userProjectsCacheTTL = time.Minute
+
+// userProjectsFailureTTL bounds how long a failed project list is
+// remembered; notification DMs for that user are not sent meanwhile.
+const userProjectsFailureTTL = time.Minute
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
 func NewV2(log *slog.Logger) *TelegramBrokerV2 {
@@ -2655,10 +2672,10 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 // --- Recipient project access ---
 
 // recipientCanReadProject reports whether the linked user in mapping can
-// read projectID, listing that user's projects as that user. Results are
-// cached briefly per user. It returns false when the user cannot be acted
-// as or the list cannot be fetched, so notifications are not sent for
-// projects the user may not be able to read.
+// read projectID, listing that user's projects as that user. Results and
+// failures are cached briefly per user. It returns false when the user
+// cannot be acted as or the list cannot be fetched, so notifications are
+// not sent for projects the user may not be able to read.
 func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) bool {
 	principal := linkedUserPrincipal(mapping)
 	if principal == "" || projectID == "" || b.hubClient == nil {
@@ -2668,28 +2685,42 @@ func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping 
 	b.userProjectsMu.Lock()
 	entry, ok := b.userProjects[principal]
 	b.userProjectsMu.Unlock()
-	if ok && time.Since(entry.fetchedAt) < userProjectsCacheTTL {
-		return entry.ids[projectID]
+	if !ok || time.Since(entry.fetchedAt) >= entry.ttl() {
+		v, _, _ := b.userProjectsGroup.Do(principal, func() (interface{}, error) {
+			return b.fetchUserProjects(ctx, principal), nil
+		})
+		entry = v.(userProjectsEntry)
 	}
+	return !entry.failed && entry.ids[projectID]
+}
 
+// fetchUserProjects lists the user's projects as that user and caches the
+// result (or the failure), evicting expired entries.
+func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal string) userProjectsEntry {
+	entry := userProjectsEntry{fetchedAt: time.Now()}
 	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
 	if err != nil {
 		b.log.Warn("Failed to list projects for notification recipient", "error", err)
-		return false
-	}
-	ids := make(map[string]bool, len(projects))
-	for _, p := range projects {
-		ids[p.ID] = true
+		entry.failed = true
+	} else {
+		entry.ids = make(map[string]bool, len(projects))
+		for _, p := range projects {
+			entry.ids[p.ID] = true
+		}
 	}
 
 	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
 	if b.userProjects == nil {
 		b.userProjects = make(map[string]userProjectsEntry)
 	}
-	b.userProjects[principal] = userProjectsEntry{ids: ids, fetchedAt: time.Now()}
-	b.userProjectsMu.Unlock()
-
-	return ids[projectID]
+	for k, e := range b.userProjects {
+		if time.Since(e.fetchedAt) >= e.ttl() {
+			delete(b.userProjects, k)
+		}
+	}
+	b.userProjects[principal] = entry
+	return entry
 }
 
 // --- Agent cache ---

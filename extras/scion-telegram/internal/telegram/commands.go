@@ -616,83 +616,18 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 		return
 	}
 
-	// Only projects the linked user can read are offered.
-	userProjects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	// Only group-linked projects the linked user can read are offered.
+	result, err := buildNotificationEntries(ctx, h.store, h.hubClient, h.log, mapping)
 	if err != nil {
-		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.log.Warn("Failed to build notification toggles", "error", err)
 		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText))
 		return
 	}
-	readable := make(map[string]bool, len(userProjects))
-	for _, p := range userProjects {
-		readable[p.ID] = true
-	}
-
-	allLinks, err := h.store.GetAllGroupLinks(ctx)
-	if err != nil {
-		h.log.Error("Failed to get group links", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
-		return
-	}
-	var links []*GroupLink
-	for _, link := range allLinks {
-		if readable[link.ProjectID] {
-			links = append(links, link)
-		}
-	}
-
-	if len(links) == 0 {
+	if result.LinkedProjects == 0 {
 		h.reply(chatID, "No linked projects found. Link a group to a project with /setup first.")
 		return
 	}
-
-	existingPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
-	if err != nil {
-		h.log.Error("Failed to get notification prefs", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
-		return
-	}
-	prefMap := make(map[string]bool)
-	for _, p := range existingPrefs {
-		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
-	}
-
-	seen := make(map[string]bool)
-	var entries []notificationAgentEntry
-	for _, link := range links {
-		if !link.Active {
-			continue
-		}
-		if seen[link.ProjectID] {
-			continue
-		}
-		seen[link.ProjectID] = true
-
-		agents, agentErr := h.getAgents(ctx, link.ProjectID, principal)
-		if agentErr != nil {
-			if isStaleLinkError(agentErr) {
-				h.reply(chatID, staleLinkText)
-				return
-			}
-			// A project whose agents the user may not list is left out.
-			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
-			continue
-		}
-
-		for _, agent := range agents {
-			enabled := true
-			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
-				enabled = val
-			}
-			entries = append(entries, notificationAgentEntry{
-				ProjectSlug: link.ProjectSlug,
-				ProjectID:   link.ProjectID,
-				AgentSlug:   agent.Slug,
-				Enabled:     enabled,
-			})
-		}
-	}
-
+	entries := result.Entries
 	if len(entries) == 0 {
 		h.reply(chatID, "No agents found across linked projects.")
 		return
@@ -700,39 +635,6 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 
 	kb := buildNotificationsKeyboard(entries)
 	h.replyWithKeyboard(chatID, "Tap an agent to toggle notifications:", kb)
-}
-
-// getAgents returns agents for a project, using the store cache with a
-// fallback to the hub API, which is called as the linked user identified by
-// onBehalfOf. A stale cache is used when the hub is unavailable, but not
-// when the hub denies the request.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
-	cached, err := h.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
-	}
-	if cached != nil && time.Since(cached.RefreshedAt) < 5*time.Minute {
-		return cached.Agents, nil
-	}
-
-	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
-	if err != nil {
-		if cached != nil && !isForbiddenHubError(err) {
-			return cached.Agents, nil
-		}
-		return nil, err
-	}
-
-	saveErr := h.store.SaveProjectAgents(ctx, &ProjectAgents{
-		ProjectID:   projectID,
-		Agents:      agents,
-		RefreshedAt: time.Now(),
-	})
-	if saveErr != nil {
-		h.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
-	}
-
-	return agents, nil
 }
 
 // agentSlugs extracts just the slug strings from a slice of AgentInfo.

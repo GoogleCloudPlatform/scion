@@ -604,12 +604,22 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		messageID = cb.Message.MessageID
 	}
 
-	senderID := ""
-	if cb.From != nil {
-		senderID = strconv.FormatInt(cb.From.ID, 10)
+	mapping, _, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
+		return nil
 	}
-	if senderID == "" {
-		h.answerCallback(ctx, cb.ID, "Could not identify user.", false)
+	senderID := mapping.TelegramUserID
+
+	// Build the scoped toggle list first; on failure keep the current
+	// keyboard and report the error.
+	result, err := buildNotificationEntries(ctx, h.store, h.hubClient, h.log, mapping)
+	if err != nil {
+		h.log.Warn("Failed to build notification toggles", "error", err)
+		h.answerCallback(ctx, cb.ID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText), true)
+		return nil
+	}
+	if !result.Readable[projectID] {
+		h.answerCallback(ctx, cb.ID, "Your Scion account can no longer read this project.", true)
 		return nil
 	}
 
@@ -620,12 +630,9 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		return err
 	}
 
-	newEnabled := false
-	if existing == nil {
-		newEnabled = false
-	} else {
-		newEnabled = !existing.Enabled
-	}
+	// No stored preference means notifications are on, so the first press
+	// turns them off.
+	newEnabled := existing != nil && !existing.Enabled
 
 	if err := h.store.SaveNotificationPref(ctx, &NotificationPref{
 		TelegramUserID: senderID,
@@ -638,51 +645,8 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		return err
 	}
 
-	allPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
-	if err != nil {
-		h.log.Error("Failed to reload notification prefs", "error", err)
-		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
-		return err
-	}
-	prefMap := make(map[string]bool)
-	for _, p := range allPrefs {
-		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
-	}
-
-	links, err := h.store.GetAllGroupLinks(ctx)
-	if err != nil {
-		h.log.Error("Failed to get group links", "error", err)
-		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
-		return err
-	}
-
-	seen := make(map[string]bool)
-	var entries []notificationAgentEntry
-	for _, link := range links {
-		if !link.Active || seen[link.ProjectID] {
-			continue
-		}
-		seen[link.ProjectID] = true
-
-		cached, _ := h.store.GetProjectAgents(ctx, link.ProjectID)
-		if cached == nil {
-			continue
-		}
-		for _, agent := range cached.Agents {
-			enabled := true
-			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
-				enabled = val
-			}
-			entries = append(entries, notificationAgentEntry{
-				ProjectSlug: link.ProjectSlug,
-				ProjectID:   link.ProjectID,
-				AgentSlug:   agent.Slug,
-				Enabled:     enabled,
-			})
-		}
-	}
-
-	kb := buildNotificationsKeyboard(entries)
+	result.set(projectID, agentSlug, newEnabled)
+	kb := buildNotificationsKeyboard(result.Entries)
 	h.editMarkup(ctx, chatID, messageID, kb)
 
 	label := "off"

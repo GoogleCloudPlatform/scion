@@ -50,6 +50,9 @@ type fakeHubClient struct {
 	listAgentsErr error
 	// listUserProjectsErr, when set, is returned by ListProjectsForUser.
 	listUserProjectsErr error
+	// listUserProjectsGate, when set, is waited on by ListProjectsForUser
+	// after recording the call.
+	listUserProjectsGate chan struct{}
 
 	// Calls recorded for assertions: the principal passed on each call.
 	listAgentsCalls       []fakeListAgentsCall
@@ -70,8 +73,14 @@ func newFakeHubClient() *fakeHubClient {
 
 func (f *fakeHubClient) ListProjectsForUser(_ context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.listUserProjectsCalls = append(f.listUserProjectsCalls, onBehalfOf)
+	gate := f.listUserProjectsGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.listUserProjectsErr != nil {
 		return nil, f.listUserProjectsErr
 	}
@@ -96,6 +105,12 @@ func (f *fakeHubClient) ListAgents(_ context.Context, projectID, onBehalfOf stri
 		return nil, f.listAgentsErr
 	}
 	return f.agents[projectID], nil
+}
+
+func (f *fakeHubClient) userProjectCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.listUserProjectsCalls...)
 }
 
 func (f *fakeHubClient) agentCalls() []fakeListAgentsCall {
@@ -299,6 +314,12 @@ func (f *fakeTGServerV2) getEditedTexts() []editMessageTextRequest {
 	result := make([]editMessageTextRequest, len(f.editedTexts))
 	copy(result, f.editedTexts)
 	return result
+}
+
+func (f *fakeTGServerV2) getEditedMarkups() []editMessageReplyMarkupRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]editMessageReplyMarkupRequest(nil), f.editedMarkups...)
 }
 
 func (f *fakeTGServerV2) getAnsweredCallbacks() []answerCallbackQueryRequest {

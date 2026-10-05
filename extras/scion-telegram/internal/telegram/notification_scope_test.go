@@ -215,3 +215,184 @@ func TestV2_InputNeededDM_NotSentWhenProjectListFails(t *testing.T) {
 	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", inputNeededFor("user:alice@example.com")))
 	assert.Empty(t, tgSrv.getSentMessages())
 }
+
+// --- notification toggle presses ---
+
+func notifyCallback(projectID, agentSlug string, fromID int64) *CallbackQuery {
+	return &CallbackQuery{
+		ID:      "cb-n",
+		From:    &TGUser{ID: fromID},
+		Message: &TGMessage{MessageID: 9, Chat: TGChat{ID: fromID, Type: "private"}},
+		Data:    "notify:" + projectID + ":" + agentSlug,
+	}
+}
+
+func markupButtonTexts(kb *InlineKeyboardMarkup) string {
+	out := ""
+	if kb == nil {
+		return out
+	}
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			out += btn.Text + "|" + btn.CallbackData + " "
+		}
+	}
+	return out
+}
+
+// setupToggleScope links two projects with fresh agent caches; the user
+// can read only proj-1.
+func setupToggleScope(t *testing.T) (*CallbackHandler, *fakeTGServerV2, *fakeHubClient, Store) {
+	t.Helper()
+	h, tgSrv, hub, store := newTestCallbackHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	saveTestGroupLink(t, store, -101, "proj-1", "alpha", "")
+	saveTestGroupLink(t, store, -102, "proj-2", "secret", "")
+	ctx := context.Background()
+	for _, pa := range []*ProjectAgents{
+		{ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now()},
+		{ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "hidden-agent"}}, RefreshedAt: time.Now()},
+	} {
+		require.NoError(t, store.SaveProjectAgents(ctx, pa))
+	}
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1", Slug: "alpha"}}}
+	return h, tgSrv, hub, store
+}
+
+func TestCallbackHandler_NotifyToggle_FreshCacheForUnreadableProjectIsLeftOut(t *testing.T) {
+	h, tgSrv, _, store := setupToggleScope(t)
+
+	_, err := h.HandleCallback(context.Background(), notifyCallback("proj-1", "coder", 42))
+	require.NoError(t, err)
+
+	edits := tgSrv.getEditedMarkups()
+	require.Len(t, edits, 1)
+	buttons := markupButtonTexts(edits[0].ReplyMarkup)
+	assert.Contains(t, buttons, "coder")
+	assert.NotContains(t, buttons, "hidden-agent")
+	assert.NotContains(t, buttons, "proj-2")
+
+	pref, err := store.GetNotificationPref(context.Background(), "42", "proj-1", "coder")
+	require.NoError(t, err)
+	require.NotNil(t, pref)
+	assert.False(t, pref.Enabled, "first press turns notifications off")
+}
+
+func TestCallbackHandler_NotifyToggle_UnreadableProjectIsRejected(t *testing.T) {
+	h, tgSrv, _, store := setupToggleScope(t)
+
+	_, err := h.HandleCallback(context.Background(), notifyCallback("proj-2", "hidden-agent", 42))
+	require.NoError(t, err)
+
+	assert.Empty(t, tgSrv.getEditedMarkups())
+	pref, err := store.GetNotificationPref(context.Background(), "42", "proj-2", "hidden-agent")
+	require.NoError(t, err)
+	assert.Nil(t, pref)
+	answered := tgSrv.getAnsweredCallbacks()
+	require.Len(t, answered, 1)
+	assert.Contains(t, answered[0].Text, "can no longer read this project")
+}
+
+func TestCallbackHandler_NotifyToggle_ListFailureKeepsMarkup(t *testing.T) {
+	for name, listErr := range map[string]error{
+		"stale link":   staleLinkError("on-behalf-of principal not found"),
+		"list failure": errors.New("list user projects returned status 500"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, tgSrv, hub, store := setupToggleScope(t)
+			hub.listUserProjectsErr = listErr
+
+			_, err := h.HandleCallback(context.Background(), notifyCallback("proj-1", "coder", 42))
+			require.NoError(t, err)
+
+			assert.Empty(t, tgSrv.getEditedMarkups(), "existing keyboard is kept")
+			pref, err := store.GetNotificationPref(context.Background(), "42", "proj-1", "coder")
+			require.NoError(t, err)
+			assert.Nil(t, pref, "preference unchanged")
+			answered := tgSrv.getAnsweredCallbacks()
+			require.Len(t, answered, 1)
+			assert.Equal(t, hubErrorText(listErr, "alice@example.com", "", setupProjectsFailedText), answered[0].Text)
+		})
+	}
+}
+
+func TestCallbackHandler_NotifyToggle_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	h, tgSrv, hub, _ := newTestCallbackHandler(t)
+
+	_, err := h.HandleCallback(context.Background(), notifyCallback("proj-1", "coder", 77))
+	require.NoError(t, err)
+
+	assert.Empty(t, hub.listUserProjectsCalls)
+	assert.Empty(t, tgSrv.getEditedMarkups())
+	answered := tgSrv.getAnsweredCallbacks()
+	require.Len(t, answered, 1)
+	assert.Equal(t, registerHint, answered[0].Text)
+}
+
+// --- recipient project cache ---
+
+func TestV2_RecipientCanReadProject_FailureIsCachedBriefly(t *testing.T) {
+	b, _, hub, _ := newDMScopeBroker(t)
+	hub.listUserProjectsErr = errors.New("list user projects returned status 500")
+	mapping, err := b.store.GetUserMapping(context.Background(), "456")
+	require.NoError(t, err)
+
+	assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.Len(t, hub.userProjectCalls(), 1, "a failed list is remembered")
+
+	// After the failure window the list is fetched again.
+	hub.mu.Lock()
+	hub.listUserProjectsErr = nil
+	hub.projects = []ProjectOption{{ID: "proj-1"}}
+	hub.mu.Unlock()
+	b.userProjectsMu.Lock()
+	e := b.userProjects["user:alice@example.com"]
+	e.fetchedAt = time.Now().Add(-2 * userProjectsFailureTTL)
+	b.userProjects["user:alice@example.com"] = e
+	b.userProjectsMu.Unlock()
+
+	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.Len(t, hub.userProjectCalls(), 2)
+}
+
+func TestV2_RecipientCanReadProject_ConcurrentMissesShareOneCall(t *testing.T) {
+	b, _, hub, _ := newDMScopeBroker(t)
+	hub.projects = []ProjectOption{{ID: "proj-1"}}
+	gate := make(chan struct{})
+	hub.listUserProjectsGate = gate
+	mapping, err := b.store.GetUserMapping(context.Background(), "456")
+	require.NoError(t, err)
+
+	const n = 8
+	results := make(chan bool, n)
+	for i := 0; i < n; i++ {
+		go func() { results <- b.recipientCanReadProject(context.Background(), mapping, "proj-1") }()
+	}
+	require.Eventually(t, func() bool { return len(hub.userProjectCalls()) == 1 }, 2*time.Second, 5*time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // let the other callers join the in-flight call
+	close(gate)
+	for i := 0; i < n; i++ {
+		assert.True(t, <-results)
+	}
+	assert.Len(t, hub.userProjectCalls(), 1)
+}
+
+func TestV2_RecipientCanReadProject_EvictsExpiredEntriesOnWrite(t *testing.T) {
+	b, _, hub, _ := newDMScopeBroker(t)
+	hub.projects = []ProjectOption{{ID: "proj-1"}}
+	b.userProjects = map[string]userProjectsEntry{
+		"user:old@example.com":   {ids: map[string]bool{"proj-9": true}, fetchedAt: time.Now().Add(-2 * userProjectsCacheTTL)},
+		"user:fresh@example.com": {ids: map[string]bool{"proj-9": true}, fetchedAt: time.Now()},
+	}
+	mapping, err := b.store.GetUserMapping(context.Background(), "456")
+	require.NoError(t, err)
+
+	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	assert.NotContains(t, b.userProjects, "user:old@example.com")
+	assert.Contains(t, b.userProjects, "user:fresh@example.com")
+	assert.Contains(t, b.userProjects, "user:alice@example.com")
+}
