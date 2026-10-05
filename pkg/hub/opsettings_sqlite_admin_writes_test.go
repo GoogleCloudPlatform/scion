@@ -1,0 +1,163 @@
+//go:build !no_sqlite
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+// Real-SQLite coverage for ptone/scion#1091 option B: on a SQLite hub the
+// hub_settings DB is the source of truth for Layer-1 settings, exactly as on
+// postgres. Since #1432 OperationalSettings is wired on every driver, and each
+// ops.Update re-applies the full DB snapshot, so an admin write that touched
+// only settings.yaml (or only in-memory state) was silently reverted by the
+// next unrelated DB-backed admin write. These tests drive the admin handlers
+// against a real migrated SQLite store and then make such an unrelated write.
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/knadh/koanf/v2"
+)
+
+// newSQLiteOpsServer builds a SQLite-driver Server backed by a real migrated
+// SQLite store with OperationalSettings wired the way initOperationalSettings
+// does it: seed rows are written first by the caller (via seed), then Refresh,
+// ApplySnapshot, SetOperationalSettings. ops.server is set so ops.Update
+// self-applies, as StartPropagation arranges in production.
+func newSQLiteOpsServer(t *testing.T, bootstrap *koanf.Koanf, seed map[string]string) (*Server, store.Store, *OperationalSettings) {
+	t.Helper()
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create sqlite store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	ctx := context.Background()
+	for section, doc := range seed {
+		if _, err := st.UpsertHubSetting(ctx, section, json.RawMessage(doc), "system", -1, "seeded"); err != nil {
+			t.Fatalf("seed %s: %v", section, err)
+		}
+	}
+
+	if bootstrap == nil {
+		bootstrap = emptyKoanf()
+	}
+	ops := NewOperationalSettings(st, bootstrap, emptyKoanf())
+	if _, err := ops.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	srv := &Server{
+		dbDriver:       "sqlite",
+		store:          st,
+		maintenance:    NewMaintenanceState(false, ""),
+		maintenanceLog: logging.Subsystem("hub.maintenance"),
+	}
+	snap := ops.Snapshot()
+	ApplySnapshot(srv, snap)
+	ApplyMaintenanceFromSnapshot(srv, snap)
+	srv.SetOperationalSettings(ops)
+	ops.server = srv
+	return srv, st, ops
+}
+
+// unrelatedLifecycleUpdate is the trigger from the #1091 repro: another admin
+// write to a different section, which re-applies the whole DB snapshot.
+func unrelatedLifecycleUpdate(t *testing.T, ops *OperationalSettings) {
+	t.Helper()
+	if _, err := ops.Update(context.Background(), "lifecycle",
+		json.RawMessage(`{"auto_suspend_stalled":true}`), "other@example.com", -1, "managed"); err != nil {
+		t.Fatalf("unrelated lifecycle update: %v", err)
+	}
+}
+
+func hubSettingDocMap(t *testing.T, st store.Store, section string) (*store.HubSetting, map[string]interface{}) {
+	t.Helper()
+	rec, err := st.GetHubSetting(context.Background(), section)
+	if err != nil {
+		t.Fatalf("get hub setting %s: %v", section, err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(rec.Value, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", section, err)
+	}
+	return rec, m
+}
+
+// hubSettingRevisions maps each hub_settings section to its revision.
+func hubSettingRevisions(t *testing.T, st store.Store) map[string]int64 {
+	t.Helper()
+	rows, err := st.ListHubSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		out[r.Section] = r.Revision
+	}
+	return out
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// W1 on SQLite: PUT /api/v1/github-app persists to the github_app DB section
+// and survives an unrelated ops.Update. Before the fix the handler gated on
+// IsPostgres(), wrote only settings.yaml, and the lifecycle write reverted the
+// in-memory app_id to the seeded DB value (111).
+func TestSQLite_UpdateGitHubApp_PersistsToDBAndSurvivesUnrelatedUpdate(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	srv, st, ops := newSQLiteOpsServer(t, nil, map[string]string{
+		"github_app": `{"app_id":111,"webhooks_enabled":false}`,
+	})
+	if got := srv.config.GitHubAppConfig.AppID; got != 111 {
+		t.Fatalf("precondition: want in-memory app_id 111 from DB, got %d", got)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleUpdateGitHubApp(rr, adminRequest(http.MethodPut, "/api/v1/github-app", githubAppUpdateBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	unrelatedLifecycleUpdate(t, ops)
+
+	if got := srv.config.GitHubAppConfig.AppID; got != 999 {
+		t.Errorf("in-memory app_id = %d after unrelated ops.Update, want 999", got)
+	}
+	rec, doc := hubSettingDocMap(t, st, "github_app")
+	if got, _ := doc["app_id"].(float64); got != 999 {
+		t.Errorf("DB github_app.app_id = %v, want 999", doc["app_id"])
+	}
+	if rec.Origin != "managed" {
+		t.Errorf("DB github_app origin = %q, want managed", rec.Origin)
+	}
+	if data := readFileString(t, settingsPath); strings.Contains(data, "app_id") {
+		t.Errorf("settings.yaml must not be written on a DB-backed SQLite hub:\n%s", data)
+	}
+}

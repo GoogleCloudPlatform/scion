@@ -154,13 +154,14 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.GitHubAppConfig
 	s.mu.Unlock()
 
-	// Persist the non-sensitive config. In Postgres mode the durable home for
-	// these fields is the DB-owned `github_app` opsettings section; writing only
-	// to settings.yaml loses the change on restart (ephemeral filesystems) and
-	// lets any later ApplySnapshot revert it to the stale DB value. File/SQLite
-	// mode has no OperationalSettings service, so settings.yaml remains the
-	// durable home and the write stays best-effort.
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Persist the non-sensitive config. Whenever OperationalSettings is wired
+	// (every DB driver, SQLite included, since #1432) the durable home for
+	// these fields is the DB-owned `github_app` opsettings section: writing
+	// only to settings.yaml loses the change on restart (ephemeral
+	// filesystems) and lets the next ops.Update / ApplySnapshot revert it to
+	// the stale DB value (#1091). Only a hub with no OperationalSettings
+	// service keeps settings.yaml as the durable home (best-effort write).
+	if ops := s.GetOperationalSettings(); ops != nil {
 		// A failed DB write is fatal to the request even though the in-memory
 		// config and the secrets are already committed: the DB is the sole
 		// durable store, so the next refreshAndApply reverts the value. Reporting
@@ -224,9 +225,9 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 }
 
 // persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
-// to the DB-owned `github_app` opsettings section (Postgres mode). The error is
-// returned rather than swallowed: in Postgres mode the DB is the only durable
-// store for these fields, so a failed write silently loses the change at the
+// to the DB-owned `github_app` opsettings section (any DB driver with
+// OperationalSettings). The error is returned rather than swallowed: the DB is
+// the only durable store for these fields, so a failed write silently loses the change at the
 // next refresh and the caller must be told.
 func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *OperationalSettings, cfg GitHubAppServerConfig, updatedBy string) error {
 	// WebhooksEnabled is a *bool in the section so an explicit false is
@@ -266,8 +267,9 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 }
 
 // persistGitHubAppConfig writes the non-sensitive GitHub App configuration
-// fields to settings.yaml. Sensitive values (private key, webhook secret) are
-// stored via the secrets system and are NOT written to settings.yaml.
+// fields to settings.yaml. Used only when the hub has no OperationalSettings.
+// Sensitive values (private key, webhook secret) are stored via the secrets
+// system and are NOT written to settings.yaml.
 func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
