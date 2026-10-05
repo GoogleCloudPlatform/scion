@@ -134,9 +134,10 @@ type relationshipOutcome struct {
 }
 
 // isHubScopedServiceAccount reports whether the resource is a hub-scoped
-// GCP service account (no parent).
+// GCP service account: no project parent, either with no parent or with an
+// explicit system parent (isHubScopedResource).
 func isHubScopedServiceAccount(resource Resource) bool {
-	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
+	return resource.Type == "gcp_service_account" && isHubScopedResource(resource)
 }
 
 // relationshipCandidates lists, in a stable order (ancestor, owner,

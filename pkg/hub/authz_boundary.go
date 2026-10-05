@@ -1698,6 +1698,9 @@ func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal Princi
 //     system role or blanket project permission grant, while still
 //     respecting a constraint that specifically strips that permission.
 func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal PrincipalContext, permID string) (bool, error) {
+	if permissions.IsSelfPermission(permID) {
+		return a.selfPermissionMintEligible(ctx, principal)
+	}
 	ok, err := a.MintTimeSystemGrant(ctx, principal, permID)
 	if err != nil {
 		return false, err
@@ -1744,6 +1747,22 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 	return a.hasRelevantProjectAdmission(ctx, principal, permID)
 }
 
+// selfPermissionMintEligible is the mint eligibility rule for a self
+// permission (permissions.IsSelfPermission): the issuer is an active user.
+// No role binding is consulted, because a self permission acts only on the
+// holder's own records. Project-boundary admission (membership) still
+// applies before this rule. A store fault is returned as an error; an
+// inactive or missing user is ineligible.
+func (a *AuthzService) selfPermissionMintEligible(ctx context.Context, principal PrincipalContext) (bool, error) {
+	if err := a.requireActiveUser(ctx, principal); err != nil {
+		if isProjectAccessLookupFault(err) {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // selectorMintEligible evaluates MintEligibilityRegistry for every
 // permission ID in a PROJECT-boundary selector's expansion. A permission
 // absent from the registry defaults to MintEligibilityFlatRole, whose
@@ -1760,6 +1779,16 @@ func (a *AuthzService) hubPermissionEligible(ctx context.Context, principal Prin
 // below.
 func (a *AuthzService) selectorMintEligible(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, permIDs []string) (bool, MintDenialReason, error) {
 	for _, permID := range permIDs {
+		if permissions.IsSelfPermission(permID) {
+			ok, err := a.selfPermissionMintEligible(ctx, principal)
+			if err != nil {
+				return false, MintDenialNone, err
+			}
+			if !ok {
+				return false, MintDenialProjectAccessRequired, nil
+			}
+			continue
+		}
 		descriptor, hasDescriptor := permissions.MintEligibilityRegistry[permID]
 		if !hasDescriptor {
 			ok, err := a.hasProjectRoleFlatPermission(ctx, principal, boundary.ProjectID, permID)

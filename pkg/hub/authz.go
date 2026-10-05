@@ -80,6 +80,10 @@ const (
 	// delegation ceiling.
 	ActionDeliver Action = "deliver"
 	ActionUse     Action = "use"
+
+	// ActionWrite covers changes to the holder's own self-scoped records
+	// (permissions.ActionWrite).
+	ActionWrite Action = "write"
 )
 
 // Resource represents the target of an authorization check.
@@ -507,6 +511,22 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 		Credential: credentialContextForIdentity(identity),
 		Resource:   resource,
 		Action:     action,
+	})
+}
+
+// CheckAccessWithEvidence is CheckAccess with server-built target evidence
+// (TargetScopeEvidence) for a collection-level request. The evidence must
+// come from trusted server code that knows which operation it runs, such as
+// hubCollectionEvidence or projectCollectionEvidence, never from a request
+// field. The bearer gate uses it to classify the target; it never widens a
+// session decision.
+func (a *AuthzService) CheckAccessWithEvidence(ctx context.Context, identity Identity, resource Resource, action Action, evidence TargetScopeEvidence) Decision {
+	return a.Decide(ctx, AuthzRequest{
+		Principal:      principalContextForIdentity(identity),
+		Credential:     credentialContextForIdentity(identity),
+		Resource:       resource,
+		Action:         action,
+		TargetEvidence: evidence,
 	})
 }
 

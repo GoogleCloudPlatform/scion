@@ -28,8 +28,11 @@ const (
 	bearerStageTargetUnknown   = "target_unknown"
 	bearerStageOutsideBoundary = "outside_boundary"
 	bearerStageCeiling         = "ceiling"
-	bearerStageProjectAccess   = "project_access"
-	bearerStagePassed          = "passed"
+	// bearerStageBoundaryEligibility is stage 3b: the permission's
+	// allowed boundary kinds must include the token's boundary kind.
+	bearerStageBoundaryEligibility = "boundary_eligibility"
+	bearerStageProjectAccess       = "project_access"
+	bearerStagePassed              = "passed"
 )
 
 // Deny reasons the bearer gate reports. They are stable strings: callers
@@ -40,6 +43,8 @@ const (
 	bearerReasonOutsideProject      = "token not scoped for this project"
 	bearerReasonHubLevelResource    = "token not scoped for hub-level resources"
 	bearerReasonProjectAccessDenied = "token holder lacks active access to the target project"
+	// bearerReasonBoundaryIneligible is the stage 3b deny reason.
+	bearerReasonBoundaryIneligible = "permission is not eligible for this token boundary"
 )
 
 // bearerGateTrace records how the bearer gate evaluated one request. decide
@@ -109,6 +114,11 @@ func bearerGateInputsFor(principal PrincipalContext, credential CredentialContex
 //     denies as an unresolvable target.
 //  3. The ceiling allows the exact permission Decide resolved for the
 //     request.
+//     3b. The permission is eligible for the token's boundary kind: its
+//     allowed boundary kinds (permissions.SelectorAllowedBoundaries)
+//     exist and contain the boundary kind. This applies the boundary rule
+//     mint enforces to every ceiling, including a frozen legacy ceiling
+//     whose permissions were never checked against a boundary at mint.
 //  4. For a project target, the principal currently has access to that
 //     project for this permission and target (ProjectTargetAdmission). This
 //     stage applies to every boundary kind, hub included: a hub boundary
@@ -172,6 +182,14 @@ func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal Princip
 		return &Decision{Allowed: false, Reason: "token does not have scope: " + target.Type + ":" + string(action)}
 	}
 
+	// Stage 3b: the permission must be eligible for the token's boundary
+	// kind. A permission with no boundary entry, or one whose
+	// entry does not list this kind, denies.
+	if !permissionEligibleForBoundary(permissionID, in.boundary.Kind) {
+		trace.Stage = bearerStageBoundaryEligibility
+		return &Decision{Allowed: false, Reason: bearerReasonBoundaryIneligible}
+	}
+
 	// Stage 4: a project target requires the principal's current access to
 	// that project, checked on every request. Retained creation ancestry
 	// or ownership never substitutes for it. ProjectTargetAdmission
@@ -225,7 +243,7 @@ func (r *bearerGateRun) traceOrNil() *bearerGateTrace {
 }
 
 // Bearer evaluation stages reported in BearerEvaluation.Stage. The first
-// five name the bearer gate stage that denied. BearerStageAuthority means
+// six name the bearer gate stage that denied. BearerStageAuthority means
 // the gate passed and the principal's live authority (role bindings,
 // groups, relationship grants, access constraints and the ceiling as a
 // kernel restriction) denied. An allowed evaluation has an empty Stage.
@@ -246,9 +264,12 @@ const (
 	BearerStageTargetUnknown   = bearerStageTargetUnknown
 	BearerStageOutsideBoundary = bearerStageOutsideBoundary
 	BearerStageCeiling         = bearerStageCeiling
-	BearerStageProjectAccess   = bearerStageProjectAccess
-	BearerStageAuthority       = "authority"
-	BearerStageError           = "error"
+	// BearerStageBoundaryEligibility reports that the permission is not
+	// eligible for the token's boundary kind.
+	BearerStageBoundaryEligibility = bearerStageBoundaryEligibility
+	BearerStageProjectAccess       = bearerStageProjectAccess
+	BearerStageAuthority           = "authority"
+	BearerStageError               = "error"
 )
 
 // BearerOptions carries the inputs to EvaluateBearerCeiling other than the
@@ -387,6 +408,22 @@ func (a *AuthzService) EvaluateBearerCeiling(
 		result.Stage = run.trace.Stage
 	}
 	return result
+}
+
+// permissionEligibleForBoundary reports whether permissionID's allowed
+// boundary kinds include kind. A permission with no entry is eligible
+// for no boundary.
+func permissionEligibleForBoundary(permissionID string, kind BoundaryKind) bool {
+	kinds, listed := permissions.SelectorAllowedBoundaries(permissionID)
+	if !listed {
+		return false
+	}
+	for _, k := range kinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // registryActionFor returns the action of permissionID's registry row.

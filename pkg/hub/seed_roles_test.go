@@ -126,6 +126,8 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 		"hub.settings.read",
 		// project.create (replacing hub-member-create-projects policy)
 		"project.create",
+		// Self-scoped permissions on the holder's own records.
+		"inbox.read", "inbox.write", "user_skill_injection.update",
 	}
 	for _, p := range expected {
 		assert.True(t, permSet[p],
