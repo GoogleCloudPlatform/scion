@@ -91,10 +91,15 @@ test('on macOS, Ctrl+K then Enter in the composer never opens the palette or lea
       () => (window as unknown as { __ctrlKPrevented?: boolean }).__ctrlKPrevented
     )
   ).toBe(false);
+  // The key reached the field: it keeps focus and its text (the caret is at
+  // the end, so deleting to the end of the line removes nothing).
+  await expect(textarea).toBeFocused();
+  await expect(textarea).toHaveValue('draft in progress');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
 
   await expect(page.locator('scion-quick-palette')).toHaveCount(0);
+  await expect(textarea).toBeFocused();
   await expect(page).toHaveURL(CURRENT_URL);
 });
 
