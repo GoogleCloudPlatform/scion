@@ -437,11 +437,11 @@ func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSett
 	return gs, nil
 }
 
-// nfsSubPathRoot is the subpath root of an nfs block, with the same default
-// the NFS backend uses.
+// nfsSubPathRoot is the subpath root of an nfs block, with the shared
+// default (config.SubPathRootOrDefault).
 func nfsSubPathRoot(nfs *config.V1NFSConfig) string {
-	if nfs == nil || nfs.SubPathRoot == "" {
-		return "projects"
+	if nfs == nil {
+		return config.SubPathRootOrDefault("")
 	}
-	return nfs.SubPathRoot
+	return config.SubPathRootOrDefault(nfs.SubPathRoot)
 }
