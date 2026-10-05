@@ -1158,8 +1158,10 @@ export class AgentStore {
         entry
       );
     }
-    // A listener may have reset the store during the merge.
-    if (this.entries.get(entry.key) !== entry) return;
+    // A listener may have reset the store during the merge, or started a
+    // walk; that walk reads everything this probe would have handed off,
+    // and its finish sets the mark and the next probe.
+    if (this.entries.get(entry.key) !== entry || entry.walk) return;
     if (!caughtUp) {
       // Churn faster than the probe reads would otherwise walk every time.
       if (backingOff) return;

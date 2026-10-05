@@ -887,16 +887,18 @@ describe('AgentStore delta probe', () => {
     expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
   });
 
-  it('aborts a walk its own merge started when it walks on overflow', async () => {
+  it('leaves a walk its own merge started to read the overflow, and starts no other', async () => {
     const h = await loaded([row('a1', 1)]);
     const store = h.store as unknown as {
       entries: Map<string, { walk: { controller: AbortController } | null }>;
     };
-    const replaced: AbortController[] = [];
+    const started: AbortController[] = [];
     h.store.retain(HUB, (snapshot) => {
       const walk = store.entries.get('hub')?.walk;
-      if (snapshot.status === 'loading' && walk) replaced.push(walk.controller);
+      if (snapshot.status === 'loading' && walk) started.push(walk.controller);
     });
+    // Rows without capabilities: the merge queues more single reads than its
+    // burst limit, which invalidates the list and walks it.
     h.server.agents.push(
       ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) =>
         agent(`n${i}`, { updated: t(10 + i) })
@@ -904,8 +906,29 @@ describe('AgentStore delta probe', () => {
     );
     await tick();
     expect(h.server.walks()).toBe(2);
-    expect(replaced).toHaveLength(1);
-    expect(replaced[0]?.signal.aborted).toBe(true);
+    expect(started).toHaveLength(1);
+    expect(started[0]?.signal.aborted).toBe(false);
+    const snapshot = h.store.peek(HUB);
+    expect(snapshot?.status).toBe('ready');
+    expect(snapshot?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
+  });
+
+  it('shows the failure of a walk its own merge started, rather than staying loading', async () => {
+    const h = await loaded([row('a1', 1)]);
+    h.store.retain(HUB, () => {});
+    h.server.agents.push(
+      ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) =>
+        agent(`n${i}`, { updated: t(10 + i) })
+      )
+    );
+    h.server.status = 500;
+    h.server.sortedStatus = (): number => 200;
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    const snapshot = h.store.peek(HUB);
+    expect(snapshot?.status).toBe('error');
+    expect(snapshot?.complete).toBe(false);
+    expect(ids(snapshot)).toContain('a1');
   });
 
   it('does not walk for a list a reset dropped during its merge', async () => {
