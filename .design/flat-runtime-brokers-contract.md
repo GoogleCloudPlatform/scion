@@ -1,46 +1,87 @@
 # Flat Runtime Brokers: P1 contract appendix
 
-Status: Stage A of ptone/scion#3267 (P1.1), for review. Parent phase ptone/scion#3266; delivery tracker ptone/scion#2926.
+Status: Stage A of ptone/scion#3267 (P1.1). **Revision 2** answers review round 1 (B1–B3, N1–N14, T1–T5); the change log is at the end. Parent phase: ptone/scion#3266. Delivery tracker: ptone/scion#2926.
 
-This appendix fixes the names and rules that P1.2 (ptone/scion#3268), P1.3 (ptone/scion#3269) and later phases build on. Changing a frozen name after acceptance needs a new review of this document. Where this document and the original illustrative design differ (for example the illustrative `schema_version: "2"` with a top-level `runtime_brokers` list), this document wins.
+This appendix fixes the names and rules that P1.2 (ptone/scion#3268), P1.3 (ptone/scion#3269) and later phases build on. Changing a frozen name after acceptance requires another review of this document. Where this document differs from the original illustrative design (for example its `schema_version: "2"` and top-level `runtime_brokers` list), this document wins.
 
-Reconciled against upstream main **`28eb4f0a5827854837d18b28b18e26688d1641cd`** (fetched 2026-10-05; this is also the planning SHA and the current fork main). The original evaluation used `b8735e7`; section 1 records what changed between the two.
+Reconciled against upstream main **`28eb4f0a5827854837d18b28b18e26688d1641cd`**, fetched 2026-10-05. That is also the planning SHA and the current fork main. The original evaluation used `b8735e7`; section 1 records what changed in between.
 
-Terms follow `GLOSSARY.md`: always say **Runtime Broker**, never bare "broker", in user-facing text. A **flat Runtime Broker** is a Runtime Broker identity that serves exactly one runtime target. A **Runtime Broker instance** is the in-process object hosting one such identity. The **legacy Runtime Broker** is today's profile-resolving Runtime Broker.
+Terms follow `GLOSSARY.md`. Always write **Runtime Broker**, never bare "broker", in user-facing text.
+- **Flat Runtime Broker**: a Runtime Broker identity whose Hub row has a stored runtime target. It serves exactly one target.
+- **Runtime Broker instance**: the in-process object that hosts one flat identity.
+- **Legacy Runtime Broker**: today's profile-resolving Runtime Broker. Its row has no stored target.
+
+**Central invariant.** Nothing in P1 retargets an existing Runtime Broker ID or moves an agent's pinned placement:
+- No automatic writer converts a legacy row or agent into a flat one.
+- No automatic writer moves a pinned agent.
+- No automatic writer adopts a flat row by name.
+
+Sections 6, 7 and 8 list every writer and the guard that holds this.
 
 ## 1. Source-map reconciliation (b8735e7 → 28eb4f0)
 
-The history in this checkout is shallow, so this comparison is by tree content. About 1.6k files changed overall. On the paths this work touches (`pkg/config`, `pkg/ent/schema`, `pkg/store`, `pkg/runtimebroker`, the Hub create/dispatch/heartbeat code and the registration commands), 129 files changed, roughly +29k/-1.4k lines. The changes that affect this plan are below.
+The git history here is shallow, so the comparison is by tree content. Of roughly 1.6k files changed, 129 are on the paths this work touches (`pkg/config`, `pkg/ent/schema`, `pkg/store`, `pkg/runtimebroker`, Hub create/dispatch/heartbeat, registration commands), at about +29k/-1.4k lines. The table lists the changes that affect this plan.
 
-| Area | What is on main now | Effect on the plan |
+| Area | Current main | Effect on the plan |
 |---|---|---|
-| Run identity | `agents.run_id` (written only by `SetAgentRunID` / `CompareAndSwapAgentRunID`), the `scion.run_id` container label, `launch_*` columns, async launch (`beginAsyncLaunch`, `launchRegistry`), `beginSyncStart`, `startsInFlight` | Pinned placement is a new, independent column set. It never replaces or clears the run ID. Mismatch rejection happens before any of these are written (section 8). |
-| Start claims | `start_claim_*` columns and `ClaimAgentStart(target)` in the store. Hub wiring is in flight in ptone/scion#3081 and ptone/scion#3091 and GoogleCloudPlatform/scion#2544. `start_claim_target` holds the *inventory target key* | The opaque runtime target ID (section 4) is not the inventory target key and is never written into `start_claim_target` (section 10). |
-| Run intent | `run_intent`, `run_intent_at`, plus `run_intent_marked_at` in ptone/scion#3081 to detect writes by older code | Same pattern used here: separate columns written only by dedicated setters (section 7). |
-| Recovery | `BrokerTargetInventory` table (kept out of `runtime_brokers` so write-backs cannot roll it back), recovery observations, the reaper's "fresh complete inventory of its target" | The inventory target key stays as it is: `auxiliaryRuntimeIdentity` (runtime name, plus context/namespace on Kubernetes). P1 does not change it. |
-| Observed target | `applied_config.runtimeTarget` / `runtimeTargetCandidate` are string keys, promoted after two matching heartbeats (`nextRuntimeTarget`) and cleared by `forgetRuntimeTarget` after an accepted create/start/restart | Semantics unchanged. The JSON key `runtimeTarget` is already taken inside `appliedConfig`, so the agent's pinned placement uses a different name (section 7). |
-| Existing-agent routing | `recorded_runtime.go` (ptone/scion#2748): the Hub sends `?runtime=<recorded type>` and the Runtime Broker searches runtimes of that type, answering 503 `runtime_unavailable` when none is registered | A flat instance has one runtime, so it can only match it or refuse. No new routing in P1.1. |
-| Profile fallback | `resolveManagerForOpts` and `resolveRuntimeNameForOpts` still fall back **silently** to the default manager when a profile does not resolve. `buildStartContext` writes project markers/dirs before resolving | A flat instance must reject an incoming profile explicitly, before `beginCreateAttempt` and `buildStartContext` (section 9). It must not inherit the fallback. |
-| Registration | `FindExistingBroker` matches **by name first**, then ID. The embedded path (`registerGlobalProjectAndBroker`) also looks up by name and adopts that ID. `resolveBrokerID` mints locally (settings → legacy → DB → new UUID) | A flat registration must never be adopted by name, otherwise a lost identity or a reused name would silently retarget (section 6). |
-| Store write semantics | `UpdateAgent` and `UpdateRuntimeBroker` overwrite the full row of their known columns. `applied_config` and the `runtimes` (profiles) JSON are rewritten from the writer's struct | New placement data must live in new top-level columns left out of these updates. It must not be JSON keys inside `applied_config` or `BrokerProfile` (section 7). |
-| Migrations | ent auto-migrate with `WithDropColumn(false)`, then ordered Go backfills in `CompositeStore.Migrate`. Postgres tests use `-tags integration` + `SCION_TEST_POSTGRES_URL` (`pkg/store/enttest`) | Additive nullable columns, no backfill needed (section 11). |
-| Quota | Per-Runtime-Broker only: `max_agents_per_broker`, `BrokerSettings.MaxAgents`. No per-profile quota on main (that work is unmerged) | Each flat Runtime Broker is its own quota scope. Aggregate limits across split identities are a P3/P5 decision. |
-| Conduit | `conduit_session.exec_scope`, `endpoint_incarnation`, `connection_epoch` exist. Nothing computes a Runtime Broker exec scope yet. Runtime Brokers are not on Conduit. Everything is gated by `hub.conduit` | Section 12 records the fencing contract that flat dispatch preserves. The Docker execution-scope record (section 5) is the natural future value for `exec_scope`, but P1 does not set it. |
-| Settings | Storage/eviction keys on runtime and profile entries (`shared_dir_storage_backend`, `home_storage_*`, `safe_to_evict`, `priority_class_name`, `kubernetes_service_account_mappings`). `schema_version` is **not** checked at load (only `scion config validate` and migration use the JSON schema). Unknown keys are dropped silently by `LoadVersionedSettings` | Keep schema version `"1"` and add an additive key (section 2). Flat config gets its own explicit validator that the Runtime Broker startup calls, because the loader won't reject bad input. |
-| Experiments | `pkg/experiments/registry.go` with server/web layers. `Server.experimentEnabled`. `requireExperiment` exists with no production callers. The Hub pushes selected flags to Runtime Brokers per dispatch (`dispatchExperimentNames`) | `hub.flat_runtime_brokers` is a server-layer experiment checked in Hub handlers. It does not need to reach Runtime Brokers (section 13). |
+| Run identity | `agents.run_id`, written only by `SetAgentRunID` and `CompareAndSwapAgentRunID`. Also the `scion.run_id` label, the `launch_*` columns, async launch, `beginSyncStart` and `startsInFlight` | Pinned placement uses its own columns and never touches the run ID. A mismatch is rejected before any of these are written (section 9). |
+| Start claims | `start_claim_*` columns and `ClaimAgentStart(target)`. The Hub wiring is in flight (ptone/scion#3081, ptone/scion#3091, GoogleCloudPlatform/scion#2544). `start_claim_target` holds the *inventory target key* | The opaque runtime target ID is a different value and is never written there (section 11). |
+| Run intent | `run_intent` and `run_intent_at`, plus `run_intent_marked_at` in ptone/scion#3081 to detect writes by older code | Same pattern used here: separate columns with dedicated setters (section 8). |
+| Recovery | The `BrokerTargetInventory` table, recovery observations, and the reaper's "fresh complete inventory of its target" | The inventory key (`auxiliaryRuntimeIdentity`) is unchanged in P1. |
+| Observed target | `applied_config.runtimeTarget` and `runtimeTargetCandidate`, promoted by `nextRuntimeTarget` and cleared by `forgetRuntimeTarget` | Semantics unchanged. The pin uses a different name (section 8). |
+| Existing-agent routing | `recorded_runtime.go` (ptone/scion#2748), with the `?runtime=` query parameter | A flat instance has one runtime and either matches it or refuses. No new routing. |
+| Profile fallback | `resolveManagerForOpts`/`ResolveRuntime` fall back silently, including `ResolveRuntime("")` falling back to the settings `active_profile`. `buildStartContext` writes markers before it resolves anything | A flat instance bypasses that resolution entirely (section 10). |
+| Registration and orphan writers | Embedded `registerGlobalProjectAndBroker` adopts a row by name, rewrites `Profiles`/`DefaultProfile` on every start, then runs **`FindOrphanedAgents` → `ReassignAgentsToBroker` → `ReassignProjectBroker` → `MarkBrokerOffline`**, which bulk-moves every non-terminal agent on an offline or missing Runtime Broker. brokerauth `FindExistingBroker` matches by name first. The deprecated `RegisterProject` with `broker` matches by ID, then name, and overwrites name/slug/profiles. Heartbeats refresh profiles and default profile | Every one of these writers gets a flat guard (sections 6 and 8). The orphan writers get P1.1 store guards. |
+| Store write semantics | `UpdateAgent` and `UpdateRuntimeBroker` overwrite all known columns, including the `applied_config` and `runtimes` JSON | New data goes in new columns that those updates leave out (section 8). |
+| Server config path | The server reads `GlobalConfig.RuntimeBroker` (`RuntimeBrokerConfig`, camelCase) through `LoadGlobalConfig` → `loadServerFromSettingsFile` → `ConvertV1ServerToGlobalConfig`. The legacy `server.yaml` path still exists. A `server` section that fails to unmarshal is dropped silently | Section 2 freezes both struct shapes, the conversion, the `server.yaml` rule and a strict loader. |
+| Migrations | ent auto-migrate (`WithDropColumn(false)`, `WithDropIndex(false)`) followed by Go backfills. Postgres tests run under `-tags integration` with `SCION_TEST_POSTGRES_URL` | Additive nullable columns, no backfill (section 12). |
+| Quota | Per Runtime Broker only (`max_agents_per_broker`, `BrokerSettings.MaxAgents`) | Each flat Runtime Broker is its own scope. Aggregate limits are a P3/P5 question. |
+| Conduit | `conduit_session.exec_scope`, `endpoint_incarnation` and `connection_epoch` exist. Nothing computes a Runtime Broker exec scope. Gated by `hub.conduit` | Section 13 records the fencing contract that flat dispatch preserves. |
+| Settings | Storage and eviction keys on runtime/profile entries. `schema_version` is not checked at load. Unknown keys are dropped silently | Schema stays `"1"` with an additive key and a strict loader (section 2). |
+| Experiments | Server and web layers, `Server.experimentEnabled`, `requireExperiment` (no production callers), `dispatchExperimentNames` | `hub.flat_runtime_brokers` is a server-layer experiment (section 14). |
 
-In-flight work this appendix was checked against: ptone/scion#3081, ptone/scion#3091 (start claims, queued stops, recovery), ptone/scion#3180 (per-dir shared-dir backends in `settings_v1.go` and the settings schema), GoogleCloudPlatform/scion#2544 (start-claim runner), GoogleCloudPlatform/scion#2480 (metadata mode), GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 (Conduit), and the workspace-recreation wire contract for GoogleCloudPlatform/scion#1931 (start/restart carry workspace inputs through `StartExtras`). The P1.1 changes below only add to those diffs. P1.1 does not edit `cmd/server_foreground.go`, `pkg/hub/httpdispatcher.go`, `pkg/runtimebroker/handlers.go` or `pkg/runtime/k8s_runtime.go`.
+In-flight work this was checked against:
+- ptone/scion#3081 and ptone/scion#3091 (start claims, queued stops, recovery)
+- ptone/scion#3180 (per-dir shared-dir backends in `settings_v1.go` and the schema)
+- GoogleCloudPlatform/scion#2544 (start-claim runner)
+- GoogleCloudPlatform/scion#2480 (metadata mode)
+- GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 (Conduit)
+- the workspace-recreation wire contract for GoogleCloudPlatform/scion#1931 (start/restart carry inputs through `StartExtras`)
 
-## 2. Settings: schema version and key placement
+P1.1 only adds to those. It does not edit `cmd/server_foreground.go`, `cmd/server_broker.go`, `pkg/hub/httpdispatcher.go`, `pkg/runtimebroker/handlers.go` or `pkg/runtime/k8s_runtime.go`.
 
-- **Schema version stays `"1"`.** The flat configuration is one new optional key, so v1 files without it are unchanged. A v2 schema would duplicate the whole v1 schema for one key. It would also gain nothing at load time, because `schema_version` is not checked there.
-- **Key: `server.broker.instances`**, a list (YAML sequence). It is valid only in global settings, like the rest of `server`. It does **not** use the singular top-level `runtime` key (`V1RuntimeDefaultsConfig`, which holds global runtime behaviour defaults), and it does not use `runtimes` or `profiles`. Process-wide listener and Hub-connection settings (`server.broker.port`, `host`, `hub_endpoint`, …) stay where they are and are shared by every instance the process hosts (P2).
-- Go types (in `pkg/config/settings_v1.go`):
-  - `V1BrokerConfig.Instances []V1RuntimeBrokerInstanceConfig` with tag `instances`.
-  - `V1RuntimeBrokerInstanceConfig { Key string "key"; Name string "name"; RuntimeTarget *V1RuntimeTargetConfig "runtime_target" }`.
-  - `V1RuntimeTargetConfig { Type string "type"; DisplayName string "display_name"; Context string "context"; Namespace string "namespace" }`. `context`/`namespace` are Kubernetes-only and defined but not implemented in P1.
+## 2. Settings: schema version, key placement and the server path
 
-One-entry Docker example (invented values):
+- **The schema version stays `"1"`.** The flat configuration is one optional key. A v2 schema would duplicate the entire v1 schema and change nothing at load, because `schema_version` is not checked there.
+- **Settings-file key: `server.broker.instances`**, a list. It does **not** use the singular top-level `runtime` key (`V1RuntimeDefaultsConfig`, the global behaviour defaults), `runtimes` or `profiles`. Process-wide listener and Hub-connection settings (`server.broker.port`, `host`, `hub_endpoint`, …) stay where they are and are shared by every hosted instance in P2.
+- **An empty list (`instances: []`) means legacy**, the same as absent.
+
+### Frozen Go shapes
+
+| Layer | Field | Type | Tags |
+|---|---|---|---|
+| Settings file (`pkg/config/settings_v1.go`) | `V1BrokerConfig.Instances` | `[]V1RuntimeBrokerInstanceConfig` | `instances` (json/yaml/koanf, omitempty) |
+| | `V1RuntimeBrokerInstanceConfig` | `Key string`, `Name string`, `RuntimeTarget *V1RuntimeTargetConfig` | `key`, `name`, `runtime_target` |
+| | `V1RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace` (string) | `type`, `display_name`, `context`, `namespace` |
+| Server config (`pkg/config/hub_config.go`) | `RuntimeBrokerConfig.Instances` | `[]RuntimeBrokerInstanceConfig` | `instances` (camelCase family, like the rest of this struct) |
+| | `RuntimeBrokerInstanceConfig` | `Key`, `Name`, `RuntimeTarget *RuntimeTargetConfig` | `key`, `name`, `runtimeTarget` |
+| | `RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace` | `type`, `displayName`, `context`, `namespace` |
+
+- `ConvertV1ServerToGlobalConfig` copies `V1BrokerConfig.Instances` into `RuntimeBrokerConfig.Instances`, and `ConvertGlobalToV1ServerConfig` copies them back. Both are deep copies, field for field.
+- `context` and `namespace` are Kubernetes-only. They are defined but not implemented in P1.
+
+### Where it is read
+
+- "Global only" means **read through `LoadGlobalConfig`**: the settings.yaml whose `server` key `loadGlobalConfigFromSettings` uses. That is the global directory, or the `--config` directory only when the global settings have no `server` key.
+- Project-level settings are never consulted. A `server.broker.instances` in a project settings file has no effect on the server (tested).
+- **Legacy `server.yaml`: not supported.** If `loadGlobalConfigLegacy` produces a non-empty `RuntimeBroker.Instances`, `LoadGlobalConfig` returns an error: "runtimeBroker.instances is only supported under server.broker.instances in settings.yaml".
+- **Strict loader (P1.1):** `config.LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceConfig, error)`.
+  - It resolves the same settings.yaml as `loadGlobalConfigFromSettings`.
+  - It decodes the raw `server.broker.instances` node with unknown fields disallowed and runs `ValidateRuntimeBrokerInstances`.
+  - A type error or unknown key is an explicit error. This closes the gap where `loadServerFromSettingsFile` silently drops a `server` section that fails to unmarshal.
+  - P1.2 startup calls it and refuses to start on an error. It also refuses if the result differs from `GlobalConfig.RuntimeBroker.Instances`, which would mean the silent-fallback path was taken.
+
+### One-entry Docker example (invented values)
 
 ```yaml
 schema_version: "1"
@@ -55,46 +96,50 @@ server:
           display_name: Local Docker
 ```
 
-- `key` is required and is the **immutable local instance key** (section 3).
-- `name` is the Runtime Broker name registered with the Hub. It is a mutable label, not identity. Default: `<server.broker.broker_name, else hostname>-<key>`.
-- `runtime_target.type` is required. P1 accepts only `docker`. `kubernetes` is defined and rejected with "not implemented yet". Any other value is rejected as unsupported.
-- `display_name` is optional, non-sensitive and shown in the UI. Default: the type.
-- There are no per-instance `agent_defaults` in P1. P3.1 adds them additively under the entry.
+- `key` is required. It is the immutable local instance key (section 3).
+- `name` is **required in P1**. It is the Runtime Broker name registered with the Hub: a mutable label, not identity. Requiring it avoids a default that changes silently when `key` changes (see section 3).
+- `runtime_target.type` is required. P1 accepts `docker` only. `kubernetes` is defined and rejected as not implemented yet. Any other value is unsupported.
+- `display_name` is optional, non-sensitive, and shown in the UI. It defaults to the type.
+- There are no per-instance `agent_defaults` in P1. P3.1 adds them additively.
 
-**Validation** (`ValidateRuntimeBrokerInstances(instances) []ValidationError`, each error naming its settings path). The JSON schema (`$defs/runtimeBrokerInstance`, `additionalProperties: false`) mirrors these rules for `scion config validate`. Runtime Broker startup (P1.2) calls the validator and refuses to start on any error:
+### Validation
+
+`ValidateRuntimeBrokerInstances(instances) []ValidationError`. Each error names its settings path. The JSON schema (`$defs/runtimeBrokerInstance` with `additionalProperties: false`) mirrors these rules for `scion config validate`.
 
 | Condition | Error (path, message gist) |
 |---|---|
-| duplicate `key` | `server.broker.instances[i].key`: duplicate instance key "k" (also at index j). Reported even when the count rule below also fails |
-| more than one entry | `server.broker.instances`: only one Runtime Broker instance is supported in this release (P2 lifts this) |
+| Duplicate `key` | `server.broker.instances[i].key`: duplicate instance key "k" (also at index j). Reported even when the count rule also fails |
+| More than one entry | `server.broker.instances`: only one Runtime Broker instance is supported in this release |
 | `key` missing or not matching `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` | invalid instance key |
-| `runtime_target` missing, or `type` empty | runtime_target.type is required |
+| `name` empty | name is required |
+| `runtime_target` missing or `type` empty | runtime_target.type is required |
 | `type: kubernetes` | Kubernetes Runtime Broker instances are not implemented yet |
-| other `type` | unsupported runtime target type "x" (supported: docker) |
-| Docker entry with `context` or `namespace` | field not valid for runtime target type docker |
+| Any other `type` | unsupported runtime target type "x" (supported: docker) |
+| Docker entry with `context`/`namespace` | field not valid for runtime target type docker |
 
 Other rules:
-- An unknown key inside an entry fails `scion config validate` through the schema. The loader itself keeps dropping unknown keys, as it does everywhere today.
-- `server.broker.broker_id` keeps its current meaning: the legacy Runtime Broker identity. It never seeds a flat instance's ID. When `instances` is non-empty, the P1 process hosts only the flat instance (no legacy Runtime Broker) and logs that the legacy identity is not hosted. If the identity file's `runtimeBrokerId` equals `server.broker.broker_id`, that is an error.
-- The co-located settings overlay (`SettingsOverlay`) replaces only `runtimes`, `profiles`, `harness_configs` and `image_registry`. It never reads or writes `server.broker.instances`. A test pins this.
-- `active_profile`, `profiles` and `runtimes` are left untouched, because the local CLI keeps using them. A flat instance never consults them to select its target.
-
-Relation to ptone/scion#3180: that PR adds `shared_dir_storage_backends` under `$defs/runtimeConfig` and `$defs/profileConfig` and resolver functions in `settings_v1.go`. The keys and definitions here do not overlap with it. If both land, the only expected conflict is textual adjacency.
+- `server.broker.broker_id` (and every other legacy ID source) keeps its current meaning: the legacy Runtime Broker identity. It never seeds a flat ID.
+- When `instances` is non-empty, the P1 process hosts only the flat instance and does not run the legacy embedded registration or the orphan reassignment (section 6). It logs that the legacy identity is not hosted.
+- The co-located `SettingsOverlay` never reads or writes `server.broker.instances` (tested).
+- `active_profile`, `profiles` and `runtimes` are left untouched for the local CLI. A flat instance never consults them.
+- Relation to ptone/scion#3180: different `$defs` and functions. Any conflict is only textual adjacency.
+- **Rollback:** an older binary that rewrites global settings.yaml (e.g. through the admin settings handlers that call `LoadModifySaveVersionedSettings`) drops `server.broker.instances`. The identity directory (section 4) survives. Re-adding the entry with the same `key` restores the same identity (tested).
 
 ## 3. Immutable local instance key
 
-- `key` from the config is the local identity anchor. It names the instance's state directory and is recorded inside the identity file.
-- Renaming `key` in config means a different instance. There is no rename path: the old directory is simply not loaded. Combined with the name rule in section 6, a renamed key with an unchanged `name` is refused by the Hub instead of creating a duplicate silently.
-- The key is local only. It is not sent to the Hub in P1. P2 may add it to an observational host label.
+- `key` names the instance's state directory and is recorded in the identity file. It is the local identity anchor.
+- Changing `key` means a different instance. The old directory is simply not loaded, and there is no rename path.
+- Because `name` is required and is not derived from `key`, an operator who changes only `key` keeps the same `name`. The new identity's registration is then refused by the name/slug guard (section 6) instead of silently creating a duplicate. An operator who changes both deliberately gets a new, separate Runtime Broker.
+- The key is local only and is not sent to the Hub in P1.
 
 ## 4. Stable opaque IDs and local persistence
 
-- **Runtime Broker ID**: a UUID minted locally at the instance's first boot. It is the existing `runtime_brokers.id` (a UUID column). It is never derived from settings, hostname or name.
-- **Runtime target ID**: an independent random UUID, also minted locally at first boot. It is opaque and carries no meaning. It is unique per instance; one target ID never belongs to two Runtime Broker IDs.
-- Both are persisted in the **instance identity file** before any registration attempt:
-  - path: `<GetGlobalDir()>/runtime-brokers/<key>/identity.json` (normally `~/.scion/runtime-brokers/<key>/identity.json`);
-  - directory 0700, file 0600, written atomically (temp file + rename + fsync).
-  - Instance-scoped Hub credentials (P1.2) go in the same directory, `<...>/runtime-brokers/<key>/hub-credentials/<hub>.json`, in the existing `brokercredentials` format. P1.1 only reserves the path.
+- **Runtime Broker ID**: a UUID minted locally at first boot. It is the existing `runtime_brokers.id`. It is never derived from settings, hostname or name.
+- **Runtime target ID**: an independent random UUID, also minted at first boot. It is opaque and unique per instance; a target ID never belongs to two Runtime Broker IDs (enforced by a unique index, section 8).
+- **Identity file:** `<GetGlobalDir()>/runtime-brokers/<key>/identity.json`, normally `~/.scion/runtime-brokers/<key>/identity.json`.
+  - Directory mode 0700, file mode 0600.
+  - Written before any registration attempt.
+- Instance-scoped Hub credentials (P1.2) go in `<...>/runtime-brokers/<key>/hub-credentials/<hub>.json`, using the `brokercredentials` format. P1.1 reserves the path only.
 
 ```json
 {
@@ -107,273 +152,451 @@ Relation to ptone/scion#3180: that PR adds `shared_dir_storage_backends` under `
 }
 ```
 
-- Code location: a new package `pkg/brokeridentity`. It owns load/create/verify and has no runtime or Hub dependency. Docker daemon probing stays in the P1.2 caller, which passes the observed scope in.
-- Immutable once written: `instanceKey`, `runtimeBrokerId`, `runtimeTarget.id`, `runtimeTarget.type` and the identity part of `executionScope` (section 5). No code path rewrites them. The file has no mutable fields in P1. `display_name` and `name` stay in settings.
+### Package and creation protocol
 
-**Missing or broken identity state is explicit:**
+The code lives in a new package, `pkg/brokeridentity`, with no runtime or Hub dependency. The caller probes the Docker scope (P1.2) and passes it in.
+
+`LoadOrCreate(dir, key, targetType, observedScope, legacyBrokerIDs)`:
+1. `mkdir -p` the directory (0700), then take an exclusive `flock` on `<dir>/.lock` for the whole operation.
+2. If `identity.json` exists, load and verify it (table below).
+3. Otherwise, decide whether this is first boot. **It is first boot only if the directory holds nothing except `.lock` and leftover temp files matching `.identity.json.tmp-*`**, which are removed. Any other entry means "other state exists".
+4. On first boot:
+   - mint both IDs;
+   - write to a temp file and fsync it;
+   - **`os.Link` it to `identity.json`**, which fails if the target exists, so a file is never replaced;
+   - remove the temp file, fsync the directory, then re-read `identity.json` and return what is on disk.
+   - If the link fails with EEXIST (a racer outside the lock, e.g. a different filesystem lock domain), load the winner's file instead.
+
+`legacyBrokerIDs` holds every legacy identity source the caller can see:
+- `server.broker.broker_id`
+- legacy `hub.brokerId`
+- `GlobalConfig.RuntimeBroker.BrokerID`
+- the `brokerId` in `broker-credentials.json` and in each `hub-credentials/*.json`
+
+If the identity's `runtimeBrokerId` equals any of them, that is an error (`ErrIdentityCollidesWithLegacy`).
+
+These fields never change once written: `instanceKey`, `runtimeBrokerId`, `runtimeTarget.id`, `runtimeTarget.type`, and the identity part of `executionScope` (section 5). The file has no mutable fields in P1.
 
 | Local state | Result |
 |---|---|
-| `runtime-brokers/<key>/` does not exist | first boot: mint both IDs, record the observed scope, write the file |
-| directory exists, `identity.json` missing (e.g. credentials or state left behind) | error `ErrIdentityMissing`: identity state for instance "k" is missing but other state exists; restore the file or remove the directory to register a new Runtime Broker. Never re-minted |
-| file unreadable, invalid JSON, unknown `schemaVersion`, any required field empty | error `ErrIdentityCorrupt`. Never re-minted |
-| `instanceKey` in the file differs from the directory key | error `ErrIdentityKeyMismatch` |
-| recorded type differs from the configured `runtime_target.type` | error `ErrRuntimeTargetTypeChanged`: a different target needs a different instance key |
+| Directory missing, or holding only `.lock`/temp files | First boot: mint, record the observed scope, write |
+| `identity.json` missing and any other entry present | `ErrIdentityMissing`: "identity state for instance \"k\" is missing but other state exists; restore it or remove the directory to register a new Runtime Broker". Never re-minted |
+| Unreadable file, invalid JSON, unknown `schemaVersion`, or empty required field | `ErrIdentityCorrupt`. Never re-minted |
+| `instanceKey` differs from the directory key | `ErrIdentityKeyMismatch` |
+| Recorded type differs from the configured `runtime_target.type` | `ErrRuntimeTargetTypeChanged` |
+| `runtimeBrokerId` equals a legacy ID | `ErrIdentityCollidesWithLegacy` |
 
-Removing the whole directory is the operator's explicit request for a new identity. The result is a new Runtime Broker ID. It never takes over the old registration or its agents. If the `name` is unchanged, the Hub refuses the registration (section 6), so the mistake is visible rather than silent.
+Removing the whole directory is the operator's explicit request for a new identity. It produces a new Runtime Broker ID and never takes over the old registration or its agents. If `name` is unchanged, the Hub refuses the new registration (section 6).
 
 ## 5. Target identity per runtime
 
-Target identity is the runtime target ID (section 4) **bound to a normalized execution-scope record**. Names, display names, kubeconfig context aliases, file paths and credentials are never identity.
+Target identity is the runtime target ID **bound to a normalized execution-scope record**. Names, display names, context aliases, file paths and credentials are never identity.
 
-**Docker (implemented in P1):**
-- Scope record `{ "type": "docker", "docker": { "daemonId": <docker info .ID>, "endpoint": <normalized endpoint> } }`.
-- `endpoint` is the effective daemon address (`DOCKER_HOST`, else the default local socket), normalized: scheme lower-cased, `unix://` paths cleaned, `tcp://host:port` with an explicit port.
-- **Identity fields:** `daemonId` when non-empty; otherwise `endpoint`.
-- At every start (P1.2), the instance probes the daemon and calls `brokeridentity.VerifyScope(recorded, observed)`:
-  - same identity → proceed; an endpoint-only change with the same daemon ID is accepted and logged;
-  - a different daemon ID (another node or a reinstalled daemon) → error `ErrExecutionScopeChanged`, naming both values. The instance does not start and does not register. Existing placement is never re-pointed. The recourse is to restore the original daemon or configure a new instance key.
-- Docker has no credentials to rotate. Socket permission changes do not affect identity.
+### Docker (P1)
 
-**Kubernetes (defined, not implemented):**
-- Scope record `{ "type": "kubernetes", "kubernetes": { "clusterUid": <metadata.uid of the kube-system namespace>, "namespace": <resolved namespace>, "apiServer": <normalized server URL, informational> } }`.
-- **Identity fields:** `clusterUid` + `namespace`.
-- The context name, kubeconfig path, user/auth entries and tokens are excluded, so credential rotation or renaming a context alias keeps the target. Pointing the alias at another cluster changes `clusterUid` and is refused like a Docker daemon change.
+- The probe goes through **the same CLI and command the `DockerRuntime` uses** (`DockerRuntime.Command`, normally `docker`). That way the active `docker context` / `DOCKER_CONTEXT` / `DOCKER_HOST` is honoured exactly as the runtime honours it.
+  - `daemonId` = `<cmd> info --format '{{.ID}}'`
+  - `endpoint` = `<cmd> context inspect --format '{{.Endpoints.docker.Host}}'`, normalized: lower-case scheme, cleaned `unix://` path, explicit port for `tcp://`. It is informational.
+  - The runtime's `Host` setting is not used, because nothing in `DockerRuntime` reads it.
+- **Identity field: `daemonId`.** An empty or failed `daemonId` probe is an explicit error (`ErrExecutionScopeUnidentified`) at first boot and at every start. The endpoint is never used as identity, because endpoints are aliases.
+- `brokeridentity.VerifyScope(recorded, observed)` runs at every start (P1.2):
+  - same `daemonId`: proceed; an endpoint change is accepted and logged;
+  - different `daemonId` (another node or a reinstalled daemon): `ErrExecutionScopeChanged`, naming both values. The instance neither starts nor registers, and existing placement is not re-pointed.
+- Docker has no credentials to rotate.
+
+### Kubernetes (defined, not implemented)
+
+- Record: `{ "type": "kubernetes", "kubernetes": { "clusterUid": <kube-system namespace metadata.uid>, "namespace": <resolved namespace>, "apiServer": <normalized URL, informational> } }`.
+- **Identity fields: `clusterUid` + `namespace`.**
+- Context name, kubeconfig path, user/auth entries and tokens are excluded. Rotating credentials or renaming a context keeps the target. Pointing the alias at another cluster or namespace is refused like a daemon change.
 - An `apiServer` change with the same `clusterUid` is accepted and logged.
-- Implementing this belongs to a later phase. P1.1 only freezes the record shape and ships a normalization/compare unit test.
+- P1.1 freezes the record shape and ships a normalization/compare unit test only.
 
-In every case a scope change is a new target, which needs a new instance key and therefore a new Runtime Broker ID. Nothing retargets an existing Runtime Broker ID or an agent pinned to it.
+A scope change always means a new target, which needs a new instance key and therefore a new Runtime Broker ID.
 
-## 6. Registration descriptor
+## 6. Registration descriptor and every Runtime Broker row writer
 
-Wire shape (JSON):
+### Wire shape
 
 ```json
 "runtimeTarget": { "id": "0b9e…", "type": "docker", "displayName": "Local Docker" }
 ```
 
-- Go type: `store.RuntimeTargetDescriptor { ID string "id"; Type string "type"; DisplayName string "displayName,omitempty" }`.
-- It is sent on the remote registration requests (`CreateBrokerRegistrationRequest` and `BrokerJoinRequest`, plus the matching `hubclient` types). The embedded path writes the same descriptor through the same store setter.
-- It is returned on the Runtime Broker API object as `runtimeTarget`.
-- No scope record, endpoint, kubeconfig path or credential is ever sent to the Hub.
+- Go type: **`api.RuntimeTargetDescriptor { ID string "id"; Type string "type"; DisplayName string "displayName,omitempty" }`** in `pkg/api/runtime_target.go`. It is shared by store, Hub, hubclient and Runtime Broker.
+- It is carried on:
+  - Hub `CreateBrokerRegistrationRequest` and `BrokerJoinRequest` (`pkg/hub/brokerauth.go`);
+  - hubclient `CreateBrokerRequest` and `JoinBrokerRequest` (`pkg/hubclient/runtime_brokers.go`);
+  - the Runtime Broker API object as `runtimeTarget`.
+- The scope record, endpoint, kubeconfig path and credentials are never sent.
 - A flat registration sends no `profiles` and no `defaultProfile`.
 
-Hub rules (P1.2 implements, using the P1.1 store setter):
-1. `runtimeTarget` present while `hub.flat_runtime_brokers` is off:
-   - for a Runtime Broker ID with **no** stored target: 412 `experiment_disabled`, details `{experiment: "hub.flat_runtime_brokers"}`;
-   - for an **already-flat** Runtime Broker ID with the same target: accepted, so turning the experiment off never strands existing agents.
-2. A flat registration is matched **by Runtime Broker ID only**, never by name. If its `name` equals the name of another existing Runtime Broker → 409 `runtime_broker_name_conflict`, details `{name, existingRuntimeBrokerId}`.
-3. Stored target empty → set it. Same ID → no-op (the display name may update). Different ID or type → 409 `runtime_target_changed`, details `{runtimeBrokerId, storedRuntimeTargetId, reportedRuntimeTargetId}`. The stored value is not modified.
-4. A legacy registration (no `runtimeTarget`) against an ID that already has a stored target → 409 `runtime_target_changed` (a rolled-back binary cannot silently turn a flat identity back into a profile-resolving one).
+### Shared rules
 
-The registration and control channel are not Conduit-fenced. Section 12 puts no constraint on this descriptor.
+All writers apply these through **one Hub implementation**, `(*hub.Server).registerFlatRuntimeBroker` (P1.2). The embedded path calls it through an exported wrapper `(*hub.Server).RegisterEmbeddedFlatRuntimeBroker`, so the experiment snapshot is the Hub's own `experimentEnabled`.
 
-## 7. Pinned agent placement and persistence
+- **R1 Experiment.**
+  - With `hub.flat_runtime_brokers` off, a new flat registration (no row with this ID) gets 412 `experiment_disabled`.
+  - Re-registration of an **existing flat** row with the same target is accepted, so its agents are not stranded.
+  - A malformed experiment snapshot fails closed, which means off.
+- **R2 Identity match.** A flat registration is matched **by Runtime Broker ID only**. If its `name` or `slug` equals that of any other Runtime Broker row, it gets 409 `runtime_broker_name_conflict`.
+  - The check is check-then-act with no unique constraint. Existing rows may already share names or slugs, so a unique index is out of scope. The race is accepted explicitly: two concurrent first registrations with the same name are an operator error that only the first-boot window can hit, and the identity file lock (section 4) serializes a single host.
+- **R3 Target set only on creation.** The target columns are written only when this flat registration **creates** the row (`CreateRuntimeBroker` with `RuntimeTarget`).
+  - Existing row with the same target ID and type: accepted; the display name may update.
+  - Existing row with a different target: 409 `runtime_target_changed`.
+  - Existing **legacy** row (no stored target) with this ID: 409 `runtime_broker_not_flat`. Converting a legacy row is P5 work and is never done implicitly.
+- **R4 Legacy writes to flat rows.** A legacy registration (no `runtimeTarget`) against a flat row gets 409 `runtime_target_changed`. No writer stores `profiles` or `defaultProfile` on a flat row: the store rejects it (section 8) and Hub handlers drop them before writing.
+- **R5 No orphan adoption.** A flat registration never runs, and is never the target of, orphan reassignment (B1 guards, section 8).
+
+### Every writer
+
+| Writer | Code (28eb4f0) | Flat rule | Phase |
+|---|---|---|---|
+| brokerauth create | `createBrokerRegistration`, `FindExistingBroker` (name first) | With `runtimeTarget`: R1–R3, ID-only match, no name adoption. Without: legacy behaviour, except that `FindExistingBroker` **skips flat rows** for name matching and an ID match on a flat row gets R4 | P1.2 |
+| brokerauth join | `CompleteBrokerJoin` | Descriptor must equal the stored target (else 409 `runtime_target_changed`). `profiles`/`defaultProfile` are rejected for flat rows | P1.2 |
+| Embedded legacy registration | `cmd/server_broker.go registerGlobalProjectAndBroker` | Not run when `instances` is non-empty. When it does run (legacy process), its name lookup **skips flat rows**. An ID match on a flat row is a startup error naming R4, and profiles are never written onto it | P1.2 |
+| Embedded flat registration | new, through `RegisterEmbeddedFlatRuntimeBroker` | R1–R5. No orphan reassignment, no profile write | P1.2 |
+| Deprecated `RegisterProject` with `broker` | `pkg/hub/handlers_projects_core.go` (ID then name lookup, name/slug/profile overwrite) | A flat row found by ID gets 409 `runtime_target_changed`. A flat row found only by name is skipped (no adoption): the request then fails with 409 `runtime_broker_name_conflict` instead of creating a duplicate name. Never writes profiles to a flat row | P1.2 |
+| Heartbeat refresh | `pkg/hub/handlers_runtime_brokers.go` (capabilities, workspace storage, default profile, profile attach) | For a flat row, `DefaultProfile`/`ProfileAttach` from a heartbeat are dropped with a warning log. Capabilities and workspace storage refresh as today | P1.2/P1.3 |
+| Any `UpdateRuntimeBroker` caller | `pkg/store/entadapter/project_store.go` | The store guard rejects non-empty `Profiles`/`DefaultProfile` on a flat row (`store.ErrFlatRuntimeBrokerProfiles`). It never writes target columns | **P1.1** |
+
+The registration and control channel are not Conduit-fenced. Section 13 puts no constraint on this descriptor.
+
+## 7. Agent movers and existing-agent paths
+
+| Writer | Code (28eb4f0) | Flat rule | Phase |
+|---|---|---|---|
+| Orphan discovery | `AgentStore.FindOrphanedAgents` | Excludes agents with non-NULL `pinned_runtime_broker_id` and agents whose current Runtime Broker row has a stored target. Returns nothing when `currentBrokerID` is a flat row | **P1.1** |
+| Orphan reassignment | `AgentStore.ReassignAgentsToBroker` | Refuses a destination row with a stored target (`store.ErrFlatRuntimeBrokerReassign`). Its update also filters out pinned agents (`pinned_runtime_broker_id IS NULL`) | **P1.1** |
+| Project default repoint | `AgentStore.ReassignProjectBroker` | No-op (0, nil) when either the old or the new row is flat | **P1.1** |
+| Mark old Runtime Broker offline | `MarkBrokerOffline` from the orphan path | Not reached for flat rows, because their agents are never in the orphan set | — |
+| Reincarnate move | `handlers_agent_reincarnate.go`, `reincarnate_move.go` | Moving a pinned agent, or moving any agent onto a flat Runtime Broker, gets 409 `runtime_target_move_unsupported` in P1. A future explicit move re-pins in the same write as the `runtime_broker_id` change | P1.2 |
+| Create-on-existing | `handleExistingAgent` (resumes/starts on `existingAgent.RuntimeBrokerID`) | A lifecycle operation: flat checks apply to the Runtime Broker actually dispatched to, compared with the agent's pin. Not refused when the experiment is off | P1.2 |
+
+**Stale pin.** A pin is valid only while `pinned_runtime_broker_id == runtime_broker_id`. With the guards above, no current-binary automatic writer can create a stale pin. Only an older binary can (for example an older Hub's move or orphan reassignment).
+- On a stale pin, the Hub **refuses** start/restart/create-on-existing dispatch with 409 `runtime_target_pin_stale`, details `{agentId, pinnedRuntimeBrokerId, runtimeBrokerId}`.
+- Stop and delete still go to the current `runtime_broker_id`, so the agent can be cleaned up.
+- There is no automatic re-pin. Repair is an explicit operator action (P5 tooling, or delete and recreate).
+- `SetAgentPinnedRuntimeTarget` exists for that explicit move. No start path calls it.
+
+## 8. Persistence: columns, writers and old-writer safety
 
 New nullable columns. No existing column changes meaning.
 
 **`runtime_brokers`** (`pkg/ent/schema/runtimebroker.go`):
-- `runtime_target_id`: string, Optional, Nillable, indexed. NULL means legacy Runtime Broker.
+- `runtime_target_id`: string, Optional, Nillable, **unique index**. Multiple NULLs are allowed on SQLite and Postgres. NULL means legacy.
 - `runtime_target_type`: string, Optional, Default "".
 - `runtime_target_display_name`: string, Optional, Default "".
 
-Store model: `RuntimeBroker.RuntimeTarget *RuntimeTargetDescriptor` with JSON `runtimeTarget,omitempty`.
+Store model: `RuntimeBroker.RuntimeTarget *api.RuntimeTargetDescriptor`, JSON `runtimeTarget,omitempty`.
 
 **`agents`** (`pkg/ent/schema/agent.go`):
 - `pinned_runtime_broker_id`: string, Optional, Nillable.
 - `pinned_runtime_target_id`: string, Optional, Nillable.
 - `pinned_runtime_target_type`: string, Optional, Default "".
 
-Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID`, `PinnedRuntimeTargetType`, all tagged `json:"-"` like the run/launch columns, so an API PATCH can't write them. P1.3 exposes them read-only on agent responses as:
+Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedRuntimeTargetType`, all `json:"-"` like the run/launch columns, so they can't be patched through the API. P1.3 exposes them read-only as `"pinnedRuntimeTarget": {"id","type","runtimeBrokerId"}`. That name avoids `appliedConfig.runtimeTarget`, the observed heartbeat key.
 
-```json
-"pinnedRuntimeTarget": { "id": "…", "type": "docker", "runtimeBrokerId": "…" }
-```
-
-This deliberately avoids `appliedConfig.runtimeTarget`, which is the observed heartbeat key.
-
-**Writers:**
-- `CreateAgent` sets the pinned columns when the model carries them (the Hub create path, P1.2).
-- `SetAgentPinnedRuntimeTarget(ctx, agentID, expected, next)` is a compare-and-set on the current values. It is used only for the stale-pin re-pin described below, and does not bump `state_version`.
-- `SetRuntimeBrokerTarget(ctx, brokerID, desc)` sets the target when it is NULL, is a no-op when the ID matches, and returns `store.ErrRuntimeTargetChanged` otherwise.
-- `buildAgentUpdate` (`UpdateAgent`) and `UpdateRuntimeBroker` **do not** write these columns, and nothing clears them. Deleting the row is the only removal.
+**Writers (P1.1 store surface):**
+- `CreateAgent` sets the pinned columns when the model carries them.
+- `SetAgentPinnedRuntimeTarget(ctx, agentID, expected, next PinnedPlacement)` compare-and-sets all three columns plus `runtime_broker_id` together. It is used only by a future explicit move and does not bump `state_version`.
+- `CreateRuntimeBroker` writes the target columns from `RuntimeTarget`.
+- `SetRuntimeBrokerTarget(ctx, brokerID, desc)`:
+  - stored NULL: `store.ErrRuntimeBrokerNotFlat`;
+  - same ID and type: updates the display name only;
+  - otherwise: `store.ErrRuntimeTargetChanged`.
+- Guard in `UpdateRuntimeBroker`: inside its existing CAS loop, a row with a stored target rejects non-empty `Profiles`/`DefaultProfile` with `store.ErrFlatRuntimeBrokerProfiles`.
+- Orphan guards as in section 7.
+- `buildAgentUpdate` (`UpdateAgent`) and `UpdateRuntimeBroker` **never write** the new columns, and nothing clears them. Only row deletion removes them.
 
 **Old and legacy writers:**
-- An older binary does not know the columns, so its `UpdateAgent`/`UpdateRuntimeBroker`/heartbeat write-backs leave them intact.
-- A current binary's full-row updates also omit them. A pin can't be erased by a stale in-memory model.
-- Tests prove this for both `UpdateAgent` and `UpdateRuntimeBroker`, including an update that rewrites `applied_config` and `runtimes`.
+- An older binary doesn't know the new columns, so its full-row updates leave them intact.
+- Current-binary full-row updates also omit them, so a stale in-memory model can't erase a pin or a target.
+- Tests cover `UpdateAgent` and `UpdateRuntimeBroker`, including rewrites of `applied_config` and `runtimes`.
+- Remaining risk, accepted and documented: the store guards and orphan exclusions don't exist in **older** binaries. An older Hub's orphan reassignment can move pinned agents, which makes their pin stale and refused (section 7) rather than retargeted. It can also rewrite profiles onto a flat row; the current Hub drops them on the next flat re-registration via R4 and the heartbeat rule. This matters only during a mixed-version window. P5 owns that window.
+- Reincarnation snapshots and `applied_config.profile`/`createInputs.profile` stay readable and unchanged. A flat create leaves both empty.
 
-**Stale pin:** a pin is valid only while `pinned_runtime_broker_id == runtime_broker_id`. A legacy writer that moves an agent (for example an older Hub's reincarnation to another Runtime Broker) changes `runtime_broker_id` without touching the pin, and the pin then reads as stale. The Hub treats the agent as unpinned. If its current Runtime Broker is flat, it re-pins on the next start through `SetAgentPinnedRuntimeTarget` (P1.3 consumer). A stale pin never redirects a dispatch back to the old Runtime Broker.
+## 9. Expected-target request field and the error codes
 
-Reincarnation snapshots and `applied_config.profile` / `createInputs.profile` stay readable and unchanged. A flat create leaves `profile` empty.
+### `expectedRuntimeTargetId` (string, optional on the wire)
 
-## 8. Expected-target request field and the mismatch error
+- **Hub public create API** (`POST /api/v1/projects/{id}/agents` and the hubclient create request): optional. Clients normally send only `runtimeBrokerId`. A client that showed a specific target sends it as a staleness guard.
+  - Field present and resolved Runtime Broker legacy: 409 `runtime_target_mismatch` with an empty `actualRuntimeTargetId`.
+  - Field present and experiment off: 412 `experiment_disabled`.
+- **Hub → Runtime Broker create** (`RemoteCreateAgentRequest` and Runtime Broker `CreateAgentRequest`): a top-level key, not inside `config`. The Hub always sets it to the pinned target ID when dispatching to a flat Runtime Broker, and never sets it toward a legacy one.
+  - A current-binary **legacy** Runtime Broker that receives a non-empty value rejects it with 409 `runtime_target_mismatch` (empty actual); it never ignores it. Older binaries ignore unknown keys, but a current Hub never sends the key to a legacy row.
+- **Hub → Runtime Broker start/restart:** `StartExtras.ExpectedRuntimeTargetID`, written by `applyStartExtras` as the top-level key `expectedRuntimeTargetId`, so both transports stay in parity. It is set from the agent's valid pin (P1.3).
 
-**Field `expectedRuntimeTargetId`** (string, optional on the wire):
-- **Hub public create API** (`POST /api/v1/projects/{id}/agents` request and the `hubclient` create request): optional. Clients normally send only `runtimeBrokerId`. A client that showed the user a specific target (UI, P4) sends it to guard against a stale view.
-- **Hub → Runtime Broker create** (`RemoteCreateAgentRequest` and Runtime Broker `CreateAgentRequest`): a top-level key, *not* inside `config`. The Hub always sets it to the pinned target ID when dispatching to a flat Runtime Broker.
-- **Hub → Runtime Broker start/restart**: `StartExtras.ExpectedRuntimeTargetID`, written by `applyStartExtras` as the top-level key `expectedRuntimeTargetId`, so the HTTP and control-channel transports stay in parity. It is set from the agent's valid pin (P1.3).
+### Pure check helper (P1.1)
 
-**Mismatch error.** The Hub and the Runtime Broker use the same envelope:
+`api.CheckExpectedRuntimeTarget(runtimeBrokerID, actual, expected string) *api.RuntimeTargetMismatch` lives in `pkg/api/runtime_target.go`.
+- It returns nil when `expected == ""` or `expected == actual`.
+- Otherwise it returns the details for the envelope.
+- `api.RuntimeTargetMismatch.Message()` produces the frozen message: "Runtime Broker <runtimeBrokerId> serves runtime target <actual>, but the request expected <expected>". When `actual` is empty, the target text reads "no runtime target".
+- The Hub and the Runtime Broker both build their envelopes from it.
 
-```json
-HTTP 409 Conflict
-{"error":{"code":"runtime_target_mismatch",
-  "message":"Runtime Broker <runtimeBrokerId> serves runtime target <actual>, but the request expected <expected>",
-  "details":{"runtimeBrokerId":"…","expectedRuntimeTargetId":"…","actualRuntimeTargetId":"…","startAttempted":false}}}
-```
+### Error codes (all new; constants added by P1.2 in the packages listed)
 
-- Constants: `ErrCodeRuntimeTargetMismatch = "runtime_target_mismatch"` in both `pkg/hub/errors.go` and `pkg/runtimebroker/errors.go` (P1.2).
-- The Hub relays a Runtime Broker 409 through `dispatchCreateErrorResponse` unchanged.
-- `startAttempted:false` (an existing details key) tells start-claim settlement that the start definitely did not happen.
+| Code | HTTP | Constant | Package(s) | Details keys | When |
+|---|---|---|---|---|---|
+| `runtime_target_mismatch` | 409 | `ErrCodeRuntimeTargetMismatch` | hub, runtimebroker | `runtimeBrokerId`, `expectedRuntimeTargetId`, `actualRuntimeTargetId` | Expected target differs (sections 9, 10) |
+| `runtime_profile_unsupported` | 422 | `ErrCodeRuntimeProfileUnsupported` | hub, runtimebroker | `runtimeBrokerId`, `profile` | Explicit profile toward a flat target |
+| `runtime_target_required` | 412 | `ErrCodeRuntimeTargetRequired` | runtimebroker | `runtimeBrokerId` | Flat instance create without the field |
+| `runtime_target_changed` | 409 | `ErrCodeRuntimeTargetChanged` | hub | `runtimeBrokerId`, `storedRuntimeTargetId`, `reportedRuntimeTargetId` | Registration R3/R4 |
+| `runtime_broker_not_flat` | 409 | `ErrCodeRuntimeBrokerNotFlat` | hub | `runtimeBrokerId` | Flat registration against a legacy row (R3) |
+| `runtime_broker_name_conflict` | 409 | `ErrCodeRuntimeBrokerNameConflict` | hub | `name`, `slug`, `existingRuntimeBrokerId` | R2 |
+| `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | `agentId`, `runtimeBrokerId` | Move of a pinned agent or onto a flat row |
+| `runtime_target_pin_stale` | 409 | `ErrCodeRuntimeTargetPinStale` | hub | `agentId`, `pinnedRuntimeBrokerId`, `runtimeBrokerId` | Stale pin (section 7) |
+| `experiment_disabled` | 412 | `ErrCodeExperimentDisabled` | hub | `experiment` | Flat registration/create with `hub.flat_runtime_brokers` off |
 
-**Before any side effects:**
-- **Hub create:** the checks run after the Runtime Broker is resolved and *before* any write.
-  - Writes include the provider auto-link inside `resolveRuntimeBroker`, `handleExistingAgent`, quota reservation, `commitAgentCreate`, the run intent, the start claim, `beginRun`/`SetAgentRunID`, the agent token and dispatch.
-  - P1.2 must therefore resolve the Runtime Broker without linking, run the flat checks, and only then link.
-- **Runtime Broker create:** after decoding and validation, before `beginCreateAttempt` (no dispatch-attempt record, no launch registry entry, no NFS mount, no project markers or dirs, no auxiliary-manager cache entry).
-  - The check is pure and deterministic, so a `requestId` replay gets the same answer.
-- **Runtime Broker start/restart:** before `beginSyncStart` / `startsInFlight` / any runtime call.
+Notes on the codes:
+- `experiment_disabled` is deliberately 412 with a code, not `requireExperiment`'s 404 `route`. These are existing endpoints, and the caller has to learn why a flat request was refused.
+- **Start markers:** on the Runtime Broker → Hub hop, a rejection envelope *without* `startAttempted:true` already means "did not act" (`brokerStartAttempted` only treats `true` as meaningful). Flat rejections therefore never set the marker. The run ID is still echoed where today's start-failure responses echo it. The **Hub public** envelopes never contain start markers, following the existing practice of not exposing them to clients.
+- **Relay:** today `dispatchCreateErrorResponse` maps an unclassified Runtime Broker 409 to 502 `runtime_error`. P1.2 adds an explicit relay case modelled on `relaySkillResolutionError`. It passes through status, code, message and the frozen details keys for `runtime_target_mismatch`, `runtime_profile_unsupported` and `runtime_target_required`, with start markers stripped.
 
-## 9. Legacy negotiation
+### Before any side effects
+
+- **Hub create:** the checks run after the Runtime Broker is resolved and before any write. Writes include:
+  - the provider auto-link (`AddProjectProvider`) and the project default-broker `UpdateProject` inside `resolveRuntimeBroker`;
+  - `handleExistingAgent`;
+  - quota reservation;
+  - `commitAgentCreate`;
+  - run intent and start claim;
+  - `beginRun`/`SetAgentRunID`;
+  - agent token and dispatch.
+
+  P1.2 splits resolution from linking. The order is: resolve (pure), then `checkBrokerDispatchAccess` (unchanged, still before any link), then the flat checks, then link.
+- **Runtime Broker create:** after decode and validation, before `beginCreateAttempt` (no attempt record, launch registry entry, NFS mount, project markers/dirs or auxiliary-manager cache). The check is deterministic, so a `requestId` replay gets the same answer.
+- **Runtime Broker start/restart:** before `beginSyncStart`, `startsInFlight` or any runtime call.
+
+## 10. Legacy negotiation and profile handling
+
+**Hub-side default-profile application points.** Each one is skipped for a flat target, and the agent keeps `AppliedConfig.Profile` and `CreateInputs.Profile` empty:
+
+| Point | Code (28eb4f0) | Flat behaviour |
+|---|---|---|
+| Project defaults | `project_settings_handlers.go applyProjectDefaults` (`scion.io/active-profile`) | Not applied |
+| Hub-default passthrough pin | `handlers_agents_core.go` (writes `AppliedConfig.Profile` and `CreateInputs.Profile`) | Not applied. The gate `hubDefaultPassthroughAllowed` evaluates the runtime type from `RuntimeTarget.Type` instead of broker profiles or `DefaultProfile` |
+| Reincarnation re-derivation | `handlers_agent_reincarnate.go` and `default_gcp_identity.go` (re-derive the project active profile) | Not applied for a pinned agent. The GCP-identity gate uses the target type |
+| Dispatcher write-back of a reported profile | `httpdispatcher.go` (writes a Runtime Broker-reported profile onto the agent) | Not written for a pinned agent. A flat instance reports none anyway |
+
+When a project or Hub default profile is dropped because the target is flat, the Hub adds a dispatch warning through the existing `addDispatchWarnings` mechanism: "default Runtime Broker Profile \"<p>\" was not applied: Runtime Broker <id> serves a single runtime target". Placement can also be selected implicitly (project default Runtime Broker, single provider), so dropping the default silently would hide a change.
 
 | Situation | Behaviour |
 |---|---|
 | Experiment off, legacy Runtime Brokers | Unchanged: current schema, profiles, fallbacks and APIs. New columns stay NULL |
-| Experiment off, create targeting a Runtime Broker with a stored target | 412 `experiment_disabled` before side effects. Lifecycle operations on agents already pinned to it (stop, start, delete, logs, attach) keep working |
-| Experiment on, create on a legacy Runtime Broker | Unchanged legacy path. No pin, no `expectedRuntimeTargetId` sent |
-| Experiment on, create on a flat Runtime Broker with an **explicit** non-empty `profile` | Hub: 422 `runtime_profile_unsupported`, message "Runtime Broker <id> serves one runtime target and does not accept a Runtime Broker Profile (got \"<profile>\")", before side effects |
-| Experiment on, flat target, profile only from defaults (project `scion.io/active-profile` annotation, user default, Hub passthrough pin) | Defaults are not applied. The applied config keeps `profile` empty and the request is sent without one. This is not an error: the user selected the Runtime Broker, and the default was never their placement choice |
-| A flat instance receives a create/start/restart with non-empty `config.profile` (e.g. an older Hub) | Runtime Broker: 422 `runtime_profile_unsupported` before side effects. Never ignored or silently resolved |
-| A flat instance receives a create without `expectedRuntimeTargetId` (an older Hub, or experiment off upstream) | Runtime Broker: 412 `runtime_target_required`, message "this Runtime Broker serves a single runtime target and requires expectedRuntimeTargetId; upgrade the Hub or enable hub.flat_runtime_brokers". A start/restart without it is accepted (it can only use the one target) |
-| Rolled-back legacy binary re-registers a flat identity without a descriptor | 409 `runtime_target_changed` (section 6) |
+| Experiment off, new create targeting a flat row | 412 `experiment_disabled` before side effects |
+| Experiment off, lifecycle on agents already pinned to a flat row (start, stop, restart, delete, logs, attach, create-on-existing resume) | Works |
+| Experiment on, create on a legacy Runtime Broker | Unchanged legacy path. No pin, and no `expectedRuntimeTargetId` sent |
+| Experiment on, flat target, **explicit** non-empty `profile` in the request | Hub: 422 `runtime_profile_unsupported`, before side effects |
+| Experiment on, flat target, profile only from defaults | Not applied. Dispatch warning (above) |
+| Flat instance receives create with non-empty `config.profile` (e.g. an older Hub) | 422 `runtime_profile_unsupported`, before side effects |
+| Flat instance receives create without `expectedRuntimeTargetId` | 412 `runtime_target_required`: "this Runtime Broker serves a single runtime target and requires expectedRuntimeTargetId; upgrade the Hub or enable hub.flat_runtime_brokers" |
+| Flat instance create, start or restart with an **empty** profile | The flat instance **bypasses `resolveManagerForOpts`/`ResolveRuntime` entirely**. It never consults the saved agent profile or the settings `active_profile`, and always uses its single manager |
+| Flat instance start/restart | The start wire has no profile field. The profile today comes from the saved agent profile or settings, and the flat instance ignores both (row above). A body that fails to decode is rejected with 400 `invalid_request`, not treated as "no `expectedRuntimeTargetId`". A start without the field is accepted, since it can only use the one target |
+| Rolled-back legacy binary re-registers a flat identity without a descriptor | 409 `runtime_target_changed` (R4) |
 
-Managed agents (`ManagedAgentsProfile`) don't go through a Runtime Broker and are unaffected.
+Managed agents (`ManagedAgentsProfile`) don't use a Runtime Broker and are unaffected.
 
-## 10. Interaction with run ID, start claims, run intent and recovery
+## 11. Interaction with run ID, start claims, run intent and recovery
 
 | New element | Interaction |
 |---|---|
-| Pinned placement columns | Set in the same `CreateAgent` transaction as the row. Written before the run intent, start claim, `beginRun` and launch. Never cleared by `forgetRuntimeTarget`, run-ID writes, launch end, start-claim settlement or reaper actions. Not used as a start-claim target |
-| `runtime_brokers.runtime_target_*` | Written only by `SetRuntimeBrokerTarget`. Heartbeat write-backs (`UpdateRuntimeBroker`) can't roll it back. Independent of `BrokerTargetInventory` |
-| `expectedRuntimeTargetId` | Checked before claim/intent/run-ID writes on the Hub and before any launch bookkeeping on the Runtime Broker. A rejection carries `startAttempted:false`, so a claimed start (once ptone/scion#3081 wires claims) settles as "definitely did not happen", and a create rolls back with nothing to compensate |
-| Runtime target ID vs inventory target key | Distinct. `start_claim_target`, `InventoryTarget.id`, `BrokerTargetInventory` and `applied_config.runtimeTarget`/`runtimeTargetCandidate` keep using the inventory key (`auxiliaryRuntimeIdentity`). P1 introduces no mapping. If a later phase wants one, it is added alongside, never by overloading these |
-| Run ID | Unchanged: minted by the Hub per create/start/restart, sent as `runId`, labelled `scion.run_id`. Flat instances follow the same path |
-| Queued stops / recovery (ptone/scion#3091) | Unchanged. A flat Runtime Broker has one inventory target, so "fresh complete inventory of its target" means that instance's inventory |
+| Pinned placement columns | Set in the same `CreateAgent` transaction as the row, before run intent, start claim, `beginRun` and launch. Never cleared by `forgetRuntimeTarget`, run-ID writes, launch end, start-claim settlement or reaper actions. Never used as a start-claim target |
+| `runtime_brokers.runtime_target_*` | Written only by `CreateRuntimeBroker` and `SetRuntimeBrokerTarget`. Heartbeat write-backs can't roll it back. Independent of `BrokerTargetInventory` |
+| `expectedRuntimeTargetId` and the flat refusals | Checked before claim/intent/run-ID writes on the Hub and before any launch bookkeeping on the Runtime Broker. No start marker is set, so a claimed start (once ptone/scion#3081 wires claims) settles as "did not act" through `isConfirmedStartNotActedOnError`. A create rolls back with nothing to compensate |
+| Stale-pin refusal | Happens before claim, intent and run ID. Same settlement |
+| Runtime target ID vs inventory target key | Distinct. `start_claim_target`, `InventoryTarget.id`, `BrokerTargetInventory` and `applied_config.runtimeTarget`/`runtimeTargetCandidate` keep the inventory key. No mapping in P1 |
+| Run ID | Unchanged: minted per create/start/restart, sent as `runId`, labelled `scion.run_id` |
+| Queued stops and recovery (ptone/scion#3091) | Unchanged. A flat Runtime Broker has one inventory target |
+| Orphan guards (section 7) | Pinned agents are never reassigned, so claims, intents and recovery observations stay on their pinned Runtime Broker |
 | Quota | `max_agents_per_broker` applies per flat Runtime Broker ID |
 
-## 11. Additive migration plan (SQLite and Postgres)
+## 12. Additive migration plan (SQLite and Postgres)
 
-- Ent schema changes are the six optional columns in section 7 plus one index (`runtime_brokers.runtime_target_id`). They are applied by the existing `entc.AutoMigrate` (`WithDropColumn(false)`) on both dialects. There is no data backfill and no new step in `CompositeStore.Migrate`. NULL already means legacy.
+- The ent changes are the six optional columns in section 8 plus the unique index on `runtime_brokers.runtime_target_id`.
+  - They are applied by the existing `entc.AutoMigrate` on both dialects.
+  - There is no backfill and no new step in `CompositeStore.Migrate`. NULL already means legacy, and the index is created empty.
 - Generated code: `go generate ./pkg/ent`, committed. `make ent-check` must stay clean.
-- Tests:
-  - SQLite runs in normal CI. It creates a database at the pre-change shape (columns dropped through raw SQL), inserts legacy agent rows (with `applied_config.profile`, `runtimeTarget`/`runtimeTargetCandidate` and `createInputs.profile`) and legacy Runtime Broker rows (`runtimes` profiles JSON, `default_profile`), re-runs `AutoMigrate`, and asserts every legacy value round-trips unchanged and the new columns read as NULL/empty.
-  - Postgres uses the same test under `-tags integration`, active only when `SCION_TEST_POSTGRES_URL` is set (the `pkg/store/enttest` convention). Without it, the Postgres case **skips with a message**. Real Postgres evidence is gathered in P1.4. The tests are added to the `test-launch-store-postgres`-style target list if one fits, so a SKIP there fails.
-- Rollback: older binaries ignore the extra columns. Dropping them is a later, separately gated release.
-- `RuntimeTargetCandidate` semantics are unchanged. A test asserts that `SetAgentRuntimeTarget`/`ClearAgentRuntimeTarget` never touch the pinned columns.
+- **SQLite** runs in normal CI:
+  - build a database at the pre-change shape (new columns and index dropped through raw SQL);
+  - insert legacy agents (`applied_config.profile`, `runtimeTarget`/`runtimeTargetCandidate`, `createInputs.profile`) and legacy Runtime Brokers (`runtimes` profiles JSON, `default_profile`);
+  - re-run `AutoMigrate`;
+  - assert every legacy value round-trips unchanged and the new columns read NULL/empty;
+  - assert two brokers with NULL `runtime_target_id` coexist under the unique index.
+- **Postgres** runs the same test under `-tags integration`, active only with `SCION_TEST_POSTGRES_URL`. Without it, the test **skips with a message**.
+  - The group C prefixes are **added to the `-run` regex of `make test-launch-store-postgres`** (`TestFlatPlacementColumns_`, `TestUpdateAgent_PreservesPinnedPlacement`, `TestUpdateAgent_LegacyColumnSetPreservesPin`, `TestUpdateRuntimeBroker_`, `TestSetRuntimeBrokerTarget_`, `TestSetAgentPinnedRuntimeTarget_`, `TestFindOrphanedAgents_`, `TestReassignAgentsToBroker_`, `TestReassignProjectBroker_`, `TestCreateAgent_PinnedPlacement`). That target fails if anything skips there.
+  - Real Postgres evidence is gathered in P1.4.
+- **Rollback:** older binaries ignore the extra columns and the index. Settings rollback is covered in section 2. Dropping the columns is a later, separately gated release.
+- `RuntimeTargetCandidate` semantics are unchanged (tested).
 
-## 12. Conduit run-ID fencing preserved by flat dispatch
+## 13. Conduit run-ID fencing preserved by flat dispatch
 
-Flat dispatch does not change the Conduit fencing contract. Specifically:
+Flat dispatch does not change the Conduit fencing contract:
 - The Hub admits an agent Conduit session only if the Hello launch ID equals the agent's current `run_id`. An empty `run_id` matches nothing.
-- Every dispatch path (create, start, restart, on flat and legacy Runtime Brokers alike) sets `SCION_LAUNCH_ID` and the `scion.run_id` label from the same value.
+- Every dispatch path (create, start and restart, on flat and legacy Runtime Brokers) sets `SCION_LAUNCH_ID` and the `scion.run_id` label from the same value.
 - Reusing a running container returns that container's run ID.
-- `run_id` is never cleared. Pinned placement writes do not touch it.
-- `startAttempted` and the run ID in start-failure responses survive unchanged. The flat rejections in sections 8 and 9 add `startAttempted:false` and never remove those keys.
+- `run_id` is never cleared, and pin writes don't touch it.
+- `startAttempted` and the run ID in start-failure responses survive unchanged. The flat refusals only add new codes; they never remove those keys from responses that carry them today.
 - Registration and the control channel are not Conduit-fenced, so there is no constraint on the registration descriptor.
 
-GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight in `cmd/server_foreground.go` (Conduit start paths), `pkg/hub/httpdispatcher.go` (additive Conduit capability) and `pkg/runtimebroker/handlers.go` (`SCION_LAUNCH_ID` on start/restart). P1.1 stays out of those files. P1.2 rebases onto them once they land, before its review.
+GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight in `cmd/server_foreground.go`, `pkg/hub/httpdispatcher.go` and `pkg/runtimebroker/handlers.go`. P1.1 stays out of those files. P1.2 rebases onto them before its review.
 
-## 13. Experiment registration
+## 14. Experiment registration
 
-- Name **`hub.flat_runtime_brokers`** (registry names need a dotted prefix; `hub.` marks server behaviour). Exported constant `experiments.FlatRuntimeBrokers`.
-- Settings: Layers `[LayerServer]`, Default `false`, Stage `alpha`, Issue `ptone/scion#3267`, Owner `runtime-broker`, ReviewBy `2027-03-31`.
-- Enforced in Hub handlers with `s.experimentEnabled(experiments.FlatRuntimeBrokers)` at registration (section 6) and agent create (section 9). It is not a UI-only flag and is not added to `/api/v1/settings/public`.
-- It is not added to `dispatchExperimentNames`. A Runtime Broker's flat behaviour comes from its own configuration. The Hub signals flat dispatch by sending `expectedRuntimeTargetId`.
-- With it off, every existing schema, API and behaviour is usable exactly as before (tested).
+- **Name: `hub.flat_runtime_brokers`**, exported as `experiments.FlatRuntimeBrokers`.
+- **Fields:**
+  - Title: "Flat Runtime Brokers"
+  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged."
+  - Layers `[LayerServer]`, Default `false`, Stage `alpha`, Issue `ptone/scion#3267`, Owner `runtime-broker`, ReviewBy `2027-03-31`.
+- **Enforcement:** in Hub code with `s.experimentEnabled(experiments.FlatRuntimeBrokers)`, at registration (R1, including the embedded wrapper) and at agent create (section 10).
+  - It is not a UI-only flag and is not exposed through `/api/v1/settings/public`.
+  - It is not added to `dispatchExperimentNames`. A Runtime Broker's flat behaviour comes from its own configuration.
+- With the experiment off, every existing schema, API and behaviour works as before (tested).
 
-## 14. Frozen tests
+## 15. Frozen tests
 
-Stage B commits these names. The tests in groups A–E run for real in P1.1. The group F dispatch-half tests are committed with their scenario and expectations in the test body, and are skipped with `t.Skip("pending ptone/scion#3268: flat dispatch not wired yet")`, through one constant per package (`pendingFlatDispatch`). P1.2 removes the skip and must make them pass unchanged, or bring a reviewed amendment to this appendix.
+Stage B commits these names. Groups A–E (including the new pure mismatch tests) run for real in P1.1.
+
+Group F tests are the dispatch half:
+- They compile against real types and helpers in P1.1, with no build tags.
+- Each calls `t.Skip(pendingFlatDispatch)`, where `const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired yet"` is defined once per package, so deleting the constant forces every skip to be removed.
+- P1.2 removes the constant and must make the tests pass unchanged, or bring a reviewed amendment. The P1.2 review checks that the constant is gone.
 
 **A. Settings (`pkg/config`)**
-- `TestRuntimeBrokerInstances_OneDockerEntryRoundTrip`: save, load and re-save keep the entry byte-stable.
+- `TestRuntimeBrokerInstances_OneDockerEntryRoundTrip`: settings save/load/save stays byte-stable.
+- `TestRuntimeBrokerInstances_GlobalConfigRoundTrip`: settings.yaml → `LoadGlobalConfig` → `RuntimeBrokerConfig.Instances` → `ConvertGlobalToV1ServerConfig` gives the same entry.
+- `TestRuntimeBrokerInstances_StrictLoaderRejectsTypeErrorAndUnknownKey`: covers the silent-fallback case.
+- `TestRuntimeBrokerInstances_LegacyServerYAMLRejected`
+- `TestRuntimeBrokerInstances_ProjectSettingsIgnoredByServer`
+- `TestRuntimeBrokerInstances_EmptyListIsLegacy`
 - `TestRuntimeBrokerInstances_DuplicateKeyRejected`
 - `TestRuntimeBrokerInstances_MultipleEntriesRejected`
 - `TestRuntimeBrokerInstances_InvalidKeyRejected`
+- `TestRuntimeBrokerInstances_NameRequired`
 - `TestRuntimeBrokerInstances_TargetTypeRequired`
 - `TestRuntimeBrokerInstances_KubernetesNotImplemented`
 - `TestRuntimeBrokerInstances_UnsupportedTypeRejected`
 - `TestRuntimeBrokerInstances_DockerRejectsKubernetesFields`
-- `TestRuntimeBrokerInstances_SchemaMatchesValidator`: `scion config validate` and the validator agree on every case above. The schema drift test stays green.
+- `TestRuntimeBrokerInstances_SchemaMatchesValidator`
 - `TestRuntimeBrokerInstances_OverlayDoesNotTouchInstances`
-- `TestRuntimeBrokerInstances_LegacyConfigUnchanged`: v1 files without the key load exactly as before.
+- `TestRuntimeBrokerInstances_LegacyConfigUnchanged`
 
 **B. Local identity (`pkg/brokeridentity`)**
-- `TestIdentity_FirstBootMintsAndPersistsAcrossRestart`: same IDs after a reload (simulated restart).
+- `TestIdentity_FirstBootMintsAndPersistsAcrossRestart`
+- `TestIdentity_EmptyDirectoryIsFirstBoot`
+- `TestIdentity_TempLeftoversAreFirstBoot`
+- `TestIdentity_ConcurrentFirstBootYieldsOneIdentity`
 - `TestIdentity_MissingWithLeftoverStateIsError`
-- `TestIdentity_CorruptFileIsError`, `TestIdentity_UnknownSchemaVersionIsError`
+- `TestIdentity_CorruptFileIsError`
+- `TestIdentity_UnknownSchemaVersionIsError`
 - `TestIdentity_KeyMismatchIsError`
 - `TestIdentity_TargetTypeChangeIsError`
-- `TestIdentity_BrokerIDEqualsLegacyBrokerIDIsError`
+- `TestIdentity_CollidesWithAnyLegacyBrokerIDIsError`
+- `TestIdentity_ReaddedEntryRestoresSameIDs`: the settings-rollback case.
 - `TestVerifyScope_DockerDaemonChangeRefused`
 - `TestVerifyScope_DockerEndpointChangeSameDaemonAccepted`
-- `TestVerifyScope_KubernetesIgnoresContextAliasAndCredentials`, `TestVerifyScope_KubernetesClusterOrNamespaceChangeRefused` (normalization/compare only)
+- `TestVerifyScope_DockerEmptyDaemonIDIsError`
+- `TestVerifyScope_KubernetesIgnoresContextAliasAndCredentials`
+- `TestVerifyScope_KubernetesClusterOrNamespaceChangeRefused`
 
 **C. Store and migrations (`pkg/store/entadapter`, `pkg/store/enttest`)**
 - `TestFlatPlacementColumns_AdditiveUpgrade_SQLite`
-- `TestFlatPlacementColumns_AdditiveUpgrade_Postgres` (`integration` tag, `SCION_TEST_POSTGRES_URL`)
-- `TestUpdateAgent_PreservesPinnedPlacement`: a full-row update from a model without pin values, including a rewritten `applied_config`.
-- `TestUpdateAgent_LegacyColumnSetPreservesPin`: an update through the ent client setting only pre-change columns, as an older binary would.
-- `TestUpdateRuntimeBroker_PreservesRuntimeTarget`, including a profiles/`runtimes` rewrite.
-- `TestSetRuntimeBrokerTarget_SetOnceThenImmutable` (same ID no-op, different ID or type → `ErrRuntimeTargetChanged`)
+- `TestFlatPlacementColumns_AdditiveUpgrade_Postgres`
+- `TestCreateAgent_PinnedPlacementRoundTrip`
+- `TestUpdateAgent_PreservesPinnedPlacement`
+- `TestUpdateAgent_LegacyColumnSetPreservesPin`
+- `TestUpdateRuntimeBroker_PreservesRuntimeTarget`
+- `TestUpdateRuntimeBroker_RejectsProfilesOnFlatRow`
+- `TestCreateRuntimeBroker_RuntimeTargetRoundTrip`
+- `TestRuntimeTargetID_UniqueIndex`
+- `TestSetRuntimeBrokerTarget_LegacyRowNotFlat`
+- `TestSetRuntimeBrokerTarget_SameTargetUpdatesDisplayName`
+- `TestSetRuntimeBrokerTarget_DifferentTargetRejected`
 - `TestSetAgentPinnedRuntimeTarget_CompareAndSet`
 - `TestRuntimeTargetCandidate_DoesNotTouchPin`
-- `TestPinnedPlacement_StaleWhenBrokerMoved` (validity helper)
+- `TestPinnedPlacement_StaleWhenBrokerMoved`
+- `TestFindOrphanedAgents_ExcludesPinnedAndFlat`
+- `TestFindOrphanedAgents_FlatCurrentBrokerAdoptsNothing`
+- `TestReassignAgentsToBroker_NeverTargetsFlatBroker`
+- `TestReassignAgentsToBroker_SkipsPinnedAgents`
+- `TestReassignProjectBroker_NeverRepointsToOrFromFlat`
 
 **D. Experiment (`pkg/experiments`, `pkg/hub`)**
-- `TestFlatRuntimeBrokersExperimentRegistered`: server layer, default off, valid entry.
-- `TestFlatRuntimeBrokersExperiment_DefaultOffInHub`: `experimentEnabled` reports false without an override.
+- `TestFlatRuntimeBrokersExperimentRegistered`
+- `TestFlatRuntimeBrokersExperiment_DefaultOffInHub`
 
-**E. Wire types (`pkg/store`, `pkg/hubclient`)**
-- `TestRuntimeTargetDescriptor_JSONShape`: `{"id","type","displayName"}`, `displayName` omitted when empty.
-- `TestExpectedRuntimeTargetID_JSONKey` on the `hubclient` create request.
+**E. Wire types and pure checks (`pkg/api`, `pkg/hubclient`)**
+- `TestRuntimeTargetDescriptor_JSONShape`
+- `TestExpectedRuntimeTargetID_JSONKey`
+- `TestCheckExpectedRuntimeTarget_MatchEmptyAndMismatch`
+- `TestRuntimeTargetMismatch_MessageAndDetails`: frozen message and details keys, including an empty actual.
 
-**F. Target mismatch and negotiation (dispatch half, skipped pending ptone/scion#3268)**
+**F. Dispatch half (skipped until P1.2)**
 
 Hub (`pkg/hub/flat_runtime_broker_contract_test.go`):
-- `TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects`: 409 `runtime_target_mismatch`. Asserts no agent row, no provider link, no quota reservation, no run intent, no start claim, no run ID and no dispatch.
-- `TestFlatCreate_ExplicitProfileRejected`: 422 `runtime_profile_unsupported`, with no side effects.
-- `TestFlatCreate_DefaultProfileNotApplied`: the project annotation profile is not applied; the dispatch has an empty profile.
+- `TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects`: no agent row, provider link, project default update, quota reservation, run intent, start claim, run ID or dispatch.
+- `TestFlatCreate_ExpectedTargetTowardLegacyBrokerRejected`
+- `TestFlatCreate_ExplicitProfileRejected`
+- `TestFlatCreate_DefaultProfileNotAppliedWithWarning`
+- `TestFlatCreate_PassthroughGateUsesTargetType`
 - `TestFlatCreate_PinsPlacementAndSendsExpectedTarget`
-- `TestFlatCreate_ExperimentOffRejected`: 412 `experiment_disabled`.
-- `TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks`
-- `TestFlatCreate_RuntimeBrokerMismatchRelayed`: a Runtime Broker 409 is relayed with `startAttempted:false`, and the create is rolled back.
-- `TestFlatRegistration_TargetChangeRejected`: 409 `runtime_target_changed`; the stored target is unchanged.
+- `TestFlatCreate_ExperimentOffRejected`
+- `TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks`: includes create-on-existing resume.
+- `TestFlatCreate_RuntimeBrokerRejectionRelayed`: 409/422/412 relayed with code and details, start markers stripped, create rolled back.
+- `TestFlatCreate_AccessCheckBeforeLink`
+- `TestFlatStart_StalePinRefused`
+- `TestFlatReincarnate_MovePinnedAgentRefused`
+- `TestFlatReincarnate_ProfileNotRederived`
+- `TestFlatRegistration_TargetChangeRejected`
+- `TestFlatRegistration_LegacyRowNotConverted`
 - `TestFlatRegistration_LegacyReRegistrationOfFlatIDRejected`
-- `TestFlatRegistration_NameCollisionNotAdopted`: 409 `runtime_broker_name_conflict`.
+- `TestFlatRegistration_NameOrSlugCollisionNotAdopted`
 - `TestFlatRegistration_ExperimentOffRejectsNewAllowsExisting`
+- `TestFlatRegistration_EmbeddedPathUsesSharedRules`
+- `TestLegacyEmbeddedRegistration_SkipsFlatRowByName`
+- `TestDeprecatedRegisterProject_DoesNotAdoptFlatRow`
+- `TestHeartbeat_DropsProfilesForFlatRow`
 - `TestLegacyCreate_ExperimentOffUnchanged`
 
 Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`):
-- `TestFlatInstanceCreate_ExpectedTargetMismatchBeforeAttempt`: 409. Asserts no dispatch-attempt file, no launch registry entry, no project dirs/markers and no runtime call.
-- `TestFlatInstanceCreate_MissingExpectedTargetRejected`: 412 `runtime_target_required`.
-- `TestFlatInstanceCreate_NonEmptyProfileRejected`: 422 `runtime_profile_unsupported`, never resolved through the default-manager fallback.
+- `TestFlatInstanceCreate_ExpectedTargetMismatchBeforeAttempt`: no attempt file, launch registry entry, project dirs/markers or runtime call.
+- `TestFlatInstanceCreate_MissingExpectedTargetRejected`
+- `TestFlatInstanceCreate_NonEmptyProfileRejected`
+- `TestFlatInstanceCreate_EmptyProfileIgnoresSettingsActiveProfile`
 - `TestFlatInstanceStart_ExpectedTargetMismatchRejected`
+- `TestFlatInstanceStart_UndecodableBodyRejected`
 - `TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget`
-- `TestFlatInstanceStart_MismatchKeepsRunIDFencing`: the error carries `startAttempted:false`, and run-ID and `SCION_LAUNCH_ID` behaviour is unchanged for accepted starts.
+- `TestFlatInstanceStart_IgnoresSavedProfile`
+- `TestFlatInstanceStart_MismatchKeepsRunIDFencing`
+- `TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected`
 
-## 15. Explicit non-goals for P1.1
+## 16. Scope
+
+### Non-goals for P1.1
 
 - No Runtime Broker startup, registration, dispatch, heartbeat or UI wiring (P1.2/P1.3).
-- No Kubernetes implementation. No other runtime types. No target-health polling.
+- No Kubernetes implementation, other runtime types or target-health polling.
 - No fleet conversion and no change to existing agents' data.
 
-P1.1 code is limited to:
-- `pkg/config` (settings, schema, validator);
-- `pkg/brokeridentity` (new);
-- `pkg/ent/schema` (runtimebroker, agent) plus generated code;
-- `pkg/store` (models, interface, entadapter setters);
-- `pkg/experiments/registry.go`;
-- additive wire types in `pkg/hubclient`, where needed for group E;
-- new test files.
+### P1.1 code surface
+
+- `pkg/config`: `settings_v1.go`, `hub_config.go` (`RuntimeBrokerConfig`, conversion, legacy rejection, strict loader), schema, validator.
+- `pkg/brokeridentity`: new.
+- `pkg/api/runtime_target.go`: descriptor and pure check.
+- `pkg/ent/schema` (runtimebroker, agent) plus generated code.
+- `pkg/store`: models, interface, and entadapter setters and guards, including the orphan guards in `agent_store.go` and the `UpdateRuntimeBroker` guard in `project_store.go`.
+- `pkg/experiments/registry.go`.
+- Additive fields on the hubclient registration/create request types and on the Hub `CreateBrokerRegistrationRequest`/`BrokerJoinRequest` structs (the type definitions only, no handler logic).
+- The Makefile regex for `test-launch-store-postgres`.
+- New test files.
+
+## Change log
+
+- **r2 (review round 1):**
+  - Added the central invariant.
+  - B1: orphan guards in the store (P1.1), stale pins refused rather than re-pinned, moves refused in P1.
+  - B2: `RuntimeBrokerConfig` shape and conversions, the `server.yaml` rule, the strict loader.
+  - B3: inventory of every Runtime Broker row writer, a single shared registration implementation, a target set only on row creation, `runtime_broker_not_flat`, and the `UpdateRuntimeBroker` profile guard.
+  - N1: explicit relay case. N2: start-marker semantics, with Hub public envelopes stripped. N3: full code table. N4: every default-profile point, the passthrough gate by target type, and the dispatch warning. N5: existing-agent and move paths. N6: the flat instance bypasses resolution for an empty profile, and an undecodable start body is rejected. N7: CLI-based Docker probe, with an empty daemon ID as an error. N8: lock plus `link` creation and a precise first-boot rule against every legacy ID source. N9: `name` required, slug included, race accepted with a reason. N10: expected target toward legacy. N11: unique index. N12: Makefile regex. N13: settings rollback. N14: tests added.
+  - T1: Title/Description frozen. T2: hubclient types named. T3: `UpdateProject` and the access-check order. T4: an empty list means legacy. T5: pure mismatch helper and tests in P1.1.
+- **r1:** initial version (ab334be).
