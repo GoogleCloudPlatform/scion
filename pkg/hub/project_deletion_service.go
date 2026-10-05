@@ -755,6 +755,11 @@ func deactivateProjectAgentEdges(ctx context.Context, tx store.Store, projectID 
 		if err != nil {
 			return total, d.OpID, fmt.Errorf("list project agents for edge deactivation: %w", err)
 		}
+		if page == nil {
+			// Items holds values, so a page is the only nil the walk can
+			// meet. Fail rather than treat it as empty and leave edges active.
+			return total, d.OpID, fmt.Errorf("%w: nil agent page in deactivateProjectAgentEdges", store.ErrInvalidInput)
+		}
 		for _, a := range page.Items {
 			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 			if err != nil {

@@ -192,6 +192,9 @@ func lifecycleAudit(mutationType, agentID string, actor AuditActor, now time.Tim
 // Service-account assignments have no lifecycle store methods, so none are
 // deactivated here.
 func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in softDeleteAgentTx", store.ErrInvalidInput)
+	}
 	opID := api.NewUUID()
 	now := time.Now()
 
@@ -234,6 +237,9 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // The hard delete of an incomplete create is a hard delete like any other;
 // its audit summary carries incomplete_create=true.
 func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in hardDeleteAgentTx", store.ErrInvalidInput)
+	}
 	opID := api.NewUUID()
 	now := time.Now()
 
@@ -279,6 +285,9 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // store.ErrVersionConflict; each rolls everything back. On success a
 // carries the restored row.
 func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in restoreAgentTx", store.ErrInvalidInput)
+	}
 	if a.DeletedAt.IsZero() {
 		return errAgentNotSoftDeleted
 	}
@@ -415,6 +424,9 @@ type reincarnateAuthority struct {
 // reincarnate-claim hooks, and the agent_reincarnate_claim audit record.
 // Any error rolls everything back, so nothing is claimed.
 func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, actor AuditActor) error {
+	if agent == nil {
+		return fmt.Errorf("%w: nil agent in reincarnateClaimTx", store.ErrInvalidInput)
+	}
 	if auth != nil && auth.Provenance.ProvenanceVersion == 0 {
 		return fmt.Errorf("%w: reincarnation provenance not recorded", errAgentCreateWriteInvalid)
 	}

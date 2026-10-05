@@ -635,6 +635,11 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 // response is written (403, or 503 for a ceiling lookup fault) and ok is
 // false; nothing has been written to the store.
 func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent) (auth *reincarnateAuthority, ok bool) {
+	if agent == nil {
+		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
+		InternalError(w)
+		return nil, false
+	}
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && agentIdent.ID() == agent.ID {
