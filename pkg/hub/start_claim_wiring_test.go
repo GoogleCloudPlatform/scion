@@ -92,13 +92,19 @@ func TestStartClaimWiring_RestartHoldsClaimAcrossStopLeg(t *testing.T) {
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "released after the start leg")
 }
 
+// A restart that cannot claim is refused before it stops anything, and the
+// capacity hold it took first is undone: no reservation is left and the
+// stopped agent's phase is restored.
 func TestStartClaimWiring_RestartRacingAClaimIsRefusedBeforeStopping(t *testing.T) {
 	f, d, a := newClaimFixture(t)
+	setBrokerAgentCeiling(t, f.s, 5)
 	_, err := f.s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
 	require.NoError(t, err)
 	code, body := lifecycle(t, f, a.ID, "restart")
 	require.Equal(t, http.StatusConflict, code, body)
 	assert.Equal(t, int32(0), d.stops.Load(), "the agent is not stopped when its restart cannot claim")
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the restart's reservation is released")
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "the starting phase is restored")
 }
 
 // A stop whose dispatch succeeded releases the claim it superseded, of
@@ -636,4 +642,35 @@ func TestStartClaimWiring_HeartbeatDeferredUnderAnotherReplicasClaim(t *testing.
 	require.NoError(t, err)
 	f.send(stopped)
 	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "without the claim the report applies")
+}
+
+// The wake ends its lifecycle op once its post-dispatch starting write has
+// landed, so a heartbeat-reported exit during the readiness wait applies; its
+// claim is still held.
+func TestStartClaimWiring_WakeEndsLifecycleOpBeforeReadinessWait(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	a := f.addAgent("waker", "suspended", "")
+	var opDuringWait, claimDuringWait atomic.Bool
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		go func() {
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if got, err := f.s.GetAgent(context.Background(), a.ID); err == nil && got.Phase == string(state.PhaseStarting) && got.ContainerStatus != "" {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond) // past the starting write, inside the wait
+			opDuringWait.Store(f.srv.lifecycleOps.active(a.ID))
+			claimDuringWait.Store(getAgent(t, f.s, a.ID).StartClaimID != "")
+			_ = f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Activity: "thinking"})
+		}()
+		cur.ContainerStatus = "running"
+		return nil
+	}
+	res, dmErr := f.srv.wakeAgentForDM(context.Background(), getAgent(t, f.s, a.ID))
+	require.Nil(t, dmErr)
+	require.Equal(t, WakeResumed, res.Outcome)
+	assert.False(t, opDuringWait.Load(), "the lifecycle op ended before the readiness wait")
+	assert.True(t, claimDuringWait.Load(), "the wake's claim is held through the readiness wait")
 }
