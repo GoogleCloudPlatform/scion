@@ -66,9 +66,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scion_harness
 
-assert scion_harness.INTERFACE_VERSION >= 2, (
+assert scion_harness.INTERFACE_VERSION >= 3, (  # 3: resolve_thinking
     "scion_harness.py INTERFACE_VERSION is too old "
-    f"(got {scion_harness.INTERFACE_VERSION}, need >= 2); "
+    f"(got {scion_harness.INTERFACE_VERSION}, need >= 3); "
     "this is a staging bug — the host should have staged a compatible library"
 )
 
