@@ -1334,6 +1334,10 @@ type Server struct {
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
 
+	// lifecycleTxHooks holds the agent lifecycle transaction hooks
+	// (agent_lifecycle_tx.go). The zero value has no hooks and is ready to use.
+	lifecycleTxHooks agentLifecycleHooks
+
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.
 	startClaimCfg atomic.Pointer[StartClaimSettings]
