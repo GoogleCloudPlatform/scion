@@ -54,6 +54,7 @@ import { chatUnread } from '../../client/chat-unread.js';
 import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
@@ -3815,6 +3816,9 @@ export class ScionPageChat extends LitElement {
     // hidden behind the terminal workspace must perform zero palette state
     // changes or fetches even though it stays mounted.
     if (this._eventFromTerminalSurface(e)) return;
+    // On macOS, Ctrl+K in a text field deletes to the end of the line; the
+    // palette's shortcut there is Cmd+K.
+    if (e.ctrlKey && isMacPlatform() && this._eventFromTextField(e)) return;
     if (!this._paletteOpenGuardsHold()) return;
 
     e.preventDefault();
@@ -3857,6 +3861,17 @@ export class ScionPageChat extends LitElement {
       if (node.tagName === 'SCION-TERMINAL-PANE') return true;
       return node.classList?.contains('xterm') ?? false;
     });
+  }
+
+  /**
+   * True when the event originated in a text field: an input, a textarea, or
+   * contenteditable content. Reads `composedPath()[0]`, since a document
+   * listener sees the composer's native textarea retargeted to its shadow host.
+   */
+  private _eventFromTextField(e: KeyboardEvent): boolean {
+    const origin = e.composedPath()[0];
+    if (!(origin instanceof HTMLElement)) return false;
+    return origin.tagName === 'INPUT' || origin.tagName === 'TEXTAREA' || origin.isContentEditable;
   }
 
   /** Is the current URL (relative to BASE_URL) `/chat` or a route below it? */
