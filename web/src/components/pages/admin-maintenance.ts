@@ -155,6 +155,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private maintenanceEnabled = false;
 
+  /**
+   * True when the hub reports break_glass: a workstation hub started in
+   * admin mode (SCION_SERVER_ADMIN_MODE / settings.yaml admin_mode) stays in
+   * maintenance whatever is saved here.
+   */
+  @state()
+  private maintenanceBreakGlass = false;
+
   /** Run detail currently being viewed. */
   @state()
   private viewingRun: MaintenanceRun | null = null;
@@ -705,6 +713,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = await res.json();
         this.maintenanceEnabled = data.enabled;
+        this.maintenanceBreakGlass = data.break_glass === true;
       }
     } catch {
       // Silently ignore — toggle will default to off.
@@ -722,6 +731,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = await res.json();
         this.maintenanceEnabled = data.enabled;
+        this.maintenanceBreakGlass = data.break_glass === true;
       }
     } catch {
       // Silently ignore — keep current state on failure.
@@ -747,14 +757,11 @@ export class ScionPageAdminMaintenance extends LitElement {
   private async applyUpdate(): Promise<void> {
     this.applyUpdateLoading = true;
     try {
-      const response = await apiFetch(
-        '/api/v1/admin/maintenance/operations/update-binary/run',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ params: {} }),
-        }
-      );
+      const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
 
       if (!response.ok) {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
@@ -1358,6 +1365,13 @@ export class ScionPageAdminMaintenance extends LitElement {
           </button>
           <span class="toggle-label"> ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'} </span>
         </div>
+        ${this.maintenanceBreakGlass
+          ? html`<p class="section-description break-glass-notice">
+              Maintenance mode is forced on by the server's startup configuration
+              (SCION_SERVER_ADMIN_MODE or <code>admin_mode</code> in settings.yaml). Turning it off
+              here is saved but has no effect until the server is restarted without that setting.
+            </p>`
+          : nothing}
       </div>
     `;
   }
@@ -1461,11 +1475,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         </p>
         ${ops.length === 0
           ? html`<div class="empty-inline">No operations registered.</div>`
-          : html`
-              <div class="card-list">
-                ${ops.map((op) => this.renderOperationCard(op))}
-              </div>
-            `}
+          : html` <div class="card-list">${ops.map((op) => this.renderOperationCard(op))}</div> `}
       </div>
     `;
   }
