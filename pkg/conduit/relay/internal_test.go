@@ -51,8 +51,14 @@ type pair struct {
 
 func newPair(t *testing.T, cfg conduit.Config) *pair {
 	t.Helper()
+	return newPairWith(t, cfg, nil)
+}
+
+// newPairWith is newPair with modA applied to the owner relay's config.
+func newPairWith(t *testing.T, cfg conduit.Config, modA func(*relay.Config)) *pair {
+	t.Helper()
 	w := relaytest.NewWorld(t)
-	a := w.StartNode("relay-a", nil)
+	a := w.StartNode("relay-a", modA)
 	b := w.StartNode("relay-b", nil)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
 	target, _ := a.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
@@ -467,6 +473,64 @@ func TestInternalStreamCapabilityChecks(t *testing.T) {
 		_, err := p.remote().OpenStream(ctx, &conduitv1.StreamOpen{})
 		assertClose(t, err, conduit.CloseProtocolError, relay.ReasonBadFrame)
 	})
+}
+
+// TestBridgeReleasedWhenCallerNeverCloses: a hop the owner closed keeps
+// its link open for the caller to close, but only up to the handshake
+// timeout on the relay clock; then the link closes and the bridge is
+// released.
+func TestBridgeReleasedWhenCallerNeverCloses(t *testing.T) {
+	const wait = 2 * time.Second
+	p := newPairWith(t, echoConfig(), func(c *relay.Config) { c.Session.HandshakeTimeout = wait })
+	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
+	want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
+	req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
+	if err != nil {
+		t.Fatalf("dial: %v (%v)", err, resp)
+	}
+	defer func() { _ = c.Close() }()
+	// A kind other than the admitted capability: the owner closes the hop.
+	open, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{
+		Kind: conduitv1.StreamKind_STREAM_KIND_LOGS}}})
+	if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
+		t.Fatal(err)
+	}
+	_, b, err := c.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &conduitv1.Frame{}
+	if err := proto.Unmarshal(b, f); err != nil {
+		t.Fatal(err)
+	}
+	sc := f.GetStreamClose()
+	if sc == nil {
+		t.Fatalf("first frame %v, want stream_close", f)
+	}
+	assertClose(t, &conduit.CloseError{Code: sc.GetCode(), Reason: sc.GetReason()}, conduit.CloseProtocolError, relay.ReasonBadFrame)
+
+	// The caller read the close but keeps its side open.
+	if n := p.a.Relay.ActiveBridges(); n != 1 {
+		t.Fatalf("%d active bridges while the caller's side is open, want 1", n)
+	}
+	p.a.Clock.Advance(wait - time.Nanosecond)
+	if n := p.a.Relay.ActiveBridges(); n != 1 {
+		t.Fatalf("%d active bridges before the wait passed, want 1", n)
+	}
+	p.a.Clock.Advance(time.Nanosecond)
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, _, err := c.ReadMessage(); err == nil {
+		t.Fatal("caller read a frame after stream_close, want the link closed")
+	} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+		t.Fatal("the owner did not close the link when the wait passed")
+	}
+	p.a.Relay.WaitBridgesForTest()
+	if n := p.a.Relay.ActiveBridges(); n != 0 {
+		t.Fatalf("%d active bridges after the wait passed", n)
+	}
 }
 
 // TestUserSessionNotRoutable (C7): the internal API refuses to route to a

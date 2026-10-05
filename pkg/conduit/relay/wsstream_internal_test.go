@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -85,7 +86,7 @@ func (c *failingWriteConn) Transport() string { return "test" }
 // does. The bytes already read are still returned.
 func TestWSStreamWindowUpdateSendFailure(t *testing.T) {
 	conn := newFailingWriteConn()
-	s := newWSStream(conn, 0, 8)
+	s := newWSStream(conn, 0, 8, clock.Real(), conduit.DefaultHandshakeTimeout)
 	b, err := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamData{StreamData: &conduitv1.StreamData{StreamId: hopStreamID, Data: []byte("12345678")}}})
 	if err != nil {
 		t.Fatal(err)
@@ -107,5 +108,133 @@ func TestWSStreamWindowUpdateSendFailure(t *testing.T) {
 	}
 	if _, err := s.Read(p); err == nil {
 		t.Fatal("Read after the stream ended: want an error")
+	}
+}
+
+// peerConn is one end of a hop whose peer the test plays: frames queued
+// on in are read by the stream, writes are recorded, and closing peer
+// makes the stream's next read fail as when the peer closes the link.
+type peerConn struct {
+	in       chan []byte
+	writes   chan []byte
+	peer     chan struct{}
+	closed   chan struct{}
+	peerOnce sync.Once
+	once     sync.Once
+}
+
+func newPeerConn() *peerConn {
+	return &peerConn{in: make(chan []byte, 4), writes: make(chan []byte, 16), peer: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (c *peerConn) ReadFrame() ([]byte, error) {
+	select {
+	case b := <-c.in:
+		return b, nil
+	case <-c.peer:
+		return nil, errors.New("peer closed")
+	case <-c.closed:
+		return nil, errors.New("closed")
+	}
+}
+
+func (c *peerConn) WriteFrame(b []byte) error {
+	select {
+	case <-c.closed:
+		return errors.New("closed")
+	case c.writes <- append([]byte(nil), b...):
+		return nil
+	}
+}
+
+func (c *peerConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *peerConn) closePeer() { c.peerOnce.Do(func() { close(c.peer) }) }
+
+func (c *peerConn) Transport() string { return "test" }
+
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestWSStreamCloseWaitsForPeer: after CloseWithCode the stream has ended
+// and StreamClose is sent at once, but the link stays open, discarding
+// what the peer still sends, until the peer closes it or the close wait
+// on the clock has passed.
+func TestWSStreamCloseWaitsForPeer(t *testing.T) {
+	const wait = 5 * time.Second
+	window, err := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: 4}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		// finish ends the wait: the peer closes, or the clock passes it.
+		finish func(t *testing.T, clk *clock.Fake, c *peerConn)
+	}{
+		{
+			name: "peer closes after reading StreamClose",
+			finish: func(_ *testing.T, _ *clock.Fake, c *peerConn) {
+				c.closePeer()
+			},
+		},
+		{
+			name: "peer never closes",
+			finish: func(t *testing.T, clk *clock.Fake, c *peerConn) {
+				clk.Advance(wait - time.Nanosecond)
+				if isClosed(c.closed) {
+					t.Fatal("link closed before the close wait passed")
+				}
+				clk.Advance(time.Nanosecond)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := clock.NewFake(time.Now())
+			c := newPeerConn()
+			s := newWSStream(c, 8, 8, clk, wait)
+			if err := s.CloseWithCode(conduit.CloseForbidden, "forbidden: test"); err != nil {
+				t.Fatal(err)
+			}
+			if !isClosed(s.Done()) {
+				t.Fatal("Done not closed after CloseWithCode")
+			}
+			f := &conduitv1.Frame{}
+			if err := proto.Unmarshal(<-c.writes, f); err != nil {
+				t.Fatal(err)
+			}
+			if sc := f.GetStreamClose(); sc == nil || sc.GetCode() != conduit.CloseForbidden || sc.GetReason() != "forbidden: test" {
+				t.Fatalf("sent %v, want stream_close 4403", f)
+			}
+			if _, err := s.Write([]byte("x")); !errors.Is(err, conduit.ErrStreamClosed) {
+				t.Fatalf("Write after close = %v, want ErrStreamClosed", err)
+			}
+			// The peer had not seen the close yet: its frame is read and
+			// discarded, and the link stays open.
+			c.in <- window
+			if isClosed(c.closed) || isClosed(s.linkClosed()) {
+				t.Fatal("link closed while waiting for the peer")
+			}
+			tc.finish(t, clk, c)
+			select {
+			case <-s.linkClosed():
+			case <-time.After(5 * time.Second):
+				t.Fatal("link not closed")
+			}
+			if !isClosed(c.closed) {
+				t.Fatal("conn not closed")
+			}
+			if n := clk.Pending(); n != 0 {
+				t.Fatalf("%d timers still armed", n)
+			}
+		})
 	}
 }
