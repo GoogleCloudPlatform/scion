@@ -132,6 +132,10 @@ var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // "TOKEN@github.com:org/repo" is indistinguishable from an ordinary login and
 // is accepted. That ambiguity is inherent to scp syntax; credentials belong
 // in project secrets or the GitHub App, not in the remote.
+//
+// It is intentional that ValidateCloneURLLabel refuses "git@host:repo@v1"
+// while SanitizeGitSourceURL keeps it for the source-url label: the login is
+// transport, and the '@' in the path is ref-like and carries no secret.
 func splitSCP(value string) (login, host, path string, ok bool) {
 	login, rest, found := strings.Cut(value, "@")
 	if !found || !scpLogin.MatchString(login) {
