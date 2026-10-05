@@ -611,11 +611,11 @@ const (
 	// before adopting an existing group with that slug.
 	AnnotationProjectMembersGroup = "scion.io/project-members-group"
 
-	// LegacyAnnotationProjectMembersGroup is the marker key written by the
-	// store marker backfill (BackfillProjectMembersGroupMarkers). Readers
-	// that guard members groups accept it alongside
-	// AnnotationProjectMembersGroup, so a group marked only by the backfill,
-	// or by an older binary during a rolling upgrade, is still recognised.
+	// LegacyAnnotationProjectMembersGroup is the legacy members-group marker
+	// key. It is still read for compatibility: readers that guard members
+	// groups accept it alongside AnnotationProjectMembersGroup, so a group
+	// that carries only the legacy key (for example one marked by an older
+	// binary) is still recognised.
 	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
 )
 

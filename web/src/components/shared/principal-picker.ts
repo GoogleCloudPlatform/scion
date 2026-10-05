@@ -63,8 +63,9 @@ export function isProjectMembersGroup(group: PickerGroup): boolean {
 
 /**
  * Removes system project members groups from group search results. These
- * groups are system-managed and cannot be granted roles or nested in another
- * group, so the picker never offers them. The server enforces the same rule.
+ * groups are system-managed: they cannot be granted roles or nested in another
+ * group, so the picker never offers them as a principal or subject. The server
+ * enforces the role-binding and nesting rule.
  */
 export function selectableGroups(groups: PickerGroup[]): PickerGroup[] {
   return groups.filter((g) => !isProjectMembersGroup(g));
@@ -76,6 +77,12 @@ export interface PrincipalChangeDetail {
   principalId: string;
   displayLabel: string;
 }
+
+/**
+ * Page size for group search. It leaves headroom so that results
+ * selectableGroups filters out do not leave the list short or empty.
+ */
+export const GROUP_SEARCH_LIMIT = 25;
 
 @customElement('scion-principal-picker')
 export class ScionPrincipalPicker extends LitElement {
@@ -399,7 +406,7 @@ export class ScionPrincipalPicker extends LitElement {
     this.groupSearchOpen = true;
     try {
       const response = await apiFetch(
-        `/api/v1/groups?search=${encodeURIComponent(query)}&limit=10`
+        `/api/v1/groups?search=${encodeURIComponent(query)}&limit=${GROUP_SEARCH_LIMIT}`
       );
       if (requestId !== this.groupSearchRequestId) return;
       if (response.ok) {

@@ -54,6 +54,19 @@ const MARKER_FALSE: PickerGroup = {
   annotations: { 'scion.io/project-members-group': 'false' },
 };
 
+// Conflicting markers: legacy "true" with canonical "false" is still a members
+// group (either key set to "true" is enough).
+const CONFLICTING: PickerGroup = {
+  id: 'g-conflicting',
+  name: 'Gamma Members',
+  slug: 'project:gamma:members',
+  projectId: 'p-gamma',
+  annotations: {
+    'scion.io/project-members-group': 'false',
+    'scion.io/system-project-members-group': 'true',
+  },
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mod: any;
 
@@ -77,6 +90,10 @@ describe('isProjectMembersGroup', () => {
     expect(mod.isProjectMembersGroup(LEGACY)).toBe(true);
   });
 
+  it('matches conflicting markers (legacy "true", canonical "false")', () => {
+    expect(mod.isProjectMembersGroup(CONFLICTING)).toBe(true);
+  });
+
   it('does not match ordinary groups', () => {
     expect(mod.isProjectMembersGroup(NORMAL)).toBe(false);
     expect(mod.isProjectMembersGroup(PROJECT_UNMARKED)).toBe(false);
@@ -89,18 +106,16 @@ describe('isProjectMembersGroup', () => {
 
 describe('group search results', () => {
   it('drops project members groups and keeps the others', async () => {
-    const all = [CANONICAL, NORMAL, LEGACY, PROJECT_UNMARKED, MARKER_FALSE];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() =>
-        Promise.resolve(
-          new Response(JSON.stringify({ groups: all }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
+    const all = [CANONICAL, NORMAL, LEGACY, PROJECT_UNMARKED, MARKER_FALSE, CONFLICTING];
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ groups: all }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       )
     );
+    vi.stubGlobal('fetch', fetchMock);
 
     const el = new mod.ScionPrincipalPicker();
     el.principalType = 'group';
@@ -110,5 +125,8 @@ describe('group search results', () => {
     await (el as unknown as { searchGroups(q: string): Promise<void> }).searchGroups('al');
     const results = (el as unknown as { groupSearchResults: PickerGroup[] }).groupSearchResults;
     expect(results.map((g) => g.id)).toEqual(['g-normal', 'g-project-unmarked', 'g-marker-false']);
+    const url = String((fetchMock.mock.calls[0] as unknown[])[0]);
+    expect(url).toContain(`limit=${mod.GROUP_SEARCH_LIMIT}`);
+    expect(mod.GROUP_SEARCH_LIMIT).toBe(25);
   });
 });

@@ -160,3 +160,48 @@ func TestAddGroupMember_RefusesProjectMembersGroupAsChild(t *testing.T) {
 		}))
 	})
 }
+
+func TestCreateGroup_RefusesProjectMembersGroupWithParent(t *testing.T) {
+	ctx := context.Background()
+	env := newRoleTestEnv(t)
+	groups := NewGroupStore(env.client)
+	parentID := env.createGroup(t, "mg-create-parent")
+
+	for kind, key := range map[string]string{
+		"canonical-key": store.AnnotationProjectMembersGroup,
+		"legacy-key":    store.LegacyAnnotationProjectMembersGroup,
+	} {
+		t.Run("refused/"+kind, func(t *testing.T) {
+			g := &store.Group{
+				ID: uuid.NewString(), Name: "mg-create-child-" + kind, Slug: "mg-create-child-" + kind,
+				GroupType: store.GroupTypeExplicit, ProjectID: env.projectID, ParentID: parentID,
+				Annotations: map[string]string{key: "true"},
+			}
+			err := groups.CreateGroup(ctx, g)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, store.ErrProjectMembersGroupPrincipal), "got: %v", err)
+			_, gErr := groups.GetGroup(ctx, g.ID)
+			assert.True(t, errors.Is(gErr, store.ErrNotFound), "the group must not be created: %v", gErr)
+		})
+	}
+
+	t.Run("allowed/unmarked-with-parent", func(t *testing.T) {
+		g := &store.Group{
+			ID: uuid.NewString(), Name: "mg-create-plain", Slug: "mg-create-plain",
+			GroupType: store.GroupTypeExplicit, ProjectID: env.projectID, ParentID: parentID,
+		}
+		require.NoError(t, groups.CreateGroup(ctx, g))
+		members, err := groups.GetGroupMembers(ctx, parentID)
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		assert.Equal(t, g.ID, members[0].MemberID)
+	})
+
+	t.Run("allowed/members-group-without-parent", func(t *testing.T) {
+		require.NoError(t, groups.CreateGroup(ctx, &store.Group{
+			ID: uuid.NewString(), Name: "mg-create-top", Slug: "mg-create-top",
+			GroupType: store.GroupTypeExplicit, ProjectID: env.projectID,
+			Annotations: map[string]string{store.AnnotationProjectMembersGroup: "true"},
+		}))
+	})
+}

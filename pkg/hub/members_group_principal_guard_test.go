@@ -37,9 +37,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// membersGroupGuardFixture is a project X whose creator was removed without
-// an ownership transfer (so X's members group still lists the creator), and
-// a second project Y owned by X's remaining owner.
+// membersGroupGuardFixture is a project X with a user (the creator) listed
+// in X's members group but holding no binding on X, and a second project Y
+// owned by X's remaining owner. The creator holds no binding on Y either.
 type membersGroupGuardFixture struct {
 	staleOwnerFixture
 	// canonical is X's members group, marked with the canonical key.
@@ -111,12 +111,12 @@ func requireNoGroupBindings(t *testing.T, s store.Store, groupID string) {
 	assert.Empty(t, bindings, "no binding may name the members group")
 }
 
-// requireCreatorHasNoAccessToY asserts the removed creator of X gained no
-// access to Y.
+// requireCreatorHasNoAccessToY asserts that the user listed in X's members
+// group, who holds no binding on Y, has no access to Y.
 func requireCreatorHasNoAccessToY(t *testing.T, f membersGroupGuardFixture) {
 	t.Helper()
 	rec := doRequestAsUser(t, f.srv, f.creator, http.MethodGet, "/api/v1/projects/"+f.y.ID, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code, "creator must not see Y: %s", rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, "listed member must not gain access to Y: %s", rec.Body.String())
 	assert.Empty(t, f.srv.membershipService.projectEffectiveRole(context.Background(), f.creator.ID, f.y.ID))
 }
 
@@ -153,6 +153,30 @@ func seedExistingMembersGroupBinding(t *testing.T, f membersGroupGuardFixture, n
 	require.NoError(t, err)
 	require.Equal(t, "true", marked.Annotations[markerKey], "seeded group must carry the marker")
 	return marked, bindings
+}
+
+// createGroupMarkedLater creates an unmarked group of X; markGroup marks it
+// afterwards, modelling a reference created before this rule existed.
+func createGroupMarkedLater(t *testing.T, f membersGroupGuardFixture, name string) *store.Group {
+	t.Helper()
+	g := &store.Group{
+		ID: tid("mgguard-later-" + name), Name: "MG Guard Later " + name, Slug: "mgguard-later-" + name,
+		GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+	}
+	require.NoError(t, f.s.CreateGroup(context.Background(), g))
+	return g
+}
+
+func markGroup(t *testing.T, f membersGroupGuardFixture, groupID, markerKey string) {
+	t.Helper()
+	ctx := context.Background()
+	stored, err := f.s.GetGroup(ctx, groupID)
+	require.NoError(t, err)
+	stored.Annotations = map[string]string{markerKey: "true"}
+	require.NoError(t, f.s.UpdateGroup(ctx, stored))
+	marked, err := f.s.GetGroup(ctx, groupID)
+	require.NoError(t, err)
+	require.Equal(t, "true", marked.Annotations[markerKey], "group must now carry the marker")
 }
 
 func markerKeys() map[string]string {
@@ -304,7 +328,7 @@ func TestMembersGroupPrincipalGuard_NestedGroupRefused(t *testing.T) {
 
 				groups, err := f.s.GetEffectiveGroups(ctx, f.creator.ID)
 				require.NoError(t, err)
-				assert.NotContains(t, groups, parent.ID, "creator must not inherit the parent group")
+				assert.NotContains(t, groups, parent.ID, "listed member must not gain the parent group")
 				requireCreatorHasNoAccessToY(t, f)
 			})
 		}
@@ -373,6 +397,46 @@ func TestMembersGroupPrincipalGuard_ExistingBindingDeleteAllowed(t *testing.T) {
 			rec := doRequestAsUser(t, f.srv, f.coOwner, http.MethodDelete, mmrPrincipalPath(f.y.ID, "group", g.ID), nil)
 			require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
 			requireNoGroupBindings(t, f.s, g.ID)
+		})
+		t.Run(kind+"/admin-project-scope", func(t *testing.T) {
+			f := setupMembersGroupGuardFixture(t)
+			g, bindings := seedExistingMembersGroupBinding(t, f, "deladminproj", key, projectRoleDef(t, f.s, store.ProjectRoleMember))
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+bindings[0].ID, nil)
+			require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+			requireNoGroupBindings(t, f.s, g.ID)
+		})
+		t.Run(kind+"/admin-system-scope", func(t *testing.T) {
+			f := setupMembersGroupGuardFixture(t)
+			ctx := context.Background()
+			g := createGroupMarkedLater(t, f, "deladminsys")
+			viewer, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+			require.NoError(t, err)
+			rb, err := f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: viewer.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: g.ID,
+				ScopeType: store.RoleScopeSystem, CreatedBy: "test-seed",
+			})
+			require.NoError(t, err)
+			markGroup(t, f, g.ID, key)
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+rb.ID, nil)
+			require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+			requireNoGroupBindings(t, f.s, g.ID)
+		})
+		t.Run(kind+"/child-group-edge", func(t *testing.T) {
+			f := setupMembersGroupGuardFixture(t)
+			ctx := context.Background()
+			parent := &store.Group{ID: tid("mgguard-deledge-parent"), Name: "MG Guard Del Edge Parent", Slug: "mgguard-deledge-parent"}
+			require.NoError(t, f.s.CreateGroup(ctx, parent))
+			child := createGroupMarkedLater(t, f, "deledge")
+			require.NoError(t, f.s.AddGroupMember(ctx, &store.GroupMember{
+				GroupID: parent.ID, MemberType: store.GroupMemberTypeGroup, MemberID: child.ID,
+				Role: store.GroupMemberRoleMember,
+			}))
+			markGroup(t, f, child.ID, key)
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/groups/"+parent.ID+"/members/group/"+child.ID, nil)
+			require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+			members, err := f.s.GetGroupMembers(ctx, parent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, members, "the child edge must be removed")
 		})
 	}
 }

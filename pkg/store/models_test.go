@@ -363,6 +363,9 @@ func TestIsProjectMembersGroup(t *testing.T) {
 		{"both keys", &Group{ProjectID: "p", Annotations: map[string]string{
 			AnnotationProjectMembersGroup: "true", LegacyAnnotationProjectMembersGroup: "true",
 		}}, true},
+		{"conflicting markers legacy true canonical false", &Group{ProjectID: "p", Annotations: map[string]string{
+			AnnotationProjectMembersGroup: "false", LegacyAnnotationProjectMembersGroup: "true",
+		}}, true},
 		{"no annotations", &Group{ProjectID: "p"}, false},
 		{"marker false", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectMembersGroup: "false"}}, false},
 		{"legacy marker false", &Group{ProjectID: "p", Annotations: map[string]string{LegacyAnnotationProjectMembersGroup: "false"}}, false},

@@ -185,6 +185,11 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 
 	// ParentID maps to parent_groups edge
 	if g.ParentID != "" {
+		// Project members groups are system-managed and cannot be created
+		// as a child of another group (see AddGroupMember).
+		if store.IsProjectMembersGroup(g) {
+			return fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, g.ID)
+		}
 		parentUID, err := parseUUID(g.ParentID)
 		if err != nil {
 			return err
@@ -455,7 +460,9 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 
 	case store.GroupMemberTypeGroup:
 		// Project members groups are system-managed and cannot be nested
-		// as a child of another group.
+		// as a child of another group. This is the store backstop for every
+		// path that adds a group-in-group edge; CreateGroup applies the same
+		// rule when the new group is created with a ParentID.
 		child, err := s.client.Group.Get(ctx, memberUID)
 		if err != nil {
 			return mapError(err)
