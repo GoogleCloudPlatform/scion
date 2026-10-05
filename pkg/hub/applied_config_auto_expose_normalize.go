@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -35,6 +36,121 @@ var autoExposeAllowlistExemptKeys = map[string]bool{
 	api.EnvAutoExposePorts:         true,
 	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
 	"SCION_AUTO_EXPOSE_INTERVAL":   true,
+}
+
+// AutoExposeEnvNormalizeExecutor re-derives SCION_AUTO_EXPOSE_PORTS for
+// agents whose InlineConfig.Env still holds a value an older hub stamped
+// there (see normalizeAutoExposeEnv). It is a rerunnable maintenance
+// migration (see resolveMaintenanceExecutor, key
+// "auto-expose-env-normalize") and touches no other env key.
+//
+// An agent whose project or template lookup fails is skipped with a WARN and
+// left as it was, so a later run retries it; a skipped agent never loses a
+// tier. Values are never logged, only agent IDs and counts. Every write goes
+// through an optimistic-lock retry that re-applies the normalization to the
+// latest row, so the migration is safe alongside normal traffic, and it is
+// idempotent: a normalized agent no longer matches
+// needsAutoExposeNormalization.
+type AutoExposeEnvNormalizeExecutor struct {
+	Store store.Store
+
+	// projectCache memoizes project lookups within one Run; a nil entry
+	// records a missing project.
+	projectCache map[string]*store.Project
+}
+
+// autoExposeEnvNormalizeResult summarizes one run.
+type autoExposeEnvNormalizeResult struct {
+	AgentsScanned    int `json:"agentsScanned"`
+	AgentsNormalized int `json:"agentsNormalized"`
+	AgentsSkipped    int `json:"agentsSkipped"`
+}
+
+func (e *AutoExposeEnvNormalizeExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	_, err := e.run(ctx, logger, params)
+	return err
+}
+
+// run does the work of Run and returns the summary it logs.
+func (e *AutoExposeEnvNormalizeExecutor) run(ctx context.Context, logger io.Writer, params map[string]string) (autoExposeEnvNormalizeResult, error) {
+	dryRun := params["dryRun"] == "true"
+	if dryRun {
+		_, _ = fmt.Fprintln(logger, "DRY RUN: no changes will be made.")
+	}
+	e.projectCache = make(map[string]*store.Project)
+
+	result := autoExposeEnvNormalizeResult{}
+	cursor := ""
+	const pageSize = 200
+	for {
+		page, err := e.Store.ListAgents(ctx, store.AgentFilter{IncludeDeleted: true}, store.ListOptions{
+			Limit:          pageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return result, fmt.Errorf("list agents: %w", err)
+		}
+		for i := range page.Items {
+			agent := &page.Items[i]
+			result.AgentsScanned++
+			if !needsAutoExposeNormalization(agent.AppliedConfig) {
+				continue
+			}
+			src, err := e.autoExposeSourcesFor(ctx, agent)
+			if err != nil {
+				result.AgentsSkipped++
+				_, _ = fmt.Fprintf(logger, "  WARN agent=%s - skipped, retried by the next run: %v\n", agent.ID, err)
+				continue
+			}
+			if !dryRun {
+				written, err := e.normalizeWithRetry(ctx, agent.ID, src)
+				if err != nil {
+					result.AgentsSkipped++
+					_, _ = fmt.Fprintf(logger, "  WARN agent=%s - failed to update, retried by the next run: %v\n", agent.ID, err)
+					continue
+				}
+				if !written {
+					continue
+				}
+			}
+			result.AgentsNormalized++
+			_, _ = fmt.Fprintf(logger, "  %s agent=%s key=%s\n", normalizeVerb(dryRun), agent.ID, api.EnvAutoExposePorts)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s); re-derived auto-expose on %d agent(s); skipped %d agent(s).\n",
+		result.AgentsScanned, result.AgentsNormalized, result.AgentsSkipped)
+	return result, nil
+}
+
+// normalizeWithRetry re-reads the agent, applies normalizeAutoExposeEnv and
+// writes the row, retrying on an optimistic-lock conflict against the latest
+// row. It reports whether a row was written; a row a concurrent writer has
+// already normalized is not.
+func (e *AutoExposeEnvNormalizeExecutor) normalizeWithRetry(ctx context.Context, agentID string, src *autoExposeSources) (bool, error) {
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		agent, err := e.Store.GetAgent(ctx, agentID)
+		if err != nil {
+			return false, err
+		}
+		if !normalizeAutoExposeEnv(agent.AppliedConfig, src) {
+			return false, nil
+		}
+		err = e.Store.UpdateAgent(ctx, agent)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, store.ErrVersionConflict) {
+			return false, err
+		}
+	}
+	return false, fmt.Errorf("agent %s: gave up after %d version-conflict retries", agentID, maxAttempts)
 }
 
 // autoExposeSources are the tiers normalizeAutoExposeEnv re-derives
@@ -97,11 +213,13 @@ func normalizeAutoExposeEnv(ac *store.AgentAppliedConfig, src *autoExposeSources
 	return true
 }
 
-// autoExposeSourcesFor loads the project and template tiers for agent. A
-// project or template that no longer exists contributes nothing, as at
-// reincarnate; any other lookup error is returned so the caller skips the
+// autoExposeSourcesFor loads the project and template tiers for agent. The
+// template is resolved by the agent's template reference, as reincarnate
+// does (resolveTemplateRef), so a template re-pushed under a new ID is still
+// found. A project or template that no longer exists contributes nothing, as
+// at reincarnate; any other lookup error is returned so the caller skips the
 // agent rather than dropping a tier.
-func (e *AppliedConfigEnvCleanupExecutor) autoExposeSourcesFor(ctx context.Context, agent *store.Agent) (*autoExposeSources, error) {
+func (e *AutoExposeEnvNormalizeExecutor) autoExposeSourcesFor(ctx context.Context, agent *store.Agent) (*autoExposeSources, error) {
 	src := &autoExposeSources{}
 	if agent.ProjectID != "" {
 		project, ok := e.projectCache[agent.ProjectID]
@@ -118,13 +236,12 @@ func (e *AppliedConfigEnvCleanupExecutor) autoExposeSourcesFor(ctx context.Conte
 		}
 		src.project = project
 	}
-	if id := agent.AppliedConfig.TemplateID; id != "" {
-		tmpl, err := e.Store.GetTemplate(ctx, id)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-		case err != nil:
-			return nil, fmt.Errorf("get template %s: %w", id, err)
-		case tmpl != nil && tmpl.Config != nil:
+	if agent.Template != "" {
+		tmpl, err := resolveTemplateRef(ctx, e.Store, agent.Template, agent.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve template %s: %w", agent.Template, err)
+		}
+		if tmpl != nil && tmpl.Config != nil {
 			src.templateEnv = tmpl.Config.Env
 		}
 	}

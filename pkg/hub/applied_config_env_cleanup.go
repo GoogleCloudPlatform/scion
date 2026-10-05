@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -67,14 +66,9 @@ import (
 // The auto-expose keys in autoExposeAllowlistExemptKeys are exempt from this
 // allowlist (the secret checks still apply): the hub derives
 // SCION_AUTO_EXPOSE_PORTS into AppliedConfig.Env from the project annotation,
-// and no plain source this job can see produces that value.
-//
-// Before the per-key decision, an agent whose InlineConfig.Env holds a
-// SCION_AUTO_EXPOSE_PORTS that its CreateInputs lacks (a stamp written by an
-// older hub) is normalized by normalizeAutoExposeEnv: the stamp leaves both
-// env maps and the project and template tiers are re-derived, as reincarnate
-// would. Agents without CreateInputs, and reincarnation snapshots, are not
-// normalized.
+// and no plain source this job can see produces that value. Stamped
+// auto-expose values are normalized by a separate migration,
+// auto-expose-env-normalize (AutoExposeEnvNormalizeExecutor).
 //
 // InlineConfig.Env keys are decided by a narrower rule: only the GITHUB_TOKEN
 // and live-secret-name checks above apply. InlineConfig is itself one of the
@@ -126,10 +120,6 @@ type AppliedConfigEnvCleanupExecutor struct {
 	// agentCache memoizes the owning-agent lookup for reincarnation records
 	// within one Run; a nil entry records that the agent row is gone.
 	agentCache map[string]*store.Agent
-
-	// projectCache memoizes project lookups for the auto-expose
-	// normalization within one Run; a nil entry records a missing project.
-	projectCache map[string]*store.Project
 }
 
 // appliedConfigEnvCleanupResult is a machine-readable summary, mirroring the
@@ -138,10 +128,6 @@ type appliedConfigEnvCleanupResult struct {
 	AgentsScanned int `json:"agentsScanned"`
 	AgentsUpdated int `json:"agentsUpdated"`
 	KeysStripped  int `json:"keysStripped"`
-	// AgentsAutoExposeNormalized counts agents whose non-explicit
-	// SCION_AUTO_EXPOSE_PORTS was moved out of InlineConfig.Env and
-	// re-derived (normalizeAutoExposeEnv).
-	AgentsAutoExposeNormalized int `json:"agentsAutoExposeNormalized"`
 
 	ReincarnationsScanned            int `json:"reincarnationsScanned"`
 	ReincarnationsUpdated            int `json:"reincarnationsUpdated"`
@@ -158,7 +144,6 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 	e.envVarCache = make(map[string][]store.EnvVar)
 	e.secretCache = make(map[string][]secret.SecretMeta)
 	e.agentCache = make(map[string]*store.Agent)
-	e.projectCache = make(map[string]*store.Project)
 
 	result := appliedConfigEnvCleanupResult{}
 	cursor := ""
@@ -185,21 +170,8 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 				continue
 			}
 
-			var aeSources *autoExposeSources
-			if needsAutoExposeNormalization(agent.AppliedConfig) {
-				src, err := e.autoExposeSourcesFor(ctx, agent)
-				if err != nil {
-					_, _ = fmt.Fprintf(logger, "  WARN agent=%s - skipped auto-expose normalization: %v\n", agent.ID, err)
-				} else {
-					aeSources = src
-					normalizeAutoExposeEnv(agent.AppliedConfig, src)
-					_, _ = fmt.Fprintf(logger, "  %s agent=%s field=inlineConfig.env key=%s\n", normalizeVerb(dryRun), agent.ID, api.EnvAutoExposePorts)
-					result.AgentsAutoExposeNormalized++
-				}
-			}
-
 			appliedStrip, inlineStrip, createInputsStrip := e.keysToStrip(ctx, agent, agent.AppliedConfig, false)
-			if aeSources == nil && len(appliedStrip) == 0 && len(inlineStrip) == 0 && len(createInputsStrip) == 0 {
+			if len(appliedStrip) == 0 && len(inlineStrip) == 0 && len(createInputsStrip) == 0 {
 				continue
 			}
 
@@ -218,7 +190,7 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 			if dryRun {
 				continue
 			}
-			if err := e.stripKeysWithRetry(ctx, agent.ID, aeSources, appliedStrip, inlineStrip, createInputsStrip); err != nil {
+			if err := e.stripKeysWithRetry(ctx, agent.ID, appliedStrip, inlineStrip, createInputsStrip); err != nil {
 				_, _ = fmt.Fprintf(logger, "  WARN agent=%s - failed to update: %v\n", agent.ID, err)
 			}
 		}
@@ -229,8 +201,8 @@ func (e *AppliedConfigEnvCleanupExecutor) Run(ctx context.Context, logger io.Wri
 		cursor = page.NextCursor
 	}
 
-	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s); normalized %d agent config row(s) (%d field(s)); re-derived auto-expose on %d agent(s).\n",
-		result.AgentsScanned, result.AgentsUpdated, result.KeysStripped, result.AgentsAutoExposeNormalized)
+	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s); normalized %d agent config row(s) (%d field(s)).\n",
+		result.AgentsScanned, result.AgentsUpdated, result.KeysStripped)
 
 	if err := e.cleanReincarnationSnapshots(ctx, logger, dryRun, &result); err != nil {
 		return err
@@ -492,8 +464,7 @@ func (e *AppliedConfigEnvCleanupExecutor) secretScopeFilters(agent *store.Agent)
 	return filters
 }
 
-// stripKeysWithRetry first re-runs normalizeAutoExposeEnv with aeSources
-// when that is non-nil, then deletes appliedKeys from the agent's persisted
+// stripKeysWithRetry deletes appliedKeys from the agent's persisted
 // AppliedConfig.Env, inlineKeys from AppliedConfig.InlineConfig.Env and
 // createInputsKeys from AppliedConfig.CreateInputs.InlineConfig.Env (all in
 // the same read-modify-write), retrying on an optimistic-lock conflict by
@@ -502,7 +473,7 @@ func (e *AppliedConfigEnvCleanupExecutor) secretScopeFilters(agent *store.Agent)
 // them). Bounded at a handful of attempts so a pathologically hot row cannot
 // spin the migration forever; a row that keeps losing the race is simply
 // picked up again on the next run of this (idempotent) migration.
-func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context, agentID string, aeSources *autoExposeSources, appliedKeys, inlineKeys, createInputsKeys []string) error {
+func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context, agentID string, appliedKeys, inlineKeys, createInputsKeys []string) error {
 	const maxAttempts = 5
 	removeApplied := make(map[string]bool, len(appliedKeys))
 	for _, k := range appliedKeys {
@@ -527,9 +498,6 @@ func (e *AppliedConfigEnvCleanupExecutor) stripKeysWithRetry(ctx context.Context
 		}
 
 		changed := false
-		if aeSources != nil && normalizeAutoExposeEnv(agent.AppliedConfig, aeSources) {
-			changed = true
-		}
 		for k := range removeApplied {
 			if _, ok := agent.AppliedConfig.Env[k]; ok {
 				delete(agent.AppliedConfig.Env, k)

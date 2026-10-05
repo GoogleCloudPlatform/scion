@@ -26,17 +26,20 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// The env cleanup's auto-expose handling (ptone/scion#2562 §5(b) as amended
-// by design A8): a stamped SCION_AUTO_EXPOSE_PORTS is re-derived, and the
-// auto-expose keys are exempt from the AppliedConfig.Env allowlist.
+// Auto-expose legacy handling (ptone/scion#2562 §5(b) as amended by design
+// A8 and A9): the auto-expose-env-normalize migration re-derives a stamped
+// SCION_AUTO_EXPOSE_PORTS, and the env cleanup exempts the auto-expose keys
+// from its AppliedConfig.Env allowlist.
 
 type aeNormalizeAgent struct {
 	projectAnno  string            // "" = no annotation
 	templateEnv  map[string]string // nil = no template
+	templateID   string            // the agent's recorded template ID; may be stale
 	appliedEnv   map[string]string
 	inlineEnv    map[string]string
 	createInputs *store.AgentCreateInputs // nil = legacy agent
@@ -57,7 +60,7 @@ func setupAENormalizeAgent(t *testing.T, in aeNormalizeAgent) (*Server, store.St
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		if in.templateEnv != nil {
 			a.Template = "ae-norm-tmpl"
-			a.AppliedConfig.TemplateID = tid("template-ae-norm-tmpl-" + t.Name())
+			a.AppliedConfig.TemplateID = in.templateID
 		}
 		a.AppliedConfig.Env = in.appliedEnv
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: in.inlineEnv}
@@ -68,9 +71,9 @@ func setupAENormalizeAgent(t *testing.T, in aeNormalizeAgent) (*Server, store.St
 	return srv, s, project, loaded
 }
 
-func runAECleanup(t *testing.T, s store.Store, params map[string]string) string {
+func runAENormalize(t *testing.T, s store.Store, params map[string]string) string {
 	t.Helper()
-	exec := &AppliedConfigEnvCleanupExecutor{Store: s}
+	exec := &AutoExposeEnvNormalizeExecutor{Store: s}
 	var buf bytes.Buffer
 	require.NoError(t, exec.Run(context.Background(), &buf, params))
 	return buf.String()
@@ -127,8 +130,8 @@ func TestEnvCleanup_AutoExposeNormalizationMatchesReincarnate(t *testing.T) {
 			fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 			require.NoError(t, err)
 
-			log := runAECleanup(t, s, nil)
-			assert.Contains(t, log, "RE-DERIVE agent="+agent.ID+" field=inlineConfig.env key="+aeKey)
+			log := runAENormalize(t, s, nil)
+			assert.Contains(t, log, "RE-DERIVE agent="+agent.ID+" key="+aeKey)
 			assert.Contains(t, log, "re-derived auto-expose on 1 agent(s)")
 
 			got := reloadAgent(t, s, agent.ID)
@@ -146,7 +149,7 @@ func TestEnvCleanup_AutoExposeNormalizationMatchesReincarnate(t *testing.T) {
 			assert.Equal(t, "1", got.AppliedConfig.Env["KEEP"])
 
 			version := got.StateVersion
-			log2 := runAECleanup(t, s, nil)
+			log2 := runAENormalize(t, s, nil)
 			assert.NotContains(t, log2, "RE-DERIVE")
 			assert.Equal(t, version, reloadAgent(t, s, agent.ID).StateVersion, "second run is a no-op")
 		})
@@ -181,7 +184,7 @@ func TestEnvCleanup_AutoExposeNormalizationLeavesOthersAlone(t *testing.T) {
 			wantApplied := maps.Clone(agent.AppliedConfig.Env)
 			wantInline := maps.Clone(inlineEnv(agent))
 
-			log := runAECleanup(t, s, nil)
+			log := runAENormalize(t, s, nil)
 			assert.NotContains(t, log, "RE-DERIVE")
 
 			got := reloadAgent(t, s, agent.ID)
@@ -200,8 +203,8 @@ func TestEnvCleanup_AutoExposeNormalizationDryRun(t *testing.T) {
 		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
 		createInputs: explicitKeep(),
 	})
-	log := runAECleanup(t, s, map[string]string{"dryRun": "true"})
-	assert.Contains(t, log, "WOULD RE-DERIVE agent="+agent.ID+" field=inlineConfig.env key="+aeKey)
+	log := runAENormalize(t, s, map[string]string{"dryRun": "true"})
+	assert.Contains(t, log, "WOULD RE-DERIVE agent="+agent.ID+" key="+aeKey)
 	got := reloadAgent(t, s, agent.ID)
 	assert.Equal(t, "true", inlineEnv(got)[aeKey])
 	assert.Equal(t, agent.StateVersion, got.StateVersion)
@@ -241,7 +244,8 @@ func TestEnvCleanup_AutoExposeKeysExemptFromAllowlist(t *testing.T) {
 		PreviousAppliedConfig: snapshot(), NewAppliedConfig: snapshot(),
 	}))
 
-	runAECleanup(t, s, nil)
+	var buf bytes.Buffer
+	require.NoError(t, (&AppliedConfigEnvCleanupExecutor{Store: s}).Run(context.Background(), &buf, nil))
 
 	assert.Equal(t, derived, reloadAgent(t, s, agent.ID).AppliedConfig.Env)
 	rec, err := s.GetAgentReincarnation(context.Background(), recID)
@@ -261,10 +265,10 @@ func TestEnvCleanup_AutoExposeNormalizationLeavesInlineTZToTZCleanup(t *testing.
 		createInputs: explicitKeep(),
 	})
 
-	runAECleanup(t, s, nil)
+	runAENormalize(t, s, nil)
 	got := reloadAgent(t, s, agent.ID)
 	assert.NotContains(t, inlineEnv(got), aeKey)
-	assert.Equal(t, "Asia/Tokyo", inlineEnv(got)[agentTZEnvKey], "env cleanup keeps an explicit-config TZ")
+	assert.Equal(t, "Asia/Tokyo", inlineEnv(got)[agentTZEnvKey], "normalization leaves TZ alone")
 
 	var buf bytes.Buffer
 	_, err := (&AppliedConfigTZCleanupExecutor{Store: s}).run(context.Background(), &buf, nil)
@@ -297,7 +301,7 @@ func TestEnvCleanup_AutoExposeNormalizationProjectLookup(t *testing.T) {
 			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
 			createInputs: explicitKeep(),
 		})
-		log := runAECleanup(t, &projectLookupStore{Store: s, err: store.ErrNotFound}, nil)
+		log := runAENormalize(t, &projectLookupStore{Store: s, err: store.ErrNotFound}, nil)
 		assert.Contains(t, log, "RE-DERIVE agent="+agent.ID)
 		got := reloadAgent(t, s, agent.ID)
 		assert.NotContains(t, inlineEnv(got), aeKey)
@@ -309,10 +313,149 @@ func TestEnvCleanup_AutoExposeNormalizationProjectLookup(t *testing.T) {
 			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
 			createInputs: explicitKeep(),
 		})
-		log := runAECleanup(t, &projectLookupStore{Store: s, err: errors.New("db down")}, nil)
-		assert.Contains(t, log, "WARN agent="+agent.ID+" - skipped auto-expose normalization")
+		log := runAENormalize(t, &projectLookupStore{Store: s, err: errors.New("db down")}, nil)
+		assert.Contains(t, log, "WARN agent="+agent.ID+" - skipped, retried by the next run")
+		assert.NotContains(t, log, "RE-DERIVE")
 		got := reloadAgent(t, s, agent.ID)
 		assert.Equal(t, "true", inlineEnv(got)[aeKey])
 		assert.Equal(t, agent.StateVersion, got.StateVersion)
 	})
+}
+
+// TestEnvCleanup_AutoExposeNormalizationTemplateRepushed covers N3: the
+// template is resolved by the agent's template reference, as reincarnate
+// does, so a template deleted and re-pushed under a new ID still supplies
+// its tier.
+func TestEnvCleanup_AutoExposeNormalizationTemplateRepushed(t *testing.T) {
+	srv, s, project, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+		templateEnv:  map[string]string{aeKey: "false"},
+		templateID:   tid("template-deleted-before-repush"),
+		appliedEnv:   map[string]string{"KEEP": "1", aeKey: "true"},
+		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+		createInputs: explicitKeep(),
+	})
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+	require.NoError(t, err)
+	require.Equal(t, "false", fresh.Env[aeKey])
+
+	runAENormalize(t, s, nil)
+	assert.Equal(t, "false", reloadAgent(t, s, agent.ID).AppliedConfig.Env[aeKey])
+}
+
+// templateLookupStore makes GetTemplate fail with err.
+type templateLookupStore struct {
+	store.Store
+	err error
+}
+
+func (s *templateLookupStore) GetTemplate(ctx context.Context, id string) (*store.Template, error) {
+	return nil, s.err
+}
+
+// TestEnvCleanup_AutoExposeNormalizationTemplateLookupError covers N2: a
+// template lookup failure skips the agent rather than dropping the template
+// tier.
+func TestEnvCleanup_AutoExposeNormalizationTemplateLookupError(t *testing.T) {
+	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+		templateEnv:  map[string]string{aeKey: "false"},
+		appliedEnv:   map[string]string{"KEEP": "1"},
+		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+		createInputs: explicitKeep(),
+	})
+	log := runAENormalize(t, &templateLookupStore{Store: s, err: errors.New("db down")}, nil)
+	assert.Contains(t, log, "WARN agent="+agent.ID+" - skipped, retried by the next run")
+	assert.Contains(t, log, "skipped 1 agent(s)")
+	got := reloadAgent(t, s, agent.ID)
+	assert.Equal(t, "true", inlineEnv(got)[aeKey])
+	assert.Equal(t, agent.StateVersion, got.StateVersion)
+}
+
+// failingUpdateStore rejects every agent update.
+type failingUpdateStore struct {
+	store.Store
+}
+
+func (s *failingUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	return errors.New("update rejected")
+}
+
+// TestEnvCleanup_AutoExposeNormalizationCountsOnlyWrites covers N4: an agent
+// whose write fails is reported as skipped, not as re-derived.
+func TestEnvCleanup_AutoExposeNormalizationCountsOnlyWrites(t *testing.T) {
+	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+		appliedEnv:   map[string]string{"KEEP": "1"},
+		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+		createInputs: explicitKeep(),
+	})
+	var buf bytes.Buffer
+	res, err := (&AutoExposeEnvNormalizeExecutor{Store: &failingUpdateStore{Store: s}}).run(context.Background(), &buf, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.AgentsNormalized)
+	assert.Equal(t, 1, res.AgentsSkipped)
+	assert.NotContains(t, buf.String(), "RE-DERIVE")
+	assert.Contains(t, buf.String(), "WARN agent="+agent.ID+" - failed to update, retried by the next run")
+}
+
+// TestEnvCleanup_AutoExposeNormalizationTouchesOnlyAutoExpose pins that the
+// normalization changes SCION_AUTO_EXPOSE_PORTS and nothing else: keys the
+// env cleanup would strip (GITHUB_TOKEN, an unsourced key) stay.
+func TestEnvCleanup_AutoExposeNormalizationTouchesOnlyAutoExpose(t *testing.T) {
+	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+		appliedEnv:   map[string]string{"KEEP": "1", "GITHUB_TOKEN": "x", "UNSOURCED_VAR": "y", "SCION_AUTO_EXPOSE_MODE": "all"},
+		inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true", "GITHUB_TOKEN": "x"},
+		createInputs: explicitKeep(),
+	})
+	runAENormalize(t, s, nil)
+	got := reloadAgent(t, s, agent.ID)
+	assert.Equal(t, map[string]string{"KEEP": "1", "GITHUB_TOKEN": "x", "UNSOURCED_VAR": "y", "SCION_AUTO_EXPOSE_MODE": "all"}, got.AppliedConfig.Env)
+	assert.Equal(t, map[string]string{"KEEP": "1", "GITHUB_TOKEN": "x"}, inlineEnv(got))
+}
+
+// TestEnvCleanup_AutoExposeSecretStillStripped covers N1: the allowlist
+// exemption never shields a live secret named like an auto-expose key.
+func TestEnvCleanup_AutoExposeSecretStillStripped(t *testing.T) {
+	_, s, project, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+		appliedEnv:   map[string]string{aeKey: "true", "SCION_AUTO_EXPOSE_PORTS_LIST": "8080"},
+		createInputs: &store.AgentCreateInputs{Workspace: "/tmp/reincarnate-workspace"},
+	})
+	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: tid("ae-secret-envvar"), Key: "SCION_AUTO_EXPOSE_PORTS_LIST", Value: "8080",
+		Scope: store.ScopeProject, ScopeID: project.ID, Secret: true,
+	}))
+	var buf bytes.Buffer
+	require.NoError(t, (&AppliedConfigEnvCleanupExecutor{Store: s}).Run(context.Background(), &buf, nil))
+	assert.Equal(t, map[string]string{aeKey: "true"}, reloadAgent(t, s, agent.ID).AppliedConfig.Env)
+}
+
+// TestAutoExposeEnvNormalizeRerunsThroughExecuteMigration runs the migration
+// twice through the admin endpoint: it is seeded, the second run is accepted
+// (the key is in rerunnableMigrations), and it writes no agent row.
+func TestAutoExposeEnvNormalizeRerunsThroughExecuteMigration(t *testing.T) {
+	key := entadapter.AutoExposeEnvNormalizeKey
+	ctx := context.Background()
+	srv, s := newTestServerWithStore(t)
+	require.True(t, rerunnableMigrations[key])
+
+	project := &store.Project{ID: tid("ae-rerun-project"), Name: "AE rerun", Slug: "ae-rerun"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("ae-rerun-agent"), Slug: "ae-rerun-agent", Name: "AE rerun agent", ProjectID: project.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env:          map[string]string{"KEEP": "1"},
+			InlineConfig: &api.ScionConfig{Env: map[string]string{"KEEP": "1", aeKey: "true"}},
+			CreateInputs: explicitKeep(),
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	first := runMigrationViaHandler(t, srv, s, key, `{}`)
+	require.Equal(t, store.MaintenanceStatusCompleted, first.Status, first.Result)
+	assert.Contains(t, first.Result, "re-derived auto-expose on 1 agent(s)")
+	after := reloadAgent(t, s, agent.ID)
+	assert.NotContains(t, inlineEnv(after), aeKey)
+
+	second := runMigrationViaHandler(t, srv, s, key, `{}`)
+	require.Equal(t, store.MaintenanceStatusCompleted, second.Status, second.Result)
+	assert.Contains(t, second.Result, "re-derived auto-expose on 0 agent(s)")
+	assert.Equal(t, after.StateVersion, reloadAgent(t, s, agent.ID).StateVersion)
 }

@@ -37,8 +37,15 @@ import (
 // It tries: 1) by ID, 2) by slug in project scope, 3) by slug in global scope.
 // Returns nil if not found, or an error for actual failures.
 func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID string) (*store.Template, error) {
+	return resolveTemplateRef(ctx, s.store, templateRef, projectID)
+}
+
+// resolveTemplateRef resolves templateRef by ID, then by slug in the
+// project's scope, then by slug in the global scope. It returns nil and no
+// error when nothing matches.
+func resolveTemplateRef(ctx context.Context, st store.Store, templateRef, projectID string) (*store.Template, error) {
 	// Try looking up by ID first (the CLI typically resolves names to IDs)
-	template, err := s.store.GetTemplate(ctx, templateRef)
+	template, err := st.GetTemplate(ctx, templateRef)
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -47,7 +54,7 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	}
 
 	// Try by slug/name within project scope
-	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "project", projectID)
+	template, err = st.GetTemplateBySlug(ctx, templateRef, "project", projectID)
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -56,7 +63,7 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	}
 
 	// Try global scope
-	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "global", "")
+	template, err = st.GetTemplateBySlug(ctx, templateRef, "global", "")
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
