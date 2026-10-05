@@ -10,6 +10,10 @@ The grove→project rename reached its breaking phase: legacy grove routes, CLI 
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-09-21/)
 
+## Timezone handling changes
+
+After the week of September 21, timezone handling changed: the Hub sends every timestamp in UTC with `Z`, the web dashboard has a per-user display timezone and a 24-hour clock, and cron schedules are UTC only. The runtime-profile `timezone` setting introduced that week ([release notes](/scion/release-notes/2026-09-21/)) has been removed: an agent's `TZ` now comes from its pin, `TZ` environment variables on the Hub, or the Hub default timezone. See [Times and Timezones](/scion/reference/times-and-timezones/) for the full behaviour and the operator steps after upgrading.
+
 ## Previous Weeks
 
 - [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)

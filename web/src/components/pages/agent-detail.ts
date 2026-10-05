@@ -54,6 +54,7 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -1322,7 +1323,7 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
+              label=${stateLabel(getAgentDisplayStatus(agent))}
             ></scion-status-badge>
             <scion-deletion-badge
               .deletion=${this.deletionLease.view(agent)}
@@ -1577,7 +1578,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
@@ -1735,23 +1736,35 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `

@@ -385,6 +385,8 @@ func TestSendOutboundMessage_Success(t *testing.T) {
 			"status":       "sent",
 			"recipient":    "user:alice",
 			"recipient_id": "uid-alice",
+			// ptone/scion#2026: the hub reports the resolved conversation.
+			"conversation_id": "conv-uuid-9",
 		})
 	}))
 	defer server.Close()
@@ -406,6 +408,7 @@ func TestSendOutboundMessage_Success(t *testing.T) {
 	assert.Equal(t, "sent", result.Status)
 	assert.Equal(t, "user:alice", result.Recipient)
 	assert.Equal(t, "uid-alice", result.RecipientID)
+	assert.Equal(t, "conv-uuid-9", result.ConversationID)
 }
 
 func TestSendOutboundMessage_ProjectScoped(t *testing.T) {

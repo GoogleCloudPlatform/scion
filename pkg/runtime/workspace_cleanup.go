@@ -43,9 +43,9 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 		return fmt.Errorf("CleanupNFSProject: no NFS shares configured")
 	}
 
-	subPathRoot := cfg.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
+	subPathRoot, err := config.ResolveSubPathRoot(cfg.SubPathRoot)
+	if err != nil {
+		return fmt.Errorf("CleanupNFSProject: %w", err)
 	}
 
 	share := cfg.Shares[0]
