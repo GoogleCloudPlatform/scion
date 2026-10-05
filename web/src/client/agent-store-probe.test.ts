@@ -723,6 +723,23 @@ describe('AgentStore delta probe', () => {
       expect(h.server.walks()).toBe(walks);
     });
 
+    it('shows its failure when a resync arrived during it', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const h = await loaded([row('a1', 1)]);
+      await tick(9 * AGENT_PROBE_INTERVAL_MS);
+      const release = h.server.pause();
+      await tick();
+      expect(h.server.walks()).toBe(2);
+      h.server.status = 500;
+      h.feeds[0]?.dispatchEvent(new CustomEvent('agents-resync'));
+      release();
+      await settle();
+      const snapshot = h.store.peek(HUB);
+      expect(snapshot?.status).toBe('error');
+      expect(snapshot?.error).toBeDefined();
+      expect(ids(snapshot)).toEqual(['a1']);
+    });
+
     it('does not walk a list nobody retains', async () => {
       const h = createHarness([row('a1', 1)]);
       const release = h.store.retain(HUB, () => {});

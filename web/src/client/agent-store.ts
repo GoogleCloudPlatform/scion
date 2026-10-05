@@ -949,8 +949,11 @@ export class AgentStore {
       entry.walk = null;
       if (isAbortError(err) && signal.aborted) return;
       const error = err instanceof Error ? err : new Error(String(err));
+      // A resync or a feed drop during the walk means events were missed:
+      // its failure leaves the list behind, so it fails as any walk does.
+      const missed = entry.followUp;
       entry.followUp = false;
-      if (walk.background) {
+      if (walk.background && !missed) {
         // The snapshot is as current as before the walk; the probe goes on.
         console.warn(`[agent-store] ${entry.key}: background walk failed:`, error);
       } else {
