@@ -80,6 +80,12 @@ const (
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
+	// ErrCodeStaleDispatch marks a delete refused because it arrived after
+	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
+	// hub's claim on the delete may have lapsed, so acting could remove an
+	// agent the user started again. Nothing was done.
+	ErrCodeStaleDispatch = "stale_dispatch"
+
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
 	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
@@ -230,6 +236,12 @@ func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods 
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// StaleDispatch writes a 409 Conflict response with the stable
+// ErrCodeStaleDispatch code.
+func StaleDispatch(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeStaleDispatch, message, nil)
 }
 
 // AgentIdentityUnknown writes a 409 Conflict response with the stable

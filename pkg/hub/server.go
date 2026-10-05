@@ -734,13 +734,16 @@ type RuntimeBrokerClient interface {
 // marking. RunID, when non-empty, is sent as runId: the broker then deletes
 // only the runtime entry labelled with that run and answers 404 (an
 // idempotent success) when only a different run holds the name
-// (ptone/scion#2550).
+// (ptone/scion#2550). NotAfter, when non-zero, is sent as notAfter: the
+// broker refuses the delete with 409 stale_dispatch, doing nothing, if it
+// arrives after that instant (ptone/scion#2906, see agent_delete_fence.go).
 type DeleteAgentOptions struct {
 	DeleteFiles  bool
 	RemoveBranch bool
 	SoftDelete   bool
 	DeletedAt    time.Time
 	RunID        string
+	NotAfter     time.Time
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -754,6 +757,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	query += deleteProjectPathQuery(ctx)
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
+	}
+	if !opts.NotAfter.IsZero() {
+		query += "&notAfter=" + url.QueryEscape(opts.NotAfter.UTC().Format(time.RFC3339))
 	}
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))

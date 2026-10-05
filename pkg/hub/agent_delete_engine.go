@@ -61,6 +61,11 @@ var (
 	deleteShortStep      = 5 * time.Second  // ports, finalizing CAS, classification
 	deleteStepTimeout    = 10 * time.Second // revoke attempt, events, notifications, finish, topic
 	deleteRevokeAttempts = 3
+
+	// deleteClock is the engine's clock for the claim's lease, its renewals
+	// and the dispatch deadline (notAfter, ptone/scion#2906). A seam so
+	// tests can use a fake clock.
+	deleteClock = time.Now
 )
 
 var (
@@ -158,7 +163,7 @@ func deleteClaimStopping(a *store.Agent) bool {
 // It returns the plan when this request now holds the claim, or nil when the
 // claim affected no row (the caller re-reads to decide).
 func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agentDeleteParams) (*agentDeletionPlan, error) {
-	now := time.Now()
+	now := deleteClock()
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
 	empty := ""
@@ -258,6 +263,9 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 	base := context.WithoutCancel(reqCtx)
 	engineCtx, cancel := context.WithCancelCause(base)
 	e := &deletionEngine{s: s, plan: plan, base: base, ctx: engineCtx, cancel: cancel}
+	if plan.snapshot.DeletionLeaseAt != nil {
+		e.leaseUntil = *plan.snapshot.DeletionLeaseAt
+	}
 	go func() {
 		var out deletionOutcome
 		defer func() {
@@ -300,6 +308,24 @@ type deletionEngine struct {
 	// finished is set once finish() has committed the soft or hard delete.
 	// Only the engine goroutine touches it.
 	finished bool
+
+	// leaseUntil is the lease expiry this engine last wrote (at the claim,
+	// then on each renewal that took). It bounds the dispatch deadline.
+	leaseMu    sync.Mutex
+	leaseUntil time.Time
+}
+
+// currentLease returns the lease expiry this engine last wrote.
+func (e *deletionEngine) currentLease() time.Time {
+	e.leaseMu.Lock()
+	defer e.leaseMu.Unlock()
+	return e.leaseUntil
+}
+
+func (e *deletionEngine) setLease(t time.Time) {
+	e.leaseMu.Lock()
+	defer e.leaseMu.Unlock()
+	e.leaseUntil = t
 }
 
 // tailStep runs one best-effort step after the delete committed, recovering
@@ -370,7 +396,7 @@ func (e *deletionEngine) startRenewal() {
 				return
 			case <-ticker.C:
 			}
-			lease := time.Now().Add(deleteLease)
+			lease := deleteClock().Add(deleteLease)
 			ctx, cancel := context.WithTimeout(e.base, deleteRenewTimeout)
 			pred := e.claimPred(store.DeletionStateDeleting, store.DeletionStateFinalizing)
 			pred.DeletedAtNull = true
@@ -392,6 +418,7 @@ func (e *deletionEngine) startRenewal() {
 				return
 			default:
 				misses = 0
+				e.setLease(lease)
 				e.publishStatus(ctx)
 			}
 			cancel()
@@ -598,12 +625,30 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	if agent.DeletionStartedAt != nil {
 		startedAt = *agent.DeletionStartedAt
 	}
+	// Fence the dispatch (ptone/scion#2906): the broker refuses it once
+	// past notAfter, after which this claim may have lapsed and the user
+	// started the agent again. A cross-node dispatch carries the claim
+	// instead and gets its deadline where it is sent.
+	now := deleteClock()
+	notAfter := deleteNotAfter(now, e.currentLease())
+	ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: e.plan.claim, notAfter: notAfter})
+	s.agentLifecycleLog.Debug("delete engine: dispatching fenced delete",
+		"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339))
 	err := dispatcher.DispatchAgentDelete(ctx, agent, req.DeleteFiles, req.RemoveBranch, req.Soft, startedAt)
 	if err == nil {
 		return deletionOutcome{}, true
 	}
 	if e.isLost() {
 		return e.lost(), false
+	}
+	if isStaleDeleteDispatch(err) {
+		// The broker (or the executing node) did nothing: the dispatch was
+		// past its deadline. Never finalize from it, even with force or a
+		// best-effort dispatch; abandon the claim so the row reads
+		// failed/abandoned and a retry re-claims it, as when an engine dies.
+		s.agentLifecycleLog.Warn("delete engine: dispatch refused as stale; abandoning the claim",
+			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
+		return e.abandonOutcome(), false
 	}
 	switch {
 	case bestEffort:

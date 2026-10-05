@@ -304,8 +304,12 @@ type Server struct {
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
-	messageLog        *slog.Logger
-	envSecretLog      *slog.Logger
+
+	// deleteClock, when set, replaces time.Now for the delete notAfter
+	// check (tests only; see delete_not_after.go).
+	deleteClock  func() time.Time
+	messageLog   *slog.Logger
+	envSecretLog *slog.Logger
 }
 
 // auxiliaryRuntime pairs a runtime with its manager for non-default runtimes.

@@ -3418,12 +3418,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		d.log.Debug("Dispatcher: delete carries run ID",
 			"agent_id", agent.ID, "agent", agent.Slug, "run_id", agent.RunID)
 	}
+	// The delete engine fences its dispatch with a deadline
+	// (ptone/scion#2906); every other caller sends none.
+	var notAfter time.Time
+	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+		notAfter = fence.notAfter
+	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, DeleteAgentOptions{
 		DeleteFiles:  deleteFiles,
 		RemoveBranch: removeBranch,
 		SoftDelete:   softDelete,
 		DeletedAt:    deletedAt,
 		RunID:        agent.RunID,
+		NotAfter:     notAfter,
 	})
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
@@ -3697,6 +3704,12 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		SoftDelete:   softDelete,
 		DeletedAt:    deletedAt,
 	}
+	// An engine delete records its claim, not its notAfter: the executing
+	// node checks the claim is still live and computes notAfter when it
+	// actually sends (ptone/scion#2906).
+	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+		args.Claim = fence.claim
+	}
 	return d.deferredDataOp(ctx, agent, "delete", args)
 }
 
@@ -3779,6 +3792,10 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		return nil, err
 	}
 	if result.State == store.DispatchStateFailed {
+		if op == "delete" && staleDeleteDispatchFromText(result.Error) {
+			// Refused as stale on the executing node: nothing was done.
+			return nil, fmt.Errorf("dispatch %s failed: %w (%s)", op, errStaleDeleteDispatch, result.Error)
+		}
 		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
 	}
 	return result, nil

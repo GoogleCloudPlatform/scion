@@ -44,11 +44,15 @@ type StopDispatchArgs struct {
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
+// Claim, when non-zero, is the delete engine's deletion claim: the executing
+// node sends the delete only while that claim is still the row's current,
+// live one (ptone/scion#2906).
 type DeleteDispatchArgs struct {
 	DeleteFiles  bool      `json:"deleteFiles,omitempty"`
 	RemoveBranch bool      `json:"removeBranch,omitempty"`
 	SoftDelete   bool      `json:"softDelete,omitempty"`
 	DeletedAt    time.Time `json:"deletedAt,omitempty"`
+	Claim        int64     `json:"claim,omitempty"`
 }
 
 // CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the
