@@ -778,6 +778,13 @@ func TestProbeServerStatus_BrokerProbe(t *testing.T) {
 	assert.Equal(t, "degraded", st.BrokerStatus)
 	assert.Equal(t, "status: degraded", st.BrokerHealthReason)
 
+	// Unhealthy is not up, but the status is still named (same as 9810).
+	unhealthy := serveHealth(t, `{"status":"unhealthy"}`)
+	st = probeServerStatus(client, unreachableHTTPURL(t), unreachableHTTPURL(t), unhealthy.URL)
+	assert.False(t, st.BrokerRunning)
+	assert.Equal(t, "unhealthy", st.BrokerStatus)
+	assert.Equal(t, "  Runtime Broker:  unhealthy (status: unhealthy) — see server log", formatServerStatusComponents(st)[1])
+
 	// Same rule as 9810: a status that is not a scion status, or none,
 	// means not detected, and is never echoed as degraded.
 	for _, body := range []string{`{"status":"ok"}`, `{}`} {
