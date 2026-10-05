@@ -139,6 +139,11 @@ func Chown(uid, gid int) error {
 // SetLogPath sets the path to the log file. Primarily for testing. Closes
 // and drops any cached fd for the previous path so the next line opens
 // (and re-validates) the new one.
+//
+// It does not mark the package initialized: if it is called before Init,
+// the lazy init on the first log line still reads SCION_DEBUG and installs
+// the slog default handler, and keeps this path (initLocked only picks a
+// default path when none is set).
 func SetLogPath(path string) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -147,7 +152,6 @@ func SetLogPath(path string) {
 		logFile = nil
 	}
 	logPath = path
-	initialized.Store(true) // Consider it initialized if path is explicitly set
 }
 
 // Info logs an informational message.

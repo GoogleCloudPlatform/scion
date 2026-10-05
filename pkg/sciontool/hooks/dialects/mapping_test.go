@@ -390,6 +390,42 @@ func TestMappingDialect_Parse_CacheWriteAndReasoningTokenFieldMappings(t *testin
 	})
 }
 
+func TestMappingDialect_Parse_ModelFieldMapping(t *testing.T) {
+	md := NewMappingDialect(MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"ModelDone": {
+				Event:  hooks.EventModelEnd,
+				Fields: map[string]string{"model": ".info.modelName"},
+			},
+			"Unmapped": {Event: hooks.EventModelEnd},
+		},
+	})
+
+	event, err := md.Parse(map[string]interface{}{
+		"event": "ModelDone",
+		"info":  map[string]interface{}{"modelName": "provider/model-x"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "provider/model-x", event.Data.Model)
+
+	// Missing or non-string values leave Model empty, so the handler falls
+	// back to SCION_MODEL, then "unknown".
+	event, err = md.Parse(map[string]interface{}{
+		"event": "ModelDone",
+		"info":  map[string]interface{}{"modelName": float64(3)},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.Model)
+
+	// No mapping entry for model: a top-level "model" key is not picked up
+	// implicitly.
+	event, err = md.Parse(map[string]interface{}{"event": "Unmapped", "model": "m"})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.Model)
+}
+
 func TestMappingDialect_Parse_TokenExtraction(t *testing.T) {
 	md := NewMappingDialect(MappingDialectSpec{
 		Dialect:        "test",
