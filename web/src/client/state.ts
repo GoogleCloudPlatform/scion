@@ -957,18 +957,33 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // A `created` for a tombstoned ID is treated as stale: the hub can
-    // publish it concurrently with, or replay it after, the `deleted` that
-    // already removed the agent. Drop it like any other late delta, so it
-    // cannot re-add the agent (ptone/scion#2886). A new agent with the same
-    // *name* has a new ID and is unaffected.
+    // A `created` for a tombstoned ID is stale unless it is marked as a
+    // restore. The hub never publishes an unmarked `created` for a deleted
+    // or delete-claimed agent (ptone/scion#2972), but an older `created`
+    // can still be delivered after the `deleted` that removed the agent
+    // (e.g. replayed by a lagging hub instance after an SSE reconnect).
+    // Drop it like any other late delta, so it cannot re-add the agent
+    // (ptone/scion#2886). A new agent with the same *name* has a new ID
+    // and is unaffected.
     //
-    // Known limitation (ptone/scion#2951): restoring a soft-deleted agent
-    // reuses its ID and publishes `created`, so a browser that already saw
-    // `deleted` keeps hiding the restored agent until the next scope change
-    // (setScope clears the tombstones) or a full reload.
+    // A restore of a soft-deleted agent reuses its ID, and its `created`
+    // carries `restoredAt` (ptone/scion#2951): that one clears the
+    // tombstone and re-adds the agent. Known limit: a stale *restore*
+    // `created` replayed after a later `deleted` would still re-add it;
+    // closing that needs SSE replay ordering (Last-Event-ID), out of scope.
     if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
-      return;
+      const restoredAt = (data as { restoredAt?: unknown } | null)?.restoredAt;
+      if (typeof restoredAt !== 'string' || restoredAt === '') {
+        return;
+      }
+      this.state.deletedAgentIds.delete(agentId);
+      this.dirty.deleted.delete(agentId);
+    }
+    if (eventType === 'created' && data && typeof data === 'object' && 'restoredAt' in data) {
+      // Event metadata, not an agent field.
+      const rest = { ...(data as Record<string, unknown>) };
+      delete rest.restoredAt;
+      data = rest;
     }
 
     const existing = this.state.agents.get(agentId);
