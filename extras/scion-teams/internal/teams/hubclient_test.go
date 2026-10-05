@@ -166,17 +166,31 @@ func TestHubClient_Reads_SendLinkedUser(t *testing.T) {
 	}
 }
 
-func TestHubClient_ListAgents_NoLinkedUserOmitsHeader(t *testing.T) {
-	var got http.Header
+func TestHubClient_Reads_NoLinkedUserOmitsHeader(t *testing.T) {
+	var headers []http.Header
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Clone()
+		headers = append(headers, r.Header.Clone())
+		if r.URL.Path == "/api/v1/projects" {
+			json.NewEncoder(w).Encode(hubProjectsResponse{})
+			return
+		}
 		json.NewEncoder(w).Encode(hubAgentsResponse{})
 	}))
 	defer ts.Close()
 
-	client := NewHubClient(ts.URL, "", "", slog.Default())
+	hmacKey := base64.StdEncoding.EncodeToString([]byte("test-secret-key-1234"))
+	client := NewHubClient(ts.URL, hmacKey, "teams-broker-1", slog.Default())
 	client.httpClient = ts.Client()
-	_, err := client.ListAgents(context.Background(), "proj-1", "")
+	ctx := context.Background()
+
+	_, err := client.ListAgents(ctx, "proj-1", "")
 	require.NoError(t, err)
-	assert.Empty(t, got.Get("X-Scion-On-Behalf-Of"))
+	_, err = client.ListUserProjects(ctx, "", "")
+	require.NoError(t, err)
+
+	require.Len(t, headers, 2)
+	for _, h := range headers {
+		assert.Empty(t, h.Get("X-Scion-On-Behalf-Of"))
+		assert.Empty(t, h.Get("X-Scion-Signed-Headers"))
+	}
 }
