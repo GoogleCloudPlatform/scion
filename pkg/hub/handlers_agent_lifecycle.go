@@ -276,9 +276,10 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	// sciontool /status POST from the OLD container racing the migration
 	// (e.g. a crash report from the generation the worker is in the middle of
 	// tearing down and replacing) must not surface as the agent's live status.
-	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
-	// concern here (this endpoint does not set them), so nothing further
-	// needs blanking. It runs before Guard 0 (suspended) because it blanks a
+	// ContainerStatus, heartbeat and the other non-status fields are not
+	// owned by the worker (reincarnationStepUpdate never writes them), so
+	// they are left as reported (partial apply; see updateAgentStatus). It
+	// runs before Guard 0 (suspended) because it blanks a
 	// superset of Guard 0's fields: a suspended agent with a reincarnation
 	// pending (the worker has not yet written its first step) must have a
 	// message- or exit-only report dropped too (ptone/scion#2267).

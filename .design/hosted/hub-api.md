@@ -538,6 +538,11 @@ Internal endpoint for agents to report status updates.
     soft-deleted.
   - `reincarnation_in_flight`: a `scion reincarnate` migration owns the agent.
 
+`applied: false` is only returned for the two reasons above. Other guards (a
+suspended agent, a phase regression) drop `phase`/`activity` silently and
+still answer `applied: true`, so `applied: true` does not mean the reported
+phase was stored.
+
 `applied` reflects the agent as the hub read it before writing. A delete or
 reincarnation claimed between that read and the write can make
 `applied: true` inaccurate. The stored state is still correct for a delete,
