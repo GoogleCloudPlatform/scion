@@ -71,7 +71,7 @@ func (c *Client) ReportMetrics(ctx context.Context, payload MetricsPayload) erro
 	// The Hub requires session.id; without it the request cannot succeed,
 	// so it is not sent.
 	if payload.Session.ID == "" {
-		return fmt.Errorf("session metrics not sent: no session ID was seen on any hook event")
+		return fmt.Errorf("session metrics not sent: summary has no session ID")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/metrics",

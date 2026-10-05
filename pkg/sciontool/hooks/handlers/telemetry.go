@@ -735,6 +735,11 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	// ID or start time (the session-end event itself usually has the ID).
 	// Lifecycle and other events are not observed, so they cannot open a
 	// session ahead of the real session-start.
+	//
+	// ObserveSession and the Record*/Finalize calls below take the lock
+	// separately. That is safe only because events reach a handler one at
+	// a time: HarnessProcessor.dispatchEvent and LifecycleManager.runHooks
+	// both dispatch serially, and a hook process handles a single event.
 	switch event.Name {
 	case hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
 		h.aggregator.ObserveSession(event.Data.SessionID)
