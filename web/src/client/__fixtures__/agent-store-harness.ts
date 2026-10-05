@@ -234,7 +234,10 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const page = rows.slice(offset, offset + limit);
       const end = offset + page.length;
       const body = {
-        agents: page.map((a) => (project && server.projectRow ? server.projectRow(a) : { ...a })),
+        // A copy, as a response would be: no object shared with the rows held.
+        agents: page.map((a) =>
+          structuredClone(project && server.projectRow ? server.projectRow(a) : a)
+        ),
         ...(end < rows.length ? { nextCursor: String(end) } : {}),
         ...(sorted ? { totalCount: server.totalCount ?? rows.length } : {}),
         ...(server.scopeCapabilities ? { _capabilities: server.scopeCapabilities } : {}),
