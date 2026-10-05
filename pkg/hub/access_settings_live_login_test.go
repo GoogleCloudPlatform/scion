@@ -25,6 +25,15 @@ package hub
 //   - Server.provisionUser — the shared decision point for
 //     POST /api/v1/auth/login, /api/v1/auth/token, /api/v1/auth/cli/token,
 //     /api/v1/auth/cli/device/token and the proxy user provisioner.
+//
+// Only new logins are checked. Established sessions (an existing session
+// cookie or a hub token refresh) are not re-checked against the access
+// mode, so these tests do not expect an existing session to be denied.
+//
+// The tightening step always uses an email that has never signed in
+// (second@other.example): invite_only admits any email with an invited
+// or active user row, so the user who signed in while the mode was open
+// is still admitted after switching back.
 
 import (
 	"context"
@@ -111,8 +120,11 @@ func oauthCallbackLogin(t *testing.T, ws *WebServer, email string) string {
 }
 
 func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// liveModeStore: the WebServer login path also needs GetUser and the
+	// role-binding lookups, which newInviteFlowStore does not provide.
 	st := newLiveModeStore()
 	srv := newLiveModeServer(st, "invite_only")
+	ctx := context.Background()
 
 	ws := newTestWebServer(t, WebServerConfig{
 		SessionSecret: "test-session-secret-for-live-mode-oauth-1234567890",
@@ -130,28 +142,32 @@ func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 
 	// invite_only at startup: an uninvited user is turned away.
 	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "first@other.example"))
-	_, err := st.GetUserByEmail(context.Background(), "first@other.example")
+	_, err := st.GetUserByEmail(ctx, "first@other.example")
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	// Loosen to open at runtime: the same user now signs in.
 	setLiveAccessMode(t, srv, "open")
 	assert.Equal(t, "/", oauthCallbackLogin(t, ws, "first@other.example"),
 		"OAuth callback must honour user_access_mode=open set after startup")
-	_, err = st.GetUserByEmail(context.Background(), "first@other.example")
+	_, err = st.GetUserByEmail(ctx, "first@other.example")
 	require.NoError(t, err)
 
 	// Tighten back to invite_only at runtime: a different uninvited user is
-	// turned away on their next login.
+	// turned away on their next login. This email has never signed in,
+	// because invite_only still admits the user who became active above.
 	setLiveAccessMode(t, srv, "invite_only")
 	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "second@other.example"),
 		"OAuth callback must honour user_access_mode=invite_only set after startup")
-	_, err = st.GetUserByEmail(context.Background(), "second@other.example")
+	_, err = st.GetUserByEmail(ctx, "second@other.example")
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestProxyAuthMiddleware_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// liveModeStore: the proxy-auth middleware also needs GetUser and the
+	// role-binding lookups, which newInviteFlowStore does not provide.
 	st := newLiveModeStore()
 	srv := newLiveModeServer(st, "invite_only")
+	ctx := context.Background()
 
 	mockAuth := &mockProxyAuthenticator{}
 	ws := newTestWebServer(t, WebServerConfig{
@@ -173,23 +189,25 @@ func TestProxyAuthMiddleware_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	}
 
 	assert.Equal(t, http.StatusForbidden, proxyLogin("first@other.example"))
-	_, err := st.GetUserByEmail(context.Background(), "first@other.example")
+	_, err := st.GetUserByEmail(ctx, "first@other.example")
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	setLiveAccessMode(t, srv, "open")
-	assert.NotEqual(t, http.StatusForbidden, proxyLogin("first@other.example"),
+	assert.Equal(t, http.StatusOK, proxyLogin("first@other.example"),
 		"proxy login must honour user_access_mode=open set after startup")
-	_, err = st.GetUserByEmail(context.Background(), "first@other.example")
+	_, err = st.GetUserByEmail(ctx, "first@other.example")
 	require.NoError(t, err)
 
 	setLiveAccessMode(t, srv, "invite_only")
 	assert.Equal(t, http.StatusForbidden, proxyLogin("second@other.example"),
 		"proxy login must honour user_access_mode=invite_only set after startup")
-	_, err = st.GetUserByEmail(context.Background(), "second@other.example")
+	_, err = st.GetUserByEmail(ctx, "second@other.example")
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// newInviteFlowStore: provisionUser only needs the user and invite
+	// lookups, so the smaller existing store is enough.
 	st := newInviteFlowStore()
 	srv := newLiveModeServer(st, "invite_only")
 	ctx := context.Background()
