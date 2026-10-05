@@ -264,3 +264,19 @@ func TestDispatch_NoGCPIdentity_DropsConfigMetadataEnvOnCreateAndStart(t *testin
 		require.NotContains(t, cls, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", label)
 	}
 }
+
+// TestApplyHubGCPMetadataModeEnv_NilClassifications pins that the helper
+// accepts a nil classification map pointer for both the no-identity and
+// explicit-mode branches.
+func TestApplyHubGCPMetadataModeEnv_NilClassifications(t *testing.T) {
+	env := map[string]string{"SCION_METADATA_MODE": "passthrough"}
+	applyHubGCPMetadataModeEnv(env, nil, "")
+	require.Equal(t, map[string]string{"SCION_METADATA_MODE_SOURCE": "hub"}, env)
+
+	env = map[string]string{}
+	applyHubGCPMetadataModeEnv(env, nil, store.GCPMetadataModeBlock)
+	require.Equal(t, map[string]string{
+		"SCION_METADATA_MODE":        store.GCPMetadataModeBlock,
+		"SCION_METADATA_MODE_SOURCE": "hub",
+	}, env)
+}

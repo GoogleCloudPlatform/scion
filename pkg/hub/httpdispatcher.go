@@ -4013,6 +4013,12 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 // elevated (non-block) mode from resolvedEnv when it is present, which keeps
 // a stray stored value from a hub that predates the marker from counting.
 func applyHubGCPMetadataModeEnv(env map[string]string, cls *map[string]api.EnvKind, mode string) {
+	if cls == nil {
+		// Callers always pass a classification map pointer today; a nil one
+		// gets a throwaway map so neither the delete nor classifyEnv below
+		// dereferences nil.
+		cls = new(map[string]api.EnvKind)
+	}
 	if mode == "" {
 		for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_REQUIRE_LOCAL_RUNTIME"} {
 			delete(env, k)
