@@ -19,7 +19,8 @@ credential.
 
 A user access token is a scoped, revocable bearer token linked to your user account, used for
 non-interactive authentication. Unlike a full OAuth session, a UAT is **scoped to a single
-project** and carries a specific set of action permissions, so a token minted for CI can do only
+project** (or, for a [hub-bound token](#hub-bound-tokens-api-only), to the projects you can
+reach) and carries a specific set of action permissions, so a token minted for CI can do only
 what CI needs.
 
 **Note on legacy keys:** the legacy `sk_live_*` API keys have been completely removed. All users
@@ -27,7 +28,8 @@ must migrate to `scion_pat_*` tokens.
 
 ## Scoping and permissions
 
-Every token is scoped to a single project and to an explicit list of **scopes** (action
+Every token has a boundary (a single project, or the hub for a
+[hub-bound token](#hub-bound-tokens-api-only)) and an explicit list of **scopes** (action
 permissions). Available scopes:
 
 | Scope | Grants |
@@ -132,6 +134,26 @@ written. If a requested scope is denied, the Hub returns `403` with error code
 `scope_violation`, with `details.selector` and `details.reason` naming the scope and the reason;
 nothing is created. Run `scion hub token scopes --project <project>` to see the full picture
 before retrying.
+
+### Hub-bound tokens (API only)
+
+A token can instead carry a **hub boundary**, which lets one token work across every project you
+can reach. The CLI always mints project tokens; mint a hub token through the API by sending
+`"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
+boundary never means hub, and a hub boundary that also names a project is rejected with `400`.
+
+The same per-request checks apply, with these limits:
+
+- **Lists.** A hub token lists only projects (and their resources) you currently have access to,
+  and the token needs the exact list permission, for example `agent:list`. A project token lists
+  only its own project. A list cursor issued to one token does not work for a token with a
+  different boundary, or for a browser session.
+- **Delegation.** Grants a token creates must fall inside its boundary. A token can never create
+  a system-scoped grant. Under a hub boundary, you must also currently have the matching access in
+  the grant's project.
+- **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
+  live project-access checks before any other rule can allow it.
+- **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
 
 ## Using a token
 

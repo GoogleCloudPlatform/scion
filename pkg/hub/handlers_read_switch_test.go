@@ -185,6 +185,9 @@ func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { retu
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
 	return nil, nil
 }
+func (s *rsWebChatStore) ListTopicsByProjects(context.Context, []string) ([]WebChatTopic, error) {
+	return nil, nil
+}
 func (s *rsWebChatStore) UpdateTopic(context.Context, string, TopicUpdate) error { return nil }
 func (s *rsWebChatStore) DeleteTopic(context.Context, string) error              { return nil }
 func (s *rsWebChatStore) TouchTopicActivity(_ context.Context, _, _ string) error {
