@@ -304,6 +304,28 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	return profiles
 }
 
+// heartbeatProfileAttach returns the attach capability of each profile
+// buildInfoProfiles advertises, for the heartbeat's ProfileAttach field.
+// A profile whose attach support is unknown (Attach == nil: no live
+// runtime instance to ask yet) is left out, so the hub keeps whatever it
+// has stored for it rather than flipping it on missing information.
+func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
+	runtimeType := "unknown"
+	s.mu.RLock()
+	if s.runtime != nil {
+		runtimeType = s.runtime.Name()
+	}
+	s.mu.RUnlock()
+	var out []hubclient.ProfileAttachState
+	for _, p := range s.buildInfoProfiles(runtimeType) {
+		if p.Attach == nil {
+			continue
+		}
+		out = append(out, hubclient.ProfileAttachState{Name: p.Name, Attach: *p.Attach})
+	}
+	return out
+}
+
 // resolveLiveRuntimeInstance returns the already-built Runtime instance
 // backing a profile resolving to rtType, without constructing anything new:
 // s.runtime for the default type, or an auxiliary runtime some prior
