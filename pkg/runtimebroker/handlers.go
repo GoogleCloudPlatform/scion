@@ -2781,6 +2781,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
+		// Start can re-provision the agent: a required skill reference that
+		// cannot be resolved gets the same typed response as on start, and
+		// is checked before the "not found" text match so a skill cause
+		// is not reported as a missing agent.
+		var skillErr *agent.SkillResolutionError
+		if errors.As(err, &skillErr) {
+			skillResolutionFailedWithDetails(w, skillErr, details)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return

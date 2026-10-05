@@ -2534,6 +2534,55 @@ func TestStartAgentEndpoint_SkillResolutionError(t *testing.T) {
 	}
 }
 
+// TestRestartAgentEndpoint_SkillResolutionError checks that a restart whose
+// start fails on a required skill gets the typed skill response with the
+// start run details, the same as start. A not_found cause must not be
+// reported as a missing agent.
+func TestRestartAgentEndpoint_SkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		message    string
+		wantStatus int
+	}{
+		{"not found cause", agent.SkillErrCodeNotFound, "skill not found", http.StatusNotFound},
+		{"forbidden", agent.SkillErrCodeForbidden, "could not resolve", http.StatusForbidden},
+		{"timeout", agent.SkillErrCodeTimeout, "could not resolve", http.StatusGatewayTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = fmt.Errorf("provision: %w", &agent.SkillResolutionError{
+				URI:     "gh://example-org/example-skills/my-skill@main",
+				Code:    tt.code,
+				Message: tt.message,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeSkillResolution {
+				t.Errorf("expected code %q, got %q (%s)", ErrCodeSkillResolution, resp.Error.Code, resp.Error.Message)
+			}
+			if resp.Error.Details["skill"] != "gh://example-org/example-skills/my-skill@main" || resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details {skill, cause}, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected details.%s true, got: %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
 // TestStartAgentEndpoint_OtherErrorStays500 checks that a start failure that
 // is not a skill resolution failure keeps the generic 500.
 func TestStartAgentEndpoint_OtherErrorStays500(t *testing.T) {
