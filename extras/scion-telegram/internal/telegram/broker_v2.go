@@ -1831,8 +1831,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Get project agents (with cache refresh).
-	agents := b.getProjectAgents(ctx, link.ProjectID)
+	// Get project agents (with cache refresh as the sender).
+	senderPrincipal := ""
+	if tgMsg.From != nil {
+		mapping, mErr := b.store.GetUserMapping(ctx, strconv.FormatInt(tgMsg.From.ID, 10))
+		if mErr != nil {
+			b.log.Warn("Failed to look up sender mapping", "error", mErr)
+		}
+		senderPrincipal = linkedUserPrincipal(mapping)
+	}
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderPrincipal)
 
 	b.mu.RLock()
 	botUsername := ""
@@ -1917,13 +1925,21 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				if tgMsg.MessageThreadID != 0 {
 					threadID = int(tgMsg.MessageThreadID)
 				}
-				if !b.shouldSuppressError(chatID, threadID, "default_agent_not_found") {
+				errorType := "default_agent_not_found"
+				if agentsErr != nil {
+					errorType = "agent_list_unavailable"
+				}
+				if !b.shouldSuppressError(chatID, threadID, errorType) {
 					replyTo := ""
 					if tgMsg.MessageID != 0 {
 						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
 					}
-					errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
-					b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+					if agentsErr != nil {
+						b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr)
+					} else {
+						errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
+						b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+					}
 				}
 				return
 			}
@@ -1937,6 +1953,10 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if isBotMentioned(tgMsg, botUsername) {
 			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
 			if len(unresolved) > 0 {
+				if agentsErr != nil {
+					b.replyAgentListUnavailable(ctx, chatID, "", agentsErr)
+					return
+				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
 				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
 			}
@@ -1953,7 +1973,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 						typos = append(typos, "@"+name)
 					}
 				}
-				if len(typos) > 0 {
+				if len(typos) > 0 && agentsErr != nil {
+					b.replyAgentListUnavailable(ctx, chatID, "", agentsErr)
+				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
 					b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
 				}
@@ -2600,22 +2622,40 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 
 // --- Agent cache ---
 
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string) []string {
+// errSenderNotLinked reports that an agent list could not be fetched because
+// the message sender has no linked Scion account and no cached list exists.
+var errSenderNotLinked = errors.New("sender has no linked Scion account")
+
+// getProjectAgents returns the agent slugs of a project for routing a message.
+//
+// The cache is keyed by project and shared by all senders. When it is stale
+// the list is refreshed from the hub as the message sender (onBehalfOf).
+// When the sender is not linked (onBehalfOf == "") the hub is not called and
+// any cached list is used as is. A non-nil error means no list is available:
+// errSenderNotLinked for an unlinked sender, otherwise the hub error.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
 	cached, err := b.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents)
+		return agentSlugs(cached.Agents), nil
 	}
 
-	agents, err := b.hubClient.ListAgents(ctx, projectID, "")
+	if onBehalfOf == "" {
+		if cached != nil {
+			return agentSlugs(cached.Agents), nil
+		}
+		return nil, errSenderNotLinked
+	}
+
+	agents, err := b.hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
-			return agentSlugs(cached.Agents)
+			return agentSlugs(cached.Agents), nil
 		}
-		return nil
+		return nil, err
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
@@ -2627,7 +2667,18 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agentSlugs(agents)
+	return agentSlugs(agents), nil
+}
+
+// replyAgentListUnavailable tells the sender why their message could not be
+// routed when no agent list is available, instead of reporting the
+// addressed agent as missing.
+func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error) {
+	text := "Couldn't fetch the agent list for this project. Please try again later."
+	if errors.Is(listErr, errSenderNotLinked) {
+		text = registerHint
+	}
+	b.api.SendMessage(ctx, chatID, text, replyTo) //nolint:errcheck
 }
 
 // --- Hub delivery (reuses the same pattern as v1) ---
