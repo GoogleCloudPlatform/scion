@@ -29,13 +29,16 @@
  * tombstones, seed epochs and the completeness flag are the feed's own.
  *
  * Contract highlights:
- * - `ensure` on a ready, fresh entry answers from memory with no request.
+ * - `ensure` on a ready, fresh entry answers from memory with no request,
+ *   also while a walk the probe started runs in the background.
  *   Concurrent `ensure` calls for one key share one walk.
  * - A caller's abort signal detaches only that caller. A walk is aborted
  *   only when it has neither waiters nor retainers.
  * - `complete` is true only after a full walk succeeded; a walk cut off by
  *   the page bound is `ready` but not complete. Loading snapshots are never
- *   complete.
+ *   complete. A walk the probe starts leaves the snapshot as it is until it
+ *   succeeds; if it fails, the snapshot stays as it was and the probe goes
+ *   on.
  * - Every walk is a seeded walk: deltas that arrive while it runs are
  *   reapplied on top of its REST rows, and tombstoned agents never return.
  * - While the feed is down, or an entry is stale, `ensure` revalidates
@@ -70,7 +73,10 @@ export interface AgentListSnapshot {
   /** Identity-stable: a new array only when membership or a row changes. */
   readonly agents: readonly Agent[];
   readonly status: 'idle' | 'loading' | 'ready' | 'error';
-  /** True only once a full walk has succeeded and no revalidation is running. */
+  /**
+   * True only once a full walk has succeeded and no revalidation is running,
+   * other than a walk the probe started in the background.
+   */
   readonly complete: boolean;
   readonly error?: Error;
   readonly fetchedAt?: number;
@@ -200,6 +206,8 @@ interface Walk {
   sseAdded: Set<string>;
   /** The feed dropped while this walk was reading pages, even if it reconnected since. */
   feedDropped: boolean;
+  /** Started by the probe: the entry keeps its status and rows while it runs. */
+  background: boolean;
 }
 
 interface Entry {
@@ -469,7 +477,7 @@ export class AgentStore {
     if (
       entry.status === 'ready' &&
       !entry.stale &&
-      !entry.walk &&
+      (!entry.walk || entry.walk.background) &&
       !entry.followUp &&
       feed.isConnected
     ) {
@@ -733,12 +741,17 @@ export class AgentStore {
 
   // --- Walks ---
 
-  private startWalk(entry: Entry): void {
+  /**
+   * Walk the entry's list. A background walk publishes nothing until it
+   * finishes, so readers keep the rows they have.
+   */
+  private startWalk(entry: Entry, options: { background?: boolean } = {}): void {
     const walk: Walk = {
       controller: new AbortController(),
       phase: 'connecting',
       sseAdded: new Set(),
       feedDropped: false,
+      background: options.background === true,
     };
     // The walk reads everything a probe would.
     entry.probe?.abort();
@@ -746,10 +759,12 @@ export class AgentStore {
     entry.walk = walk;
     entry.walkedAt = this.now();
     entry.followUp = false;
-    entry.status = 'loading';
-    entry.complete = false;
     this.updateFeedIdle();
-    this.publish(entry);
+    if (!walk.background) {
+      entry.status = 'loading';
+      entry.complete = false;
+      this.publish(entry);
+    }
     void this.runWalk(entry, walk);
   }
 
@@ -911,13 +926,18 @@ export class AgentStore {
       entry.walk = null;
       if (isAbortError(err) && signal.aborted) return;
       const error = err instanceof Error ? err : new Error(String(err));
-      if (firstLoad) entry.agents = [];
-      entry.status = 'error';
-      entry.error = error;
-      entry.complete = false;
-      entry.stale = true;
       entry.followUp = false;
-      this.publish(entry);
+      if (walk.background) {
+        // The snapshot is as current as before the walk; the probe goes on.
+        console.warn(`[agent-store] ${entry.key}: background walk failed:`, error);
+      } else {
+        if (firstLoad) entry.agents = [];
+        entry.status = 'error';
+        entry.error = error;
+        entry.complete = false;
+        entry.stale = true;
+        this.publish(entry);
+      }
       const waiters = Array.from(entry.waiters);
       entry.waiters.clear();
       for (const w of waiters) {
@@ -1003,7 +1023,7 @@ export class AgentStore {
       return;
     }
     if (this.now() - (entry.walkedAt ?? 0) >= this.probeFullWalkMs) {
-      this.startWalk(entry);
+      this.startWalk(entry, { background: true });
       return;
     }
     const controller = new AbortController();
@@ -1111,7 +1131,7 @@ export class AgentStore {
         ? Math.min(2 * entry.overflowBackoffMs, AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS)
         : AGENT_PROBE_OVERFLOW_BACKOFF_MS;
       entry.overflowWalkAt = this.now();
-      this.startWalk(entry);
+      this.startWalk(entry, { background: true });
       return;
     }
     entry.overflowWalkAt = undefined;
@@ -1125,7 +1145,7 @@ export class AgentStore {
     // already made a walk does not make another until it changes.
     if (entry.countWalkTotal === total) return;
     entry.countWalkTotal = total;
-    this.startWalk(entry);
+    this.startWalk(entry, { background: true });
   }
 
   /**

@@ -630,6 +630,43 @@ describe('AgentStore delta probe', () => {
       expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
     });
 
+    it('keeps the list ready while it runs, so a load answers from memory', async () => {
+      const h = await loaded([row('a1', 1)]);
+      const statuses: string[] = [];
+      h.store.retain(HUB, (snapshot) => statuses.push(snapshot.status));
+      await run(h, 9);
+      const release = h.server.pause();
+      const published = statuses.length;
+      await tick();
+      expect(h.server.walks()).toBe(2);
+      expect(statuses).toHaveLength(published);
+      expect(h.store.peek(HUB)?.status).toBe('ready');
+      expect(h.store.peek(HUB)?.complete).toBe(true);
+      let answered: AgentListSnapshot | undefined;
+      void h.store.ensure(HUB).then((snapshot) => (answered = snapshot));
+      await settle();
+      expect(ids(answered)).toEqual(['a1']);
+      release();
+      await settle();
+      expect(statuses).not.toContain('loading');
+    });
+
+    it('leaves the list ready with its rows when it fails', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const h = await loaded([row('a1', 1)]);
+      await run(h, 9);
+      h.server.status = 500;
+      expect(await run(h, 1, 9)).toEqual([5]);
+      expect(warn).toHaveBeenCalled();
+      const snapshot = h.store.peek(HUB);
+      expect(snapshot?.status).toBe('ready');
+      expect(snapshot?.error).toBeUndefined();
+      expect(ids(snapshot)).toEqual(['a1']);
+      const walks = h.server.walks();
+      await h.store.ensure(HUB);
+      expect(h.server.walks()).toBe(walks);
+    });
+
     it('does not walk a list nobody retains', async () => {
       const h = createHarness([row('a1', 1)]);
       const release = h.store.retain(HUB, () => {});
@@ -670,6 +707,14 @@ describe('AgentStore delta probe', () => {
       expect(h.server.requests.length - requests).toBe(h.server.probes() + 6 * 2);
     });
 
+    it('keeps the list ready during an overflow walk', async () => {
+      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
+      const statuses: string[] = [];
+      h.store.retain(HUB, (snapshot) => statuses.push(snapshot.status));
+      expect(await churn(h, 1)).toEqual([0.5]);
+      expect(statuses).not.toContain('loading');
+    });
+
     it('walks at once again on overflow after a probe has caught up', async () => {
       const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
       expect(await churn(h, 14)).toEqual([0.5, 2.5, 6.5]);
@@ -699,6 +744,17 @@ describe('AgentStore delta probe', () => {
     await tick();
     expect(h.server.probes()).toBe(2);
     expect(h.server.walks()).toBe(2);
+  });
+
+  it('keeps the list ready during the walk its count starts', async () => {
+    const h = await loaded([row('a1', 1), row('a2', 2)]);
+    const statuses: string[] = [];
+    h.store.retain(HUB, (snapshot) => statuses.push(snapshot.status));
+    h.server.agents.pop();
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(statuses).not.toContain('loading');
   });
 
   it('walks only once for a mismatch a walk does not resolve, and again when the count changes', async () => {
