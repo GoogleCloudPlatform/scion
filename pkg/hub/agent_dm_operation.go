@@ -250,17 +250,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 1: Admission checks (no side effects) ─────────────────────
 	// All checks must pass before any content/lifecycle effects (AC-3).
 
-	// 1. Rate limit — aggregate send budget (AC-2).
-	// The traffic class is derived from the message type, but the aggregate
-	// ceiling is always charged, so switching type cannot bypass the budget.
-	class := chatSenderClassForMessageType(input.Type)
-	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, class)
+	// 1. Rate limit — the agent's send budget (AC-2).
+	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, chatSenderAgent)
 	if !rateLimitDecision.Allowed {
 		seconds := int(math.Ceil(rateLimitDecision.RetryAfter.Seconds()))
 		dmErr := &AgentDMError{
 			Code: ErrCodeRateLimited,
 			Message: fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
-				int(rateLimitDecision.Limit), rateLimitDecision.LimitClass.noun(), seconds),
+				int(rateLimitDecision.Limit), "messages", seconds),
 			HTTPStatus: http.StatusTooManyRequests,
 			RetryAfter: rateLimitDecision.RetryAfter,
 		}

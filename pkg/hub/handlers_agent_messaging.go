@@ -1085,6 +1085,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		req.Type = "input-needed"
 	}
 
+	// The end-of-turn assistant-reply mirror is retired: sciontool no
+	// longer sends it, but agents running an older sciontool still do on
+	// every turn. Accept and discard it so those agents see success, and
+	// nothing is persisted, routed to a channel, or shown in chat.
+	if req.Type == messages.TypeAssistantReply {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "dropped"})
+		return
+	}
+
 	if req.Msg == "" {
 		ValidationError(w, "msg is required", nil)
 		return
@@ -1207,7 +1216,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// ── Non-agent-DM paths: rate limit, then build and dispatch ─────────
 	// Rate limiting for user delivery paths (agent DMs are rate limited
 	// inside ExecuteAgentDM above).
-	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderAgent) {
 		return
 	}
 
