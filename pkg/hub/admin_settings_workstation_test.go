@@ -1110,3 +1110,38 @@ func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T
 		t.Errorf("server.log_level = %v, want debug written", got)
 	}
 }
+
+// A workstation PUT checks server.home_storage like the file-mode handler:
+// unknown values are rejected with 400 and nothing is written; a valid
+// block is written.
+func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
+	for _, body := range []string{
+		`{"server":{"home_storage":{"backend":"ceph"}}}`,
+		`{"server":{"home_storage":{"leaf":"node"}}}`,
+		`{"server":{"home_storage":{"stop_grace_seconds":-5}}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			settingsPath := workstationHome(t)
+			srv, _, _ := newSQLiteHubInMode(t, true, nil)
+			before := readFileString(t, settingsPath)
+			rr := putServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if after := readFileString(t, settingsPath); after != before {
+				t.Errorf("settings.yaml changed:\n%s", after)
+			}
+		})
+	}
+
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	rr := putServerConfig(t, srv, `{"server":{"home_storage":{"leaf":"pod","stop_grace_seconds":40}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid home_storage: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	m := readYAMLMap(t, settingsPath)
+	if yamlAt(m, "server", "home_storage", "leaf") != "pod" || yamlAt(m, "server", "home_storage", "stop_grace_seconds") != 40 {
+		t.Errorf("home_storage not written:\n%s", readFileString(t, settingsPath))
+	}
+}

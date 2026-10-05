@@ -651,6 +651,13 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{err.Error()}
 		}
 	}
+	if under("server.home_storage") && req.Server != nil {
+		// Same check as the file-mode handler: backend, leaf and
+		// stop_grace_seconds must hold known values.
+		if err := req.Server.HomeStorage.Validate(); err != nil {
+			return &serverConfigFileValidationError{err.Error()}
+		}
+	}
 	if under("server.shared_dir_storage") && req.Server != nil {
 		runtimes, profiles := req.Runtimes, req.Profiles
 		snap := ops.Snapshot()
