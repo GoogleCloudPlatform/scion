@@ -22,14 +22,22 @@ let target: HTMLTextAreaElement;
 let onTargetKeydown: Mock<(e: Event) => void>;
 let onDocumentKeydown: Mock<(e: Event) => void>;
 
-/** Dispatches a keydown at the focused stand-in for the composer or a terminal pane. */
-function press(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+/**
+ * Dispatches a keydown at the focused stand-in for the composer or a
+ * terminal pane. AltGraph is reported only when `altGraph` is set, as in
+ * browsers: happy-dom reports it whenever Alt is held.
+ */
+function press(key: string, init: KeyboardEventInit = {}, altGraph = false): KeyboardEvent {
   const e = new KeyboardEvent('keydown', {
     key,
     bubbles: true,
     composed: true,
     cancelable: true,
     ...init,
+  });
+  const modifierState = e.getModifierState.bind(e);
+  Object.defineProperty(e, 'getModifierState', {
+    value: (name: string): boolean => (name === 'AltGraph' ? altGraph : modifierState(name)),
   });
   target.dispatchEvent(e);
   return e;
@@ -48,7 +56,9 @@ function expectPassedThrough(e: KeyboardEvent): void {
 }
 
 beforeEach(() => {
-  typeahead = new PaletteTypeahead();
+  // Alt+key is a shortcut here, as on Windows and Linux; the macOS tests
+  // below build their own.
+  typeahead = new PaletteTypeahead({ mac: false });
   target = document.createElement('textarea');
   document.body.append(target);
   target.focus();
@@ -136,6 +146,92 @@ describe('PaletteTypeahead', () => {
     typeahead.start();
     expectPassedThrough(press('k', init));
     expect(typeahead.pending).toBe('');
+  });
+
+  it('captures a character typed with AltGr, which Windows reports as Ctrl+Alt', () => {
+    typeahead.start();
+    expectCaptured(press('@', { ctrlKey: true, altKey: true }, true));
+    expectCaptured(press('€', { altKey: true }, true));
+    expect(typeahead.pending).toBe('@€');
+  });
+
+  it('lets a non-printable key through even with AltGr held, Backspace and Enter included', () => {
+    typeahead.start();
+    press('a');
+    for (const key of ['Backspace', 'Enter', 'ArrowLeft']) {
+      const e = press(key, { ctrlKey: true, altKey: true }, true);
+      expect(e.defaultPrevented).toBe(false);
+    }
+    expect(onTargetKeydown).toHaveBeenCalledTimes(3);
+    expect(typeahead.pending).toBe('a');
+  });
+
+  it('lets a Meta chord through even with AltGr held', () => {
+    typeahead.start();
+    expectPassedThrough(press('v', { metaKey: true, altKey: true }, true));
+    expect(typeahead.pending).toBe('');
+  });
+
+  describe('on macOS', () => {
+    beforeEach(() => {
+      typeahead = new PaletteTypeahead({ mac: true });
+    });
+
+    it('captures a character typed with Option as text', () => {
+      typeahead.start();
+      expectCaptured(press('@', { altKey: true }));
+      expectCaptured(press('∫', { altKey: true }));
+      expect(typeahead.pending).toBe('@∫');
+    });
+
+    it('lets Option with Ctrl or Meta, and a non-printable key with Option, through', () => {
+      typeahead.start();
+      press('k', { altKey: true, ctrlKey: true });
+      press('k', { altKey: true, metaKey: true });
+      press('ArrowLeft', { altKey: true });
+      press('Backspace', { altKey: true });
+      expect(onTargetKeydown).toHaveBeenCalledTimes(4);
+      expect(typeahead.pending).toBe('');
+    });
+  });
+
+  it('defaults to treating Option characters as text on macOS only', () => {
+    const platform = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
+    const results: boolean[] = [];
+    try {
+      for (const value of ['MacIntel', 'Win32']) {
+        Object.defineProperty(window.navigator, 'platform', { value, configurable: true });
+        const t = new PaletteTypeahead();
+        t.start();
+        try {
+          results.push(press('@', { altKey: true }).defaultPrevented);
+        } finally {
+          t.stop();
+        }
+      }
+    } finally {
+      if (platform) Object.defineProperty(window.navigator, 'platform', platform);
+      else delete (window.navigator as unknown as Record<string, unknown>).platform;
+    }
+    expect(results).toEqual([true, false]);
+  });
+
+  it('lets a dead key through', () => {
+    typeahead.start();
+    expectPassedThrough(press('Dead'));
+    expect(typeahead.pending).toBe('');
+  });
+
+  it('keeps a captured key from window capture listeners added after it started', () => {
+    typeahead.start();
+    const later = vi.fn();
+    window.addEventListener('keydown', later, true);
+    try {
+      press('a');
+      expect(later).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', later, true);
+    }
   });
 
   it('lets keys that are part of an IME composition through', () => {

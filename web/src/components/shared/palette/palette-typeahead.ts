@@ -33,6 +33,8 @@
  * the palette component into its bundle.
  */
 
+import { isMacPlatform } from '../../../utils/platform.js';
+
 /**
  * How long a capture lasts at most. A capture that no close or focus ever
  * ends (an open path that forgot to stop it) must not swallow keys for
@@ -55,10 +57,25 @@ const SWALLOWED_KEYS = new Set([
   'PageDown',
 ]);
 
+export interface PaletteTypeaheadOptions {
+  /**
+   * Whether keys follow macOS conventions: a character typed with Option
+   * (Alt) and neither Ctrl nor Meta is text, since Option types characters
+   * such as `@`, `[` or `€` on many layouts. Elsewhere Alt+key is a
+   * shortcut. Defaults to {@link isMacPlatform}.
+   */
+  mac?: boolean;
+}
+
 export class PaletteTypeahead {
+  private readonly mac: boolean;
   private text = '';
   private capturing = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(options: PaletteTypeaheadOptions = {}) {
+    this.mac = options.mac ?? isMacPlatform();
+  }
 
   /** Whether keys are being captured. */
   get isCapturing(): boolean {
@@ -105,12 +122,21 @@ export class PaletteTypeahead {
 
   /**
    * Window capture phase, so it runs before every document and element
-   * listener. Escape, modifier chords (the palette's own shortcut, copy,
-   * reload…), lone modifiers, function keys and IME input pass through.
+   * listener, and before window capture listeners added after it. Escape,
+   * modifier chords (the palette's own shortcut, copy, reload…), lone
+   * modifiers, function keys and IME input pass through. A character typed
+   * with AltGr (reported as Ctrl+Alt on Windows) is text, and so is one
+   * typed with Option on macOS (see {@link PaletteTypeaheadOptions.mac}). Any
+   * key with Meta is a chord. Dead keys pass through, so an accented letter
+   * composed from one reaches the old focus.
    */
   private readonly handleKeydown = (e: KeyboardEvent): void => {
-    if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (Array.from(e.key).length === 1) {
+    if (e.isComposing || e.metaKey) return;
+    const printable = Array.from(e.key).length === 1;
+    const altGraph = printable && e.getModifierState('AltGraph');
+    const optionText = printable && this.mac && e.altKey && !e.ctrlKey;
+    if (!altGraph && !optionText && (e.ctrlKey || e.altKey)) return;
+    if (printable) {
       this.text += e.key;
     } else if (e.key === 'Backspace') {
       this.text = Array.from(this.text).slice(0, -1).join('');

@@ -595,6 +595,8 @@ describe('QuickPaletteHost: Escape and other closes while the first mount is pen
         cancelable: true,
         ...init,
       });
+      // happy-dom reports AltGraph whenever Alt is held; a browser does not for a plain Alt.
+      Object.defineProperty(e, 'getModifierState', { value: (): boolean => false });
       el.dispatchEvent(e);
       expect(e.defaultPrevented).toBe(false);
     }
