@@ -70,15 +70,35 @@ describe('agent detail layout', () => {
 
   it('keeps the message-mode select inside its column', () => {
     expect(rules.get('.messaging-grid') ?? '').toMatch(/flex-wrap:\s*wrap/);
-    expect(rules.get('.messaging-grid .messaging-mode') ?? '').toMatch(/max-width:\s*360px/);
-    expect(rules.get('.messaging-mode sl-select') ?? '').toMatch(/width:\s*100%/);
+    const column = rules.get('.messaging-grid .messaging-mode') ?? '';
+    expect(column).toMatch(/flex:\s*1 1 280px/);
+    expect(column).toMatch(/min-width:\s*0/);
+    // The cap is on the select, not the column, so a read-only mode
+    // description can use the full column width.
+    expect(column).not.toMatch(/max-width/);
+    const select = rules.get('.messaging-mode sl-select') ?? '';
+    expect(select).toMatch(/(^|;)\s*width:\s*100%/);
+    expect(select).toMatch(/max-width:\s*360px/);
     // The select used to force itself wider than its column with an inline
     // min-width; it now takes its width from the stylesheet only.
-    const select = renderMessagingCard(
+    const el = renderMessagingCard(
       makeAgent({ _capabilities: { actions: ['read', 'set_message_mode'] } })
     ).querySelector('sl-select');
-    expect(select).not.toBeNull();
-    expect(select!.hasAttribute('style')).toBe(false);
+    expect(el).not.toBeNull();
+    expect(el!.hasAttribute('style')).toBe(false);
+  });
+
+  it('lets a read-only mode description fill the mode column', () => {
+    const column = renderMessagingCard(
+      makeAgent({ messageMode: 'project', _capabilities: { actions: ['read'] } })
+    ).querySelector('.messaging-grid > .messaging-mode');
+    expect(column).not.toBeNull();
+    expect(column!.querySelector('sl-select')).toBeNull();
+    expect(column!.querySelector('scion-message-mode-badge')).not.toBeNull();
+    // Nothing inside the column caps its width inline.
+    for (const node of Array.from(column!.querySelectorAll('[style]'))) {
+      expect(node.getAttribute('style')).not.toMatch(/max-width/);
+    }
   });
 
   /** Render one of the page's template methods for `agent`. */

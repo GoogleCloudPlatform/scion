@@ -431,15 +431,17 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .messaging-grid .messaging-mode {
       flex: 1 1 280px;
-      max-width: 360px;
       min-width: 0;
     }
     .messaging-grid .messaging-reach {
       flex: 1 1 200px;
       min-width: 0;
     }
+    /* Cap the select, not its column, so a read-only mode description can
+       use the full column width. */
     .messaging-mode sl-select {
       width: 100%;
+      max-width: 360px;
     }
 
     /* ---- Task summary ---- */
