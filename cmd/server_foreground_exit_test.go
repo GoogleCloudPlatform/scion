@@ -86,8 +86,12 @@ func TestRunServerStart_DefersHubExitSequence(t *testing.T) {
 		assert.NotRegexp(t, `\b(tp|mp)\.Shutdown\b|CloseDecisionAudit`, d,
 			"runServerStart defers %q outside the exit sequence", d)
 	}
-	assert.Contains(t, src.String(), "hubSrv.DeferDecisionAuditClose()")
-	assert.Contains(t, src.String(), "closeDecisionAudit: hubSrv.CloseDecisionAudit")
-	assert.Contains(t, src.String(), "exit.addFlush(tp.Shutdown)")
-	assert.Contains(t, src.String(), "exit.addFlush(mp.Shutdown)")
+	for _, want := range []string{
+		"hubSrv.DeferDecisionAuditClose()",
+		"closeDecisionAudit: hubSrv.CloseDecisionAudit",
+		"exit.addFlush(tp.Shutdown)",
+		"exit.addFlush(mp.Shutdown)",
+	} {
+		assert.True(t, strings.Contains(src.String(), want), "runServerStart is missing %q", want)
+	}
 }
