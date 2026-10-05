@@ -340,7 +340,7 @@ An agent's GCP identity mode decides which Google identity, if any, GCP client l
 | Mode | On the Kubernetes runtime |
 | :--- | :--- |
 | `block` | Not offered. A dispatch that resolves to `block` fails before any pod is created. |
-| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. Must be set explicitly (see **No identity configured** below). |
+| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. The default when no identity is configured (see **No identity configured** below). |
 | `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). Requires a GSA-to-KSA mapping in the broker's settings. |
 
 #### block
@@ -351,7 +351,7 @@ An agent's GCP identity mode decides which Google identity, if any, GCP client l
 GCP identity mode "block" is not supported on the Kubernetes runtime; edit this agent's GCP identity mode to "assign" or "passthrough", or change the project or hub default GCP identity mode for agents created after this
 ```
 
-- **No identity configured.** When neither the request, the project default, nor the hub default names a mode, an agent dispatched through the Hub is sent as `block`, so it fails on Kubernetes with the error above. A hub-default `passthrough` is denied for Kubernetes profiles and is treated the same way. Agents on the Kubernetes runtime therefore need an explicit identity: `passthrough` or `assign` on the agent, a project default of `passthrough` or `assign`, or a hub default of `assign`.
+- **No identity configured.** When neither the request, the project default, nor the hub default names a mode, the Hub sends no mode and the broker applies its runtime default, which is `passthrough` on Kubernetes (and `block` on every other runtime). A hub-default `passthrough` is denied for Kubernetes profiles and is treated the same way, so the agent also gets `passthrough`. Hubs older than this behaviour still send `block` in this case, so the agent fails with the error above until the Hub is upgraded.
 - **Explicit `block` defaults.** A project default or hub default that is explicitly `block` is stored on each new agent as an explicit `block`, so new agents dispatched to Kubernetes under that default fail with the error above. Change it to a project default of `assign` or `passthrough`, or a hub default of `assign`. A hub default of `passthrough` is denied for Kubernetes. A project or hub default of `assign` with no service account selected is also stored as `block`.
 - **Stored `block` on existing agents.** An agent whose own stored identity is `block`, including agents created by earlier versions that wrote `block` when nothing was chosen, is not migrated. Starting, restarting, or resuming it on Kubernetes fails with the same error. Edit that agent's own GCP identity mode; changing a project or hub default affects only agents created afterwards.
 
@@ -451,7 +451,7 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 #### Troubleshooting
 
-- **`"block" is not supported on the Kubernetes runtime`.** Either no GCP identity is configured for the agent (no agent setting and no project or hub default), or the agent's own mode, or the default it was created under, is `block` (including a default of `assign` with no service account), or the hub default is `passthrough`, which is denied for Kubernetes. Set the agent's GCP identity mode to `assign` or `passthrough`, and for future agents set a project default (`assign` or `passthrough`) or a hub default (`assign`).
+- **`"block" is not supported on the Kubernetes runtime`.** The agent's own mode, or the default it was created under, is `block` (including a default of `assign` with no service account), or the Hub predates the runtime default for agents with no identity configured. Set the agent's GCP identity mode to `assign` or `passthrough`, and for future agents set a project default (`assign` or `passthrough`) or a hub default (`assign`).
 - **`no Kubernetes ServiceAccount mapped for "<gsa>"`.** Add the GSA, in lowercase, to `kubernetes_service_account_mappings` on the runtime entry or profile the dispatch selects, in the broker's global settings. For a broker in the same process as a database-backed Hub, editing only `settings.yaml` after first boot has no effect. Check the broker log for a warning that the mapping was found in a project's `settings.yaml` instead.
 - **The pod is not created, and the error names the ServiceAccount.** The mapped KSA does not exist in the namespace the runtime entry resolves to. Create it there.
 - **The pod runs, but GCP calls fail with authentication or permission errors.** Check the KSA annotation, the `roles/iam.workloadIdentityUser` binding (the member must name the same namespace and KSA), that the node pool uses `GKE_METADATA`, and that the GSA itself holds the roles the agent needs.
