@@ -443,6 +443,9 @@ export class ScionChatThread extends LitElement {
   /** The restore anchor already applied, so a re-load does not reuse it. */
   private _usedRestoreAnchor: ChatScrollAnchor | null = null;
 
+  /** Bumped by an explicit jump, so a restore still in flight stands down. */
+  private _restoreSeq = 0;
+
   /** Latest scroll position, kept current from scroll events. */
   private _scrollAnchor: ChatScrollAnchor | null = null;
 
@@ -2879,12 +2882,20 @@ export class ScionChatThread extends LitElement {
     };
   }
 
-  /** The restore anchor for this conversation, once; null otherwise. */
+  /**
+   * The restore anchor for this conversation, once; null otherwise. Taking
+   * it fires `scroll-restore-consumed` so the page stops offering it: a
+   * thread element re-created later (closing search re-mounts it) must not
+   * restore a position the user has long since moved on from.
+   */
   private takeRestoreScrollAnchor(): ChatScrollAnchor | null {
     const anchor = this.restoreScrollAnchor;
     if (!anchor || anchor === this._usedRestoreAnchor) return null;
     if (anchor.conversationKey !== this.conversationKey) return null;
     this._usedRestoreAnchor = anchor;
+    this.dispatchEvent(
+      new CustomEvent<ChatScrollAnchor>('scroll-restore-consumed', { detail: anchor })
+    );
     return anchor;
   }
 
@@ -2895,6 +2906,7 @@ export class ScionChatThread extends LitElement {
    * does not include it. Falls back to the bottom if the message is gone.
    */
   private async restoreScrollPosition(anchor: ChatScrollAnchor): Promise<void> {
+    const restoreSeq = this._restoreSeq;
     if (anchor.pinnedToBottom || !anchor.messageId) {
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
@@ -2911,7 +2923,9 @@ export class ScionChatThread extends LitElement {
       await this.updateComplete;
       msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     }
-    if (fetchId !== this.fetchId) return;
+    // Superseded by a thread switch or an explicit jump (e.g. a search
+    // result in this conversation) made while the anchor was being located.
+    if (fetchId !== this.fetchId || restoreSeq !== this._restoreSeq) return;
     if (!msgEl) {
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
@@ -3055,6 +3069,11 @@ export class ScionChatThread extends LitElement {
     // overridden the moment content resizes and the ResizeObserver re-anchors
     // to the divider (R1).
     this.deactivateUnreadAnchor();
+    // It also outranks a restored position: use the anchor up if the load
+    // has not taken it yet, and stop a restore that is still in flight.
+    this.takeRestoreScrollAnchor();
+    ++this._restoreSeq;
+    this.cancelRestoreSettleWatch();
     await this.updateComplete;
     const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
     if (!scrollEl) return;

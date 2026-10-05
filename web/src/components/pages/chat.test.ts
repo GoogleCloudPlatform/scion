@@ -1813,6 +1813,22 @@ describe('chat page — thread and scroll position across mode switches', () => 
     expect(el._pendingScrollRestore).toBe(THREAD_ANCHOR);
   });
 
+  it('stops offering the position once a thread has taken it (search close re-mounts the thread)', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    // Some other anchor object being reported leaves this one alone.
+    el.handleScrollRestoreConsumed(
+      new CustomEvent('scroll-restore-consumed', { detail: { ...THREAD_ANCHOR } })
+    );
+    expect(el._pendingScrollRestore).toBe(THREAD_ANCHOR);
+    el.handleScrollRestoreConsumed(
+      new CustomEvent('scroll-restore-consumed', { detail: THREAD_ANCHOR })
+    );
+    expect(el._pendingScrollRestore).toBeNull();
+    // The thread element built when search closes is offered nothing.
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
   it("hands the open thread's live position to the next page", () => {
     const el = createPage();
     const live = { ...THREAD_ANCHOR, messageId: 'm7', offset: 3 };
@@ -1902,6 +1918,18 @@ describe('chat page — late conversation switches while composing', () => {
     // The thread name is user content: rendered as text, never as markup.
     expect(link.textContent).toBe('Open #promoted <b>name</b>');
     expect(document.querySelector('.dm-promoted-toast b')).toBeNull();
+    // It stays until dismissed: the user was busy typing.
+    expect((document.querySelector('.dm-promoted-toast') as any).duration).toBe(Infinity);
+  });
+
+  it("this page's own promotion still moves the user even with a draft", () => {
+    const el = pageOnDM(true);
+    el.promoteLoading = true; // the promote POST has not resolved yet
+    const toast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => {});
+    el.handleDMPromoted(promoted());
+    expect(el.v2Conversation.conversationKey).toBe('topic-9');
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+    expect(toast).toHaveBeenCalledTimes(1);
   });
 
   it('a promotion of the DM on screen moves an idle user to the new thread', () => {

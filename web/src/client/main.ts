@@ -951,13 +951,13 @@ async function init(): Promise<void> {
   // The event fires synchronously from performLogout() or auth-expiry detection
   // so cross-tab teardown completes before the page navigates away.
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
+    // A chat scroll position belongs to this account's session.
+    clearChatScrollAnchor();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
     // auth-expiry teardown may resume the same account after re-auth, so it
     // does not clear recents.
-    // A chat scroll position belongs to this account's session.
-    clearChatScrollAnchor();
     const reason = (e as CustomEvent<AccountTeardownDetail>).detail?.reason;
     if (shouldClearRecentFilesOnTeardown(reason)) {
       chatRecentFiles.clearForLogout();

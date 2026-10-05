@@ -43,6 +43,7 @@ import { showToast } from '../../../utils/toast.js';
 import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_ITEMS: ActionSheetItem[] = [
@@ -1692,17 +1693,21 @@ export class ScionChatComposer extends LitElement {
     (slTextarea as HTMLElement | null)?.blur();
   }
 
-  /** Focus the textarea after send/cancel. */
   /**
-   * Whether the user is mid-composition: there is draft text, or focus is
-   * inside the composer. Used to hold off server-pushed navigation that
-   * would otherwise pull the conversation out from under them.
+   * Whether the user is mid-composition, used to hold off server-pushed
+   * navigation that would pull the conversation out from under them: there
+   * is draft text, or — on a touch-primary device only — focus is inside the
+   * composer, which there means the on-screen keyboard is up. On desktop the
+   * textarea keeps focus after every send, so focus alone says nothing.
    */
   get isComposing(): boolean {
     if (this.text.trim().length > 0) return true;
-    return this.shadowRoot?.activeElement != null;
+    const touchPrimary =
+      typeof window !== 'undefined' && !!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches;
+    return touchPrimary && this.shadowRoot?.activeElement != null;
   }
 
+  /** Focus the textarea after send/cancel. */
   private focusTextarea(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {

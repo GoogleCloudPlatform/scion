@@ -6694,6 +6694,81 @@ describe('scion-chat-thread scroll position hand-over', () => {
     }
   });
 
+  it('announces once that it took the anchor, so the page stops offering it', async () => {
+    const anchor = {
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm4',
+      offset: 0,
+    };
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    const consumed: unknown[] = [];
+    el.addEventListener('scroll-restore-consumed', (e) => consumed.push((e as CustomEvent).detail));
+    el.conversationKey = CONVERSATION_KEY;
+    el.restoreScrollAnchor = anchor;
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(consumed).toEqual([anchor]));
+    // A later re-load of the same conversation does not take it again.
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    el.conversationKey = CONVERSATION_KEY;
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-m9')).not.toBeNull());
+    expect(consumed).toHaveLength(1);
+  });
+
+  it('a jump made before the load finishes uses the anchor up instead of restoring it', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.restoreScrollAnchor = {
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm4',
+      offset: 0,
+    };
+    document.body.appendChild(el);
+    void el.scrollToMessageById('m2', false);
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-m9')).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const scroller = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    expect(scroller.scrollTop).not.toBe(400);
+  });
+
+  it('a jump made while the anchor is still being located stands the restore down', async () => {
+    let releaseAround: () => void = () => {};
+    apiFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('around=old-1')) {
+        await new Promise<void>((resolve) => (releaseAround = resolve));
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve(
+            String(url).endsWith('/read')
+              ? {}
+              : { items: String(url).includes('around=old-1') ? [older, ...history] : history }
+          ),
+      } as unknown as Response;
+    });
+    const { el, scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'old-1',
+      offset: -50,
+    });
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('around=old-1'))).toBe(true)
+    );
+    // e.g. a search result in this same conversation
+    void el.scrollToMessageById('m2', false);
+    scroller().scrollTop = 123;
+    releaseAround();
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-old-1')).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The restore would have written 50 (old-1 at -50px).
+    expect(scroller().scrollTop).not.toBe(50);
+  });
+
   describe('holding the restored position against late layout shifts', () => {
     const OriginalResizeObserver = globalThis.ResizeObserver;
     let observers: Array<{ fire: () => void; disconnected: boolean }>;

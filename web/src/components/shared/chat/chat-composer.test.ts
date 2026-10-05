@@ -474,24 +474,53 @@ describe('composer — caret-end focus hardening when sl-textarea is not yet upg
 describe('isComposing', () => {
   afterEach(() => {
     document.body.innerHTML = '';
+    vi.unstubAllGlobals();
   });
 
-  it('is true with draft text or focus inside, false when idle', async () => {
+  function stubTouchPrimary(touch: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: touch && query.includes('pointer: coarse'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  async function mountFocused(): Promise<any> {
     const el = createComposer();
     document.body.appendChild(el);
     await el.updateComplete;
-    expect(el.isComposing).toBe(false);
-
-    el.text = '   ';
-    expect(el.isComposing).toBe(false);
-    el.text = 'half a thought';
-    expect(el.isComposing).toBe(true);
-
-    el.text = '';
     Object.defineProperty(el.shadowRoot, 'activeElement', {
       configurable: true,
       get: () => el.shadowRoot.querySelector('sl-textarea'),
     });
+    return el;
+  }
+
+  it('is true with draft text on any device', async () => {
+    stubTouchPrimary(false);
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.isComposing).toBe(false);
+    el.text = '   ';
+    expect(el.isComposing).toBe(false);
+    el.text = 'half a thought';
+    expect(el.isComposing).toBe(true);
+  });
+
+  it('on desktop, focus alone is not composing (it stays after every send)', async () => {
+    stubTouchPrimary(false);
+    const el = await mountFocused();
+    expect(el.isComposing).toBe(false);
+  });
+
+  it('on touch, focus means the keyboard is up, so it counts', async () => {
+    stubTouchPrimary(true);
+    const el = await mountFocused();
     expect(el.isComposing).toBe(true);
   });
 });

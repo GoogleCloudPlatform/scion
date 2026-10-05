@@ -1471,6 +1471,17 @@ export class ScionPageChat extends LitElement {
     this._pendingScrollRestore = null;
   }
 
+  /**
+   * A thread has applied the handed-over position: stop offering it. The
+   * thread element is re-created without a conversation change (closing
+   * search re-mounts it), and a fresh one must not restore it again.
+   */
+  private handleScrollRestoreConsumed = (e: Event): void => {
+    if ((e as CustomEvent<ChatScrollAnchor>).detail === this._pendingScrollRestore) {
+      this._pendingScrollRestore = null;
+    }
+  };
+
   /** The handed-over scroll position, if it belongs to this conversation. */
   private scrollRestoreFor(conversationKey: string): ChatScrollAnchor | null {
     const pending = this._pendingScrollRestore;
@@ -2403,10 +2414,13 @@ export class ScionPageChat extends LitElement {
     // — unless the user is typing in it. This event is server-pushed (the
     // promotion may come from another tab or device), so moving them would
     // pull the conversation out from under their draft; offer a link to the
-    // new thread instead and leave them where they are.
+    // new thread instead and leave them where they are. A promotion this
+    // page started itself (still awaiting its POST) is not an interruption:
+    // its own completion moves the user, so offering a link too would leave
+    // a stale toast behind.
     if (this.v2Conversation?.conversationKey === oldConversationKey) {
       this.promoteDialogOpen = false;
-      if (this.isComposingInConversation()) {
+      if (!this.promoteLoading && this.isComposingInConversation()) {
         this.showPromotedThreadLinkToast(newTopic);
       } else {
         this.navigateToPromotedThread(newTopic);
@@ -2446,7 +2460,9 @@ export class ScionPageChat extends LitElement {
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant: 'primary',
       closable: true,
-      duration: 10000,
+      // Stays until dismissed or followed: the user was busy typing and
+      // may not look up for a while.
+      duration: Infinity,
     });
     alert.classList.add('dm-promoted-toast');
     const icon = document.createElement('sl-icon');
@@ -5444,6 +5460,7 @@ export class ScionPageChat extends LitElement {
               .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
               .restoreScrollAnchor=${this.scrollRestoreFor(conv.conversationKey)}
+              @scroll-restore-consumed=${this.handleScrollRestoreConsumed}
               @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>
           `}

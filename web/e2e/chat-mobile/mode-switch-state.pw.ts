@@ -144,11 +144,26 @@ async function openScrolledThread(page: Page): Promise<{ messageId: string; offs
   await expect(page).toHaveURL(THREAD_PATH);
   await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 10_000 });
 
-  // Park the view part-way up the history, off the bottom.
-  await page.evaluate((expr) => {
-    const scroller = (0, eval)(expr) as HTMLElement;
-    scroller.scrollTop = Math.round(scroller.scrollHeight * 0.4);
-  }, scrollerHandle);
+  // Park the view part-way up the history, off the bottom. The thread's own
+  // open-time scroll to the bottom can land after a single write, so keep
+  // writing until the view has stayed parked for a moment.
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate((expr) => {
+          const scroller = (0, eval)(expr) as HTMLElement;
+          const target = Math.round(scroller.scrollHeight * 0.4);
+          if (Math.abs(scroller.scrollTop - target) > 2) scroller.scrollTop = target;
+        }, scrollerHandle);
+        await page.waitForTimeout(150);
+        return page.evaluate((expr) => {
+          const scroller = (0, eval)(expr) as HTMLElement;
+          return Math.abs(scroller.scrollTop - Math.round(scroller.scrollHeight * 0.4)) <= 2;
+        }, scrollerHandle);
+      },
+      { timeout: 10_000 }
+    )
+    .toBe(true);
   await expect(page.locator('.jump-to-latest')).toBeVisible();
   // Let the rAF-throttled position capture run.
   await page.waitForTimeout(200);
