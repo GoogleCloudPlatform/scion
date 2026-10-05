@@ -71,6 +71,11 @@ beforeEach(() => {
   chatSpacesLoad.invalidate();
 });
 
+/** Let pending promise callbacks (a few macrotask turns of awaits) run. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 describe('chat mention roster stability', () => {
   it('reuses agent props until the member roster or project changes', () => {
     const page = createPage();
@@ -1182,11 +1187,6 @@ describe('chat page — promote DM dialog', () => {
 });
 
 describe('chat page — late route lookups', () => {
-  /** Let pending promise callbacks (the lookup's awaits) run. */
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold the project-by-slug lookup until `release` is called; every other
    * request gets an empty object.
@@ -1261,10 +1261,6 @@ describe('chat page — late route lookups', () => {
 });
 
 describe('chat page — late space lookups', () => {
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold the project-by-slug lookup and the space's thread list until their
    * releases are called; every other request gets an empty object.
@@ -1434,10 +1430,6 @@ describe('chat page — rail reload after a message', () => {
 });
 
 describe('chat page — late DM peer lookups', () => {
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold each DM-list request until its own release is called, in order;
    * every other request gets an empty object.
@@ -1747,10 +1739,6 @@ describe('chat page — late DM peer lookups', () => {
 });
 
 describe('chat page — startup after the page is removed', () => {
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Load initV2's lazy modules up front. Its own imports then come from the
    * module cache, but initV2 still resumes only after an await, so a page
