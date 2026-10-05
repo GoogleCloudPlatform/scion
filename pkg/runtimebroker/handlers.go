@@ -2672,14 +2672,32 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// unlabelled ones), and resolve again if any was cancelled, since
 		// its cleanup may have changed what the runtime lists.
 		s.cancelLocalLaunchForRun(key, runID)
-		if s.cancelInFlightStartRun(ctx, key, runID) > 0 {
+		cancelledOwn := s.cancelInFlightStartRun(ctx, key, runID)
+		if cancelledOwn > 0 {
 			match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
 		}
 		// Whatever the cancel did, a runtime entry of another run is never
 		// stopped. In-flight starts of other runs no longer count here: this
 		// run's own starts are already cancelled, so refusing for another
 		// run's start now would report a stop that did act as not done.
-		if s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckEntryOnly) {
+		if current, mismatch := s.stopRunMismatch(key, runID, match, lookupErr, stopCheckEntryOnly); mismatch {
+			if cancelledOwn > 0 {
+				// This stop cancelled the requested run's own start, and
+				// only another run's entry holds the name (for example the
+				// previous run's container during a restart): the requested
+				// run is gone, so the stop is accepted, as for a run with
+				// nothing left. A 404 here would make the hub keep showing
+				// the run as running. The other run's entry is left alone.
+				s.agentLifecycleLog.Warn("Agent stop: cancelled the requested run's start; another run holds the name and is left untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current)
+				s.forceHeartbeatAll("stop", id)
+				writeJSON(w, http.StatusAccepted, map[string]string{
+					"status":  "accepted",
+					"message": "Stop operation accepted",
+				})
+				return
+			}
+			s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckEntryOnly)
 			return
 		}
 	}

@@ -306,8 +306,8 @@ func TestStopAgent_BothRunsTrackedReLookupStopsOwnContainer(t *testing.T) {
 // A stop for run-b while run-b's start is in flight and run-a's stale
 // container still holds the name (for example during a restart): the stop
 // still cancels run-b's start, so it is not lost, and never stops run-a's
-// container. Because run-a's entry holds the name afterwards, the answer is
-// the run-mismatch 404 (refusal on a matched entry of another run only).
+// container. Run-b is then gone, so the stop is accepted (202), not the
+// run-mismatch 404 that would make the hub keep showing run-b as running.
 func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
 	srv, mgr, _, _ := newSyncStartTestServer(t)
 	setAgents(mgr, trackedRunEntry("c-a", "run-a"))
@@ -317,8 +317,28 @@ func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
 	go func() { stopDone <- actionWithRun(srv, "stop", "runId=run-b", "") }()
 	waitStopped(t, doneB)
 	sw := <-stopDone
+	if sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202 (run-b's start was cancelled): %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", mgr.StopCalls())
+	}
+}
+
+// With nothing of the requested run cancelled, a matched entry of another
+// run is still the run-mismatch 404, after the own-run checks: a stop for
+// run-b with only run-b's async launch registered (no tracked start to
+// cancel) and run-a's container holding the name.
+func TestStopAgent_OtherRunEntryWithoutOwnCancelStill404(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	setAgents(mgr, trackedRunEntry("c-a", "run-a"))
+	rec := newLaunchRecord("async-1", "same-name", "create", "", time.Time{}, func() {})
+	rec.RunID = "run-b"
+	srv.launchRegistry.Begin(launchKey{Slug: "same-name"}, rec)
+
+	sw := actionWithRun(srv, "stop", "runId=run-b", "")
 	if sw.Code != http.StatusNotFound {
-		t.Fatalf("stop run-b: status %d, want 404 (run-a holds the name): %s", sw.Code, sw.Body.String())
+		t.Fatalf("stop run-b: status %d, want 404 (nothing of run-b cancelled): %s", sw.Code, sw.Body.String())
 	}
 	if mgr.StopCalls() != 0 {
 		t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", mgr.StopCalls())
