@@ -1312,12 +1312,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 
 	// Fixup for list fields that might be loaded as a single comma-separated string from env vars.
 	// This happens because koanf's env provider doesn't automatically split strings for slice fields.
-	if len(config.Hub.AdminEmails) == 1 && strings.Contains(config.Hub.AdminEmails[0], ",") {
-		config.Hub.AdminEmails = parseCommaSeparatedList(config.Hub.AdminEmails[0])
-	}
-	if len(config.Auth.AuthorizedDomains) == 1 && strings.Contains(config.Auth.AuthorizedDomains[0], ",") {
-		config.Auth.AuthorizedDomains = parseCommaSeparatedList(config.Auth.AuthorizedDomains[0])
-	}
+	splitEnvCommaLists(config)
 
 	// D11-fix: normalize AdminEmails for ALL list shapes (YAML list, env-var,
 	// comma-separated). Apply TrimSpace + ToLower and drop empty entries so
@@ -1765,17 +1760,28 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 
 	// Fixup for list fields that might be loaded as a single comma-separated
 	// string from env vars (koanf's env provider doesn't auto-split slices).
-	if len(gc.Hub.AdminEmails) == 1 && strings.Contains(gc.Hub.AdminEmails[0], ",") {
-		gc.Hub.AdminEmails = parseCommaSeparatedList(gc.Hub.AdminEmails[0])
-	}
-	if len(gc.Auth.AuthorizedDomains) == 1 && strings.Contains(gc.Auth.AuthorizedDomains[0], ",") {
-		gc.Auth.AuthorizedDomains = parseCommaSeparatedList(gc.Auth.AuthorizedDomains[0])
-	}
+	splitEnvCommaLists(gc)
 
 	// D11-fix: normalize AdminEmails (same as primary config load path).
 	gc.Hub.AdminEmails = SanitizeEmailList(gc.Hub.AdminEmails)
 
 	return nil
+}
+
+// splitEnvCommaLists splits list fields that koanf's env provider loaded as a
+// single comma-separated string (it does not split slices itself), e.g.
+// SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b.
+func splitEnvCommaLists(gc *GlobalConfig) {
+	for _, list := range []*[]string{
+		&gc.Hub.AdminEmails,
+		&gc.Auth.AuthorizedDomains,
+		&gc.Hub.CORSAllowedOrigins, &gc.Hub.CORSAllowedMethods, &gc.Hub.CORSAllowedHeaders,
+		&gc.RuntimeBroker.CORSAllowedOrigins, &gc.RuntimeBroker.CORSAllowedMethods, &gc.RuntimeBroker.CORSAllowedHeaders,
+	} {
+		if len(*list) == 1 && strings.Contains((*list)[0], ",") {
+			*list = parseCommaSeparatedList((*list)[0])
+		}
+	}
 }
 
 // LoadServerMode reads just the server mode from settings.yaml without loading the full config.

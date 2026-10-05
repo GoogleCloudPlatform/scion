@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -153,8 +155,10 @@ func TestWarnUnmatchedSettingsEnv_LogsNamesNotValues(t *testing.T) {
 
 // TestFindUnmatchedSettingsEnv_CORSHintsBind checks that the CORS hints are
 // not just accepted by the detector but set the GlobalConfig fields the hub
-// reads.
+// reads, on both load paths: CORSENABLED (set opposite to its baseline),
+// CORSMAXAGE, and CORSALLOWEDORIGINS with a comma-separated list.
 func TestFindUnmatchedSettingsEnv_CORSHintsBind(t *testing.T) {
+	origins := []string{"https://a.example.com", "https://b.example.com"}
 	for _, mode := range []string{"legacy", "settings"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
@@ -168,14 +172,35 @@ func TestFindUnmatchedSettingsEnv_CORSHintsBind(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t.Setenv("SCION_SERVER_HUB_CORSMAXAGE", "4243")
-			t.Setenv("SCION_SERVER_RUNTIMEBROKER_CORSMAXAGE", "4244")
-			gc, err := config.LoadGlobalConfig(t.TempDir())
+			configDir := t.TempDir()
+			base, err := config.LoadGlobalConfig(configDir)
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantHubEnabled := !base.Hub.CORSEnabled
+			wantBrokerEnabled := !base.RuntimeBroker.CORSEnabled
+
+			t.Setenv("SCION_SERVER_HUB_CORSENABLED", strconv.FormatBool(wantHubEnabled))
+			t.Setenv("SCION_SERVER_RUNTIMEBROKER_CORSENABLED", strconv.FormatBool(wantBrokerEnabled))
+			t.Setenv("SCION_SERVER_HUB_CORSMAXAGE", "4243")
+			t.Setenv("SCION_SERVER_RUNTIMEBROKER_CORSMAXAGE", "4244")
+			t.Setenv("SCION_SERVER_HUB_CORSALLOWEDORIGINS", strings.Join(origins, ","))
+			t.Setenv("SCION_SERVER_RUNTIMEBROKER_CORSALLOWEDORIGINS", strings.Join(origins, ","))
+			gc, err := config.LoadGlobalConfig(configDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.Hub.CORSEnabled != wantHubEnabled || gc.RuntimeBroker.CORSEnabled != wantBrokerEnabled {
+				t.Errorf("CORSEnabled hub=%v broker=%v, want %v/%v", gc.Hub.CORSEnabled, gc.RuntimeBroker.CORSEnabled, wantHubEnabled, wantBrokerEnabled)
+			}
 			if gc.Hub.CORSMaxAge != 4243 || gc.RuntimeBroker.CORSMaxAge != 4244 {
 				t.Errorf("CORSMaxAge hub=%d broker=%d, want 4243/4244", gc.Hub.CORSMaxAge, gc.RuntimeBroker.CORSMaxAge)
+			}
+			if !reflect.DeepEqual(gc.Hub.CORSAllowedOrigins, origins) {
+				t.Errorf("Hub.CORSAllowedOrigins = %q, want %q", gc.Hub.CORSAllowedOrigins, origins)
+			}
+			if !reflect.DeepEqual(gc.RuntimeBroker.CORSAllowedOrigins, origins) {
+				t.Errorf("RuntimeBroker.CORSAllowedOrigins = %q, want %q", gc.RuntimeBroker.CORSAllowedOrigins, origins)
 			}
 		})
 	}
