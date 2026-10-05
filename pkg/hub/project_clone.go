@@ -1134,21 +1134,20 @@ func isGitSourceLabel(k string) bool {
 // a provider of the project: the default copied from the source is kept
 // only when the clone has that provider row after auto-linking; otherwise
 // the first auto-linked broker becomes the default, or the default is
-// cleared when there is none. Best-effort: store errors are logged.
+// cleared when there is none. The stored default is read back and written
+// whenever it differs from the settled one, so the store and the returned
+// clone agree. Best-effort: store errors are logged.
 func (s *Server) autoLinkClonedProviders(ctx context.Context, clone *store.Project) {
 	copied := clone.DefaultRuntimeBrokerID
-	stored := copied
 	clone.DefaultRuntimeBrokerID = ""
 	s.autoLinkProviders(ctx, clone)
-	if clone.DefaultRuntimeBrokerID != "" {
-		stored = clone.DefaultRuntimeBrokerID
-	}
 	if copied != "" {
 		if _, err := s.store.GetProjectProvider(ctx, clone.ID, copied); err == nil {
 			clone.DefaultRuntimeBrokerID = copied
 		}
 	}
-	if clone.DefaultRuntimeBrokerID == stored {
+	if current, err := s.store.GetProject(ctx, clone.ID); err == nil &&
+		current.DefaultRuntimeBrokerID == clone.DefaultRuntimeBrokerID {
 		return
 	}
 	if err := s.store.UpdateProject(ctx, clone); err != nil {

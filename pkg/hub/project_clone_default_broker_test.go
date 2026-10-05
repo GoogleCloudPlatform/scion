@@ -19,8 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -104,6 +106,41 @@ func TestProjectClone_DefaultClearedWhenNoProvider(t *testing.T) {
 
 	assert.Empty(t, clone.DefaultRuntimeBrokerID)
 	assertNoProvider(t, s, clone.ID, private.ID)
+}
+
+// The stored default is settled even when the write made while auto-linking
+// fails: the response and the store agree, and the stored default is a
+// provider of the clone or empty.
+func TestProjectClone_DefaultSettledWhenAutoLinkWriteFails(t *testing.T) {
+	srv, s := testServer(t)
+	private := newCloneDefaultBroker(t, s, "clone-default-write-private", false)
+	auto := newCloneDefaultBroker(t, s, "clone-default-write-auto", true)
+	failing := &defaultWriteFailsOnceStore{Store: s, brokerID: auto.ID}
+	srv.store = failing
+
+	clone := cloneWithDefault(t, srv, s, private.ID, "clone-default-write")
+
+	require.True(t, failing.failed.Load(), "the write made while auto-linking failed")
+	if clone.DefaultRuntimeBrokerID != "" {
+		_, err := s.GetProjectProvider(context.Background(), clone.ID, clone.DefaultRuntimeBrokerID)
+		require.NoError(t, err, "the stored default is a provider of the clone")
+	}
+	assert.Equal(t, auto.ID, clone.DefaultRuntimeBrokerID)
+}
+
+// defaultWriteFailsOnceStore fails the first UpdateProject call that sets
+// the default runtime broker to brokerID.
+type defaultWriteFailsOnceStore struct {
+	store.Store
+	brokerID string
+	failed   atomic.Bool
+}
+
+func (s *defaultWriteFailsOnceStore) UpdateProject(ctx context.Context, p *store.Project) error {
+	if p.DefaultRuntimeBrokerID == s.brokerID && s.failed.CompareAndSwap(false, true) {
+		return errors.New("db unavailable")
+	}
+	return s.Store.UpdateProject(ctx, p)
 }
 
 func TestFindConnectedProvider_DefaultMustBeProvider(t *testing.T) {
