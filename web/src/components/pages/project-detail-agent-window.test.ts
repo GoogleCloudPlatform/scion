@@ -25,7 +25,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
-import type { Agent, Capabilities, PageData } from '../../shared/types.js';
+import type { Agent, Capabilities, DeletionInfo, PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
 import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
@@ -4846,6 +4846,127 @@ describe('project-detail — agent list window', () => {
       }
       expect(st.badges).toEqual(['Delete interrupted']);
       expect(st.icons('trash')).toBe(internals(el).agentWindow.items.length);
+    });
+  });
+
+  describe('a delete the hub accepts with a 202, in every window state', () => {
+    const lifecycleCaps = { actions: ['read', 'update', 'delete', 'lifecycle'] };
+    const deletingView = (): DeletionInfo => ({
+      state: 'deleting',
+      soft: false,
+      claim: 1,
+      startedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    const altClick = { altKey: true } as MouseEvent;
+    const sseUpdate = (subject: string, data: unknown): void =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({ subject, data });
+
+    function rowOf(el: TestEl, id: string): Element | null {
+      const link = el.shadowRoot?.querySelector(`a[href="/agents/${id}"]`);
+      return link?.closest('tr, .agent-card') ?? null;
+    }
+
+    async function badgeText(row: Element | null): Promise<string> {
+      const badge = row?.querySelector('scion-deletion-badge') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      await badge?.updateComplete;
+      return badge?.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '';
+    }
+
+    function icons(row: Element | null, name: string): number {
+      return row?.querySelectorAll(`sl-icon[name="${name}"]`).length ?? 0;
+    }
+
+    interface StateRow {
+      state: 'small' | 'held' | 'paged';
+      count: number;
+      /** Load in the tree view (complete-needing), then switch to the row view. */
+      viaTree: boolean;
+    }
+    const states: StateRow[] = [
+      { state: 'small', count: 30, viaTree: false },
+      { state: 'held', count: 1200, viaTree: true },
+      { state: 'paged', count: PROJECT_AGENTS_FIT_THRESHOLD + 1, viaTree: false },
+    ];
+    // A capped set exists only in the tree view here: switching to the grid
+    // or list sends a sorted request and ends paged.
+
+    describe.each(
+      states.flatMap((st) => (['list', 'grid'] as const).map((view) => ({ ...st, view })))
+    )('$state, $view view', ({ state, count, viaTree, view }) => {
+      it('keeps the row with Deleting and its actions hidden, sends no list request, and the live delete removes it', async () => {
+        const projectId = `p-del-202-${state}-${view}`;
+        localStorage.setItem('scion-view-project-agents', viaTree ? 'graph' : view);
+        localStorage.setItem(
+          `scion-sort-project-agents-${projectId}`,
+          JSON.stringify({ field: 'updated', dir: 'desc' })
+        );
+        const agents = Array.from({ length: count }, (_, i) =>
+          makeAgent(i, { projectId, _capabilities: lifecycleCaps, deletion: null })
+        );
+        const requests: AgentsRequest[] = [];
+        const inner = createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        });
+        const deletes: string[] = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: string | URL | Request, init?: RequestInit) => {
+            if (init?.method === 'DELETE') {
+              deletes.push(String(input));
+              return Promise.resolve(jsonResponse({ deletion: deletingView() }, 202));
+            }
+            return inner(input, init);
+          })
+        );
+        const el = await createComponent(projectId);
+        if (viaTree) {
+          await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe(state));
+          viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
+          await settle(el);
+        }
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe(state);
+        const id = win.items[0].id;
+        const rowsBefore = win.items.length;
+        const statsBefore = { ...internals(el).agentStats };
+        const requestsBefore = requests.length;
+        expect(icons(rowOf(el, id), 'trash')).toBe(1);
+        expect(icons(rowOf(el, id), 'stop-circle')).toBe(1);
+
+        await (
+          el as unknown as {
+            handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
+          }
+        ).handleAgentAction(id, 'delete', altClick);
+        await flushLive(el);
+
+        expect(deletes).toEqual([`/api/v1/agents/${id}`]);
+        expect(win.items).toHaveLength(rowsBefore);
+        expect(win.items.find((a) => a.id === id)?.deletion?.state).toBe('deleting');
+        expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+        expect(icons(rowOf(el, id), 'trash')).toBe(0);
+        expect(icons(rowOf(el, id), 'stop-circle')).toBe(0);
+        expect(icons(rowOf(el, win.items[1].id), 'trash')).toBe(1);
+        expect(win.updatesAvailable).toBe(false);
+        expect(internals(el).agentStats).toEqual(statsBefore);
+        await settle(el);
+        expect(requests.length).toBe(requestsBefore);
+
+        sseUpdate(`agent.${id}.deleted`, {});
+        await flushLive(el);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(rowOf(el, id)).toBeNull();
+        await settle(el);
+        expect(requests.length).toBe(requestsBefore);
+      });
     });
   });
 }, 20_000);

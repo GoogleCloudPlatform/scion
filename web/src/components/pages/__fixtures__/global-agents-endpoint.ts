@@ -19,7 +19,7 @@
  * plus the projects, invite-stats and lifecycle endpoints those pages call.
  */
 
-import type { Agent, Capabilities } from '../../../shared/types.js';
+import type { Agent, Capabilities, DeletionInfo } from '../../../shared/types.js';
 
 /** happy-dom has no EventSource; it opens on the next tick, so a drain's wait for it resolves at once. */
 export class FakeEventSource extends EventTarget {
@@ -83,6 +83,12 @@ export interface Fake {
   projects?: Array<{ id: string; name: string }>;
   /** Every non-agents GET (projects, invite stats), in order. */
   otherRequests?: string[];
+  /** When set, an agent DELETE is accepted with a 202 carrying this deletion view. */
+  deletion?: DeletionInfo;
+  /** Every agent DELETE URL, in order. */
+  deletes?: string[];
+  /** An agent DELETE without `force=true` answers 502 (an unreachable broker). */
+  deleteUnreachable?: boolean;
 }
 
 /**
@@ -100,6 +106,16 @@ export function fakeFetch(fake: Fake) {
       init?.method ?? (input instanceof Request ? input.method : 'GET')
     ).toUpperCase();
 
+    if (u.pathname.startsWith('/api/v1/agents/') && method === 'DELETE') {
+      fake.deletes?.push(rawUrl);
+      if (fake.deleteUnreachable && u.searchParams.get('force') !== 'true') {
+        return Promise.resolve(jsonResponse({ error: { message: 'unreachable' } }, 502));
+      }
+      if (fake.deletion) {
+        const agentId = u.pathname.slice('/api/v1/agents/'.length);
+        return Promise.resolve(jsonResponse({ agentId, deletion: fake.deletion }, 202));
+      }
+    }
     if (u.pathname.startsWith('/api/v1/agents/') && method !== 'GET') {
       return Promise.resolve(jsonResponse({ stopped: 0, failed: 0 }));
     }

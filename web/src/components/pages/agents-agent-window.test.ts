@@ -28,7 +28,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 // Stop All asks for confirmation first; the tests confirm it.
 vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(async () => true) }));
 
-import type { Agent } from '../../shared/types.js';
+import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
@@ -2081,5 +2081,284 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expect(win.updatesAvailable).toBe(serverLists);
       });
     }
+  });
+
+  describe('a delete the hub accepts with a 202', () => {
+    const lifecycleCaps = { actions: ['read', 'update', 'delete', 'lifecycle', 'stop_all'] };
+    const deletingView = (): DeletionInfo => ({
+      state: 'deleting',
+      soft: false,
+      claim: 1,
+      startedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    // Every REST row carries `deletion: null`, as the hub sends it.
+    const deletableAgents = (count: number): Agent[] =>
+      Array.from({ length: count }, (_, i) =>
+        makeAgent(i, { _capabilities: lifecycleCaps, deletion: null })
+      );
+    const altClick = { altKey: true } as MouseEvent;
+
+    /** The grid card or list row that renders agent `id`, if any. */
+    function rowOf(el: TestEl, id: string): Element | null {
+      const link = el.shadowRoot?.querySelector(`a[href="/agents/${id}"]`);
+      return link?.closest('tr, .agent-card') ?? null;
+    }
+
+    async function badgeText(row: Element | null): Promise<string> {
+      const badge = row?.querySelector('scion-deletion-badge') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      await badge?.updateComplete;
+      return badge?.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '';
+    }
+
+    function icons(row: Element | null, name: string): number {
+      return row?.querySelectorAll(`sl-icon[name="${name}"]`).length ?? 0;
+    }
+
+    /** Whether agent `id` is a row of the current window, and its stored deletion state. */
+    function shownDeletion(el: TestEl, id: string): string | null | undefined {
+      const row = internals(el).agentWindow.items.find((a) => a.id === id);
+      return row ? (row.deletion?.state ?? null) : undefined;
+    }
+
+    interface StateRow {
+      state: 'small' | 'held' | 'paged' | 'capped';
+      count: number;
+      /** A complete-needing mode filter makes the page drain. */
+      drain: boolean;
+    }
+    const states: StateRow[] = [
+      { state: 'small', count: 30, drain: false },
+      { state: 'held', count: 600, drain: true },
+      { state: 'paged', count: 1200, drain: false },
+      { state: 'capped', count: 2001, drain: true },
+    ];
+
+    describe.each(
+      states.flatMap((st) => (['list', 'grid'] as const).map((view) => ({ ...st, view })))
+    )('$state, $view view', ({ state, count, drain, view }) => {
+      it('keeps the row, shows Deleting at once, hides its actions, sends no list request and counts no dropped row; the live delete then removes it in place', async () => {
+        const fake: Fake = {
+          agents: deletableAgents(count),
+          requests: [],
+          deletion: deletingView(),
+          deletes: [],
+        };
+        stubFake(fake);
+        localStorage.setItem('scion-view-agents', view);
+        if (drain) localStorage.setItem('scion-filter-agents-mode', 'project');
+        const el = await mount();
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe(state);
+        const id = win.items[0].id;
+        const rowsBefore = win.items.length;
+        const statsBefore = { ...win.stats };
+        const requestsBefore = fake.requests.length;
+        expect(icons(rowOf(el, id), 'trash')).toBe(1);
+        expect(icons(rowOf(el, id), 'stop-circle')).toBe(1);
+
+        await internals(el).handleAgentAction(id, 'delete', altClick);
+        await flushLive(el);
+
+        expect(fake.deletes).toEqual([`/api/v1/agents/${id}`]);
+        expect(shownDeletion(el, id)).toBe('deleting');
+        expect(win.items).toHaveLength(rowsBefore);
+        expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+        expect(icons(rowOf(el, id), 'trash')).toBe(0);
+        expect(icons(rowOf(el, id), 'stop-circle')).toBe(0);
+        // Not a dropped row: no chip, unchanged counts, no refresh.
+        expect(win.updatesAvailable).toBe(false);
+        expect(win.stats).toEqual(statsBefore);
+        await settle(el);
+        expect(fake.requests.length).toBe(requestsBefore);
+        // Other rows keep their actions.
+        const other = win.items[1].id;
+        expect(icons(rowOf(el, other), 'trash')).toBe(1);
+        expect(await badgeText(rowOf(el, other))).toBe('');
+
+        handleUpdate(`agent.${id}.deleted`, {});
+        await flushLive(el);
+        expect(shownDeletion(el, id)).toBeUndefined();
+        expect(rowOf(el, id)).toBeNull();
+        expect(stateManager.getAgent(id)).toBeUndefined();
+        if (state === 'paged') {
+          expect(win.memberIndex.has(id)).toBe(false);
+        } else {
+          expect(internals(el).agents.some((a) => a.id === id)).toBe(false);
+        }
+        if (state !== 'capped') expect(win.stats.total).toBe(statsBefore.total - 1);
+        await settle(el);
+        expect(fake.requests.length).toBe(requestsBefore);
+      });
+    });
+
+    it('a force delete accepted with a 202 keeps the paged row deleting and sends no list request', async () => {
+      const fake: Fake = {
+        agents: deletableAgents(1200),
+        requests: [],
+        deletion: deletingView(),
+        deletes: [],
+        deleteUnreachable: true,
+      };
+      stubFake(fake);
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+      const before = fake.requests.length;
+
+      await internals(el).handleAgentAction(id, 'delete', altClick);
+      await flushLive(el);
+
+      expect(fake.deletes).toEqual([`/api/v1/agents/${id}`, `/api/v1/agents/${id}?force=true`]);
+      expect(shownDeletion(el, id)).toBe('deleting');
+      expect(win.items).toHaveLength(25);
+      expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+      expect(icons(rowOf(el, id), 'trash')).toBe(0);
+      expect(win.updatesAvailable).toBe(false);
+      await settle(el);
+      expect(fake.requests.length).toBe(before);
+    });
+
+    it('a delete answered 200 still leaves the held set at once and sends the lifecycle refresh', async () => {
+      const fake: Fake = { agents: deletableAgents(30), requests: [], deletes: [] };
+      stubFake(fake);
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('small');
+      const id = win.items[0].id;
+      const before = fake.requests.length;
+      fake.agents = fake.agents.filter((a) => a.id !== id);
+      await internals(el).handleAgentAction(id, 'delete', altClick);
+      expect(internals(el).agents.some((a) => a.id === id)).toBe(false);
+      await settle(el);
+      expect(fake.deletes).toEqual([`/api/v1/agents/${id}`]);
+      expect(fake.requests.length).toBe(before + 1);
+      expect(win.items.some((a) => a.id === id)).toBe(false);
+    });
+
+    it('a chip refresh response that predates the 202 keeps the row deleting and counts no dropped row', async () => {
+      const fake: Fake = {
+        agents: deletableAgents(1200),
+        requests: [],
+        deletion: deletingView(),
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+      const total = win.stats.total;
+
+      h.hold();
+      const refreshed = win.refresh();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      await internals(el).handleAgentAction(id, 'delete', altClick);
+      await flushLive(el);
+      expect(shownDeletion(el, id)).toBe('deleting');
+      // The held response lists the row with `deletion: null`.
+      h.release();
+      await refreshed;
+      await settle(el);
+
+      expect(h.sent).toHaveLength(2);
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(shownDeletion(el, id)).toBe('deleting');
+      expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+      expect(icons(rowOf(el, id), 'trash')).toBe(0);
+      expect(win.items).toHaveLength(25);
+      expect(win.updatesAvailable).toBe(false);
+      expect(win.stats.total).toBe(total);
+
+      handleUpdate(`agent.${id}.deleted`, {});
+      await flushLive(el);
+      expect(shownDeletion(el, id)).toBeUndefined();
+      expect(win.memberIndex.has(id)).toBe(false);
+      expect(win.stats.total).toBe(total - 1);
+    });
+
+    it('a drain response that predates the 202 keeps the row deleting in the held set', async () => {
+      const fake: Fake = {
+        agents: deletableAgents(600),
+        requests: [],
+        deletion: deletingView(),
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      localStorage.setItem('scion-filter-agents-mode', 'project');
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('held');
+      const id = win.items[0].id;
+      const sentBefore = h.sent.length;
+
+      // A label commit drains the whole set again; hold its first page.
+      h.hold();
+      commitLabel(el, 'env=prod');
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      await internals(el).handleAgentAction(id, 'delete', altClick);
+      await flushLive(el);
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      h.release();
+      await settle(el);
+
+      expect(h.sent.length - sentBefore).toBe(2);
+      expect(win.state).toBe('held');
+      expect(internals(el).agents).toHaveLength(600);
+      expect(internals(el).agents.find((a) => a.id === id)?.deletion?.state).toBe('deleting');
+      expect(stateManager.getAgent(id)?.deletion?.state).toBe('deleting');
+      expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+      expect(icons(rowOf(el, id), 'trash')).toBe(0);
+
+      handleUpdate(`agent.${id}.deleted`, {});
+      await flushLive(el);
+      expect(internals(el).agents.some((a) => a.id === id)).toBe(false);
+      expect(rowOf(el, id)).toBeNull();
+    });
+
+    it('paged: the lease timer watches the page rows and flips a deleting row to Delete interrupted', async () => {
+      const fake: Fake = { agents: deletableAgents(1200), requests: [] };
+      stubFake(fake);
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      expect(internals(el).agents).toEqual([]);
+      const id = win.items[0].id;
+
+      // Fake clock only after mount (mount waits on real timers).
+      let badge: string;
+      let trash: number;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      try {
+        handleUpdate(`agent.${id}.status`, {
+          deletion: {
+            state: 'deleting',
+            soft: false,
+            claim: 1,
+            startedAt: new Date().toISOString(),
+            leaseExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+          },
+        });
+        await flushLive(el);
+        expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+
+        vi.advanceTimersByTime(19_000);
+        await el.updateComplete;
+        expect(await badgeText(rowOf(el, id))).toBe('Deleting…');
+
+        // Nothing else re-renders the page: only the lease timer can.
+        vi.advanceTimersByTime(1_000);
+        await el.updateComplete;
+        badge = await badgeText(rowOf(el, id));
+        trash = icons(rowOf(el, id), 'trash');
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(badge).toBe('Delete interrupted');
+      expect(trash).toBe(1);
+    });
   });
 });

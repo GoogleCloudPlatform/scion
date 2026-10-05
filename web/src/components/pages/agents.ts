@@ -169,8 +169,13 @@ export class ScionPageAgents extends LitElement {
   @state()
   private viewMode: ViewMode = 'grid';
 
-  /** One lease timer for this page's deleting agents (ptone/scion#2483 N4). */
-  private readonly deletionLease = new DeletionLeaseController(this, () => this.agents);
+  /**
+   * One lease timer for this page's deleting agents (ptone/scion#2483 N4).
+   * While paged, `this.agents` is empty and the rows are the window's page.
+   */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
+  );
 
   /** "Jump to agent" over the graph, offering the agents its tree view shows. */
   readonly graphPalette = new GraphPaletteController(this, {
