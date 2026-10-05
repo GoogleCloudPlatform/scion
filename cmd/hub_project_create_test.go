@@ -459,3 +459,15 @@ func TestSplitFilesIgnoredWarning(t *testing.T) {
 	assert.True(t, got)
 	assert.Nil(t, rest)
 }
+
+func TestHubProjectCloneURLLabel(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://github.com/org/repo", "https://github.com/org/repo.git"},
+		{"https://github.com/org/repo.git?ref=main", "https://github.com/org/repo.git"},
+		{"github.com/org/repo#readme", "https://github.com/org/repo.git"},
+		{"git@github.com:org/repo.git?x=1", "https://github.com/org/repo.git"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, hubProjectCloneURLLabel(tt.in), tt.in)
+	}
+}

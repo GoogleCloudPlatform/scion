@@ -96,7 +96,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// clone-url label by ToHTTPSCloneURL. The query string and fragment are
 	// dropped first: git remotes never need them and they can carry tokens
 	// (?access_token=…).
-	overrideRemote := stripQueryAndFragment(trimRemote(req.GitRemote))
+	overrideRemote := util.StripQueryAndFragment(trimRemote(req.GitRemote))
 	if overrideRemote != "" {
 		if msg := validateCloneGitRemote(overrideRemote); msg != "" {
 			ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
@@ -197,6 +197,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			}
 			clone.Labels[k] = v
 		}
+		// Labels copied from the source may predate write-time validation.
+		sanitizeSourceURLLabel(clone.Labels)
+		sanitizeCopiedCloneURLLabel(clone.Labels)
 		if len(clone.Labels) == 0 {
 			clone.Labels = nil
 		}
@@ -814,19 +817,6 @@ func trimRemote(remote string) string {
 	return strings.Trim(remote, " \t\n\v\f\r")
 }
 
-// isPrintableASCII reports whether s contains only printable, non-space
-// ASCII (0x21-0x7E). This rejects whitespace, control and format characters
-// (e.g. RTL overrides) and non-ASCII homoglyphs; IDN hosts must be given in
-// punycode (xn--...).
-func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x21 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 // validRemotePath reports whether a decoded remote path (without the leading
 // '/' of a scheme URL) has only non-empty segments that are neither "." nor
 // "..", and no '@' (ambiguous with userinfo), '\\' or control characters. A single trailing '/' is allowed. Dot
@@ -877,15 +867,6 @@ func validEscapedRemotePath(path string) bool {
 	return err == nil && validRawRemotePath(path) && validRemotePath(path) && validRemotePath(decoded)
 }
 
-// stripQueryAndFragment drops everything from the first '?' or '#'. Git remote
-// URLs never need either, and a query can carry credentials.
-func stripQueryAndFragment(remote string) string {
-	if i := strings.IndexAny(remote, "?#"); i >= 0 {
-		return remote[:i]
-	}
-	return remote
-}
-
 // scpLogin matches the login of an SCP-style remote (user@host:path).
 var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -928,7 +909,7 @@ func splitSCPRemote(remote string) (login, host, path string, ok bool) {
 // (raw or %40), "." / ".." or empty segments. git:// with a port and
 // http:// with a port other than 80 get errCloneRemoteTLSPort.
 func validateCloneGitRemote(remote string) string {
-	if !isPrintableASCII(remote) {
+	if !util.IsPrintableASCII(remote) {
 		return errCloneRemoteInvalid
 	}
 	if strings.Contains(remote, "://") {
@@ -1144,8 +1125,10 @@ func validateCloneURLLabelValue(labels map[string]string) string {
 	switch err := util.ValidateCloneURLLabel(v); {
 	case err == nil:
 		return ""
+	case errors.Is(err, util.ErrCloneURLInvalid):
+		problem = "remove whitespace and control or non-ASCII characters from the URL"
 	case errors.Is(err, util.ErrCloneURLUserinfo):
-		problem = "remove the username, password or token from the URL"
+		problem = "remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)"
 	case errors.Is(err, util.ErrCloneURLQuery):
 		problem = "remove the query string (?...) from the URL"
 	case errors.Is(err, util.ErrCloneURLFragment):
@@ -1160,11 +1143,35 @@ func validateCloneURLLabelValue(labels map[string]string) string {
 // sanitizeSourceURLLabel rewrites the source-url label in labels (if any) to
 // its credential-, query- and fragment-free form, mirroring how the clone
 // path above sanitizes a git remote override before storing it. The label is
-// readable by project members, so it never keeps what was stripped. labels is
-// modified in place.
+// readable by project members, so it never keeps what was stripped; a value
+// that cannot be sanitized unambiguously is removed. labels is modified in
+// place.
 func sanitizeSourceURLLabel(labels map[string]string) {
-	if v, ok := labels[store.LabelSourceURL]; ok {
-		labels[store.LabelSourceURL] = util.SanitizeGitSourceURL(v)
+	v, ok := labels[store.LabelSourceURL]
+	if !ok {
+		return
+	}
+	if clean := util.SanitizeGitSourceURL(v); clean != "" {
+		labels[store.LabelSourceURL] = clean
+	} else {
+		delete(labels, store.LabelSourceURL)
+	}
+}
+
+// sanitizeCopiedCloneURLLabel makes a clone-url label copied from another
+// project (which may predate write-time validation) acceptable to
+// validateCloneURLLabelValue: a value that fails validation is replaced by its
+// sanitized form, or removed when that is still not a plain repository URL.
+// labels is modified in place.
+func sanitizeCopiedCloneURLLabel(labels map[string]string) {
+	v, ok := labels[store.LabelCloneURL]
+	if !ok || util.ValidateCloneURLLabel(v) == nil {
+		return
+	}
+	if clean := util.SanitizeGitSourceURL(v); clean != "" && util.ValidateCloneURLLabel(clean) == nil {
+		labels[store.LabelCloneURL] = clean
+	} else {
+		delete(labels, store.LabelCloneURL)
 	}
 }
 

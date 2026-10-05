@@ -50,6 +50,13 @@ var cloneURLLabelCases = []struct {
 	{"ssh with password", "ssh://git:" + cloneURLLabelSentinel + "@github.com/org/repo.git", "username, password or token"},
 	{"query token", "https://github.com/org/repo.git?access_token=" + cloneURLLabelSentinel, "query string"},
 	{"fragment", "https://github.com/org/repo.git#" + cloneURLLabelSentinel, "fragment"},
+	{"password that looks like a port", "https://user:8443/" + cloneURLLabelSentinel + "@host/repo", "username, password or token"},
+	{"at sign in path", "https://github.com/org/repo@v1", "username, password or token"},
+	{"scheme-like suffix", "user:" + cloneURLLabelSentinel + "@host/org/repo://", "username, password or token"},
+	{"single-slash scheme", "https:/user:" + cloneURLLabelSentinel + "@host/r", "username, password or token"},
+	{"embedded newline", "https://host/r\nhttps://u:" + cloneURLLabelSentinel + "@h/x", "whitespace and control"},
+	{"scp path with at sign", "git@host:repo@v1", "username, password or token"},
+	{"local path with hash", "/tmp/repo#1", ""},
 	{"clean https", "https://github.com/org/repo.git", ""},
 	{"clean https with port", "https://git.example.com:8443/org/repo.git", ""},
 	{"clean schemeless", "github.com/org/repo", ""},
@@ -187,6 +194,10 @@ func TestPopulateAgentConfig_LegacyCloneURLLabelUserinfoStripped(t *testing.T) {
 		{"ssh query keeps login", "ssh://git@github.com/org/repo.git?t=" + cloneURLLabelSentinel, "ssh://git@github.com/org/repo.git"},
 		{"scp-style query", "git@github.com:org/repo.git?t=" + cloneURLLabelSentinel, "git@github.com:org/repo.git"},
 		{"schemeless query", "github.com/org/repo?access_token=" + cloneURLLabelSentinel, "https://github.com/org/repo.git"},
+		{"leading whitespace", " https://u:" + cloneURLLabelSentinel + "@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"other scheme userinfo", "git+ssh://u:" + cloneURLLabelSentinel + "@github.com/org/repo", "https://git+ssh://github.com/org/repo.git"},
+		{"ambiguous value falls back to git remote", "https://user:8443/" + cloneURLLabelSentinel + "@host/repo", "https://github.com/org/repo.git"},
+		{"embedded newline falls back to git remote", "https://host/r\nhttps://u:" + cloneURLLabelSentinel + "@h/x", "https://github.com/org/repo.git"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,6 +234,11 @@ var sourceURLLabelCases = []struct {
 	{"ssh password", "ssh://git:" + cloneURLLabelSentinel + "@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
 	{"query token", "https://github.com/org/repo.git?access_token=" + cloneURLLabelSentinel, "https://github.com/org/repo.git"},
 	{"fragment", "https://github.com/org/repo.git#" + cloneURLLabelSentinel, "https://github.com/org/repo.git"},
+	{"password that looks like a port removed", "https://user:8443/" + cloneURLLabelSentinel + "@host/repo", ""},
+	{"single-slash scheme removed", "https:/user:" + cloneURLLabelSentinel + "@host/r", ""},
+	{"embedded newline removed", "https://host/r\nhttps://u:" + cloneURLLabelSentinel + "@h/x", ""},
+	{"scheme-like suffix", "user:" + cloneURLLabelSentinel + "@host/org/repo://", "host/org/repo://"},
+	{"scp path with at sign kept", "git@host:repo@v1", "git@host:repo@v1"},
 	{"clean https", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
 	{"clean schemeless", "github.com/org/repo", "github.com/org/repo"},
 	{"scp-style login", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
@@ -233,7 +249,9 @@ func assertStoredSourceURL(t *testing.T, s store.Store, projectID, want string) 
 	t.Helper()
 	stored, err := s.GetProject(context.Background(), projectID)
 	require.NoError(t, err)
-	assert.Equal(t, want, stored.Labels[store.LabelSourceURL])
+	got, present := stored.Labels[store.LabelSourceURL]
+	assert.Equal(t, want, got)
+	assert.Equal(t, want != "", present, "a source-url that cannot be sanitized is removed")
 	assert.NotContains(t, stored.Labels[store.LabelSourceURL], cloneURLLabelSentinel)
 }
 
@@ -293,6 +311,76 @@ func TestUpdateProject_SourceURLLabelSanitized(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), cloneURLLabelSentinel)
 			assertStoredSourceURL(t, s, project.ID, tc.want)
+		})
+	}
+}
+
+// TestProjectClone_SanitizesCopiedGitSourceLabels covers a clone without a
+// remote override: the source project's legacy clone-url and source-url
+// labels are not copied with credentials, a query or a fragment.
+func TestProjectClone_SanitizesCopiedGitSourceLabels(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name                  string
+		cloneURL, sourceURL   string
+		wantClone, wantSource string
+		cloneKept, sourceKept bool
+	}{
+		{
+			name:       "credentials and query stripped",
+			cloneURL:   "https://user:" + cloneURLLabelSentinel + "@github.com/org/repo.git?t=" + cloneURLLabelSentinel,
+			sourceURL:  "https://" + cloneURLLabelSentinel + "@github.com/org/repo#" + cloneURLLabelSentinel,
+			wantClone:  "https://github.com/org/repo.git",
+			wantSource: "https://github.com/org/repo",
+			cloneKept:  true, sourceKept: true,
+		},
+		{
+			name:      "ambiguous values removed",
+			cloneURL:  "https://user:8443/" + cloneURLLabelSentinel + "@host/repo",
+			sourceURL: "https:/user:" + cloneURLLabelSentinel + "@host/r",
+		},
+		{
+			name:       "clean values copied unchanged",
+			cloneURL:   "git@github.com:org/repo.git",
+			sourceURL:  "ssh://git@github.com/org/repo.git",
+			wantClone:  "git@github.com:org/repo.git",
+			wantSource: "ssh://git@github.com/org/repo.git",
+			cloneKept:  true, sourceKept: true,
+		},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &store.Project{
+				ID:        tid(fmt.Sprintf("clone-src-labels-%d", i)),
+				Name:      fmt.Sprintf("Clone Source Labels %d", i),
+				Slug:      fmt.Sprintf("clone-source-labels-%d", i),
+				GitRemote: "github.com/org/repo",
+				OwnerID:   DevUserID,
+				CreatedBy: DevUserID,
+				Labels: map[string]string{
+					store.LabelCloneURL:  tt.cloneURL,
+					store.LabelSourceURL: tt.sourceURL,
+				},
+			}
+			require.NoError(t, s.CreateProject(ctx, src))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]string{"name": fmt.Sprintf("Cloned Labels %d", i)})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), cloneURLLabelSentinel)
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			stored, err := s.GetProject(ctx, clone.ID)
+			require.NoError(t, err)
+			gotClone, cloneOK := stored.Labels[store.LabelCloneURL]
+			gotSource, sourceOK := stored.Labels[store.LabelSourceURL]
+			assert.Equal(t, tt.cloneKept, cloneOK)
+			assert.Equal(t, tt.sourceKept, sourceOK)
+			assert.Equal(t, tt.wantClone, gotClone)
+			assert.Equal(t, tt.wantSource, gotSource)
 		})
 	}
 }

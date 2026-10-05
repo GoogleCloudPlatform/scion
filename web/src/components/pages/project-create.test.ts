@@ -1094,6 +1094,11 @@ describe('cloneUrlCredentialHint', () => {
     'user:pass@github.com/org/repo',
     'TOKEN@github.com/org/repo',
     'ssh://git:secret@github.com/org/repo',
+    'https://user:8443/x@host/repo',
+    'https://github.com/org/repo@v1',
+    'user:PW@host/org/repo://',
+    'https:/user:PW@host/r',
+    'git@host:repo@v1',
   ])('flags userinfo in %s', (url) => {
     expect(hint(url)).toMatch(/username, password or token/);
   });
@@ -1111,7 +1116,35 @@ describe('cloneUrlCredentialHint', () => {
     'git@github.com:org/repo.git',
     'ssh://git@github.com/org/repo.git',
     'https://github.com:8443/org/repo',
+    'deploy@host:team/proj',
+    '/tmp/repo#1',
   ])('accepts %s', (url) => {
     expect(hint(url)).toBeNull();
+  });
+
+  it('flags control characters', () => {
+    expect(hint('https://host/r\nhttps://u:PW@h/x')).toMatch(/control or non-ASCII/);
+  });
+});
+
+describe('deriveCloneUrl', () => {
+  let derive: (remote: string) => string;
+  beforeAll(async () => {
+    ({ deriveCloneUrl: derive } = await import('./project-create.js'));
+  });
+
+  it.each([
+    ['https://github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['github.com/org/repo.git', 'https://github.com/org/repo.git'],
+    ['git@github.com:org/repo.git', 'https://github.com/org/repo.git'],
+    ['ssh://git@github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['deploy@host:team/proj', 'https://host/team/proj.git'],
+    ['https://user:pass@github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['https://github.com/org/repo?ref=main#x', 'https://github.com/org/repo.git'],
+    ['https://dev.azure.com/org/proj/_git/repo.git', 'https://dev.azure.com/org/proj/_git/repo'],
+  ])('derives %s', (input, want) => {
+    const got = derive(input);
+    expect(got).toBe(want);
+    expect(got).not.toContain('@');
   });
 });

@@ -1671,7 +1671,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		WorkspaceMode: hubProjectCreateMode,
 		Labels: map[string]string{
 			store.LabelDefaultBranch: defaultBranch,
-			store.LabelCloneURL:      util.ToHTTPSCloneURL(gitURL),
+			store.LabelCloneURL:      hubProjectCloneURLLabel(gitURL),
 			store.LabelSourceURL:     gitURL,
 		},
 	})
@@ -2893,4 +2893,11 @@ func listBrokersForProject(ctx context.Context, client hubclient.Client, project
 		}
 		fmt.Printf("  - %s (%s)\n", b.Name, status)
 	}
+}
+
+// hubProjectCloneURLLabel derives the clone-url label for `hub project create`
+// from the user's git URL. The query string and fragment are dropped first:
+// the hub refuses a clone-url with either, and ToHTTPSCloneURL would keep them.
+func hubProjectCloneURLLabel(gitURL string) string {
+	return util.ToHTTPSCloneURL(util.StripQueryAndFragment(gitURL))
 }

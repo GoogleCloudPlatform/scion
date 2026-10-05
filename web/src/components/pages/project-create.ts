@@ -32,7 +32,6 @@ import {
   displayGitRemote,
   normalizeGitRemote,
   sanitizeGitRemote,
-  stripGitURLCredentials,
   stripQueryAndFragment,
   trimRemote,
   validateGitRemote,
@@ -155,22 +154,58 @@ export function cloneUrlCredentialHint(remote: string): string | null {
   const url = trimRemote(remote);
   const advice =
     ' Use a plain repository URL and configure clone authentication with project secrets or the GitHub App.';
+  if (!/^[\x21-\x7e]*$/.test(url)) {
+    return 'The repository URL must not include spaces, control or non-ASCII characters.';
+  }
+  if (url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) return null;
   if (/[?#]/.test(url)) {
     return 'The repository URL must not include a query string or fragment.' + advice;
   }
-  let hasUserinfo: boolean;
-  if (url.includes('://')) {
-    hasUserinfo = stripGitURLCredentials(url) !== url;
+  if (!url.includes('@')) return null;
+  const scpLogin = /^[A-Za-z0-9._-]+$/;
+  // Mirror of util.ValidateCloneURLLabel: only an RFC 3986 scheme prefix counts.
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/.exec(url);
+  let loginOnly = false;
+  if (scheme) {
+    const rest = scheme[2];
+    const authority = rest.split('/')[0];
+    const at = authority.indexOf('@');
+    loginOnly =
+      scheme[1].toLowerCase() === 'ssh' &&
+      rest.split('@').length === 2 &&
+      at > 0 &&
+      scpLogin.test(authority.slice(0, at));
   } else {
-    const authority = url.split('/')[0];
-    const at = authority.lastIndexOf('@');
-    const login = at >= 0 ? authority.slice(0, at) : '';
-    const host = at >= 0 ? authority.slice(at + 1) : '';
-    hasUserinfo = at >= 0 && !(login !== '' && !/[:@]/.test(login) && host.includes(':'));
+    const scp = /^([A-Za-z0-9._-]+)@([^:/]+):(.*)$/.exec(url);
+    loginOnly = scp !== null && !scp[3].includes('@');
   }
-  return hasUserinfo
-    ? 'The repository URL must not include a username, password or token.' + advice
-    : null;
+  return loginOnly
+    ? null
+    : "The repository URL must not include a username, password or token ('@' is allowed only in an ssh or scp-style login)." +
+        advice;
+}
+
+/**
+ * The HTTPS clone URL the create form stores as the clone-url label, derived
+ * from whatever the user entered. Credentials, query, fragment, scheme and any
+ * ssh/scp login are dropped (displayGitRemote), then https:// and .git are
+ * added (except for Azure DevOps URLs, where .git would break the path). The
+ * hub refuses a clone-url carrying userinfo, so a login such as
+ * ssh://git@host/... or deploy@host:team/proj must not survive here.
+ */
+export function deriveCloneUrl(remote: string): string {
+  let cloneUrl = displayGitRemote(remote);
+  const lowerUrl = cloneUrl.toLowerCase();
+  const isADO =
+    lowerUrl.startsWith('dev.azure.com/') ||
+    /^[^.]+\.visualstudio\.com(\/|$)/.test(lowerUrl) ||
+    lowerUrl.includes('/_git/');
+  if (isADO) {
+    cloneUrl = cloneUrl.replace(/\.git$/, '');
+  } else if (!cloneUrl.endsWith('.git')) {
+    cloneUrl += '.git';
+  }
+  return `https://${cloneUrl}`;
 }
 
 /** The template's clone URL, used as the git remote override placeholder. */
@@ -1074,26 +1109,7 @@ export class ScionPageProjectCreate extends LitElement {
 
       if (this.mode === 'git') {
         const trimmedUrl = this.gitRemote.trim();
-        // Build an HTTPS clone URL from whatever the user entered.
-        // Strip known schemes/prefixes, then re-add https:// and .git
-        // (except for Azure DevOps URLs where .git would break the path).
-        let cloneUrl = trimmedUrl;
-        const hadGitAt = cloneUrl.startsWith('git@');
-        cloneUrl = cloneUrl.replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
-        if (hadGitAt) {
-          cloneUrl = cloneUrl.replace(':', '/'); // git@host:org/repo → host/org/repo
-        }
-        const lowerUrl = cloneUrl.toLowerCase();
-        const isADO =
-          lowerUrl.startsWith('dev.azure.com/') ||
-          /^[^.]+\.visualstudio\.com(\/|$)/.test(lowerUrl) ||
-          lowerUrl.includes('/_git/');
-        if (isADO) {
-          cloneUrl = cloneUrl.replace(/\.git$/, '');
-        } else if (!cloneUrl.endsWith('.git')) {
-          cloneUrl += '.git';
-        }
-        cloneUrl = `https://${cloneUrl}`;
+        const cloneUrl = deriveCloneUrl(trimmedUrl);
         body.gitRemote = trimmedUrl;
         const labels: Record<string, string> = {
           'scion.dev/default-branch': this.branch.trim() || 'main',
