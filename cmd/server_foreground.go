@@ -2895,10 +2895,11 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 // transient outage into a boot crash loop. The broker starts degraded
 // instead, but that degraded state is not self-healing: the default runtime
 // is resolved once here and is not rebuilt until the broker process
-// restarts, and /healthz still reports healthy (the "error" runtime counts
-// as an available runtime in the health check), so nothing restarts the
-// broker automatically. Operators must alert on the logged degraded "error"
-// runtime line and restart the broker to rebuild the runtime. It also
+// restarts. /healthz reports status "degraded" with checks["runtime"] =
+// "unavailable" but still answers 200, so a liveness probe does not restart
+// the broker; /readyz returns 503, and the Broker /healthz uptime check
+// alerts on the degraded status. Operators restart the broker to rebuild
+// the runtime once the cause is fixed. It also
 // includes, for example, a Kubernetes client that fails Verify at startup,
 // or a missing container CLI.
 //

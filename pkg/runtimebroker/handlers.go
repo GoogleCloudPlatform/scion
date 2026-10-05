@@ -94,8 +94,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// *runtime.ErrorRuntime the broker falls back to when startup
 	// resolution fails) is reported as unavailable, not as an available
 	// runtime named "error" (ptone/scion#2766).
-	if s.defaultRuntimeAvailable() {
-		checks[s.runtime.Name()] = "available"
+	if rt, ok := s.defaultRuntime(); ok {
+		checks[rt.Name()] = "available"
 	} else {
 		checks["runtime"] = "unavailable"
 	}
@@ -177,22 +177,30 @@ func NFSWarnOnlyRuntime(name string) bool {
 	return false
 }
 
-// defaultRuntimeAvailable reports whether the broker has a usable default
-// runtime: one is set and it is not the *runtime.ErrorRuntime placeholder
-// installed when runtime resolution failed at startup.
-func (s *Server) defaultRuntimeAvailable() bool {
-	if s.runtime == nil {
-		return false
+// defaultRuntime returns one snapshot of the broker's default runtime,
+// read under s.mu (SwapRuntime replaces it concurrently), and whether it
+// is usable: set, and not the *runtime.ErrorRuntime placeholder installed
+// when runtime resolution failed at startup.
+func (s *Server) defaultRuntime() (scionrt.Runtime, bool) {
+	s.mu.RLock()
+	rt := s.runtime
+	s.mu.RUnlock()
+	if rt == nil {
+		return nil, false
 	}
-	_, degraded := s.runtime.(*scionrt.ErrorRuntime)
-	return !degraded
+	if _, degraded := rt.(*scionrt.ErrorRuntime); degraded {
+		return rt, false
+	}
+	return rt, true
 }
 
 // handleHealthz is the liveness endpoint. It always answers 200 and carries
 // the overall status (healthy or degraded) in the body. A degraded default
-// runtime does not return 503 here: the CLI treats any non-200 /healthz as
-// "broker not running", and a liveness restart loop would hide the
-// condition rather than fix it. /readyz returns 503 instead.
+// runtime does not return 503 here. A restart can clear a transient boot
+// failure, but the CLI and liveness consumers treat any non-200 /healthz
+// as "broker not running", and a persistent fault would restart-loop
+// under a liveness probe. Operators restart after fixing the cause.
+// /readyz returns 503 instead.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -211,7 +219,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 	// Check if we have a functional runtime. A degraded default
 	// *runtime.ErrorRuntime cannot run agents, so it is not ready either.
-	if !s.defaultRuntimeAvailable() {
+	if _, ok := s.defaultRuntime(); !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
 			"reason": "no runtime available",

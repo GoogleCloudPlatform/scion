@@ -5878,3 +5878,50 @@ func TestReadyzErrorRuntimeNotReady(t *testing.T) {
 		t.Errorf("readyz status = %q, want not_ready", body["status"])
 	}
 }
+
+// TestHealthEndpointsConcurrentSwapRuntime runs /healthz and /readyz while
+// SwapRuntime flips the default runtime between a usable and a degraded
+// one. Under -race it checks that the health paths read s.runtime under
+// s.mu; each response must match one of the two runtimes.
+func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	good := &runtime.MockRuntime{}
+	bad := &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	handler := srv.Handler()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				srv.SwapRuntime(bad)
+			} else {
+				srv.SwapRuntime(good)
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		health := srv.GetHealthInfo(context.Background())
+		switch health.Status {
+		case "healthy":
+			if health.Checks["runtime"] != "" {
+				t.Fatalf("healthy with checks[runtime]: %v", health.Checks)
+			}
+		case "degraded":
+			if health.Checks["runtime"] != "unavailable" {
+				t.Fatalf("degraded without checks[runtime]: %v", health.Checks)
+			}
+		default:
+			t.Fatalf("unexpected status %q", health.Status)
+		}
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("readyz code = %d", w.Code)
+		}
+	}
+	wg.Wait()
+}
