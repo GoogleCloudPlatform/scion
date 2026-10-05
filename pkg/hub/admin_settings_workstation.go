@@ -182,41 +182,113 @@ func presentBodyLeaves(obj map[string]json.RawMessage, t reflect.Type, prefix []
 	return out
 }
 
-// hostedLayer0Changes returns, for a hosted hub, the Layer-0 leaves present
-// in the body whose value differs from what GET reports. Equal leaves are
-// echoes and are ignored; anything else, an explicit zero such as
-// dev_mode:false over a stored true included, is a change the hub will not
-// make, so the PUT must reject it rather than report "saved". Leaves under
-// the unpersisted lists are left to rejectUnpersistedKeys.
-func (s *Server) hostedLayer0Changes(ctx context.Context, ops *OperationalSettings, rawBody []byte) ([]string, error) {
+// hostedBootstrapChanges returns, for a hosted hub, the Layer-0 and the
+// unclassified leaves present in the body whose value differs from what GET
+// reports. Equal leaves are echoes and are ignored (schema_version "1",
+// zero-valued blocks, an unchanged active_profile); anything else, an
+// explicit zero such as dev_mode:false over a stored true included, is a
+// change the hub will not make, so the PUT must reject it rather than
+// report "saved". Leaves under the unpersisted lists are left to
+// rejectUnpersistedKeys.
+func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSettings, rawBody []byte) (layer0, unclassified []string, err error) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(rawBody, &top) != nil {
+		return nil, nil, nil
+	}
+	type classified struct {
+		leaf     bodyLeaf
+		isLayer0 bool
+	}
+	var leaves []classified
+	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
+		if l.path[0] == "expected_revisions" || underUnpersistedList(l.path) {
+			continue
+		}
+		_, l0, u := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)})
+		switch {
+		case len(l0) > 0:
+			leaves = append(leaves, classified{l, true})
+		case len(u) > 0:
+			leaves = append(leaves, classified{l, false})
+		}
+	}
+	if len(leaves) == 0 {
+		return nil, nil, nil
+	}
+	view, err := s.serverConfigDBView(ctx, ops)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, c := range leaves {
+		if isEchoOfView(rawPath{path: c.leaf.path, value: c.leaf.raw}, view) {
+			continue
+		}
+		if c.isLayer0 {
+			layer0 = append(layer0, strings.Join(c.leaf.path, "."))
+		} else {
+			unclassified = append(unclassified, strings.Join(c.leaf.path, "."))
+		}
+	}
+	sort.Strings(layer0)
+	sort.Strings(unclassified)
+	return layer0, unclassified, nil
+}
+
+// maskedLayer0Echoes returns the Layer-0/unclassified leaves whose value is
+// the masked placeholder that GET also shows at that path: an unchanged
+// secret. They are never written (hosted hubs write no Layer-0, and on a
+// workstation an absent leaf is kept), so the handler drops them before the
+// mask-restore check, whose whole-block comparison would otherwise reject a
+// lone placeholder whose siblings the body leaves out. Layer-1 masked
+// fields (the GitHub App) keep the restore path.
+func (s *Server) maskedLayer0Echoes(ctx context.Context, ops *OperationalSettings, rawBody []byte) ([]bodyLeaf, error) {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(rawBody, &top) != nil {
 		return nil, nil
 	}
-	var leaves []bodyLeaf
+	masked, _ := json.Marshal(maskedValue)
+	var cands []bodyLeaf
 	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
-		if underUnpersistedList(l.path) {
+		if strings.TrimSpace(string(l.raw)) != string(masked) {
 			continue
 		}
-		if _, l0, _ := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)}); len(l0) > 0 {
-			leaves = append(leaves, l)
+		if l1, _, _ := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)}); len(l1) > 0 {
+			continue
 		}
+		cands = append(cands, l)
 	}
-	if len(leaves) == 0 {
+	if len(cands) == 0 {
 		return nil, nil
 	}
 	view, err := s.serverConfigDBView(ctx, ops)
 	if err != nil {
 		return nil, err
 	}
-	var changed []string
-	for _, l := range leaves {
-		if !isEchoOfView(rawPath{path: l.path, value: l.raw}, view) {
-			changed = append(changed, strings.Join(l.path, "."))
+	var out []bodyLeaf
+	for _, l := range cands {
+		if isEchoOfView(rawPath{path: l.path, value: l.raw}, view) {
+			out = append(out, l)
 		}
 	}
-	sort.Strings(changed)
-	return changed, nil
+	return out, nil
+}
+
+// dropLeaves removes the leaves whose path is in drop.
+func dropLeaves(leaves, drop []bodyLeaf) []bodyLeaf {
+	if len(drop) == 0 {
+		return leaves
+	}
+	skip := map[string]bool{}
+	for _, d := range drop {
+		skip[strings.Join(d.path, ".")] = true
+	}
+	var out []bodyLeaf
+	for _, l := range leaves {
+		if !skip[strings.Join(l.path, ".")] {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func underUnpersistedList(path []string) bool {
@@ -288,23 +360,99 @@ func workstationFileLeaves(rawBody []byte) []bodyLeaf {
 	return out
 }
 
+// hubOwnedBrokerPaths are settings.yaml keys the hub writes itself (broker
+// registration). The server-config PUT may only echo them; a null on the
+// broker block leaves them in place.
+var hubOwnedBrokerPaths = [][]string{
+	{"server", "broker", "broker_id"},
+	{"server", "broker", "broker_token"},
+}
+
+func isHubOwnedBrokerPath(path []string) bool {
+	for _, p := range hubOwnedBrokerPaths {
+		if pathHasPrefixPath(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// hubOwnedBrokerChanges returns the hub-owned broker leaves the body tries
+// to change: anything but an echo of the GET view (the masked placeholder
+// for broker_token, the value for broker_id) or an absent key.
+func (s *Server) hubOwnedBrokerChanges(ctx context.Context, ops *OperationalSettings, leaves []bodyLeaf) ([]string, error) {
+	var owned []bodyLeaf
+	for _, l := range leaves {
+		if isHubOwnedBrokerPath(l.path) {
+			owned = append(owned, l)
+		}
+	}
+	if len(owned) == 0 {
+		return nil, nil
+	}
+	view, err := s.serverConfigDBView(ctx, ops)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, l := range owned {
+		if l.null || !isEchoOfView(rawPath{path: l.path, value: l.raw}, view) {
+			changed = append(changed, strings.Join(l.path, "."))
+		}
+	}
+	return changed, nil
+}
+
 // workstationFileEdits turns file leaves into settings.yaml edits, taking
 // each value from the decoded request (masked secrets already restored).
+//
+//   - An explicit null removes the key. A null on server.broker removes the
+//     block's fields except the hub-owned broker_id/broker_token.
+//   - An explicit zero ("", false, 0, []) of an omitempty field is written so
+//     the loaded result equals what was sent: the key is removed when its
+//     parent block exists (absent and zero load the same there), else the
+//     zero value is written, which creates the block (an absent
+//     server.hub.cors block means "CORS on", cors: {enabled: false} means
+//     off). See config.SettingsPathEdit.ZeroOmitempty.
+//   - Hub-owned broker leaves are never written (only echoes reach here).
+//   - schema_version "1" is the value GET reports for a file without the
+//     key, so it is not written as an edit; the editor adds it when needed.
 func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf) []config.SettingsPathEdit {
 	root := reflect.ValueOf(req).Elem()
 	edits := make([]config.SettingsPathEdit, 0, len(leaves))
 	for _, l := range leaves {
+		if isHubOwnedBrokerPath(l.path) {
+			continue
+		}
 		if l.null {
+			if strings.Join(l.path, ".") == "server.broker" {
+				for name := range jsonFieldInfos(reflect.TypeOf(config.V1BrokerConfig{})) {
+					p := []string{"server", "broker", name}
+					if !isHubOwnedBrokerPath(p) {
+						edits = append(edits, config.SettingsPathEdit{Path: p, Delete: true})
+					}
+				}
+				continue
+			}
 			edits = append(edits, config.SettingsPathEdit{Path: l.path, Delete: true})
 			continue
 		}
 		fv, ok := fieldByIndexPath(root, l.index)
-		if !ok || (l.omitempty && isEmptyJSONValue(fv)) {
-			edits = append(edits, config.SettingsPathEdit{Path: l.path, Delete: true})
+		if !ok {
+			continue
+		}
+		if len(l.path) == 1 && l.path[0] == "schema_version" && fv.Kind() == reflect.Pointer && !fv.IsNil() && fv.Elem().String() == "1" {
+			continue
+		}
+		if l.omitempty && isEmptyJSONValue(fv) {
+			// A nil pointer can only come from a null, handled above; a
+			// non-pointer empty value is the type's zero value.
+			edits = append(edits, config.SettingsPathEdit{Path: l.path, Value: fv.Interface(), ZeroOmitempty: true})
 			continue
 		}
 		edits = append(edits, config.SettingsPathEdit{Path: l.path, Value: fv.Interface()})
 	}
+	sort.Slice(edits, func(i, j int) bool { return strings.Join(edits[i].Path, ".") < strings.Join(edits[j].Path, ".") })
 	return edits
 }
 
@@ -375,6 +523,12 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{err.Error()}
 		}
 		req.Server.Hub.AgentEndpoint = normalized
+	}
+	if under("server.mode") && req.Server != nil {
+		// The server refuses to start with an unknown mode; never write one.
+		if err := config.ValidateServerMode(req.Server.Mode); err != nil {
+			return &serverConfigFileValidationError{err.Error()}
+		}
 	}
 	if under("server.shared_dir_storage") && req.Server != nil {
 		runtimes, profiles := req.Runtimes, req.Profiles

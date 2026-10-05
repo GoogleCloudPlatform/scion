@@ -300,6 +300,39 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 			absent:   [][]string{{"server", "storage"}},
 			fileKeys: []string{"server.storage"},
 		},
+		{
+			// No cors block in the file: an absent block means CORS on, so
+			// the explicit false must create the block (review r3 finding 1).
+			name:     "hub CORS off without a cors block",
+			body:     `{"server":{"hub":{"cors":{"enabled":false}}}}`,
+			want:     map[string]interface{}{"server.hub.cors.enabled": false},
+			fileKeys: []string{"server.hub.cors.enabled"},
+		},
+		{
+			name:     "broker CORS off without a cors block",
+			body:     `{"server":{"broker":{"cors":{"enabled":false}}}}`,
+			want:     map[string]interface{}{"server.broker.cors.enabled": false, "server.broker.broker_id": "b-123"},
+			fileKeys: []string{"server.broker.cors.enabled"},
+		},
+		{
+			name: "null on the broker block keeps the hub-owned identity",
+			body: `{"server":{"broker":null}}`,
+			absent: [][]string{
+				{"server", "broker", "enabled"},
+				{"server", "broker", "port"},
+			},
+			want: map[string]interface{}{
+				"server.broker.broker_id":    "b-123",
+				"server.broker.broker_token": "tok-secret",
+			},
+			fileKeys: []string{"server.broker.enabled", "server.broker.port"},
+		},
+		{
+			name:     "explicit zero under an existing block is a no-op when already absent",
+			body:     `{"server":{"storage":{"local_path":""}}}`,
+			want:     map[string]interface{}{"server.storage.provider": "gcs"},
+			fileKeys: nil,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -689,5 +722,194 @@ func TestHosted_PutServerConfig_Layer0EchoIgnored(t *testing.T) {
 				t.Errorf("DB changed on an echo")
 			}
 		})
+	}
+}
+
+// The explicit false must take effect, not only appear in the file: the
+// loaded config has CORS off.
+func TestWorkstation_PutServerConfig_CORSOffTakesEffect(t *testing.T) {
+	workstationHome(t) // no cors block
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"cors":{"enabled":false}},"broker":{"cors":{"enabled":false}}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gc.Hub.CORSEnabled || gc.RuntimeBroker.CORSEnabled {
+		t.Errorf("CORS still on after an explicit false: hub=%v broker=%v", gc.Hub.CORSEnabled, gc.RuntimeBroker.CORSEnabled)
+	}
+}
+
+// Review r3 finding 2: the PUT never writes a server.mode the server would
+// refuse to start with.
+func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	before := readFileString(t, settingsPath)
+	for _, mode := range []string{"Hosted", "prod"} {
+		rr := putServerConfig(t, srv, `{"server":{"mode":"`+mode+`"}}`)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid server.mode") {
+			t.Errorf("mode %q: expected 400 invalid server.mode, got %d: %s", mode, rr.Code, rr.Body.String())
+		}
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed:\n%s", after)
+	}
+	if rr := putServerConfig(t, srv, `{"server":{"mode":"workstation"}}`); rr.Code != http.StatusOK {
+		t.Errorf("a valid mode: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Review r3 N-c: broker_id/broker_token are hub-owned; the PUT may echo them
+// (the masked token included) but not change or clear them.
+func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"server":{"broker":{"broker_token":""}}}`, http.StatusUnprocessableEntity},
+		{`{"server":{"broker":{"broker_id":"other"}}}`, http.StatusUnprocessableEntity},
+		{`{"server":{"broker":{"broker_token":null}}}`, http.StatusUnprocessableEntity},
+		{`{"server":{"broker":{"broker_token":"********","broker_id":"b-123"}}}`, http.StatusOK},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			settingsPath := workstationHome(t)
+			srv, _, _ := newSQLiteHubInMode(t, true, nil)
+			before := readFileString(t, settingsPath)
+			rr := putServerConfig(t, srv, tc.body)
+			if rr.Code != tc.status {
+				t.Fatalf("expected %d, got %d: %s", tc.status, rr.Code, rr.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				if code, keys := rejectedKeys(t, rr); code != "hub_owned_keys_rejected" || len(keys) == 0 {
+					t.Errorf("got %q %v, want hub_owned_keys_rejected naming the key", code, keys)
+				}
+			}
+			if after := readFileString(t, settingsPath); after != before {
+				t.Errorf("settings.yaml changed:\n%s", after)
+			}
+		})
+	}
+}
+
+// Review r3 N-d: a hosted GET -> PUT round trip (schema_version and other
+// unclassified echoes included) is a 200 and writes nothing to the file.
+func TestHosted_PutServerConfig_FullGetEchoIsNoOp(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte(hostedLayer0Fixture+"active_profile: local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, false, nil)
+	getRR := httptest.NewRecorder()
+	srv.handleAdminServerConfig(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+	before := readFileString(t, settingsPath)
+
+	rr := putServerConfig(t, srv, getRR.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("full GET echo: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed:\n%s", after)
+	}
+	for _, body := range []string{`{"schema_version":"2"}`, `{"active_profile":"other"}`} {
+		if rr := putServerConfig(t, srv, body); rr.Code != http.StatusUnprocessableEntity {
+			t.Errorf("hosted %s: expected 422, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// Review r3 N-e: a lone masked Layer-0 secret echo (siblings left out) is an
+// unchanged value: 200 on both hub kinds, nothing written.
+func TestPutServerConfig_LoneMaskedLayer0Echo(t *testing.T) {
+	for _, workstation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("workstation=%v", workstation), func(t *testing.T) {
+			settingsPath := tempSettingsHome(t)
+			if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nserver:\n  auth:\n    dev_mode: true\n    dev_token: s3cret\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			srv, _, _ := newSQLiteHubInMode(t, workstation, nil)
+			before := readFileString(t, settingsPath)
+			rr := putServerConfig(t, srv, `{"server":{"auth":{"dev_token":"********"}}}`)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if after := readFileString(t, settingsPath); after != before {
+				t.Errorf("settings.yaml changed:\n%s", after)
+			}
+		})
+	}
+}
+
+// Review r3 N-h: schema_version "1" sent to a file without the key is the
+// value GET reports, so nothing is written.
+func TestWorkstation_PutServerConfig_SchemaVersionEcho(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte("server:\n  log_level: info\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	before := readFileString(t, settingsPath)
+	rr := putServerConfig(t, srv, `{"schema_version":"1","server":{"log_level":"info"}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed:\n%s", after)
+	}
+}
+
+// Review r3 N-f: the workstation-settings PATCH answers a file it cannot edit
+// in place with 422 and the hand-edit hint, like the PUT.
+func TestWorkstationSettingsPatch_UneditableFile422(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nbase: &b true\nauto_inject_gcloud_adc: *b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	rr := httptest.NewRecorder()
+	srv.handleWorkstationSettings(rr, adminRequest(http.MethodPatch, "/api/v1/system/workstation-settings", `{"auto_inject_gcloud_adc":false}`))
+	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(rr.Body.String(), "edit the file by hand") {
+		t.Errorf("expected 422 with the hand-edit hint, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Review r3 N-a: the registry endpoint (like the runtime endpoint and the
+// hubsync cleanup, through the same config.LoadModifySaveVersionedSettings)
+// loads, modifies and saves under the settings-file lock, so a concurrent
+// broker-token write survives.
+func TestSystemStructWriters_KeepConcurrentTokenWrite(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	globalDir := filepath.Dir(settingsPath)
+	for i := 0; i < 10; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			req := adminRequest(http.MethodPut, "/api/v1/system/registry", fmt.Sprintf(`{"image_registry":"reg-%d"}`, i))
+			req.RemoteAddr = "127.0.0.1:1234"
+			srv.handleSystemRegistry(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Errorf("registry PUT: %d %s", rr.Code, rr.Body.String())
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := config.UpdateSetting(globalDir, "hub.brokerToken", fmt.Sprintf("tok-%d", i), true); err != nil {
+				t.Errorf("UpdateSetting: %v", err)
+			}
+		}()
+		wg.Wait()
+		m := readYAMLMap(t, settingsPath)
+		if got := yamlAt(m, "server", "broker", "broker_token"); got != fmt.Sprintf("tok-%d", i) {
+			t.Fatalf("round %d: broker_token = %v (lost)", i, got)
+		}
+		if got := yamlAt(m, "image_registry"); got != fmt.Sprintf("reg-%d", i) {
+			t.Fatalf("round %d: image_registry = %v (lost)", i, got)
+		}
 	}
 }

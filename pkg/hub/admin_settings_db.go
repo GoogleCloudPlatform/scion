@@ -710,14 +710,35 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// zero (dev_mode:false over a stored true) is rejected instead of being
 	// dropped by the non-zero koanf-key extraction, and an unchanged echo of
 	// the GET view, zero-valued blocks included, is ignored.
+	// Unclassified leaves (schema_version, active_profile, workspace_path)
+	// follow the same echo rule, so a GET -> PUT round trip is a 200.
 	if !workstation {
-		changed, err := s.hostedLayer0Changes(r.Context(), ops, rawBody)
+		l0, u, err := s.hostedBootstrapChanges(r.Context(), ops, rawBody)
 		if err != nil {
 			slog.Error("PUT server-config: failed to build GET view for Layer-0 check", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 			return
 		}
-		layer0Keys = changed
+		layer0Keys, unclassifiedKeys = l0, u
+	}
+
+	// Workstation: server.broker.broker_id / broker_token are written by the
+	// hub itself (broker registration); the PUT may only echo them.
+	if workstation {
+		owned, err := s.hubOwnedBrokerChanges(r.Context(), ops, fileLeaves)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for broker identity check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if len(owned) > 0 {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":   "hub_owned_keys_rejected",
+				"message": "The broker ID and token are written by the hub itself and cannot be changed through the server config API.",
+				"keys":    owned,
+			})
+			return
+		}
 	}
 
 	// Reject if any Layer-0 keys are present — 422 before any write.
@@ -767,6 +788,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (the github_app section has no secret fields), so for them this check
 	// only validates the request; their handling is tracked in
 	// ptone/scion#2938.
+	// An unchanged masked Layer-0 secret is dropped first (see
+	// maskedLayer0Echoes), so a lone placeholder echo is not rejected for
+	// siblings the body leaves out.
+	if req.Server != nil {
+		echoes, err := s.maskedLayer0Echoes(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for masked echoes", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		root := reflect.ValueOf(&req).Elem()
+		for _, l := range echoes {
+			if fv, ok := fieldByIndexPath(root, l.index); ok && fv.Kind() == reflect.String && fv.CanSet() {
+				fv.SetString("")
+			}
+		}
+		fileLeaves = dropLeaves(fileLeaves, echoes)
+		fileKeys = leafKeys(fileLeaves)
+	}
 	if req.Server != nil {
 		stored, err := storedServerConfigDB(ops)
 		if err != nil {
