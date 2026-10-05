@@ -1032,7 +1032,6 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	// Resolve project ID
 	var projectID string
 	var projectName string
-	var localProjectPath string // Local path to the project's .scion directory on this broker
 
 	if brokerProjectID != "" {
 		projectID = brokerProjectID
@@ -1043,7 +1042,6 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to resolve project path: %w\n\nSpecify a project with --project <name-or-id>", err)
 		}
-		localProjectPath = resolvedPath
 
 		settings, err := config.LoadSettings(resolvedPath)
 		if err != nil {
@@ -1107,15 +1105,6 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		}
 		projectID = project.ID
 		projectName = project.Name
-		// The project named by --project need not be the one in the
-		// current directory: register a local path only when it is
-		// (ptone/scion#2839). Otherwise the provider gets no path and the
-		// hub has the broker resolve the project by its slug; registering the
-		// CWD's project (often the global ~/.scion) would make the broker
-		// provision this project's agents there.
-		if !isRemoteBroker {
-			localProjectPath = localPathForProvidedProject(projectPath, projectID)
-		}
 	}
 
 	// If we used --broker flag, resolve broker by name or ID
@@ -1141,7 +1130,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		ID:       projectID,
 		Name:     projectName,
 		BrokerID: brokerID,
-		Path:     localProjectPath,
+		Path:     providerRegisterPath(projectPath, projectID, brokerProjectID != "", isRemoteBroker),
 	}
 
 	resp, err := client.Projects().Register(ctx, req)
@@ -2062,6 +2051,30 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 	}
 
 	return &result
+}
+
+// providerRegisterPath returns the local project path `scion broker provide`
+// registers for projectID, or "" to have the hub let the broker resolve the
+// project by its slug (ptone/scion#2839):
+//   - for a remote broker (--broker), always "": a path on this host names
+//     nothing on the broker's host;
+//   - with --project, the CWD's project only if it is linked to projectID
+//     (see localPathForProvidedProject): registering an unrelated CWD
+//     project, often the global ~/.scion, made the broker provision this
+//     project's agents there;
+//   - otherwise the CWD's project, which is the project being provided.
+func providerRegisterPath(projectPath, projectID string, namedProject, remoteBroker bool) string {
+	if remoteBroker {
+		return ""
+	}
+	if namedProject {
+		return localPathForProvidedProject(projectPath, projectID)
+	}
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
 // localPathForProvidedProject returns the local .scion path to register for

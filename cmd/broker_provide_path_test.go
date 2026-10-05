@@ -78,3 +78,46 @@ func TestLocalPathForProvidedProject(t *testing.T) {
 		t.Error("providing the global project from home registered no path")
 	}
 }
+
+// The path registered by `scion broker provide`: never a local path for a
+// remote broker (--broker), with or without --project; the named project's
+// path only when the CWD is that project; the CWD's project without
+// --project, as before.
+func TestProviderRegisterPath(t *testing.T) {
+	const target = "11111111-aaaa-aaaa-aaaa-111111111111"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	linked := filepath.Join(home, "linked", ".scion")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linked, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nhub:\n  project_id: "+target+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Dir(linked))
+	want, _ := filepath.EvalSymlinks(linked)
+	for _, tc := range []struct {
+		name                       string
+		namedProject, remoteBroker bool
+		wantPath                   bool
+	}{
+		{"local broker, CWD project", false, false, true},
+		{"local broker, --project names the CWD project", true, false, true},
+		{"remote broker, CWD project", false, true, false},
+		{"remote broker, --project", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerRegisterPath("", target, tc.namedProject, tc.remoteBroker)
+			if !tc.wantPath {
+				if got != "" {
+					t.Errorf("got %q, want no local path", got)
+				}
+				return
+			}
+			if gotEval, _ := filepath.EvalSymlinks(got); gotEval != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
