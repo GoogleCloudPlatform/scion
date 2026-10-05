@@ -957,6 +957,14 @@ type ProjectStore interface {
 	// ListProjects returns projects matching the filter criteria.
 	ListProjects(ctx context.Context, filter ProjectFilter, opts ListOptions) (*ListResult[Project], error)
 
+	// ListProjectSummaries returns the same projects, in the same order and
+	// with the same pagination, as ListProjects for the same filter and
+	// options, but only with persisted columns: the computed fields
+	// (AgentCount, ActiveBrokerCount, ProjectType) are left zero. It costs
+	// no per-project queries, so callers that need only identity, naming,
+	// annotations and authorization inputs should prefer it.
+	ListProjectSummaries(ctx context.Context, filter ProjectFilter, opts ListOptions) (*ListResult[Project], error)
+
 	// LockProjectForMembership acquires a project-scoped serialization lock
 	// for membership mutations. On PostgreSQL this executes SELECT ... FOR
 	// UPDATE on the project row, serializing concurrent membership

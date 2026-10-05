@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -190,6 +190,42 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
+
+## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
+# Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
+# tests self-skip without it, so the target fails if the variable is unset,
+# if any selected test skips, or if any test listed in
+# WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
+# the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
+# webchat_* tables, so point the DSN at a scratch database.
+WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
+	TestC4Fix_Postgres_FreshDB \
+	TestC4Fix_Postgres_PreExistingDB \
+	TestC4Fix_Postgres_Idempotent \
+	TestC4Fix_Postgres_PreExistingDB_Idempotent
+
+test-webchat-postgres:
+	@echo "Running web chat store tests against Postgres..."
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
+		exit 1; \
+	fi
+	@go test -count=1 -timeout 10m -v \
+		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
+		./pkg/hub/ > /tmp/test-webchat-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-webchat-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
+		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(WEBCHAT_POSTGRES_TESTS); do \
+		if ! grep -qE "^--- PASS: $$t " /tmp/test-webchat-postgres.log; then \
+			echo "ERROR: $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done
 
 ## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
 # It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
