@@ -474,11 +474,11 @@ func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 // OpenCode's provider retries are exhausted): the captured session.error
 // ({name: "APIError", data: {statusCode: 500, message: ..., ...}}) is
 // remembered as its name and status only, and attached to that turn's one
-// gated session.idle. The bridge
-// test "run3: the captured session.error is carried onto the one agent-end
-// as its name and status only" (scion-bridge.test.mjs) pins that the bridge
-// emits exactly this, from the real capture; this replays it through the
-// real dialect.yaml and telemetry handler. Note this does not by itself
+// gated session.idle. The bridge test "run3: the captured session.error is
+// carried onto the one agent-end as its name and status only"
+// (scion-bridge.test.mjs) pins that the bridge emits exactly this, from the
+// real capture; this replays it through the real dialect.yaml and telemetry
+// handler. Note this does not by itself
 // guard dialect.yaml's explicit `error: error` field on session.idle:
 // MappingDialect.Parse copies any top-level string `error` into Data.Error
 // by default, so the test would pass without that field too (the field is
@@ -503,7 +503,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 		t.Fatalf("event.Name = %q, want %q", event.Name, hooks.EventAgentEnd)
 	}
 	if event.Data.Error != "APIError (status 500)" {
-		t.Errorf("event.Data.Error = %q, want the bridge's carried session.error text", event.Data.Error)
+		t.Errorf("event.Data.Error = %q, want the bridge's carried session.error name/status", event.Data.Error)
 	}
 
 	sr := tracetest.NewSpanRecorder()
@@ -522,7 +522,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 		t.Errorf("span name = %q, want agent.turn.end", spans[0].Name())
 	}
 	if got := spans[0].Status(); got.Code != codes.Error || got.Description != "APIError (status 500)" {
-		t.Errorf("span status = %+v, want Error with the carried session.error text", got)
+		t.Errorf("span status = %+v, want Error with the carried session.error name/status", got)
 	}
 
 	// A clean turn's session.idle (run2's, from the hook-payload fixture)

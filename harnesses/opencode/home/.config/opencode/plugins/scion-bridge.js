@@ -101,8 +101,8 @@ function evictOldest(collection, maxEntries) {
 // emitted, the provider/model pair for each assistant message, which
 // session IDs are task-tool subagent children (see routeSessionCreated), and
 // which sessions have been busy (or retrying) since their last emitted
-// agent-end (see routeSessionIdle), and the pending error text for an armed
-// session whose turn failed (see routeSessionError).
+// agent-end (see routeSessionIdle), and the pending error name/status for
+// an armed session whose turn failed (see routeSessionError).
 export function createBridgeState() {
   return {
     liveMessageIds: new Set(),
@@ -133,8 +133,8 @@ export function route(state, event) {
       return routeSessionStatus(state, event);
     // session.error never emits by itself: see routeSessionIdle's doc
     // comment for why a session's turn must end exactly once, on
-    // session.idle, and never a second time here. Its error text is only
-    // remembered, and carried on that turn's single agent-end.
+    // session.idle, and never a second time here. Its error name/status is
+    // only remembered, and carried on that turn's single agent-end.
     case 'session.error':
       return routeSessionError(state, event);
     // Real runtime event names, confirmed against a live capture (npm
