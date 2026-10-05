@@ -354,24 +354,18 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	// Auto-verify impersonation after registration
 	resp := createGCPServiceAccountResponse{GCPServiceAccount: *sa}
 	if s.gcpTokenGenerator != nil {
-		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-			sa.Verified = false
-			sa.VerificationStatus = store.GCPVerificationFailed
-			sa.VerificationError = err.Error()
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
+		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			writeGCPVerificationPersistError(w)
+			return
+		}
+		resp.GCPServiceAccount = *sa
+		if verifyErr != nil {
 			resp.VerificationFailed = true
 			resp.VerificationDetails = &verificationFailedDetails{
 				HubServiceAccountEmail: s.gcpTokenGenerator.ServiceAccountEmail(),
 				TargetEmail:            sa.Email,
 			}
-		} else {
-			sa.Verified = true
-			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = store.GCPVerificationVerified
-			sa.VerificationError = ""
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
 		}
 	}
 
@@ -604,34 +598,63 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Attempt to verify impersonation via the GCP token generator
-	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-		// Persist the failure status
-		sa.Verified = false
-		sa.VerificationStatus = store.GCPVerificationFailed
-		sa.VerificationError = err.Error()
-		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+	// Attempt to verify impersonation via the GCP token generator, then
+	// persist the outcome. A result that could not be stored is reported as
+	// a server error rather than as the verification outcome: the stored row
+	// is what later checks read, so it must match what the caller is told.
+	verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+	if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+		writeGCPVerificationPersistError(w)
+		return
+	}
 
+	if verifyErr != nil {
 		details := map[string]interface{}{
 			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
 			"targetEmail":            sa.Email,
 		}
 		writeError(w, http.StatusBadGateway, "gcp_verification_failed",
-			"Failed to verify impersonation: "+err.Error(), details)
-		return
-	}
-
-	sa.Verified = true
-	sa.VerifiedAt = time.Now()
-	sa.VerificationStatus = store.GCPVerificationVerified
-	sa.VerificationError = ""
-
-	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
-		writeErrorFromErr(w, err, "")
+			"Failed to verify impersonation: "+verifyErr.Error(), details)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, sa)
+}
+
+// applyGCPVerificationResult records the outcome of an impersonation check
+// on sa and persists it. verifyErr is the error VerifyImpersonation returned
+// (nil on success). Every verify and auto-verify path goes through here so
+// the fields written for each outcome cannot drift apart between handlers.
+//
+// The returned error is only ever a persistence failure; callers must not
+// report the verification outcome when it is non-nil, because the stored
+// row -- which the assign, start and token-mint checks read -- would not
+// match it.
+func (s *Server) applyGCPVerificationResult(ctx context.Context, sa *store.GCPServiceAccount, verifyErr error) error {
+	if verifyErr != nil {
+		sa.Verified = false
+		sa.VerificationStatus = store.GCPVerificationFailed
+		sa.VerificationError = verifyErr.Error()
+	} else {
+		sa.Verified = true
+		sa.VerifiedAt = time.Now()
+		sa.VerificationStatus = store.GCPVerificationVerified
+		sa.VerificationError = ""
+	}
+	if err := s.store.UpdateGCPServiceAccount(ctx, sa); err != nil {
+		slog.Error("failed to persist GCP service account verification result",
+			"sa_id", sa.ID, "status", sa.VerificationStatus, "error", err)
+		return fmt.Errorf("persist verification result: %w", err)
+	}
+	return nil
+}
+
+// writeGCPVerificationPersistError answers a request whose verification
+// result could not be stored. Always 500: a missing row or a conflict here
+// is a server-side failure to record the outcome, not a client error.
+func writeGCPVerificationPersistError(w http.ResponseWriter) {
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		"failed to record the service account verification result; retry the verification", nil)
 }
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
@@ -1033,13 +1056,82 @@ func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCP
 	return agentRecord.AppliedConfig.GCPIdentity, true
 }
 
+// gcpServiceAccountVerified reports whether sa's stored verification state
+// admits it for use by an agent: the Verified flag and the persisted status
+// must both say verified. This is the single verified predicate; every
+// assign, default, start and token-mint check uses it rather than reading
+// sa.Verified directly.
+func gcpServiceAccountVerified(sa *store.GCPServiceAccount) bool {
+	return sa != nil && sa.Verified && sa.VerificationStatus == store.GCPVerificationVerified
+}
+
+// Reasons checkGCPAssignmentAdmissible refuses an agent's GCP identity
+// assignment. Each is phrased so it can be shown to the user as is.
+var (
+	errGCPSANotAvailable = errors.New("the assigned GCP service account is no longer available in this project")
+	errGCPSANotVerified  = errors.New("the assigned GCP service account is not verified")
+	errGCPSAEmailChanged = errors.New("the assigned GCP service account's email no longer matches the agent's assignment")
+	errGCPSAHubModeOff   = errors.New("hub-scoped GCP service account assignment requires gcpIamCheckMode=enforce")
+)
+
+// isGCPAssignmentInadmissible reports whether err is one of the refusal
+// reasons above, as opposed to a store failure while checking.
+func isGCPAssignmentInadmissible(err error) bool {
+	return errors.Is(err, errGCPSANotAvailable) || errors.Is(err, errGCPSANotVerified) ||
+		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff)
+}
+
+// checkGCPAssignmentAdmissible is the admissibility rule for an agent's
+// applied GCP identity assignment: the assigned service account still loads
+// by ID, is still verified (gcpServiceAccountVerified) under the same email,
+// is still reachable from the agent's project, and -- for a hub-scoped
+// account -- saAssignCheckMode is still enforce.
+//
+// It returns nil when the assignment is admissible, one of the errGCPSA*
+// reasons when it is not, and a wrapped store error when the check itself
+// could not be completed. The token-mint gate (resolveAgentGCPMintFacts)
+// and the start/restart gate (gcpIdentityStartRefusal) both apply it, so an
+// agent that would be refused a token is refused at start instead.
+func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) error {
+	if gcpID == nil {
+		return errGCPSANotAvailable
+	}
+	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errGCPSANotAvailable
+		}
+		return fmt.Errorf("load assigned GCP service account: %w", err)
+	}
+	if sa == nil {
+		return errGCPSANotAvailable
+	}
+	if !gcpServiceAccountVerified(sa) {
+		return errGCPSANotVerified
+	}
+	if sa.Email != gcpID.ServiceAccountEmail {
+		return errGCPSAEmailChanged
+	}
+	if !sa.ReachableFromProject(agentProjectID) {
+		return errGCPSANotAvailable
+	}
+	if sa.Scope == store.ScopeHub {
+		s.mu.RLock()
+		mode := s.saAssignCheckMode
+		s.mu.RUnlock()
+		if mode != SAAssignCheckEnforce {
+			return errGCPSAHubModeOff
+		}
+	}
+	return nil
+}
+
 // resolveAgentGCPMintFacts rechecks, for one token-mint request and after the
-// token-scope compare has already passed: the assigned service account still
-// loads by ID, is still verified under the same email, is still reachable
-// from the agent's project, and -- for a hub-scoped account -- that
-// saAssignCheckMode is still enforce. Every fresh mint is a new authorization
-// event, so none of these facts is read once and trusted for the life of the
-// token; each mint re-derives them from the store.
+// token-scope compare has already passed, that the agent's assignment is
+// still admissible (checkGCPAssignmentAdmissible). Every fresh mint is a new
+// authorization event, so none of these facts is read once and trusted for
+// the life of the token; each mint re-derives them from the store. Passing
+// the start gate does not exempt an agent from this check.
 //
 // A false return covers every failure in the same path, including any store
 // lookup error, so the caller renders the same "no GCP identity assigned" denial
@@ -1049,25 +1141,37 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPI
 	if gcpID == nil {
 		return false
 	}
-	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
-	if err != nil || sa == nil {
-		return false
-	}
-	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified || sa.Email != gcpID.ServiceAccountEmail {
-		return false
-	}
-	if !sa.ReachableFromProject(agentProjectID) {
-		return false
-	}
-	if sa.Scope == store.ScopeHub {
-		s.mu.RLock()
-		mode := s.saAssignCheckMode
-		s.mu.RUnlock()
-		if mode != SAAssignCheckEnforce {
-			return false
-		}
-	}
+	return s.checkGCPAssignmentAdmissible(ctx, gcpID, agentProjectID) == nil
+}
 
+// gcpIdentityStartRefusal applies the token-mint admissibility rule at
+// start and restart, so an agent whose assigned GCP service account would be
+// refused a token fails fast with an actionable message instead of starting
+// and failing later inside the container. Agents without an applied
+// assign-mode GCP identity are unaffected.
+//
+// It writes the response and returns true when the start must not proceed:
+// 400 for an inadmissible assignment, 500 when the check could not be made.
+func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWriter, agent *store.Agent, action string) bool {
+	gcpID, ok := s.resolveAgentGCPAssignment(agent)
+	if !ok {
+		return false
+	}
+	err := s.checkGCPAssignmentAdmissible(ctx, gcpID, agent.ProjectID)
+	if err == nil {
+		return false
+	}
+	if !isGCPAssignmentInadmissible(err) {
+		slog.Error("GCP identity admissibility check failed at agent start",
+			"agent_id", agent.ID, "action", action, "error", err)
+		writeErrorFromErr(w, err, "")
+		return true
+	}
+	slog.Info("agent start refused: GCP identity assignment is not admissible",
+		"agent_id", agent.ID, "action", action, "sa_id", gcpID.ServiceAccountID, "reason", err)
+	writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+		fmt.Sprintf("Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
+			action, err.Error()), nil)
 	return true
 }
 

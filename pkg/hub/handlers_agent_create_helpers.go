@@ -2060,7 +2060,7 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 		return false, err
 	}
 	for _, sa := range sas {
-		if sa.Verified {
+		if gcpServiceAccountVerified(&sa) {
 			return true, nil
 		}
 	}
