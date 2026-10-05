@@ -295,6 +295,22 @@ export class ScionPageAgentDetail extends LitElement {
       gap: 0.5rem;
       flex-shrink: 0;
     }
+    /* On a phone the actions drop below the title and wrap, rather than
+       pushing the last of them off the right edge. */
+    @media (max-width: 640px) {
+      .header {
+        flex-wrap: wrap;
+      }
+      .header-info {
+        min-width: 0;
+        flex-basis: 100%;
+      }
+      .header-actions {
+        flex-wrap: wrap;
+        flex-shrink: 1;
+        min-width: 0;
+      }
+    }
 
     /* ---- Error banner ---- */
     scion-deletion-banner.deletion-banner {
@@ -1273,7 +1289,9 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .conversationKey=${this.currentUserId
+          ? `dm:agent:${this.agentId}:user:${this.currentUserId}`
+          : ''}
         .projectId=${agent.projectId || ''}
         .currentUserId=${this.currentUserId}
         ?isDM=${true}
@@ -1950,8 +1968,12 @@ export class ScionPageAgentDetail extends LitElement {
                       )}
                     </sl-select>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
-                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;"
+                        >
+                          Hub mode: sends within this project and to permitted agents in other
+                          projects. External messaging requires the Hub cross-project switch to be
+                          enabled.
                         </div>`
                       : nothing}
                   `
@@ -1964,7 +1986,9 @@ export class ScionPageAgentDetail extends LitElement {
                       ${modeDisplay.description}
                     </span>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;"
+                        >
                           External messaging requires the Hub cross-project switch to be enabled.
                         </div>`
                       : nothing}

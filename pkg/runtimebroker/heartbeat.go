@@ -92,6 +92,11 @@ type HeartbeatService struct {
 	// targets' data keep flowing every interval.
 	listingDeadline time.Duration
 
+	// workspaceStorage, when set, returns the broker's current workspace
+	// storage descriptor, reported on every heartbeat so the hub sees share
+	// health changes. Nil omits the field.
+	workspaceStorage func() *api.BrokerWorkspaceStorage
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -305,7 +310,12 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
+			// Cross-broker agent move is not implemented by this broker.
+			AgentMove: false,
 		},
+	}
+	if s.workspaceStorage != nil {
+		heartbeat.WorkspaceStorage = s.workspaceStorage()
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the

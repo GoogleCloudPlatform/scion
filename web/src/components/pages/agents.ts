@@ -332,11 +332,16 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary-600, #2563eb);
       }
 
+      /* On the narrowest phones the status group is wider than the page;
+         it scrolls sideways rather than clipping its last buttons. */
       .scope-toggle {
         display: inline-flex;
+        max-width: 100%;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
-        overflow: hidden;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
       }
 
       .scope-toggle button {

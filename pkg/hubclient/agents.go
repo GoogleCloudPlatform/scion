@@ -1017,6 +1017,9 @@ func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *Rei
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
+	// TargetBroker (a broker ID, name or slug) asks to move the agent to
+	// that broker, which must mount the same NFS export as its current one.
+	TargetBroker string `json:"targetBroker,omitempty"`
 
 	// Phase 3 overrides — not yet supported by a Phase 1 hub.
 	Image          string            `json:"image,omitempty"`
@@ -1036,6 +1039,38 @@ type ReincarnateAgentResponse struct {
 	Generation int               `json:"generation"`
 	State      string            `json:"state"`
 	Plan       ReincarnationPlan `json:"plan"`
+	// SourceBrokerID and TargetBrokerID are set when the request named a
+	// target broker; they are equal for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// MoveVerdict is the move eligibility verdict of a dry-run move.
+	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+}
+
+// MoveVerdict is the hub's eligibility verdict for moving an agent to
+// another broker. A refused request carries it in the error details under
+// "verdict". Checks lists every check in evaluation order, each passed,
+// failed or not_evaluated.
+type MoveVerdict struct {
+	Eligible     bool          `json:"eligible"`
+	SourceBroker MoveBrokerRef `json:"sourceBroker"`
+	TargetBroker MoveBrokerRef `json:"targetBroker"`
+	Profile      string        `json:"profile,omitempty"`
+	RuntimeType  string        `json:"runtimeType,omitempty"`
+	Checks       []MoveCheck   `json:"checks"`
+}
+
+// MoveBrokerRef identifies a broker in a MoveVerdict.
+type MoveBrokerRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// MoveCheck is one move eligibility check result.
+type MoveCheck struct {
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	Message string `json:"message,omitempty"`
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
