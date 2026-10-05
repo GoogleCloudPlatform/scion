@@ -3597,3 +3597,21 @@ func TestV2_ImportV1ChatRoutes_ResolvesSlugFromBrokerProjectList(t *testing.T) {
 	assert.Equal(t, 1, hub.listFreshCalls)
 	assert.Empty(t, hub.listUserProjectsCalls, "migration does not act as a user")
 }
+
+func TestV2_ImportV1ChatRoutes_ListsBrokerProjectsOnce(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}, {ID: "proj2", Name: "Beta"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-1": "scion.project.proj1.agent.coder.messages", "-2": "scion.project.proj2.broadcast", "-3": "scion.project.proj1.agent.reviewer.messages"}`)
+
+	assert.Equal(t, 1, hub.listFreshCalls)
+	for chatID, want := range map[int64]string{-1: "alpha", -2: "Beta", -3: "alpha"} {
+		link, err := b.store.GetGroupLink(ctx, chatID)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		assert.Equal(t, want, link.ProjectSlug)
+	}
+}

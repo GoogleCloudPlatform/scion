@@ -275,3 +275,56 @@ func TestHTTPHubClient_ListProjectsForUser_ErrorOnLaterPage(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, projects, "a partial list is not returned on error")
 }
+
+func TestHTTPHubClient_ListAgents_FollowsCursor(t *testing.T) {
+	var cursors, principals []string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cursor := r.URL.Query().Get("cursor")
+		cursors = append(cursors, cursor)
+		principals = append(principals, r.Header.Get("X-Scion-On-Behalf-Of"))
+		if cursor == "" {
+			json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{Slug: "a1"}, {Slug: "a2"}}, NextCursor: "n/2"})
+			return
+		}
+		json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{Slug: "a3"}}})
+	}))
+	defer hub.Close()
+
+	agents, err := NewHTTPHubClient(hub.URL, "", "", nil).ListAgents(context.Background(), "p1", "user:alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a1", "a2", "a3"}, agentSlugs(agents))
+	assert.Equal(t, []string{"", "n/2"}, cursors)
+	for _, p := range principals {
+		assert.Equal(t, "user:alice@example.com", p, "every page carries the linked user")
+	}
+}
+
+func TestHTTPHubClient_ListAgents_PageLimitAndLaterPageError(t *testing.T) {
+	t.Run("page limit", func(t *testing.T) {
+		var calls atomic.Int64
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := calls.Add(1)
+			json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{Slug: fmt.Sprintf("a%d", n)}}, NextCursor: fmt.Sprintf("c%d", n)})
+		}))
+		defer hub.Close()
+		agents, err := NewHTTPHubClient(hub.URL, "", "", nil).ListAgents(context.Background(), "p1", "user:alice@example.com")
+		require.NoError(t, err)
+		assert.Equal(t, int64(maxAgentPages), calls.Load())
+		assert.Len(t, agents, maxAgentPages)
+	})
+	t.Run("later page error", func(t *testing.T) {
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("cursor") == "" {
+				json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{Slug: "a1"}}, NextCursor: "c2"})
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"denied"}}`))
+		}))
+		defer hub.Close()
+		agents, err := NewHTTPHubClient(hub.URL, "", "", nil).ListAgents(context.Background(), "p1", "user:alice@example.com")
+		require.Error(t, err)
+		assert.True(t, isForbiddenHubError(err))
+		assert.Nil(t, agents)
+	})
+}

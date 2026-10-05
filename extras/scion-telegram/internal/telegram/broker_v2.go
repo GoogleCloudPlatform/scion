@@ -499,6 +499,24 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		return
 	}
 
+	// The broker's project list is fetched at most once per import, and
+	// only when a route needs it.
+	var (
+		projects       []ProjectOption
+		projectsLoaded bool
+	)
+	brokerProjects := func() []ProjectOption {
+		if projectsLoaded || b.hubClient == nil {
+			return projects
+		}
+		projectsLoaded = true
+		var err error
+		if projects, err = b.hubClient.ListProjectsFresh(ctx); err != nil {
+			b.log.Warn("Could not list broker projects for v1 route import", "error", err)
+		}
+		return projects
+	}
+
 	imported := 0
 	for chatIDStr, topic := range raw {
 		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
@@ -517,22 +535,17 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		}
 
 		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
-		// Attempt to resolve the project slug from the broker's project
-		// list. Falls back to the project ID if the hub is unavailable
-		// during migration.
+		// Resolve the project slug from the broker's project list, falling
+		// back to the project ID if the hub is unavailable during migration.
 		projectSlug := projectID
-		if b.hubClient != nil {
-			if projects, err := b.hubClient.ListProjectsFresh(ctx); err == nil {
-				for _, p := range projects {
-					if p.ID == projectID {
-						if p.Slug != "" {
-							projectSlug = p.Slug
-						} else if p.Name != "" {
-							projectSlug = p.Name
-						}
-						break
-					}
+		for _, p := range brokerProjects() {
+			if p.ID == projectID {
+				if p.Slug != "" {
+					projectSlug = p.Slug
+				} else if p.Name != "" {
+					projectSlug = p.Name
 				}
+				break
 			}
 		}
 		link := &GroupLink{

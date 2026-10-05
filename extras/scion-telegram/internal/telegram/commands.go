@@ -844,7 +844,8 @@ type hubProject struct {
 }
 
 type hubAgentsResponse struct {
-	Agents []hubAgent `json:"agents"`
+	Agents     []hubAgent `json:"agents"`
+	NextCursor string     `json:"nextCursor,omitempty"`
 }
 
 type hubAgent struct {
@@ -952,9 +953,36 @@ func (c *httpHubClient) listUserProjectsPage(ctx context.Context, onBehalfOf, cu
 	return &result, nil
 }
 
+// maxAgentPages bounds how many pages ListAgents follows.
+const maxAgentPages = 20
+
 func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
-	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	var agents []AgentInfo
+	cursor := ""
+	for page := 0; page < maxAgentPages; page++ {
+		result, err := c.listAgentsPage(ctx, projectID, onBehalfOf, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range result.Agents {
+			agents = append(agents, AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase})
+		}
+		if result.NextCursor == "" {
+			return agents, nil
+		}
+		cursor = result.NextCursor
+	}
+	slog.Warn("Agent list truncated at page limit", "project_id", projectID, "pages", maxAgentPages, "count", len(agents))
+	return agents, nil
+}
+
+// listAgentsPage fetches one page of a project's agents as the linked user.
+func (c *httpHubClient) listAgentsPage(ctx context.Context, projectID, onBehalfOf, cursor string) (*hubAgentsResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	if cursor != "" {
+		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
@@ -978,12 +1006,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf st
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode list agents response: %w", err)
 	}
-
-	agents := make([]AgentInfo, len(result.Agents))
-	for i, a := range result.Agents {
-		agents[i] = AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
-	}
-	return agents, nil
+	return &result, nil
 }
 
 func (c *httpHubClient) HubBaseURL() string {
