@@ -509,6 +509,91 @@ describe('shortcut dispatch: the palette is the single shortcut owner', () => {
   });
 });
 
+describe('keys typed while the palette opens', () => {
+  /** A focused composer stand-in with its own keydown listener. */
+  function composer(): { el: HTMLTextAreaElement; onKeydown: ReturnType<typeof vi.fn> } {
+    const el = document.createElement('textarea');
+    document.body.appendChild(el);
+    const onKeydown = vi.fn();
+    el.addEventListener('keydown', onKeydown);
+    el.focus();
+    return { el, onKeydown };
+  }
+
+  function typeAt(el: Element, key: string): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(e);
+    return e;
+  }
+
+  it('are captured from the start of an open, before the lazy import resolves, and handed to the palette', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+
+    const opening = page.togglePalette();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(true);
+    await opening;
+    await page.updateComplete;
+
+    expect(onKeydown).not.toHaveBeenCalled();
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette.typeahead).toBe(page._paletteTypeahead);
+    expect(page._paletteTypeahead.pending).toBe('a');
+  });
+
+  it('are not captured while the palette is not opening', () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once a second press cancels the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    await Promise.all([page.togglePalette(), page.togglePalette()]);
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once the page disconnects during the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    const opening = page.togglePalette();
+    page.remove();
+    await opening;
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once the palette closes', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again if the open fails', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    vi.spyOn(page, '_capturePaletteInvokerFocus').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    await expect(page.togglePalette()).rejects.toThrow('boom');
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+});
+
 describe('togglePalette: a reopen queued behind a still-animating close never opens an invisible palette', () => {
   afterEach(() => {
     document.body.innerHTML = '';

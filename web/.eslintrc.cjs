@@ -96,6 +96,7 @@ module.exports = {
                 'e2e/chat-palette/thread-navigation.pw.ts',
                 'e2e/chat-palette/typography.pw.ts',
                 'e2e/palette-typography.ts',
+                'e2e/palette-focus.ts',
             ],
             parserOptions: { project: './e2e/chat-palette/tsconfig.json' },
         },

@@ -73,6 +73,7 @@ import {
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
+import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -520,6 +521,13 @@ export class ScionPageChat extends LitElement {
    * re-capture the invoker focus.
    */
   private _palettePendingOpen = false;
+  /**
+   * Captures keys typed from an open until the palette's query input has
+   * focus, so they become the query instead of reaching the composer (see
+   * {@link PaletteTypeahead}). Started in `_openPalette`, before the
+   * first open's lazy import.
+   */
+  private readonly _paletteTypeahead = new PaletteTypeahead();
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
    * dequeued). `_retargetPaletteInvokerToNewComposer` captures this value
@@ -1395,6 +1403,7 @@ export class ScionPageChat extends LitElement {
     this._palettePendingOpen = false;
     this._palettePendingReopen = false;
     this._paletteCloseAnimating = false;
+    this._paletteTypeahead.stop();
     stateManager.removeEventListener('chat-message-received', this._onChatMessage);
     stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
     stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
@@ -3897,6 +3906,7 @@ export class ScionPageChat extends LitElement {
   private async _openPalette(options: { skipInvokerCapture?: boolean } = {}): Promise<void> {
     this._palettePendingOpen = true;
     this._paletteOpenEpoch++;
+    this._paletteTypeahead.start();
     try {
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       if (!this.v2SwitcherLoaded) {
@@ -3911,11 +3921,15 @@ export class ScionPageChat extends LitElement {
       }
       if (!this._palettePendingOpen) {
         // Cancelled by a second press while we were awaiting above.
+        this._paletteTypeahead.stop();
         return;
       }
       this.v2PaletteOpen = true;
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
+    } catch (err) {
+      this._paletteTypeahead.stop();
+      throw err;
     } finally {
       this._palettePendingOpen = false;
     }
@@ -4134,6 +4148,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._paletteTypeahead.stop();
     this.v2PaletteOpen = false;
     this._paletteCloseAnimating = true;
   }
@@ -4892,6 +4907,7 @@ export class ScionPageChat extends LitElement {
               placeholder="Search agents, threads, people, documents…"
               .open=${this.v2PaletteOpen}
               .groups=${this.v2PaletteGroups}
+              .typeahead=${this._paletteTypeahead}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
               @palette-dismiss=${this._handlePaletteDismiss}
