@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import type { User, Message } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 
@@ -46,6 +47,9 @@ export class ScionInboxTray extends LitElement {
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnUserMessage = this.onUserMessageEvent.bind(this);
 
+  /** The user id that the message list belongs to. */
+  private stateUserId: string | null = null;
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -62,6 +66,13 @@ export class ScionInboxTray extends LitElement {
     // A reconnect starts afresh, as a first mount does.
     this.activeUserId = null;
     document.removeEventListener('click', this.boundOnClickOutside, true);
+  }
+
+  override willUpdate(changed: Map<string, unknown>): void {
+    // Clear the previous user's state before this render, so no render pairs
+    // the new user with the previous user's list.
+    if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('messages')) this.announceCount();
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -92,6 +103,40 @@ export class ScionInboxTray extends LitElement {
       this.stopListeningForMessages();
       this.messages = [];
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Clears the message list when the signed-in user id changes, so the next
+   * user only ever sees their own messages.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.messages = [];
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'inbox', this.messages.length);
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -131,10 +176,12 @@ export class ScionInboxTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchMessages(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       const res = await apiFetch('/api/v1/messages?unread=true');
       if (!res.ok) return;
       const data = (await res.json()) as { items?: Message[] } | null;
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = data?.items ?? [];
     } catch {
       // Silently ignore network errors during polling
@@ -142,8 +189,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/messages/${id}/read`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = this.messages.filter((m) => m.id !== id);
     } catch {
       // Ignore
@@ -151,8 +200,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/messages/read-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = [];
     } catch {
       // Ignore
