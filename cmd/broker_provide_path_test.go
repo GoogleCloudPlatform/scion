@@ -56,6 +56,7 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 		{"remote --broker from inside a linked project", true, "", otherBroker, false, false, false},
 		{"remote --broker with --project", true, target, otherBroker, false, false, false},
 		{"remote --broker with an explicit --path", true, target, otherBroker, false, true, true},
+		{"remote --broker, no --project, explicit --path", true, "", otherBroker, false, true, true},
 		{"--broker naming this host's own broker", true, "", localBroker, false, false, true},
 		{"--broker by name: this host's own broker", true, "", "local-host", false, false, true},
 		{"--broker by name: a remote broker", true, "", "remote-host", false, false, false},
