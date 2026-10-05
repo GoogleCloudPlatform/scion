@@ -1100,9 +1100,11 @@ export class AgentStore {
       if (this.feed !== feed) return;
       const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
       feed.seedAgents(fresh, { token, partial: true });
-      // Only a merged probe moves the mark; an interrupted one reads the
-      // same pages again.
-      entry.highWater = highWater;
+      // Only a merged probe that caught up moves the mark. An interrupted
+      // one reads the same pages again; one that did not catch up leaves
+      // the mark to the walk it hands off to, so if that walk fails, later
+      // probes still know they are behind.
+      if (caughtUp) entry.highWater = highWater;
     } catch (err) {
       if (!isAbortError(err)) console.warn('[agent-store] agent probe failed:', err);
       return;

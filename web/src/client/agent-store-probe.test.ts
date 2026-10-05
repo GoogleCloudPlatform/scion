@@ -28,6 +28,7 @@ import {
   AGENT_PROBE_INTERVAL_MS,
   AGENT_PROBE_JITTER_MS,
   AGENT_PROBE_LIMIT,
+  AGENT_PROBE_MAX_EXTRA_PAGES,
   AGENT_PROBE_REFUSED_RETRY_MS,
   AGENT_PROBE_TIMEOUT_MS,
   type AgentListSnapshot,
@@ -416,6 +417,28 @@ describe('AgentStore delta probe', () => {
     });
   });
 
+  it('walks again after an overflow walk fails, though the count matches', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = await loaded([row('a1', 1)], HUB, { probeFullWalkMs: Infinity });
+    h.server.agents.push(
+      ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) => row(`n${i}`, 100 + i))
+    );
+    const read = 1 + (1 + AGENT_PROBE_MAX_EXTRA_PAGES) * AGENT_PROBE_LIMIT;
+    // Agents removed without an event offset the count of those added.
+    h.server.totalCount = read;
+    h.server.status = 500;
+    h.server.sortedStatus = (): number => 200;
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    expect(warn).toHaveBeenCalled();
+    expect(h.store.peek(HUB)?.agents).toHaveLength(read);
+
+    h.server.status = 200;
+    await tick(4 * AGENT_PROBE_INTERVAL_MS);
+    expect(h.server.walks()).toBe(3);
+    expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
+  });
+
   it('stops at a full page without a next cursor', async () => {
     const h = await loaded([]);
     h.server.agents.push(
@@ -721,9 +744,13 @@ describe('AgentStore delta probe', () => {
     it('walks at once again on overflow after a probe has caught up', async () => {
       const h = await loaded(fleet());
       expect(await churn(h, 14)).toEqual([0.5, 2.5, 6.5]);
-      await tick();
-      // Without the catch-up, the next walk would wait for the periodic walk at 11.5.
-      expect(await churn(h, 2, 15)).toEqual([8]);
+      // Quiet from here: the periodic walk at 11.5 reads every row, and the
+      // probe after it catches up.
+      const walks = h.server.walks();
+      await tick(10 * AGENT_PROBE_INTERVAL_MS);
+      expect(h.server.walks()).toBe(walks + 1);
+      // Without the catch-up, the back-off would hold the next walk until 19.5.
+      expect(await churn(h, 1, 24)).toEqual([12.5]);
     });
   });
 
