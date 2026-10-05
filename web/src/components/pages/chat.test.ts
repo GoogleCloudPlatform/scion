@@ -34,6 +34,7 @@ import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -65,6 +66,9 @@ let ScionPageChat: any;
 // store's feed; it never connects here.
 beforeEach(() => {
   vi.stubGlobal('EventSource', FakeEventSource);
+  // Page-wide shared list loads: one test's DM list must not answer the next.
+  chatDMsLoad.invalidate();
+  chatSpacesLoad.invalidate();
 });
 
 describe('chat mention roster stability', () => {
@@ -1296,7 +1300,15 @@ describe('chat page — late space lookups', () => {
   function createSpacePage(mobile: boolean): any {
     const el = createPage();
     el.isMobileLayout = mobile;
-    const rail = { expandSpace: vi.fn() };
+    const rail = {
+      expandSpace: vi.fn(),
+      // The real rail loads the list over the same endpoint; going through
+      // the mocked apiFetch keeps the held thread request in control.
+      threadsFor: vi.fn(async (projectId: string) => {
+        const res = await apiFetch(`/api/v1/chat/spaces/${projectId}/threads`);
+        return ((await res.json()) as { threads?: unknown[] }).threads ?? [];
+      }),
+    };
     Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     Object.defineProperty(el, 'shadowRoot', {
       get: () => ({
@@ -1444,7 +1456,11 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     // The first parse and the rail-loaded re-parse each start a lookup.
+    // Back to back they would share one DM-list request; forget it in
+    // between so the second answers on its own, as it does once the shared
+    // list has aged out.
     el.parseV2Route();
+    chatDMsLoad.invalidate();
     el.parseV2Route();
     await flush();
     expect(releases).toHaveLength(2);

@@ -35,6 +35,7 @@ import {
   type UnreadDM,
   type UnreadSpace,
 } from './chat-unread.js';
+import { chatDMsLoad, chatSpacesLoad } from './chat-list-cache.js';
 import { setDocumentTitle, setUnreadBadge, getUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
@@ -51,6 +52,9 @@ function mockChatApi(spaces: UnreadSpace[], dms: UnreadDM[]): void {
 
 beforeEach(() => {
   apiFetch.mockReset();
+  // The shared loads are page-wide; one test's result must not satisfy the next.
+  chatSpacesLoad.invalidate();
+  chatDMsLoad.invalidate();
   setUnreadBadge(0);
   setDocumentTitle();
 });
@@ -158,6 +162,38 @@ describe('ChatUnreadCounter', () => {
 
     expect(getUnreadBadge()).toBe(8);
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('shares the startup lists with the chat page and rail instead of fetching its own', async () => {
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    // The rail and the chat page ask first (or at the same moment).
+    const railSpaces = chatSpacesLoad.load({ maxAgeMs: 5_000 });
+    const pageDMs = chatDMsLoad.load({ maxAgeMs: 5_000 });
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await Promise.all([railSpaces, pageDMs]);
+    await vi.waitFor(() => expect(getUnreadBadge()).toBe(3));
+
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    counter.stop();
+  });
+
+  it('an event-driven refresh fetches even right after startup', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+
+    // A message arrives: the startup result may predate it.
+    mockChatApi([{ unreadCount: 4 }], []);
+    counter.scheduleRefresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+    expect(apiFetch).toHaveBeenCalledTimes(4);
+    expect(getUnreadBadge()).toBe(4);
+    counter.stop();
   });
 
   it('coalesces a burst of events into one refresh', async () => {

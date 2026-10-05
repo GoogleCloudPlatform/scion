@@ -738,6 +738,92 @@ describe('loadHubMembers full pagination', () => {
   });
 });
 
+describe('loadHubMembers after a finished walk', () => {
+  function countRequests(prefix: string): number {
+    return vi.mocked(apiFetch).mock.calls.filter((c) => String(c[0]).startsWith(prefix)).length;
+  }
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )
+    );
+  });
+
+  it('a join call (the re-parse after rail-loaded) does not walk the hub again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+    expect(countRequests('/api/v1/agents')).toBe(1);
+
+    // Seconds later, once the rail has loaded, the route is parsed again.
+    page.loadHubMembers();
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(1);
+    expect(countRequests('/api/v1/users')).toBe(1);
+    expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+  });
+
+  it('the fallback poll still walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    page.loadHubMembers({ refresh: true });
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('returning to the hub view after a conversation walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    // A conversation opening retires the walk's generation.
+    page._hubMembersGeneration++;
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('a project member load replaces the lists, so the next hub view walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    await page.loadV2Members('p1');
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('a walk with a failed leg is not treated as finished', async () => {
+    let agentsCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => (++agentsCall === 1 ? new Response('', { status: 500 }) : agentsPage(['a1']))
+      )
+    );
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+    expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+  });
+});
+
 describe('loadHubMembers error handling', () => {
   it('a failed second page keeps the previous members', async () => {
     const page = createPage();
@@ -765,7 +851,9 @@ describe('loadHubMembers error handling', () => {
         () => agentsPage(['a2'])
       )
     );
-    page.loadHubMembers();
+    // A refresh (the fallback poll): a plain join call after a finished
+    // walk has nothing to do.
+    page.loadHubMembers({ refresh: true });
     await flush();
 
     // Users list is unchanged from before the failed walk; agents updated.

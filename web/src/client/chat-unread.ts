@@ -26,7 +26,8 @@
  * "stop telling me about this", and a number in the tab title is telling them.
  */
 
-import { apiFetch } from './api.js';
+import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatSpacesLoad } from './chat-list-cache.js';
+import type { SharedLoadOptions } from './chat-list-cache.js';
 import { isChatNotificationStatus } from './chat-notifications.js';
 import { setUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
@@ -87,7 +88,9 @@ export class ChatUnreadCounter {
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
     this.stopped = false;
-    void this.refresh();
+    // The chat page and rail ask for the same lists as they mount; share
+    // whatever request is already in flight or has just completed.
+    void this.refresh({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
   }
 
   stop(): void {
@@ -148,10 +151,14 @@ export class ChatUnreadCounter {
     }, UNREAD_REFRESH_DEBOUNCE_MS);
   }
 
-  /** Recomputes both halves from the server. */
-  async refresh(): Promise<void> {
+  /**
+   * Recomputes both halves from the server. Without options this always
+   * fetches — it follows an event that may have changed the counts; `start`
+   * passes `maxAgeMs` to share the startup loads.
+   */
+  async refresh(options: SharedLoadOptions = {}): Promise<void> {
     const localId = ++this.refreshId;
-    const [spaces, dms] = await Promise.all([this.fetchSpaces(), this.fetchDMs()]);
+    const [spaces, dms] = await Promise.all([this.fetchSpaces(options), this.fetchDMs(options)]);
     // Discard stale results: a newer refresh was started while we awaited.
     if (this.stopped || localId !== this.refreshId) return;
     if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
@@ -170,28 +177,16 @@ export class ChatUnreadCounter {
     setUnreadBadge(this.spaceUnread + this.dmUnread);
   }
 
-  private async fetchSpaces(): Promise<UnreadSpace[] | null> {
-    try {
-      const res = await apiFetch('/api/v1/chat/spaces');
-      if (!res.ok) return null;
-      const data = (await res.json()) as { spaces?: UnreadSpace[] };
-      return data?.spaces ?? [];
-    } catch {
-      // Offline or chat disabled — keep the last known count rather than
-      // flashing the badge to zero.
-      return null;
-    }
+  private async fetchSpaces(options: SharedLoadOptions): Promise<UnreadSpace[] | null> {
+    // A failed load (offline, chat disabled) is null: keep the last known
+    // count rather than flashing the badge to zero.
+    const data = await chatSpacesLoad.load(options);
+    return data ? ((data.spaces ?? []) as UnreadSpace[]) : null;
   }
 
-  private async fetchDMs(): Promise<UnreadDM[] | null> {
-    try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (!res.ok) return null;
-      const data = (await res.json()) as { dms?: UnreadDM[] };
-      return data?.dms ?? [];
-    } catch {
-      return null;
-    }
+  private async fetchDMs(options: SharedLoadOptions): Promise<UnreadDM[] | null> {
+    const data = await chatDMsLoad.load(options);
+    return data ? ((data.dms ?? []) as UnreadDM[]) : null;
   }
 }
 
