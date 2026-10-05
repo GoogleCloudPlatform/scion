@@ -578,28 +578,134 @@ describe('scion-page-admin-server-config', () => {
       expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
     });
 
-    it('the PUT payload carries Layer-0 keys for the server to split', async () => {
-      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
-      let capturedPayload: Record<string, unknown> | null = null;
+    async function capturePut(
+      config: Record<string, unknown>,
+      mutate: (el: any) => void
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
       element = await createComponent(
         createFetchHandler(config, {
           putHandler: (body) => {
-            capturedPayload = body;
+            captured = body;
             return { status: 200, body: { reload: { applied: [] } } };
           },
         })
       );
-
+      mutate(element as any);
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
       await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
 
-      expect(capturedPayload).not.toBeNull();
-      const server = capturedPayload!.server as Record<string, unknown> | undefined;
+    it('the PUT payload carries Layer-0 keys for the server to split', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        () => {}
+      );
+      const server = payload.server as Record<string, unknown> | undefined;
       expect(server?.log_level).toBe('info');
       expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('postgres');
+      // The masked database URL is left out so the stored value is kept.
+      expect((server?.database as Record<string, unknown> | undefined)?.url).toBeUndefined();
     });
+
+    it('clearing authorized_domains and public_url sends [] and ""', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.authAuthorizedDomains = '';
+          el.hubPublicUrl = '';
+        }
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.auth.authorized_domains).toEqual([]);
+      expect(server.hub.public_url).toBe('');
+      // Merged with the Layer-0 part, not replaced by it.
+      expect(server.hub.port).toBe(8080);
+    });
+
+    it('cleared and switched-off Layer-0 fields are sent explicitly', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.logFormat = '';
+          el.storageBucket = '';
+          el.messageBrokerEnabled = false;
+          el.messageBrokerType = 'inprocess';
+        }
+      );
+      const server = payload.server as Record<string, Record<string, unknown> | string>;
+      expect(server.log_format).toBe('');
+      expect((server.storage as Record<string, unknown>).bucket).toBe('');
+      expect(server.message_broker).toEqual({ enabled: false, type: 'inprocess' });
+    });
+
+    it('flag-managed workstation fields are read-only and not sent', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      const payload = await capturePut(config, () => {});
+      const badgeTexts = queryAll(element!, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('workstation startup defaults'))).toBe(true);
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.enabled).toBeUndefined();
+      expect(server.auth?.dev_mode).toBeUndefined();
+      expect(server.storage?.provider).toBeUndefined();
+      expect(server.hub?.host).toBeUndefined();
+    });
+  });
+
+  describe('agent-default fields the hub cannot save (ptone/scion#3067)', () => {
+    for (const tier of [
+      { settings_tier: 'db' },
+      { settings_tier: 'db', layer0_editable: true },
+      { settings_tier: 'file' },
+    ]) {
+      it(`are not sent and not editable (${JSON.stringify(tier)})`, async () => {
+        const config = makeBaseConfig({ ...tier, default_agent_role: 'full' });
+        let captured: Record<string, unknown> | null = null;
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        expect(shadowText(element)).toContain('ptone/scion#3067');
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        expect(captured!).not.toHaveProperty('default_agent_role');
+        expect(captured!).not.toHaveProperty('default_max_agent_role');
+        expect(captured!).not.toHaveProperty('default_harness_auth');
+      });
+    }
+  });
+
+  describe('save errors that name keys', () => {
+    for (const code of ['unpersisted_keys_rejected', 'unclassified_keys_rejected']) {
+      it(`${code} shows the message and the keys`, async () => {
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+            putHandler: () => ({
+              status: 422,
+              body: { error: code, message: 'Not saved.', keys: ['server.hub.bogus', 'x.y'] },
+            }),
+          })
+        );
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+        const text = shadowText(element);
+        expect(text).toContain('Not saved.');
+        expect(text).toContain('server.hub.bogus');
+        expect(text).toContain('x.y');
+      });
+    }
   });
 
   // ── Criterion 6: File mode ──
@@ -1124,11 +1230,10 @@ describe('scion-page-admin-server-config', () => {
     const clearable: Array<[string, string]> = [
       ['active_profile', 'activeProfile'],
       ['default_template', 'defaultTemplate'],
-      ['default_harness_auth', 'defaultHarnessAuth'],
+      // default_harness_auth and the agent role defaults are not sent at all
+      // until ptone/scion#3067 is fixed (see the #3067 describe block).
       ['image_registry', 'imageRegistry'],
       ['workspace_path', 'workspacePath'],
-      ['default_max_agent_role', 'defaultMaxAgentRole'],
-      ['default_agent_role', 'defaultAgentRole'],
       ['default_runtime_broker', 'defaultRuntimeBroker'],
     ];
 
