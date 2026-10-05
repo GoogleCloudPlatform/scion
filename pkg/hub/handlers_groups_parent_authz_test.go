@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -377,27 +379,148 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 	assert.Equal(t, ref.CanDelegateReason, rec.CanDelegateReason)
 }
 
+// inMemoryReservationStore wraps a store and keeps usage reservations in
+// memory, with advisory locks that always succeed. The SQLite test store
+// cannot hold a reservation for a group scope yet (ptone/scion#3082), so the
+// tests that need a parent group to actually reach its member limit, or need
+// to observe a reservation being released, use this wrapper as the quota
+// service's store.
+type inMemoryReservationStore struct {
+	store.Store
+	mu       sync.Mutex
+	active   map[string]string // resource ID -> scope ID
+	created  []string
+	released []string
+}
+
+func (m *inMemoryReservationStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (m *inMemoryReservationStore) TryAdvisoryLockObject(ctx context.Context, class store.AdvisoryLockKey, obj int32) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (m *inMemoryReservationStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.active[r.ResourceID] = r.ScopeID
+	m.created = append(m.created, r.ResourceID)
+	return r, nil
+}
+
+func (m *inMemoryReservationStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, s := range m.active {
+		if s == scopeID {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *inMemoryReservationStore) HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.active[resourceID]
+	return ok, nil
+}
+
+func (m *inMemoryReservationStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.released = append(m.released, resourceID)
+	if _, ok := m.active[resourceID]; !ok {
+		return store.ErrNotFound
+	}
+	delete(m.active, resourceID)
+	return nil
+}
+
+// snapshot returns copies of the active, created and released reservations.
+func (m *inMemoryReservationStore) snapshot() (active map[string]string, created, released []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	active = make(map[string]string, len(m.active))
+	for k, v := range m.active {
+		active[k] = v
+	}
+	return active, append([]string(nil), m.created...), append([]string(nil), m.released...)
+}
+
+// useInMemoryReservations sets the hub-wide max_members_per_group limit and
+// points the quota service at an in-memory reservation store.
+func (f *parentGroupFixture) useInMemoryReservations(t *testing.T, limit int64) *inMemoryReservationStore {
+	t.Helper()
+	f.setMaxMembersPerGroup(t, limit)
+	mem := &inMemoryReservationStore{Store: f.store, active: map[string]string{}}
+	f.srv.quotaService = &QuotaService{store: mem, logger: slog.Default()}
+	return mem
+}
+
 // TestCreateGroup_ParentID_EnforcesParentMemberLimit: a parent at its
-// max_members_per_group limit refuses a new child the same way it refuses a
-// new group member, and nothing is created.
-//
-// The test compares against addGroupMember's live response rather than a
-// fixed status: until ptone/scion#3082 is fixed, the reservation for a group
-// scope fails and both paths answer 500 runtime_error; once it is fixed, both
-// answer 429 quota_exceeded.
+// max_members_per_group limit refuses a new child with 429 quota_exceeded,
+// the same way it refuses a new group member, and nothing is created.
 func TestCreateGroup_ParentID_EnforcesParentMemberLimit(t *testing.T) {
 	f := newParentGroupFixture(t, "cg-quota")
 	ctx := context.Background()
-	f.setMaxMembersPerGroup(t, 1)
+	mem := f.useInMemoryReservations(t, 1)
 
 	// Take the parent's only member slot through the members endpoint.
+	fill := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
+		map[string]interface{}{"memberType": store.GroupMemberTypeGroup, "memberId": f.spare.ID})
+	require.Equal(t, http.StatusCreated, fill.Code, "filling the parent's member slot: %s", fill.Body.String())
+
+	// Reference: adding another group member to the parent is refused.
+	other := &store.Group{
+		ID: api.NewUUID(), Name: "cg-quota-other", Slug: "cg-quota-other",
+		GroupType: store.GroupTypeExplicit, OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	require.NoError(t, f.store.CreateGroup(ctx, other))
+	refRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
+		map[string]interface{}{"memberType": store.GroupMemberTypeGroup, "memberId": other.ID})
+	require.Equal(t, http.StatusTooManyRequests, refRec.Code, refRec.Body.String())
+	require.Equal(t, ErrCodeQuotaExceeded, apiErrorCode(t, refRec.Body.String()))
+
+	before := f.listAllGroupIDs(t)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+		map[string]interface{}{"name": "cg-quota-child", "slug": "cg-quota-child", "parentId": f.parent.ID})
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeQuotaExceeded, apiErrorCode(t, rec.Body.String()))
+	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
+	_, err := f.store.GetGroupBySlug(ctx, "cg-quota-child")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	active, _, _ := mem.snapshot()
+	assert.Equal(t, map[string]string{
+		groupMembershipQuotaID(f.parent.ID, store.GroupMemberTypeGroup, f.spare.ID): f.parent.ID,
+	}, active, "only the filling member holds a reservation")
+}
+
+// TestCreateGroup_ParentID_MemberLimitCheckMatchesAddMember: with the default
+// test store, create with parentId applies the parent's member-limit check
+// the same way addGroupMember does: same status and error code.
+//
+// The test compares against addGroupMember's live response rather than a
+// fixed status: until ptone/scion#3082 is fixed, the reservation for a group
+// scope fails in this store and both paths answer 500 runtime_error; once it
+// is fixed, both answer 429 quota_exceeded.
+func TestCreateGroup_ParentID_MemberLimitCheckMatchesAddMember(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-quota-real")
+	ctx := context.Background()
+	f.setMaxMembersPerGroup(t, 1)
+
+	// Ask for the parent's only member slot through the members endpoint.
+	// Under ptone/scion#3082 this request is refused like the ones below.
 	fill := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups/"+f.parent.ID+"/members",
 		map[string]interface{}{"memberType": store.GroupMemberTypeGroup, "memberId": f.spare.ID})
 	t.Logf("filling the parent's member slot: %d %s", fill.Code, fill.Body.String())
 
 	// Reference: adding another group member to the parent.
 	other := &store.Group{
-		ID: api.NewUUID(), Name: "cg-quota-other", Slug: "cg-quota-other",
+		ID: api.NewUUID(), Name: "cg-quota-real-other", Slug: "cg-quota-real-other",
 		GroupType: store.GroupTypeExplicit, OwnerID: DevUserID, CreatedBy: DevUserID,
 	}
 	require.NoError(t, f.store.CreateGroup(ctx, other))
@@ -409,12 +532,54 @@ func TestCreateGroup_ParentID_EnforcesParentMemberLimit(t *testing.T) {
 
 	before := f.listAllGroupIDs(t)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
-		map[string]interface{}{"name": "cg-quota-child", "slug": "cg-quota-child", "parentId": f.parent.ID})
+		map[string]interface{}{"name": "cg-quota-real-child", "slug": "cg-quota-real-child", "parentId": f.parent.ID})
 	assert.Equal(t, refRec.Code, rec.Code, "status must match addGroupMember (body: %s)", rec.Body.String())
 	assert.Equal(t, refCode, apiErrorCode(t, rec.Body.String()), "error code must match addGroupMember")
 	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
-	_, err := f.store.GetGroupBySlug(ctx, "cg-quota-child")
+	_, err := f.store.GetGroupBySlug(ctx, "cg-quota-real-child")
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestCreateGroup_ParentID_ReleasesReservationOnCreateFailure: when the
+// group cannot be created after the parent's member slot was reserved (here
+// the slug is taken), the reservation is released.
+func TestCreateGroup_ParentID_ReleasesReservationOnCreateFailure(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-release")
+	mem := f.useInMemoryReservations(t, 5)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+		map[string]interface{}{"name": "cg-release-dup", "slug": f.spare.Slug, "parentId": f.parent.ID})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	active, created, released := mem.snapshot()
+	require.Len(t, created, 1, "the parent's member slot is reserved before the create")
+	assert.Equal(t, created, released, "the same reservation is released")
+	assert.Empty(t, active, "no reservation is held after the failed create")
+}
+
+// TestCreateGroup_ParentID_SlugConflict_NoAudit: a create with parentId that
+// fails because the slug is taken returns 409, creates nothing and writes no
+// group_membership audit record for the parent.
+func TestCreateGroup_ParentID_SlugConflict_NoAudit(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-dup")
+	ctx := context.Background()
+
+	before := f.listAllGroupIDs(t)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+		map[string]interface{}{"name": "cg-dup-child", "slug": f.spare.Slug, "parentId": f.parent.ID})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
+	children, err := f.store.ListGroups(ctx, store.GroupFilter{ParentID: f.parent.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, children.Items, "the parent has no child group")
+	spare, err := f.store.GetGroup(ctx, f.spare.ID)
+	require.NoError(t, err)
+	assert.Empty(t, spare.ParentID, "the group holding the slug is unchanged")
+
+	// Audit records are written asynchronously: give a record time to land.
+	time.Sleep(200 * time.Millisecond)
+	assert.Empty(t, f.groupMembershipAudits(t, f.parent.ID), "a failed create writes no audit record")
 }
 
 // failingParentLookupStore fails GetGroup for one group ID with an error
