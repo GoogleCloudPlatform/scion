@@ -115,3 +115,12 @@ func TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace(t *testin
 		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include emptyPerAgentWorkspace", brokerRegistrationCapabilities())
 	}
 }
+
+// TestBrokerRegistrationCapabilities_IncludesAgentMove pins that the broker
+// CLI reports agentMove at join (ptone/scion#2727); the hub refuses a move
+// unless both brokers report it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMove") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMove", brokerRegistrationCapabilities())
+	}
+}

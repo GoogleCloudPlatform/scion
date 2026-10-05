@@ -128,3 +128,34 @@ func TestDeleteAgent_EmptyPerAgentRemovesNFSAgentFiles(t *testing.T) {
 		t.Fatalf("RemoveNFSAgentFiles calls = %q", mgr.calls)
 	}
 }
+
+// A localOnly delete (the source broker's cleanup after a cross-broker
+// move) removes the broker's own state but never the agent's files on the
+// NFS export, which the agent now uses on the target broker, and never its
+// branch, even when the request also asks for them.
+func TestDeleteAgent_LocalOnlyKeepsNFSAgentFilesAndBranch(t *testing.T) {
+	mgr := &worktreeRemovingManager{filteringMockManager: &filteringMockManager{}}
+	srv, home, _ := newWorktreeRemovalServer(t, mgr)
+	scionDir, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-a", scopeProjA, scionDir)}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true&removeBranch=true&localOnly=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.DeleteCalls() != 1 {
+		t.Fatalf("expected the container and local files to be deleted once, got %d", mgr.DeleteCalls())
+	}
+	mgr.mu.Lock()
+	files, branch := mgr.lastDeleteFiles, mgr.lastDeleteRemoveBranch
+	mgr.mu.Unlock()
+	if !files {
+		t.Error("broker-local agent files must still be deleted")
+	}
+	if branch {
+		t.Error("a localOnly delete must never remove the branch")
+	}
+	if len(mgr.calls) != 0 {
+		t.Fatalf("RemoveNFSAgentFiles must not be called for a localOnly delete: %q", mgr.calls)
+	}
+}

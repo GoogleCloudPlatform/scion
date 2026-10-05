@@ -266,6 +266,14 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
+	// is being moved here from another broker on the same NFS export: before
+	// provisioning, the broker confirms through its own mount that the
+	// workspace already exists ("agent-dir": <subPathRoot>/<projectID>/
+	// agents/<name>/workspace; "project": <subPathRoot>/<projectID>/
+	// workspace) and refuses with 409 when it does not, instead of
+	// provisioning an empty workspace (design ptone/scion#2727 A9).
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`

@@ -1965,8 +1965,10 @@ func getLocalBrokerID() string {
 // runtime that actually opts out reports it once the broker itself runs
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
+// "agentMove" is a property of this broker binary (localOnly delete and the
+// moved-workspace check), like "reprovision".
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

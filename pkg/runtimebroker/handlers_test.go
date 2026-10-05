@@ -55,24 +55,25 @@ import (
 // access from outside this file is the bug this comment exists to prevent
 // from coming back.
 type mockManager struct {
-	mu                    sync.Mutex
-	agents                []api.AgentInfo
-	startCalls            int
-	stopCalls             int
-	deleteCalls           int
-	startErr              error
-	provisionErr          error
-	stopErr               error
-	listErr               error
-	deleteTargetErr       error
-	messageErr            error
-	lastStartOpts         api.StartOptions
-	lastDeleteProjectPath string
-	lastDeleteAgentID     string
-	lastDeleteContainerID string
-	lastDeleteRunID       string
-	lastDeleteFiles       bool
-	lastStopAgentID       string
+	mu                     sync.Mutex
+	agents                 []api.AgentInfo
+	startCalls             int
+	stopCalls              int
+	deleteCalls            int
+	startErr               error
+	provisionErr           error
+	stopErr                error
+	listErr                error
+	deleteTargetErr        error
+	messageErr             error
+	lastStartOpts          api.StartOptions
+	lastDeleteProjectPath  string
+	lastDeleteAgentID      string
+	lastDeleteContainerID  string
+	lastDeleteRunID        string
+	lastDeleteFiles        bool
+	lastDeleteRemoveBranch bool
+	lastStopAgentID        string
 	// lastStartCtx captures the context passed to Start, so tests can assert
 	// on what was attached to it (e.g. a skill resolver, #1960) without a
 	// real container runtime or ProvisionAgent call.
@@ -168,6 +169,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref ru
 	m.lastDeleteContainerID = ref.ID
 	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
+	m.lastDeleteRemoveBranch = removeBranch
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
 		return false, m.deleteTargetErr
