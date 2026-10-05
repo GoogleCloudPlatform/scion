@@ -932,7 +932,11 @@ func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
 	t.Run("AlreadyExists list error", func(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
 		cs.PrependReactor("list", "secrets", forbidden("secrets"))
-		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+		err := rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA)
+		check(t, err)
+		if !k8serrors.IsForbidden(err) {
+			t.Errorf("cause lost: %v", err)
+		}
 	})
 	t.Run("AlreadyExists delete error", func(t *testing.T) {
 		rt, cs, _, _ := newRunScopeRuntime(t)
@@ -942,7 +946,11 @@ func TestK8sRunScope_StartErrorsCarryNoIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		cs.PrependReactor("delete", "secrets", forbidden("secrets"))
-		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+		err := rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA)
+		check(t, err)
+		if !k8serrors.IsForbidden(err) {
+			t.Errorf("cause lost: %v", err)
+		}
 	})
 }
 

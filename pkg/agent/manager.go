@@ -381,18 +381,18 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	return m.deleteResolved(ctx, agentID, target, deleteFiles, projectPath, removeBranch)
 }
 
+// ErrRuntimeDelete wraps a failure of the runtime Delete call in a delete
+// (deleteResolved). It tells that failure, after which the runtime entry
+// may still exist, apart from a later file-cleanup failure, which comes
+// after a successful runtime delete.
+var ErrRuntimeDelete = errors.New("failed to delete container")
+
 // DeleteTarget deletes an agent that the caller has already resolved to a
 // specific runtime entry. Unlike Delete it performs no slug re-resolution, so
 // it cannot drift to a same-slug agent in another project. ref.ID may be
 // empty for an agent that has files but no backing container; ref.RunID is
 // the resolved entry's run ID and is passed through to Runtime.Delete.
 // projectPath is used verbatim for file deletion.
-// ErrRuntimeDelete wraps a failure of the runtime Delete call in a delete
-// (deleteResolved). It tells that failure, after which the runtime entry
-// may still exist, apart from a later file-cleanup failure, which comes
-// after a successful runtime delete.
-var ErrRuntimeDelete = errors.New("runtime delete failed")
-
 func (m *AgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return m.deleteResolved(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
 }
@@ -413,7 +413,7 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 
 		util.Debugf("delete: starting runtime delete for container %s (run_id=%q)", targetID, ref.RunID)
 		if err := m.Runtime.Delete(ctx, ref); err != nil {
-			return false, fmt.Errorf("%w: failed to delete container: %w", ErrRuntimeDelete, err)
+			return false, fmt.Errorf("%w: %w", ErrRuntimeDelete, err)
 		}
 		util.Debugf("delete: runtime delete completed for container %s", targetID)
 	}
