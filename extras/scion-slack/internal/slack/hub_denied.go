@@ -62,5 +62,19 @@ func deniedActionPhrase(action, resourceType string) string {
 	if resourceType == "" {
 		return action
 	}
-	return action + " " + resourceType + "s"
+	return action + " " + pluralNoun(resourceType)
+}
+
+// pluralNoun returns the plural of a resource type noun, e.g. "agent" ->
+// "agents", "policy" -> "policies".
+func pluralNoun(noun string) string {
+	switch {
+	case strings.HasSuffix(noun, "y") && len(noun) > 1 && !strings.ContainsRune("aeiou", rune(noun[len(noun)-2])):
+		return noun[:len(noun)-1] + "ies"
+	case strings.HasSuffix(noun, "s"), strings.HasSuffix(noun, "x"),
+		strings.HasSuffix(noun, "ch"), strings.HasSuffix(noun, "sh"):
+		return noun + "es"
+	default:
+		return noun + "s"
+	}
 }

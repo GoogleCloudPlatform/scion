@@ -69,7 +69,7 @@ func TestHubErrorUserFacingMessage_InboundDenials(t *testing.T) {
 		{"sender not active", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "sender identity is not active"}, staleAccountLinkText},
 		{"linked user not found", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "on-behalf-of principal not found"}, staleAccountLinkText},
 		{"other forbidden", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "Insufficient permissions"}, "You don't have permission to message this agent."},
-		{"message denied", &hubError{StatusCode: http.StatusForbidden, Code: "message_denied", Message: "Message delivery denied"}, "You don't have permission to message this agent."},
+		{"message denied", &hubError{StatusCode: http.StatusForbidden, Code: "message_denied", Message: "Message delivery denied"}, "You don't have permission to message this agent. Ask a project owner."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,4 +92,18 @@ func TestParseHubError_DeniedDetails(t *testing.T) {
 	assert.Equal(t, "forbidden", he.Code)
 	assert.Equal(t, "agent", he.ResourceType)
 	assert.Equal(t, "list", he.DeniedAction)
+}
+
+func TestDeniedActionPhrase(t *testing.T) {
+	tests := []struct{ action, resourceType, want string }{
+		{"list", "agent", "list agents"},
+		{"read", "policy", "read policies"},
+		{"read", "gateway", "read gateways"},
+		{"list", "access", "list accesses"},
+		{"list", "", "list"},
+		{"", "agent", "do that"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, deniedActionPhrase(tt.action, tt.resourceType))
+	}
 }

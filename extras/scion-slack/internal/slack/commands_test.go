@@ -271,3 +271,27 @@ func TestHandleStatus_WithoutLinkedAccountAsksToRegister(t *testing.T) {
 	assert.Empty(t, f.hub.recorded(), "no hub request without a linked account")
 	assert.Contains(t, f.slack.lastText(t), "/scion register")
 }
+
+func TestHandleSetup_HubErrorShowsRetryText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusInternalServerError,
+		`{"error":{"code":"internal_error","message":"boom"}}`)
+
+	f.run(t, "setup")
+
+	assert.Equal(t, "Failed to fetch your projects. Please try again later.", f.slack.lastText(t))
+}
+
+func TestHandleSetup_DeniedShowsActionableText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"Insufficient permissions","details":{"resource_type":"project","denied_action":"list"}}}`)
+
+	f.run(t, "setup")
+
+	assert.Equal(t,
+		"Your Scion account (alice@example.com) doesn't have permission to list projects. Ask a project owner.",
+		f.slack.lastText(t))
+}

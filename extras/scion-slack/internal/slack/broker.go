@@ -94,7 +94,7 @@ func (e *hubError) userFacingMessage() string {
 		}
 		return "You don't have permission to message this agent."
 	case "message_denied":
-		return "You don't have permission to message this agent."
+		return "You don't have permission to message this agent. Ask a project owner."
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
 	case "transport_error":
