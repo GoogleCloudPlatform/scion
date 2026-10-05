@@ -4702,7 +4702,7 @@ describe('scion-chat-thread recent-files capture', () => {
     );
   });
 
-  it('does not attribute an initial history page to a conversation the thread has since switched away from', async () => {
+  it('drops an initial history page once the thread has switched conversations', async () => {
     // The race is specifically in the gap between the fetch resolving (the
     // existing fetchId check at that point still passes) and `res.json()`
     // resolving — not the earlier gap during the fetch itself, which the
@@ -4751,11 +4751,12 @@ describe('scion-chat-thread recent-files capture', () => {
       ],
     });
 
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The page belongs to the conversation the thread has left: it is
+    // neither shown in the new one nor recorded as its files.
     const internals = el as unknown as { messageMap: Map<string, unknown> };
-    // mergeMessages (unconditional) runs immediately before the recent-files
-    // guard, in the same synchronous continuation — once the stale item is
-    // merged, the guard has already run too.
-    await vi.waitFor(() => expect(internals.messageMap.has('hist-stale')).toBe(true));
+    expect(internals.messageMap.has('hist-stale')).toBe(false);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 
@@ -4876,9 +4877,9 @@ describe('scion-chat-thread recent-files capture', () => {
     void el;
   });
 
-  it('does not attribute a reconnect-backfill page to a conversation the thread has since switched away from', async () => {
+  it('drops a reconnect-backfill page once the thread has switched conversations', async () => {
     // Same race as the initial-history-load test above, but for
-    // runBackfillV2's post-json re-check specifically: the gap is between
+    // runBackfillV2's post-json re-check: the gap is between
     // the fetch resolving (its earlier fetchId check still passes) and
     // `res.json()` resolving.
     const el = await mount();
@@ -4923,11 +4924,12 @@ describe('scion-chat-thread recent-files capture', () => {
       ],
     });
 
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The page belongs to the conversation the thread has left: it is
+    // neither shown in the new one nor recorded as its files.
     const internals = el as unknown as { messageMap: Map<string, unknown> };
-    // mergeMessages (unconditional) runs immediately before the recent-files
-    // guard, in the same synchronous continuation — once the stale item is
-    // merged, the guard has already run too.
-    await vi.waitFor(() => expect(internals.messageMap.has('backfill-stale')).toBe(true));
+    expect(internals.messageMap.has('backfill-stale')).toBe(false);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 

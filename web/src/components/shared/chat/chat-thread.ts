@@ -1746,6 +1746,10 @@ export class ScionChatThread extends LitElement {
       replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
 
+    // The body can still be arriving after the headers; a conversation
+    // switch in the meantime must not merge this page into the new one.
+    if (currentId !== this.fetchId) return;
+
     const items = data?.items ?? data?.messages ?? [];
 
     // W7: Merge attachment refs from history response.
@@ -1776,12 +1780,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
-    // Re-checked here, not just before the fetch/json-parse awaits above: a
-    // conversation switch that lands during `res.json()` must not attribute
-    // this page's items to the new conversation/project.
-    if (currentId === this.fetchId) {
-      this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    }
+    this.recordRecentFilesForHistory(items, recentFilesGeneration);
   }
 
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
@@ -2070,6 +2069,8 @@ export class ScionChatThread extends LitElement {
       >;
       replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
+    // See fetchHistoryV2: re-checked once the body has been read.
+    if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
 
     // W7: Merge attachment refs from history response.
@@ -2092,12 +2093,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
-    // See fetchHistoryV2's identical re-check: a conversation switch during
-    // `res.json()` must not attribute this page's items to the new
-    // conversation/project.
-    if (currentId === this.fetchId) {
-      this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    }
+    this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
