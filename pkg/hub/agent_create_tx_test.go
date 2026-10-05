@@ -259,11 +259,6 @@ type compensationFailureLog struct {
 // it ran.
 func (f *uatCreateFixture) createWithRequestID(t *testing.T, requestID string, req CreateAgentRequest) (*httptest.ResponseRecorder, []compensationFailureLog) {
 	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 	r := httptest.NewRequest(http.MethodPost, f.path, bytes.NewReader(body))
@@ -271,9 +266,22 @@ func (f *uatCreateFixture) createWithRequestID(t *testing.T, requestID string, r
 	user := authUser(f.creator)
 	ctx := contextWithIdentity(r.Context(), user)
 	ctx = context.WithValue(ctx, userContextKey{}, user)
-	ctx = logging.ContextWithRequestMeta(ctx, &logging.RequestMeta{RequestID: requestID})
+	return serveWithRequestID(t, f.srv.mux, r.WithContext(ctx), requestID)
+}
+
+// serveWithRequestID serves r with request metadata carrying requestID, as
+// the request-log middleware installs it, and returns the response and the
+// compensation-failure records logged while it ran.
+func serveWithRequestID(t *testing.T, h http.Handler, r *http.Request, requestID string) (*httptest.ResponseRecorder, []compensationFailureLog) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	ctx := logging.ContextWithRequestMeta(r.Context(), &logging.RequestMeta{RequestID: requestID})
 	rec := httptest.NewRecorder()
-	f.srv.mux.ServeHTTP(rec, r.WithContext(ctx))
+	h.ServeHTTP(rec, r.WithContext(ctx))
 	slog.SetDefault(prev)
 
 	var logs []compensationFailureLog

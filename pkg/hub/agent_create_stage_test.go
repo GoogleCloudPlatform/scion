@@ -17,11 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -65,20 +67,21 @@ func useFailingManagedBackend(t *testing.T) {
 	})
 }
 
-// Each create failure site records its own stage in the rollback audit
-// record.
-//
-// Must not run in parallel: the managed case swaps the package-level
-// managed-agent backend.
-func TestCreateRollbackStageAtEachSite(t *testing.T) {
+// createRollbackSite is one create failure site: the dispatcher and server
+// setup that make the create fail there, and the stage its rollback records.
+type createRollbackSite struct {
+	name      string
+	disp      AgentDispatcher
+	setup     func(t *testing.T, srv *Server)
+	req       CreateAgentRequest
+	wantStage string
+}
+
+// createRollbackSites returns one case per create failure site, each with a
+// fresh dispatcher.
+func createRollbackSites() []createRollbackSite {
 	workspaceFiles := []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}
-	cases := []struct {
-		name      string
-		disp      AgentDispatcher
-		setup     func(t *testing.T, srv *Server)
-		req       CreateAgentRequest
-		wantStage string
-	}{
+	return []createRollbackSite{
 		{
 			name:      "storage",
 			disp:      &createAgentDispatcher{},
@@ -132,7 +135,15 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 			wantStage: createStageProvision,
 		},
 	}
-	for i, tc := range cases {
+}
+
+// Each create failure site records its own stage in the rollback audit
+// record.
+//
+// Must not run in parallel: the managed case swaps the package-level
+// managed-agent backend.
+func TestCreateRollbackStageAtEachSite(t *testing.T) {
+	for i, tc := range createRollbackSites() {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, tc.disp)
 			if tc.setup != nil {
@@ -152,6 +163,64 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 			var sum compensationSummary
 			require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
 			assert.Equal(t, tc.wantStage, sum.Stage)
+		})
+	}
+}
+
+// When the rollback's compensation transaction fails, every create failure
+// site answers 500 with the request ID as its correlation ID, whatever
+// status the site's own failure carries, and logs one ERROR record with the
+// same correlation ID. The extra delete_in_progress case checks that a 409
+// from dispatch gives way to the 500 too.
+//
+// Must not run in parallel: the managed case swaps the package-level
+// managed-agent backend.
+func TestCreateCompensationFailureAtEachSite(t *testing.T) {
+	sites := append(createRollbackSites(), createRollbackSite{
+		name:      "dispatch delete in progress",
+		disp:      &failingCreateDispatcher{createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)},
+		wantStage: createStageDispatch,
+	})
+	for _, tc := range sites {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project := setupCreateAgentServer(t, tc.disp)
+			if tc.setup != nil {
+				tc.setup(t, srv)
+			}
+			srv.store = &createTxFaultStore{Store: srv.store, auditErrFor: mutationTypeAgentCreateDispatchFailed}
+
+			req := tc.req
+			req.Name = "comp-" + tidSlugSafe(tc.name)
+			req.ProjectID = project.ID
+			req.Task = "do something"
+			body, err := json.Marshal(req)
+			require.NoError(t, err)
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+testDevToken)
+			requestID := "req-comp-" + tidSlugSafe(tc.name)
+
+			rec, logs := serveWithRequestID(t, srv.Handler(), r, requestID)
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code,
+				"the site's own status must not reach the caller: %s", rec.Body.String())
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, ErrCodeInternalError, resp.Error.Code)
+			assert.Equal(t, requestID, resp.Error.Details["correlation_id"],
+				"the 500 body carries the request ID as its correlation ID")
+			assert.Empty(t, rec.Header().Get("Retry-After"), "no relayed retry hint")
+
+			require.Len(t, logs, 1, "one ERROR record for the failed compensation")
+			assert.Equal(t, requestID, logs[0].CorrelationID, "the ERROR record carries the same correlation ID")
+			require.NotEmpty(t, logs[0].AgentID)
+			assert.NotEmpty(t, logs[0].OpID)
+
+			ctx := context.Background()
+			_, err = s.GetAgent(ctx, logs[0].AgentID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "the fallback removes the logged agent's row")
+			assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, logs[0].AgentID),
+				"the failed compensation wrote no record")
 		})
 	}
 }
