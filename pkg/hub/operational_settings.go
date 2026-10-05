@@ -586,8 +586,9 @@ func (o *OperationalSettings) Update(
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). The event publisher
-	// is nil in file/SQLite mode — no-op there.
+	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
+	// publisher is an in-process ChannelEventPublisher (single replica); it
+	// is nil only before StartPropagation is wired, e.g. in tests.
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
@@ -648,7 +649,8 @@ func (o *OperationalSettings) EnvOverriddenKeys() []string {
 
 // SetEventPublisher wires the event publisher for cross-replica propagation.
 // Must be called before StartPropagation. Nil is safe (disables publishing
-// in Update). In file/SQLite mode this is never called.
+// in Update). Called on every DB driver: postgres wires the LISTEN/NOTIFY
+// publisher, SQLite an in-process ChannelEventPublisher.
 func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 	o.events = ep
 }
@@ -657,8 +659,9 @@ func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 // §3.6). It subscribes to admin.settings.updated events, starts a 60s jittered
 // poll backstop, and wires the reconnect callback for unconditional refresh.
 //
-// Must be called after SetEventPublisher. Postgres mode only; in file/SQLite
-// mode this is never called (the writing handler applies synchronously).
+// Must be called after SetEventPublisher. Runs on every DB driver; on SQLite
+// (single replica, in-process publisher) the writing node's synchronous
+// self-apply is what matters and the poll backstop is a harmless re-read.
 //
 // The ctx should be the server's lifetime context; cancellation stops the
 // propagation goroutines.
@@ -742,7 +745,8 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 
 // runPollBackstop runs a ticker at the configured PollInterval (default 60s,
 // with ±10s jitter) that calls Refresh and applies any changes. This is the
-// backstop for missed NOTIFY events (design §3.6). Postgres mode only.
+// backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
+// where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
 	interval := o.PollInterval
 	if interval == 0 {
@@ -945,8 +949,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 }
 
 // BuildLayer1SnapshotFromFile constructs a Layer1Snapshot from the current
-// GlobalConfig, i.e. from settings.yaml + env. This is used in file/SQLite
-// mode where there is no DB tier for operational settings.
+// GlobalConfig, i.e. from settings.yaml + env. This is used only by a hub
+// with no OperationalSettings (no DB tier for operational settings).
 //
 // NOTE: Only fields that the old reloadSettings() consumed are populated here.
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,

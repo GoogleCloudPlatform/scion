@@ -69,7 +69,7 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 	} else {
 		s.mu.RLock()
 		if s.config.DefaultScratchpad != nil {
-			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+			// No OperationalSettings: read from settings.yaml via ApplySnapshot.
 			enabled = *s.config.DefaultScratchpad
 		}
 		s.mu.RUnlock()
@@ -83,7 +83,7 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 // handlePutProjectDefaults accepts a partial update to the project_defaults
 // section. It writes the section via OperationalSettings.Update() (which
 // handles validation, persistence, and cross-replica propagation) or falls
-// back to a simple validation-only response in file/SQLite mode.
+// back to a 501 when the hub has no OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
 	var body opsettings.ProjectDefaultsSettings
 	if err := readJSON(r, &body); err != nil {
@@ -130,8 +130,8 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// File/SQLite mode: no persistent storage for this section.
+	// No OperationalSettings: no persistent storage for this section.
 	// Return 501 to signal that writes are not supported.
 	writeError(w, http.StatusNotImplemented, "not_implemented",
-		"Updating project defaults is not supported in file/SQLite mode", nil)
+		"Updating project defaults requires DB-backed operational settings", nil)
 }

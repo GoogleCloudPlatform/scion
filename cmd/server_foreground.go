@@ -2381,8 +2381,10 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 // startSettingsPropagation wires the event publisher into the OperationalSettings
 // service and starts the cross-replica propagation loop (design §3.6, Phase 4).
-// When OperationalSettings is nil (init failed) this is a no-op. On SQLite the
-// event publisher is nil, so StartPropagation itself short-circuits.
+// When OperationalSettings is nil (init failed) this is a no-op. It runs on
+// every driver: on SQLite the publisher is an in-process ChannelEventPublisher
+// (single replica), so propagation is effectively local self-apply plus the
+// poll backstop.
 func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub hub.EventPublisher) {
 	ops := hubSrv.GetOperationalSettings()
 	if ops == nil {

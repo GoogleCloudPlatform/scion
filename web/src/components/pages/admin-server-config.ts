@@ -277,7 +277,7 @@ interface ServerConfigResponse {
 
   agent_secrets?: { user_scope_only?: boolean };
 
-  // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+  // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
   env_overrides?: string[];
   section_metadata?: Record<string, SectionMetadataInfo>;
@@ -300,7 +300,7 @@ interface ReloadResult {
   error?: string;
 }
 
-/** Per-section provenance metadata from the settings-db GET response (postgres mode). */
+/** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
 interface SectionMetadataInfo {
   source: string; // "db" | "file" | "default"
   revision?: number;
@@ -682,7 +682,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
 
-  // ── Settings-DB metadata (postgres mode only) ──
+  // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
@@ -1732,7 +1732,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.harnessConfigsRaw = rawStrings;
     this.harnessConfigErrors = {};
 
-    // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+    // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
     this.settingsTier = data.settings_tier || 'file';
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
