@@ -3104,7 +3104,7 @@ func TestReincarnationStartLeftNoContainer(t *testing.T) {
 }
 
 // TestReincarnateAgent_AmbiguousStartFailure_NoRerender covers
-// ptone/scion#1935 review F1: a start failure whose outcome is ambiguous
+// ptone/scion#1935: a start failure whose outcome is ambiguous
 // (here a transport timeout: a gen N+1 container may be running) makes no
 // re-render dispatch, so the credential that container would use is not
 // revoked, and the row stays at gen N+1. The re-render would have been
@@ -3131,7 +3131,7 @@ func TestReincarnateAgent_AmbiguousStartFailure_NoRerender(t *testing.T) {
 }
 
 // TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes covers
-// ptone/scion#1935 review F1: after a definitive start failure (the broker
+// ptone/scion#1935: after a definitive start failure (the broker
 // refused it; no container exists) the re-render is dispatched. When that
 // re-render fails, dispatchProvision's create-failed revoke revokes the
 // agent's credentials by agent: every credential, including the one the
@@ -3199,10 +3199,10 @@ func setupReincarnateCredentialTest(t *testing.T, startErr error) (*Server, stor
 	return srv, s, agent, mock, gen, calls
 }
 
-// TestReincarnateAgent_RerenderEchoDoesNotLeak covers ptone/scion#1935
-// review F4(a): the re-render dispatches a copy of previous, so the broker's
-// echo on that dispatch reaches neither the record's PreviousAppliedConfig
-// nor the restored row.
+// TestReincarnateAgent_RerenderEchoDoesNotLeak covers ptone/scion#1935: the
+// re-render dispatches a copy of previous, so the broker's echo on that
+// dispatch reaches neither the record's PreviousAppliedConfig nor the
+// restored row.
 func TestReincarnateAgent_RerenderEchoDoesNotLeak(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = definitiveStartErr()
@@ -3247,7 +3247,7 @@ func (f *failAdvanceToStartingStore) TryAdvanceAgentReincarnation(ctx context.Co
 }
 
 // TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig
-// covers ptone/scion#1935 review F4(b): a record CAS error after a
+// covers ptone/scion#1935: a record CAS error after a
 // successful reprovision (no start dispatched, so no container) re-renders
 // previous and, since that succeeded, restores the row.
 func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *testing.T) {
@@ -3292,7 +3292,7 @@ func (f *failStartingWriteStore) UpdateAgent(ctx context.Context, a *store.Agent
 }
 
 // TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig covers
-// ptone/scion#1935 review round 3 F3: the starting-step row write fails after
+// ptone/scion#1935: the starting-step row write fails after
 // a successful reprovision (no start dispatched, so no container), so
 // previous is re-rendered and, since that succeeded, the row is restored.
 func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testing.T) {
@@ -3325,7 +3325,7 @@ func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testin
 }
 
 // TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow covers
-// ptone/scion#1935 review F4(c): after a failed reprovision the row is
+// ptone/scion#1935: after a failed reprovision the row is
 // restored to previous whatever the re-render's outcome, including when the
 // re-render fails too.
 func TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow(t *testing.T) {
