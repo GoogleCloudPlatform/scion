@@ -1493,7 +1493,7 @@ export class ScionPageChat extends LitElement {
     }
 
     // Load unread DM peer IDs for the blue unread dot on member avatars.
-    // The tab-title counter asked for the same list moments ago; share it.
+    // The rail may have asked for the same list moments ago; share it.
     void this.loadUnreadDMPeers({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
 
     // Subscribe to SSE events
@@ -1564,13 +1564,6 @@ export class ScionPageChat extends LitElement {
         unreadCount?: number;
       }>;
     };
-
-    // The rail reloads its spaces after the user reads, marks unread or
-    // mutes in this tab — changes the server does not echo back here — so
-    // the unread conversation count follows the reload (debounced).
-    if (detail.spaces) {
-      chatUnread.scheduleRefresh();
-    }
 
     // Populate slug ↔ projectId maps for deep-link resolution
     if (detail.spaces) {
@@ -2132,6 +2125,10 @@ export class ScionPageChat extends LitElement {
     const key = detail?.conversationKey || '';
     if (!key) return;
 
+    // The read was saved, and the server does not echo the reader's own
+    // read back to this tab, so the unread conversation count asks again.
+    chatUnread.scheduleRefresh();
+
     if (key.startsWith('dm:')) {
       // The acknowledgement belongs to its key, even if navigation changed
       // the selected conversation before this event was delivered.
@@ -2264,8 +2261,8 @@ export class ScionPageChat extends LitElement {
 
     // Debounce: reload the rail + backfill conversation. The reload only
     // needs a spaces list requested after the newest message of the burst,
-    // so it shares the tab-title counter's refresh for the same messages
-    // (which runs sooner) rather than asking the server a second time.
+    // so it can share another owner's refresh for the same messages rather
+    // than asking the server a second time.
     // A synthetic event stamped 0 would share any request: fall back to now.
     const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
     this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
@@ -2510,7 +2507,7 @@ export class ScionPageChat extends LitElement {
   private async resolveDMPeerInfo(key: string): Promise<void> {
     try {
       // Peer metadata does not change under a DM, so a list loaded moments
-      // ago (at startup, by the unread counter) answers this as well.
+      // ago (at startup, by the page) answers this as well.
       const body = await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
       if (!body) return;
       const data = body as {
@@ -3053,8 +3050,6 @@ export class ScionPageChat extends LitElement {
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
-      // The DM list reloads after a read in this tab; so does the count.
-      chatUnread.scheduleRefresh();
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||

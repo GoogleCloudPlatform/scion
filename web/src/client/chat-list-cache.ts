@@ -17,11 +17,11 @@
 /**
  * Shared loads of the chat space list and DM list.
  *
- * At startup three owners need both lists at once: the tab-title unread
- * counter, the chat page (DM unread dots, DM deep links) and the space rail.
- * Each used to issue its own request, so a cold `/chat` asked the hub for
- * `/chat/spaces` and `/chat/dms` twice each — and those are among the
- * heaviest chat endpoints. Going through this module they share one request.
+ * At startup several owners need these lists at once: the chat page (DM
+ * unread dots, DM deep links) and the space rail. Each used to issue its own
+ * request, so a cold `/chat` asked the hub for `/chat/spaces` and
+ * `/chat/dms` more than once — and those are among the heaviest chat
+ * endpoints. Going through this module they share one request.
  *
  * Three ways to ask:
  *
@@ -44,10 +44,9 @@ import { apiFetch } from './api.js';
 
 /**
  * How old a completed startup load may be and still be reused by another
- * owner's initial load. Long enough to cover the gap between the unread
- * counter's request (issued before the router renders) and the chat page's
- * and rail's own (issued after their lazy imports); short enough that a
- * real navigation back to chat later fetches again.
+ * owner's initial load. Long enough to cover the gap between the chat
+ * page's and the rail's requests (each issued after its own lazy import);
+ * short enough that a real navigation back to chat later fetches again.
  */
 export const CHAT_STARTUP_REUSE_MS = 5_000;
 

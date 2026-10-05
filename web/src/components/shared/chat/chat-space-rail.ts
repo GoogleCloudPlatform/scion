@@ -1216,8 +1216,8 @@ export class ScionChatSpaceRail extends LitElement {
    * Reload all data (called externally when SSE events indicate changes).
    * `startedAfter` — when the triggering event was delivered, on the
    * shared loads' clock — lets the spaces load share a request another
-   * owner (the tab-title counter) made after that event; by default only a
-   * request started after the call will do.
+   * owner made after that event; by default only a request started after
+   * the call will do.
    */
   async reload(options: { startedAfter?: number } = {}): Promise<void> {
     await this.loadData(options.startedAfter);
@@ -1315,8 +1315,6 @@ export class ScionChatSpaceRail extends LitElement {
               projectId: s.projectId,
               projectSlug: s.projectSlug,
               projectName: s.projectName,
-              // Carried so the tab-title badge can reuse this load instead of
-              // asking the server for the same rollup a second time.
               unreadCount: s.unreadCount,
             })),
           },
@@ -1335,8 +1333,8 @@ export class ScionChatSpaceRail extends LitElement {
 
   /**
    * Loads spaces; returns whether the load succeeded (used to gate pruning).
-   * The first load shares the startup request the tab-title counter already
-   * made; a reload follows a change and only shares a request that started
+   * The first load shares a startup request another owner already made; a
+   * reload follows a change and only shares a request that started
    * after `startedAfter` (see {@link reload}).
    */
   private async loadSpaces(initial: boolean, startedAfter: number): Promise<boolean> {

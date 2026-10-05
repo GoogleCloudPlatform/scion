@@ -35,6 +35,7 @@ import { apiFetch } from '../../client/api.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
+import { chatUnread } from '../../client/chat-unread.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -808,6 +809,20 @@ describe('chat page — muted DMs raise no unread dot', () => {
       );
       expect(el.v2UnreadFromIds).toEqual(['agent-2']);
       expect(refresh).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each(['dm:agent:agent-1:user:user-me', 'thread-1'])(
+    'asks the unread conversation count again after a read is saved (%s)',
+    (key) => {
+      const el = createPage();
+      vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+      const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+      el._handleReadStateUpdated(
+        new CustomEvent('read-state-updated', { detail: { conversationKey: key } })
+      );
+      expect(refresh).toHaveBeenCalledOnce();
+      refresh.mockRestore();
     }
   );
 
