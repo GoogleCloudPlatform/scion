@@ -1064,6 +1064,10 @@ type Server struct {
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
 
+	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
+	// zero value uses the defaults (handlers_chat_v2.go).
+	chatSpacesBatch chatSpacesBatchSizes
+
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
 	conduitGrantsOnce sync.Once

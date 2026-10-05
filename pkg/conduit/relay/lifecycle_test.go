@@ -147,11 +147,26 @@ func TestHeartbeatSupersededStopsServing(t *testing.T) {
 // TestGoAwayMarksSessionDraining: SetSessionDraining runs before GoAway is
 // sent. With no open streams the session ends right after GoAway, so the
 // row is observed at its delete: it must already be draining.
+//
+// Dial returns on the Welcome, before Serve registers the session, and
+// GoAway only addresses registered sessions. Serve is held in that window
+// until Local is waiting for it, so the test always waits through it.
 func TestGoAwayMarksSessionDraining(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	n.Relay.SetBeforeReadyHookForTest(func() { <-release })
+	n.Relay.SetPendingWaitHookForTest(unblock)
 	sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok {
+		t.Fatal("session was not registered after its Welcome")
+	}
 	var log opLog
 	drainingAtDelete := make(chan bool, 1)
 	w.SetFault(func(op string) error {
