@@ -241,3 +241,55 @@ func TestHandleAgentOutboundMessage_InProcessBufferFullWithPluginFailure(t *test
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, ErrCodeUnavailable, resp.Error.Code)
 }
+
+// TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribesOnDemand pins
+// that the handler creates the persisting subscription itself. Without
+// proxy.Start there is no bootstrap subscription, so the stored row comes
+// only from the handler's on-demand subscribe.
+func TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribesOnDemand(t *testing.T) {
+	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
+	t.Cleanup(f.proxy.Stop) // no Start: no bootstrap subscription
+
+	f.requireSentOnce(t, f.send(t, "on demand"))
+}
+
+// requireDeliveryFailedNoRow asserts a 502 delivery failure with nothing
+// stored.
+func (f *outboundSpokeFixture) requireDeliveryFailedNoRow(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusBadGateway, rr.Code, "handler response: %s", rr.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
+	require.Never(t, func() bool { return f.storedRows(t) > 0 },
+		200*time.Millisecond, 20*time.Millisecond, "expected no stored row")
+}
+
+// TestHandleAgentOutboundMessage_PluginSpokeFailureAfterStopFails pins that
+// a stopped proxy (no persisting subscription) still reports the plugin
+// failure as 502.
+func TestHandleAgentOutboundMessage_PluginSpokeFailureAfterStopFails(t *testing.T) {
+	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
+	f.proxy.Start()
+	f.proxy.Stop()
+
+	f.requireDeliveryFailedNoRow(t, f.send(t, "hello after stop"))
+}
+
+// failSubscribeBus is an InProcessEventBus whose Subscribe always fails.
+type failSubscribeBus struct{ *eventbus.InProcessEventBus }
+
+func (failSubscribeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, errors.New("subscribe unavailable")
+}
+
+// TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribeErrorFails pins
+// that a failed persisting Subscribe still reports the plugin failure as
+// 502.
+func TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribeErrorFails(t *testing.T) {
+	f := newOutboundSpokeFixture(t,
+		failSubscribeBus{eventbus.NewInProcessEventBus(slog.Default())})
+	t.Cleanup(f.proxy.Stop)
+
+	f.requireDeliveryFailedNoRow(t, f.send(t, "hello with a failed subscribe"))
+}

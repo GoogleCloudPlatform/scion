@@ -1342,7 +1342,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			}
 			if err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
-					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "persisting", persisting, "error", err)
 				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
 					// The in-process bus could not queue this delivery for at
 					// least one matching subscriber, normally the per-project
