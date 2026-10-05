@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -141,6 +142,7 @@ func TestProvisionedOnly_Enrich(t *testing.T) {
 			a.LaunchID, a.LaunchState, a.LaunchKind = "l1", store.LaunchStateActive, "start"
 		}, want: false},
 		{name: "deleting", mutate: func(a *store.Agent) { a.DeletionState = "deleting" }, want: false},
+		{name: "soft-deleted", mutate: func(a *store.Agent) { a.DeletedAt = time.Now() }, want: false},
 		{name: "stopped-phase", mutate: func(a *store.Agent) { a.Phase = string(state.PhaseStopped) }, want: false},
 	}
 	for _, tc := range cases {
@@ -155,5 +157,72 @@ func TestProvisionedOnly_Enrich(t *testing.T) {
 			srv.enrichAgents(ctx, many)
 			assert.Equal(t, tc.want, many[0].ProvisionedOnly, "enrichAgents")
 		})
+	}
+}
+
+// createdEventProvisionedOnly creates an agent over HTTP and returns the
+// provisionedOnly value of the agent created event the hub publishes.
+func createdEventProvisionedOnly(t *testing.T, provisionOnly bool) bool {
+	t.Helper()
+	disp := newSiteIntentDispatcher(nil)
+	srv, s, project := setupCreateAgentServer(t, disp)
+	disp.s = s
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.SetEventPublisher(pub)
+	ch, unsub := pub.Subscribe("agent.*.created")
+	t.Cleanup(unsub)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "po-event", ProjectID: project.ID, ProvisionOnly: provisionOnly,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	select {
+	case evt := <-ch:
+		var m map[string]interface{}
+		require.NoError(t, json.Unmarshal(evt.Data, &m))
+		return m["provisionedOnly"] == true
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the agent created event")
+		return false
+	}
+}
+
+// The agent created event carries provisionedOnly, so the web can show it
+// without a refetch: true for a provision-only create, false for a full
+// create.
+func TestProvisionedOnly_CreatedEvent(t *testing.T) {
+	assert.True(t, createdEventProvisionedOnly(t, true), "provision-only create")
+	assert.False(t, createdEventProvisionedOnly(t, false), "full create")
+}
+
+// Status deltas always carry provisionedOnly (no omitempty), so a false
+// clears the web's merged value: false after a start (intent running,
+// still created), true after a stop that leaves the agent in created.
+func TestProvisionedOnly_StatusEvent(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	ch, unsub := pub.Subscribe("agent.a1.status")
+	defer unsub()
+
+	created := string(state.PhaseCreated)
+	pub.PublishAgentStatus(context.Background(), &store.Agent{
+		ID: "a1", ProjectID: "g1", Phase: created, RunIntent: store.RunIntentRunning,
+	})
+	pub.PublishAgentStatus(context.Background(), &store.Agent{
+		ID: "a1", ProjectID: "g1", Phase: created, RunIntent: store.RunIntentStopped,
+	})
+
+	for i, want := range []bool{false, true} {
+		select {
+		case evt := <-ch:
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(evt.Data, &m))
+			v, ok := m["provisionedOnly"]
+			require.True(t, ok, "event %d must carry provisionedOnly: %s", i, evt.Data)
+			assert.Equal(t, want, v, "event %d", i)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the status event")
+		}
 	}
 }

@@ -168,6 +168,9 @@ type AgentStatusEvent struct {
 	// explicit null when no delete is active or failed, so the web's delta
 	// merge clears it.
 	Deletion *store.DeletionInfo `json:"deletion"`
+	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
+	// No omitempty: false must reach the web to clear a merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -497,6 +500,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		ContainerStatus: agent.ContainerStatus,
 		Launch:          store.ComputeAgentLaunch(agent, now),
 		Deletion:        store.ComputeAgentDeletion(agent, now),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
