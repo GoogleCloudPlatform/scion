@@ -134,6 +134,16 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private agentPhase: AgentPhase = 'created';
 
+  /**
+   * The agent is stopping (e.g. while it is being deleted, ptone/scion#2483
+   * C#11). Derived from the shared metadata in `applyMetadata`; it only
+   * shows a non-fatal notice and never tears the session down. Running
+   * clears it; stopped/deleted clear it while the workspace root's SSE
+   * bridge marks the session unavailable as before.
+   */
+  @state()
+  private agentStopping = false;
+
   @state()
   private agentActivity: AgentActivity | '' = '';
 
@@ -637,6 +647,21 @@ export class ScionTerminalPane extends LitElement {
       background: var(--scion-primary-hover, #2563eb);
     }
 
+    /* Always rendered so screen readers see the live region before its
+       text arrives; it takes no space while idle. */
+    .stopping-notice.idle {
+      padding: 0;
+      height: 0;
+      overflow: hidden;
+    }
+
+    .stopping-notice {
+      padding: 0.375rem 1rem;
+      background: var(--scion-badge-warning-bg, #fef3c7);
+      color: var(--scion-badge-warning-text, #92400e);
+      font-size: 0.75rem;
+    }
+
     .error-banner {
       padding: 0.375rem 1rem;
       background: var(--scion-badge-danger-bg, #fee2e2);
@@ -1006,6 +1031,7 @@ export class ScionTerminalPane extends LitElement {
     if (this.disposed) return;
     this.metadataError = value.error;
     this.error = value.error ?? this.session?.state.error ?? null;
+    this.agentStopping = value.availability !== 'deleted' && value.agent?.phase === 'stopping';
     const agent = value.agent;
     if (!agent) return;
     const previousProject = this.projectId;
@@ -2127,6 +2153,9 @@ export class ScionTerminalPane extends LitElement {
               </button>
             `
           : ''}
+      </div>
+      <div class="stopping-notice ${this.agentStopping ? '' : 'idle'}" role="status">
+        ${this.agentStopping ? 'Agent is stopping…' : nothing}
       </div>
       ${this.error
         ? html`
