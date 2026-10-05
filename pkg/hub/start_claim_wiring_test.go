@@ -674,3 +674,31 @@ func TestStartClaimWiring_WakeEndsLifecycleOpBeforeReadinessWait(t *testing.T) {
 	assert.False(t, opDuringWait.Load(), "the lifecycle op ended before the readiness wait")
 	assert.True(t, claimDuringWait.Load(), "the wake's claim is held through the readiness wait")
 }
+
+// deleteHoldsClaimStore refuses every start claim: a delete holds the row.
+type deleteHoldsClaimStore struct{ store.Store }
+
+func (deleteHoldsClaimStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
+	return store.StartClaim{}, store.ErrDeleteInProgress
+}
+
+// A create-and-start whose claim a delete refuses answers delete_in_progress
+// and is rolled back as a refused run-intent write, as before claims.
+func TestStartClaimWiring_CreateClaimRefusedByDeleteRollsBack(t *testing.T) {
+	disp := &createAgentDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.store = deleteHoldsClaimStore{srv.store}
+	req := CreateAgentRequest{Name: "claim-refused-by-delete", ProjectID: project.ID, Task: "do something"}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
+	failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	require.Len(t, failed, 1, "the refused create is rolled back once")
+	var sum compensationSummary
+	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+	assert.Equal(t, createStageRunIntent, sum.Stage)
+}

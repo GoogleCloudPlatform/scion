@@ -2231,17 +2231,20 @@ func (s *Server) createAgentInProject(
 					return
 				} else if errors.Is(err, errStartClaimWrite) {
 					// The start claim (this create's run-intent write)
-					// could not be recorded: nothing was dispatched.
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
 					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
 					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 					return
-				} else if s.writeStartClaimError(w, err, agent.ID) {
-					// Refused by the start claim before dispatch (held,
-					// not eligible, a delete holding the row), or the claim
-					// was lost while the create ran: a stop superseded it,
-					// and whatever was dispatched now belongs to that stop
-					// and the start-claim reaper. Either way the record is
-					// kept, not cleaned up as a failed create.
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2296,17 +2299,20 @@ func (s *Server) createAgentInProject(
 					return
 				} else if errors.Is(err, errStartClaimWrite) {
 					// The start claim (this create's run-intent write)
-					// could not be recorded: nothing was dispatched.
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
 					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
 					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 					return
-				} else if s.writeStartClaimError(w, err, agent.ID) {
-					// Refused by the start claim before dispatch (held,
-					// not eligible, a delete holding the row), or the claim
-					// was lost while the create ran: a stop superseded it,
-					// and whatever was dispatched now belongs to that stop
-					// and the start-claim reaper. Either way the record is
-					// kept, not cleaned up as a failed create.
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker

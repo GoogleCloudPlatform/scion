@@ -163,10 +163,11 @@ func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind
 	}
 	if err != nil {
 		var held *store.ClaimHeldError
-		if errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) || errors.Is(err, store.ErrDeleteInProgress) || ctx.Err() != nil {
+		if errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) || ctx.Err() != nil {
 			return nil, err
 		}
-		// Not a refusal: the claim (the start's run-intent write) failed.
+		// The claim (the start's run-intent write) failed, or was refused
+		// because a delete holds the row, as the running-intent write is.
 		return nil, fmt.Errorf("%w: %w", errStartClaimWrite, err)
 	}
 	agent.RunIntent = store.RunIntentRunning
@@ -482,9 +483,10 @@ func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, cle
 	return nil
 }
 
-// errStartClaimWrite marks a start claim the store failed to record (not a
-// refusal): for a claimed start, its run-intent write failed and nothing was
-// dispatched.
+// errStartClaimWrite marks a start claim the store did not record: the
+// write failed, or a delete holds the row (store.ErrDeleteInProgress stays
+// in the chain). For a claimed start, its run-intent write failed or was
+// refused, and nothing was dispatched.
 var errStartClaimWrite = errors.New("record the start claim")
 
 // errStartedStatusWrite marks a start that succeeded but whose status write
