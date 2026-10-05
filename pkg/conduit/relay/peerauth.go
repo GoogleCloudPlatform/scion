@@ -15,6 +15,7 @@
 package relay
 
 import (
+	"container/heap"
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
@@ -119,7 +120,41 @@ type HMACPeerAuth struct {
 	key []byte // derived MAC key
 
 	mu     sync.Mutex
-	nonces map[string]time.Time
+	nonces map[string]time.Time // peer+nonce -> expiry
+	expiry nonceQueue           // the same entries, ordered by expiry
+}
+
+// nonceEntry is one replay-cache entry.
+type nonceEntry struct {
+	key string
+	exp time.Time
+}
+
+// nonceQueue is a min-heap of replay-cache entries by expiry
+// (container/heap).
+type nonceQueue []nonceEntry
+
+func (q nonceQueue) Len() int           { return len(q) }
+func (q nonceQueue) Less(i, j int) bool { return q[i].exp.Before(q[j].exp) }
+func (q nonceQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
+func (q *nonceQueue) Push(x any)        { *q = append(*q, x.(nonceEntry)) }
+func (q *nonceQueue) Pop() any {
+	old := *q
+	e := old[len(old)-1]
+	old[len(old)-1] = nonceEntry{}
+	*q = old[:len(old)-1]
+	return e
+}
+
+// evictExpiredLocked removes the entries whose expiry has passed, in
+// expiry order. Verify calls it only when the cache is at its cap; an
+// entry is removed only once it has expired, never to make room. a.mu
+// must be held.
+func (a *HMACPeerAuth) evictExpiredLocked(now time.Time) {
+	for len(a.expiry) > 0 && now.After(a.expiry[0].exp) {
+		e := heap.Pop(&a.expiry).(nonceEntry)
+		delete(a.nonces, e.key)
+	}
 }
 
 // NewHMACPeerAuthFromSecret returns an HMACPeerAuth keyed with the HKDF
@@ -207,13 +242,8 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for n, exp := range a.nonces {
-		if len(a.nonces) < a.cfg.MaxNonces {
-			break
-		}
-		if now.After(exp) {
-			delete(a.nonces, n)
-		}
+	if len(a.nonces) >= a.cfg.MaxNonces {
+		a.evictExpiredLocked(now)
 	}
 	key := peer + "\x00" + nonce
 	if _, seen := a.nonces[key]; seen {
@@ -223,6 +253,8 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 		// Fail closed rather than forget nonces still inside the window.
 		return "", fmt.Errorf("%w: replay cache full", ErrPeerUnauthenticated)
 	}
-	a.nonces[key] = at.Add(2 * a.cfg.MaxSkew)
+	exp := at.Add(2 * a.cfg.MaxSkew)
+	a.nonces[key] = exp
+	heap.Push(&a.expiry, nonceEntry{key: key, exp: exp})
 	return peer, nil
 }
