@@ -46,7 +46,19 @@ var schemaDriftAllowList = map[string]string{
 	// and is then dropped when settings.yaml loads. Kept in the schema so
 	// existing files keep validating; whether to add the Go field or remove
 	// the key is tracked separately.
-	"schema-only: default_harness_auth": "no VersionedSettings field yet; see comment",
+	"schema-only: default_harness_auth": "no VersionedSettings field yet; tracked in ptone/scion#3023",
+
+	// Type unions: the schema accepts more than one JSON type for these
+	// keys because the loader does.
+	//
+	// oidc.token_lifetime is a time.Duration. koanf's
+	// StringToTimeDurationHook accepts a Go duration string ("15m"), and
+	// an integer is taken as nanoseconds.
+	"type-union: server.oidc.token_lifetime": "time.Duration: Go duration string or integer nanoseconds",
+	// map[string]string values decode weakly (WeaklyTypedInput), so an
+	// unquoted number or boolean loads as its string form.
+	"type-union: server.plugins.broker.*.config.*":         "weakly decoded map[string]string value",
+	"type-union: server.notification_channels.[].params.*": "weakly decoded map[string]string value",
 }
 
 // TestSettingsSchema_NoDriftFromGoTypes walks the Go settings types reachable
@@ -58,6 +70,13 @@ var schemaDriftAllowList = map[string]string{
 //     rejected by `scion config validate`.
 //   - "schema-only": a schema property with no Go field. Such a key validates
 //     but is silently dropped when settings load.
+//   - "type": the schema's JSON type does not match the Go kind (string,
+//     integer, number, boolean, array, object). Nodes without a "type"
+//     (e.g. a bare enum) are not compared.
+//   - "type-union": the schema allows several JSON types for one Go field;
+//     each such union must be allow-listed with the reason.
+//
+// Enums, patterns and required lists are not compared.
 //
 // The walk is derived from the types and the schema, not from a key list, so
 // new fields are checked automatically. Intentional mismatches go in
@@ -167,6 +186,9 @@ func (w *schemaDriftWalker) walk(path string, t reflect.Type, node map[string]an
 	if node == nil {
 		return
 	}
+	if path != "" {
+		w.checkType(path, t, node)
+	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -215,5 +237,65 @@ func (w *schemaDriftWalker) walk(path string, t reflect.Type, node map[string]an
 		if _, ok := fields[name]; !ok {
 			w.drift = append(w.drift, "schema-only: "+joinDriftPath(path, name))
 		}
+	}
+}
+
+// goJSONKind returns the JSON Schema type a Go type decodes from.
+func goJSONKind(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "integer"
+	case reflect.Float32, reflect.Float64:
+		return "number"
+	case reflect.Slice, reflect.Array:
+		return "array"
+	case reflect.Map, reflect.Struct:
+		return "object"
+	default:
+		return ""
+	}
+}
+
+// checkType compares the schema node's "type" with the Go kind.
+func (w *schemaDriftWalker) checkType(path string, t reflect.Type, node map[string]any) {
+	goKind := goJSONKind(t)
+	if goKind == "" {
+		return
+	}
+	switch typ := node["type"].(type) {
+	case string:
+		if typ != goKind {
+			w.drift = append(w.drift, "type: "+path+" (schema "+typ+", go "+goKind+")")
+		}
+	case []any:
+		// "null" next to one other type only makes the key nullable; the
+		// loader decodes null to the zero value.
+		var kinds []string
+		for _, v := range typ {
+			if k, _ := v.(string); k != "null" {
+				kinds = append(kinds, k)
+			}
+		}
+		if len(kinds) == 1 {
+			if kinds[0] != goKind {
+				w.drift = append(w.drift, "type: "+path+" (schema "+kinds[0]+", go "+goKind+")")
+			}
+			return
+		}
+		w.drift = append(w.drift, "type-union: "+path)
+		for _, k := range kinds {
+			if k == goKind {
+				return
+			}
+		}
+		w.drift = append(w.drift, "type: "+path+" (schema union lacks go "+goKind+")")
 	}
 }

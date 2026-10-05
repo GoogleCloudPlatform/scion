@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -193,32 +194,78 @@ func TestValidateSettings_DriftKeysValidate(t *testing.T) {
 // invalid-type / unknown-field tests for the sections added alongside the
 // drift guard.
 func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
+	// want is a substring that must appear in one error's path or message,
+	// naming the key under test, so an unrelated error cannot satisfy a case.
+	// For an unknown field it is the closed object's path: the validator
+	// reports additionalProperties failures under a $ref as "<object path>:
+	// validation failed" without the field name.
 	tests := []struct {
 		name string
 		yaml string
+		want string
 	}{
-		{"auto_expose_ports.enabled non-boolean", "auto_expose_ports:\n  enabled: \"yes\"\n"},
-		{"auto_expose_ports unknown field", "auto_expose_ports:\n  unknown_field: true\n"},
-		{"project_defaults.default_scratchpad non-boolean", "project_defaults:\n  default_scratchpad: \"yes\"\n"},
-		{"project_defaults unknown field", "project_defaults:\n  unknown_field: true\n"},
-		{"server.maintenance.check_interval_hours non-integer", "server:\n  maintenance:\n    check_interval_hours: soon\n"},
-		{"server.maintenance unknown field", "server:\n  maintenance:\n    unknown_field: x\n"},
-		{"server.mode unknown value", "server:\n  mode: cluster\n"},
-		{"runtimes.*.list_all_namespaces non-boolean", "runtimes:\n  k8s:\n    type: kubernetes\n    list_all_namespaces: \"yes\"\n"},
-		{"runtimes.*.cloudrun unknown field", "runtimes:\n  cr:\n    type: cloudrun\n    cloudrun:\n      region: us-central1\n"},
-		{"runtimes.*.cloudrun_instances unknown field", "runtimes:\n  cri:\n    type: cloudrun-instances\n    cloudrun_instances:\n      location: us-central1\n"},
-		{"runtimes.*.cloudrun_sandbox unknown field", "runtimes:\n  crs:\n    type: cloudrun-sandbox\n    cloudrun_sandbox:\n      bin: x\n"},
-		{"shared_dirs entry without name", "shared_dirs:\n  - read_only: true\n"},
-		{"shared_dirs invalid name", "shared_dirs:\n  - name: Build_Cache\n"},
-		{"federation trusted issuer without issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - jwks_url: https://x\n"},
-		{"server.shared_dir_storage.nfs.auto_mount (ignored there)", "server:\n  shared_dir_storage:\n    nfs:\n      auto_mount: true\n"},
+		{"auto_expose_ports.enabled non-boolean", "auto_expose_ports:\n  enabled: \"yes\"\n", "auto_expose_ports/enabled"},
+		{"auto_expose_ports unknown field", "auto_expose_ports:\n  unknown_field: true\n", "auto_expose_ports"},
+		{"project_defaults.default_scratchpad non-boolean", "project_defaults:\n  default_scratchpad: \"yes\"\n", "project_defaults/default_scratchpad"},
+		{"project_defaults unknown field", "project_defaults:\n  unknown_field: true\n", "project_defaults"},
+		{"server.maintenance.check_interval_hours non-integer", "server:\n  maintenance:\n    check_interval_hours: soon\n", "server/maintenance/check_interval_hours"},
+		{"server.maintenance unknown field", "server:\n  maintenance:\n    unknown_field: x\n", "server/maintenance"},
+		{"server.mode unknown value", "server:\n  mode: cluster\n", "server/mode"},
+		{"runtimes.*.list_all_namespaces non-boolean", "runtimes:\n  k8s:\n    type: kubernetes\n    list_all_namespaces: \"yes\"\n", "runtimes/k8s/list_all_namespaces"},
+		{"runtimes.*.cloudrun unknown field", "runtimes:\n  cr:\n    type: cloudrun\n    cloudrun:\n      region: us-central1\n", "runtimes/cr/cloudrun"},
+		{"runtimes.*.cloudrun_instances unknown field", "runtimes:\n  cri:\n    type: cloudrun-instances\n    cloudrun_instances:\n      location: us-central1\n", "runtimes/cri/cloudrun_instances"},
+		{"runtimes.*.cloudrun_sandbox unknown field", "runtimes:\n  crs:\n    type: cloudrun-sandbox\n    cloudrun_sandbox:\n      bin: x\n", "runtimes/crs/cloudrun_sandbox"},
+		{"shared_dirs entry without name", "shared_dirs:\n  - read_only: true\n", "name"},
+		{"shared_dirs invalid name", "shared_dirs:\n  - name: Build_Cache\n", "shared_dirs/0/name"},
+		{"federation trusted issuer without issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - jwks_url: https://x\n", "server/federation/trusted_issuers/0"},
+		{"federation trusted issuer empty issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: \"\"\n", "trusted_issuers/0/issuer_url"},
+		{"federation unknown issuer_type", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: https://x\n        issuer_type: robot\n", "trusted_issuers/0/issuer_type"},
+		{"federation unsupported algorithm", "server:\n  federation:\n    algorithms: [HS256]\n", "server/federation/algorithms/0"},
+		{"federation refresh_interval without unit", "server:\n  federation:\n    refresh_interval: \"3600\"\n", "server/federation/refresh_interval"},
+		{"federation debounce_interval not a duration", "server:\n  federation:\n    debounce_interval: soon\n", "server/federation/debounce_interval"},
+		{"oidc token_lifetime quoted integer", "server:\n  oidc:\n    token_lifetime: \"900000000000\"\n", "server/oidc/token_lifetime"},
+		{"server.shared_dir_storage.nfs.auto_mount (ignored there)", "server:\n  shared_dir_storage:\n    nfs:\n      auto_mount: true\n", "server/shared_dir_storage/nfs"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data := []byte("schema_version: \"1\"\n" + tt.yaml)
 			errs, err := ValidateSettings(data, "1")
 			require.NoError(t, err)
-			assert.NotEmpty(t, errs, "expected a validation error")
+			require.NotEmpty(t, errs, "expected a validation error")
+			found := false
+			for _, e := range errs {
+				if strings.Contains(e.Path+" "+e.Message, tt.want) {
+					found = true
+				}
+			}
+			assert.True(t, found, "expected an error naming %q, got: %v", tt.want, errs)
+		})
+	}
+}
+
+// TestValidateSettings_DurationsAndWeakMapValues covers values the loader
+// accepts and the schema must therefore accept too: Go duration strings
+// (and integer nanoseconds for token_lifetime), and unquoted numbers and
+// booleans in map[string]string values, which decode to their string form.
+func TestValidateSettings_DurationsAndWeakMapValues(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"token_lifetime 15m", "server:\n  oidc:\n    token_lifetime: 15m\n"},
+		{"token_lifetime 1h30m", "server:\n  oidc:\n    token_lifetime: 1h30m\n"},
+		{"token_lifetime integer nanoseconds", "server:\n  oidc:\n    token_lifetime: 900000000000\n"},
+		{"federation intervals", "server:\n  federation:\n    refresh_interval: 1h30m\n    debounce_interval: 500ms\n"},
+		{"federation interval 0", "server:\n  federation:\n    refresh_interval: \"0\"\n"},
+		{"plugin config number and boolean", "server:\n  plugins:\n    broker:\n      nats:\n        config:\n          port: 4222\n          tls: true\n          url: nats://x\n"},
+		{"notification params number", "server:\n  notification_channels:\n    - type: webhook\n      params:\n        retries: 3\n        verbose: false\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte("schema_version: \"1\"\n" + tt.yaml)
+			errs, err := ValidateSettings(data, "1")
+			require.NoError(t, err)
+			assert.Empty(t, errs)
 		})
 	}
 }

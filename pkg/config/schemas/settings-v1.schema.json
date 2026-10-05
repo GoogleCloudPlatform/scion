@@ -1754,8 +1754,8 @@
         "type": { "type": "string", "description": "Channel type." },
         "params": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
-          "description": "Channel-specific parameters (e.g. webhook URL)."
+          "additionalProperties": { "type": ["string", "number", "boolean"] },
+          "description": "Channel-specific parameters (e.g. webhook URL). Numbers and booleans load as their string form."
         },
         "filter_types": { "type": "array", "items": { "type": "string" } },
         "filter_urgent_only": { "type": "boolean" }
@@ -1796,8 +1796,8 @@
         "path": { "type": "string", "description": "Plugin binary path. Discovered automatically when empty; ignored for self-managed plugins." },
         "config": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
-          "description": "Opaque key-value map passed to the plugin."
+          "additionalProperties": { "type": ["string", "number", "boolean"] },
+          "description": "Opaque key-value map passed to the plugin. Numbers and booleans load as their string form."
         },
         "config_file": { "type": "string", "description": "Standalone YAML config file merged into config." },
         "self_managed": { "type": "boolean" },
@@ -1850,6 +1850,7 @@
         "enabled": { "type": "boolean", "default": false },
         "token_lifetime": {
           "type": ["string", "integer"],
+          "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
           "description": "Validity of issued identity tokens as a Go duration (e.g. \"15m\", the default) or integer nanoseconds."
         }
       },
@@ -1865,9 +1866,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/serverTrustedIssuer" }
         },
-        "algorithms": { "type": "array", "items": { "type": "string" } },
-        "refresh_interval": { "type": "string", "description": "Go duration." },
-        "debounce_interval": { "type": "string", "description": "Go duration." }
+        "algorithms": { "type": "array", "items": { "type": "string", "enum": ["RS256", "ES256"] } },
+        "refresh_interval": { "type": "string", "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"1h\"." },
+        "debounce_interval": { "type": "string", "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"30s\"." }
       },
       "additionalProperties": false
     },
@@ -1875,13 +1876,17 @@
       "type": "object",
       "required": ["issuer_url"],
       "properties": {
-        "issuer_url": { "type": "string" },
+        "issuer_url": { "type": "string", "minLength": 1 },
         "jwks_url": { "type": "string" },
         "expected_audience": { "type": "string" },
         "allowed_projects": { "type": "array", "items": { "type": "string" } },
         "allowed_root_users": { "type": "array", "items": { "type": "string" } },
         "default_scopes": { "type": "array", "items": { "type": "string" } },
-        "issuer_type": { "type": "string" },
+        "issuer_type": {
+          "type": "string",
+          "enum": ["", "hub", "service_account", "user"],
+          "description": "Claims extraction mode. Empty means \"hub\"."
+        },
         "default_role": { "type": "string" },
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
