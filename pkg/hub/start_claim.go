@@ -355,6 +355,10 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, kind st
 	})
 }
 
+// compensatingStoreTimeout bounds each store call of a compensating stop,
+// which runs detached from the triggering request.
+const compensatingStoreTimeout = 15 * time.Second
+
 // compensatingStop stops an agent whose start succeeded after a stop was
 // accepted (run intent stopped, written after the claim was taken): the
 // start may have reached the broker after the stop did. It runs after the
@@ -363,7 +367,9 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, kind st
 // claim), so the stop claim is refused and nothing is stopped.
 func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim store.StartClaim) {
 	bg := context.WithoutCancel(ctx)
-	cur, err := s.store.GetAgent(bg, agent.ID)
+	readCtx, cancelRead := context.WithTimeout(bg, compensatingStoreTimeout)
+	cur, err := s.store.GetAgent(readCtx, agent.ID)
+	cancelRead()
 	if err != nil || cur.RunIntent != store.RunIntentStopped || cur.RunIntentAt == nil || !cur.RunIntentAt.After(claim.At) {
 		return
 	}
@@ -378,7 +384,9 @@ func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim
 		return // a newer start or stop since: nothing to compensate
 	}
 	defer func() {
-		if _, err := s.store.ReleaseAgentStart(bg, agent.ID, stop.ID, s.instanceID); err != nil {
+		releaseCtx, cancelRelease := context.WithTimeout(bg, compensatingStoreTimeout)
+		defer cancelRelease()
+		if _, err := s.store.ReleaseAgentStart(releaseCtx, agent.ID, stop.ID, s.instanceID); err != nil {
 			slog.Warn("Compensating stop: releasing its claim failed; the reaper will settle it", "agent_id", agent.ID, "error", err)
 		}
 	}()
