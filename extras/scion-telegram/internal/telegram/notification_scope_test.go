@@ -37,8 +37,8 @@ func TestCommandHandler_Notifications_FreshCacheForUnreadableProjectIsLeftOut(t 
 	saveTestGroupLink(t, store, -102, "proj-2", "secret", "")
 	ctx := context.Background()
 	for _, pa := range []*ProjectAgents{
-		{ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now()},
-		{ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "hidden-agent"}}, RefreshedAt: time.Now()},
+		{User: principal, ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now()},
+		{User: principal, ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "hidden-agent"}}, RefreshedAt: time.Now()},
 	} {
 		require.NoError(t, store.SaveProjectAgents(ctx, pa))
 	}
@@ -66,7 +66,7 @@ func TestCommandHandler_Notifications_NoReadableProjects(t *testing.T) {
 	h, tgSrv, hub, store := newTestCommandHandler(t)
 	principal := linkTestUser(t, store, 42, "alice@example.com")
 	saveTestGroupLink(t, store, -102, "proj-2", "secret", "")
-	saveStaleAgentCache(t, store, "proj-2", "hidden-agent")
+	saveStaleAgentCache(t, store, principal, "proj-2", "hidden-agent")
 	hub.userProjects = map[string][]ProjectOption{principal: {}}
 
 	h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
@@ -89,6 +89,72 @@ func TestCommandHandler_Notifications_ProjectListFailureIsReported(t *testing.T)
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
 	assert.Equal(t, setupProjectsFailedText, sent[0].Text)
+}
+
+// notificationsText returns the /notifications reply text and button labels.
+func notificationsText(t *testing.T, tgSrv *fakeTGServerV2) string {
+	t.Helper()
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	var labels []string
+	if sent[0].ReplyMarkup != nil {
+		for _, row := range sent[0].ReplyMarkup.InlineKeyboard {
+			for _, btn := range row {
+				labels = append(labels, btn.Text)
+			}
+		}
+	}
+	return sent[0].Text + " " + joinStrings(labels)
+}
+
+func TestCommandHandler_Notifications_CachePerUser(t *testing.T) {
+	cases := map[string]struct {
+		alicesEntryAge time.Duration
+		hubErr         error
+	}{
+		"fresh entry, hub available": {0, nil},
+		"stale entry, hub available": {30 * time.Minute, nil},
+		"fresh entry, hub down":      {0, errors.New("list agents returned status 500")},
+		"stale entry, hub down":      {30 * time.Minute, errors.New("list agents returned status 500")},
+		"fresh entry, bob denied":    {0, forbiddenListAgents()},
+		"stale entry, bob denied":    {30 * time.Minute, forbiddenListAgents()},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h, tgSrv, hub, store := newTestCommandHandler(t)
+			alice := linkTestUser(t, store, 41, "alice@example.com")
+			bob := linkTestUser(t, store, 42, "bob@example.com")
+			saveTestGroupLink(t, store, -101, "proj-1", "alpha", "")
+			saveAgentCache(t, store, alice, "proj-1", time.Now().Add(-tc.alicesEntryAge), "alices-agent")
+			hub.userProjects = map[string][]ProjectOption{bob: {{ID: "proj-1", Slug: "alpha"}}}
+			hub.agents["proj-1"] = []AgentInfo{{Slug: "bobs-agent"}}
+			hub.listAgentsErr = tc.hubErr
+
+			h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+
+			calls := hub.agentCalls()
+			require.Len(t, calls, 1, "bob triggers his own agent list")
+			assert.Equal(t, fakeListAgentsCall{ProjectID: "proj-1", OnBehalfOf: bob}, calls[0])
+			joined := notificationsText(t, tgSrv)
+			assert.NotContains(t, joined, "alices-agent", "alice's cached list is never shown to bob")
+			if tc.hubErr == nil {
+				assert.Contains(t, joined, "bobs-agent")
+			}
+		})
+	}
+}
+
+func TestCommandHandler_Notifications_StaleCacheCoversHubOutageForSameUser(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	alice := linkTestUser(t, store, 42, "alice@example.com")
+	saveTestGroupLink(t, store, -101, "proj-1", "alpha", "")
+	saveStaleAgentCache(t, store, alice, "proj-1", "coder")
+	hub.userProjects = map[string][]ProjectOption{alice: {{ID: "proj-1", Slug: "alpha"}}}
+	hub.listAgentsErr = errors.New("list agents returned status 500")
+
+	h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+
+	assert.Contains(t, notificationsText(t, tgSrv), "coder")
 }
 
 func joinStrings(ss []string) string {
@@ -260,8 +326,8 @@ func setupToggleScope(t *testing.T) (*CallbackHandler, *fakeTGServerV2, *fakeHub
 	saveTestGroupLink(t, store, -102, "proj-2", "secret", "")
 	ctx := context.Background()
 	for _, pa := range []*ProjectAgents{
-		{ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now()},
-		{ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "hidden-agent"}}, RefreshedAt: time.Now()},
+		{User: principal, ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: time.Now()},
+		{User: principal, ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "hidden-agent"}}, RefreshedAt: time.Now()},
 	} {
 		require.NoError(t, store.SaveProjectAgents(ctx, pa))
 	}

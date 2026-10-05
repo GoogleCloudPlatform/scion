@@ -668,6 +668,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -730,6 +731,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -780,6 +782,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -856,6 +859,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -920,6 +924,7 @@ func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -982,6 +987,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -1041,6 +1047,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -1105,6 +1112,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -1165,6 +1173,7 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -2080,6 +2089,7 @@ func TestV2_WebhookMode_InboundMessageDelivery(t *testing.T) {
 		LinkedAt:       time.Now().UTC(),
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2284,6 +2294,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2355,6 +2366,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2732,6 +2744,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2828,6 +2841,7 @@ func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2887,6 +2901,7 @@ func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2946,6 +2961,7 @@ func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3004,6 +3020,7 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3065,6 +3082,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3130,6 +3148,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3359,6 +3378,7 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),

@@ -173,7 +173,7 @@ func TestCommandHandler_Notifications_StaleLinkShowsReregisterText(t *testing.T)
 func TestCommandHandler_Notifications_DeniedProjectNotShownFromCache(t *testing.T) {
 	h, tgSrv, hub, store := newTestCommandHandler(t)
 	saveTestGroupLink(t, store, -100, "proj-1", "my-project", "")
-	saveStaleAgentCache(t, store, "proj-1", "coder")
+	saveStaleAgentCache(t, store, "user:alice@example.com", "proj-1", "coder")
 	linkTestUser(t, store, 42, "alice@example.com")
 	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "my-project"}}
 	hub.listAgentsErr = forbiddenListAgents()

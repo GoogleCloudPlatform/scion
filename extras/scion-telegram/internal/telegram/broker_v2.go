@@ -1902,7 +1902,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Get project agents (with cache refresh as the sender).
+	// Get project agents (cached per user, refreshed as the sender).
 	agents, senderLookup, agentsErr := b.getProjectAgents(ctx, link.ProjectID, tgMsg.From)
 	listUnavailable := func(replyTo string) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
@@ -2103,10 +2103,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// routing back to Telegram.
 	hubSenderID := senderID
 	if senderID != "" {
-		// Reuse the lookup done for the agent-list refresh, if any.
-		if senderLookup == nil {
-			senderLookup = b.lookupSender(ctx, tgMsg.From)
-		}
+		// Reuse the lookup done for the agent list.
 		switch {
 		case errors.Is(senderLookup.err, errSenderLookupFailed):
 			// A lookup failure is not the same as being unlinked.
@@ -2839,8 +2836,8 @@ func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal stri
 
 // --- Agent cache ---
 
-// errSenderNotLinked reports that an agent list could not be fetched because
-// the message sender has no linked Scion account and no cached list exists.
+// errSenderNotLinked reports that the message sender is unknown or has no
+// linked Scion account.
 var errSenderNotLinked = errors.New("sender has no linked Scion account")
 
 // errSenderLinkStale reports that the sender's link mapping has no Scion
@@ -2890,32 +2887,27 @@ func (b *TelegramBrokerV2) lookupSender(ctx context.Context, sender *TGUser) *se
 }
 
 // getProjectAgents returns the agent slugs of a project for routing a
-// message from sender, plus the sender lookup when one was needed (nil
-// otherwise).
+// message from sender, plus the sender lookup.
 //
-// The cache is keyed by project and shared by all senders. Only when it is
-// stale is the sender's link mapping looked up and the list refreshed from
-// the hub as that user. When the plugin cannot act as the sender (not
-// linked, link without email, or lookup failure) the hub is not called and
-// any cached list is used as is. A stale cache also covers a failed refresh,
-// except when the hub denies the sender. A non-nil error means no list is
-// available: errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed
-// when the plugin cannot act as the sender, otherwise the hub error.
+// The sender's link is looked up first and the cache is kept per user and
+// project: the sender is only served a list fetched as themselves. When
+// their entry is stale the list is refreshed from the hub as the sender; a
+// stale entry also covers a failed refresh, except when the hub denies the
+// sender. A non-nil error means no list is available: errSenderNotLinked,
+// errSenderLinkStale or errSenderLookupFailed when the plugin cannot act as
+// the sender (nothing cached is served then), otherwise the hub error.
 func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, sender *TGUser) (slugs []string, link *senderLink, err error) {
-	cached, cacheErr := b.store.GetProjectAgents(ctx, projectID)
+	link = b.lookupSender(ctx, sender)
+	if link.err != nil {
+		return nil, link, link.err
+	}
+
+	cached, cacheErr := b.store.GetProjectAgents(ctx, link.principal, projectID)
 	if cacheErr != nil {
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", cacheErr)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents), nil, nil
-	}
-
-	link = b.lookupSender(ctx, sender)
-	if link.err != nil {
-		if cached != nil {
-			return agentSlugs(cached.Agents), link, nil
-		}
-		return nil, link, link.err
+		return agentSlugs(cached.Agents), link, nil
 	}
 
 	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)
@@ -2931,6 +2923,7 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        link.principal,
 		ProjectID:   projectID,
 		Agents:      agents,
 		RefreshedAt: time.Now(),

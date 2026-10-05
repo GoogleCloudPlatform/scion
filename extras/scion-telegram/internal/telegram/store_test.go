@@ -16,6 +16,7 @@ package telegram
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -301,26 +302,29 @@ func TestStore_ProjectAgents_SaveAndGet(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
+	refreshed := time.Now().UTC().Truncate(time.Second)
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}},
-		RefreshedAt: time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC),
+		RefreshedAt: refreshed,
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
+	assert.Equal(t, "user:alice@example.com", got.User)
 	assert.Equal(t, "proj-1", got.ProjectID)
 	assert.Equal(t, []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}}, got.Agents)
-	assert.Equal(t, 2026, got.RefreshedAt.Year())
+	assert.True(t, refreshed.Equal(got.RefreshedAt))
 }
 
 func TestStore_ProjectAgents_GetNotFound(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	got, err := store.GetProjectAgents(ctx, "nonexistent")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "nonexistent")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -330,17 +334,18 @@ func TestStore_ProjectAgents_Upsert(t *testing.T) {
 	ctx := context.Background()
 
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
-		RefreshedAt: time.Now().UTC(),
+		RefreshedAt: time.Now().UTC().Add(-time.Minute),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
 	pa.Agents = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
-	pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
+	pa.RefreshedAt = time.Now().UTC()
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}, got.Agents)
@@ -351,16 +356,104 @@ func TestStore_ProjectAgents_EmptySlice(t *testing.T) {
 	ctx := context.Background()
 
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{},
 		RefreshedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []AgentInfo{}, got.Agents)
+}
+
+func TestStore_ProjectAgents_PerUser(t *testing.T) {
+	testProjectAgentsPerUser(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
+	testProjectAgentsEviction(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE project_agents (project_id TEXT PRIMARY KEY, agent_slugs TEXT NOT NULL, refreshed_at TEXT NOT NULL);
+INSERT INTO project_agents VALUES ('proj-1', '[{"slug":"coder"}]', '` + time.Now().UTC().Format(time.RFC3339) + `');`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "a list cached per project is not served to any user")
+	testProjectAgentsPerUser(t, store)
+}
+
+// testProjectAgentsPerUser checks that a cached agent list is only returned
+// for the user it was saved for.
+func testProjectAgentsPerUser(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: now,
+	}))
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: now,
+	}))
+
+	alice, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, alice)
+	assert.Equal(t, []AgentInfo{{Slug: "coder"}}, alice.Agents)
+
+	bob, err := store.GetProjectAgents(ctx, "user:bob@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, bob)
+	assert.Equal(t, []AgentInfo{{Slug: "reviewer"}}, bob.Agents)
+
+	carol, err := store.GetProjectAgents(ctx, "user:carol@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, carol)
+
+	none, err := store.GetProjectAgents(ctx, "", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, none, "no list without a user")
+
+	assert.Error(t, store.SaveProjectAgents(ctx, &ProjectAgents{ProjectID: "proj-1", RefreshedAt: now}),
+		"a list cannot be cached without a user")
+}
+
+// testProjectAgentsEviction checks that saving a list evicts entries older
+// than the retention window.
+func testProjectAgentsEviction(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now().Add(-agentCacheRetention - time.Minute),
+	}))
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:alice@example.com", ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now().Add(-agentCacheRetention + time.Minute),
+	}))
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: time.Now(),
+	}))
+
+	expired, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, expired, "an expired entry is evicted")
+	kept, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-2")
+	require.NoError(t, err)
+	assert.NotNil(t, kept, "an entry within retention is kept")
 }
 
 // --- TelegramUserMapping ---

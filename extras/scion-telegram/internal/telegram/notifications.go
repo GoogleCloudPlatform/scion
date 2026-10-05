@@ -123,13 +123,10 @@ func buildNotificationEntries(ctx context.Context, store Store, hub HubClient, l
 // the linked user identified by onBehalfOf. A stale cache is used when the
 // hub is unavailable, but not when the hub denies the request.
 //
-// A fresh cache is returned without a hub call. This relies on the caller
-// having already checked that the user can read the project: under the
-// current roles, reading a project implies being allowed to list its
-// agents. The cache stays keyed by project, not by user, pending a separate
-// product decision on per-user keying.
+// The cache is kept per user and project, so the user is only served a
+// list fetched as themselves.
 func projectAgentsForUser(ctx context.Context, store Store, hub HubClient, log *slog.Logger, projectID, onBehalfOf string) ([]AgentInfo, error) {
-	cached, err := store.GetProjectAgents(ctx, projectID)
+	cached, err := store.GetProjectAgents(ctx, onBehalfOf, projectID)
 	if err != nil {
 		log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
@@ -146,6 +143,7 @@ func projectAgentsForUser(ctx context.Context, store Store, hub HubClient, log *
 	}
 
 	if saveErr := store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        onBehalfOf,
 		ProjectID:   projectID,
 		Agents:      agents,
 		RefreshedAt: time.Now(),
