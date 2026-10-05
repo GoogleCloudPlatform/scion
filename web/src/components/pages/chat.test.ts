@@ -1763,8 +1763,6 @@ describe('chat page — startup after the page is removed', () => {
     ]);
   }
 
-  const FALLBACK_POLL_MS = 60_000;
-
   /**
    * A page that never renders: these tests are about initV2's side effects,
    * and happy-dom mishandles the members element a disconnected page renders
@@ -1780,13 +1778,29 @@ describe('chat page — startup after the page is removed', () => {
     return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
   }
 
-  function fallbackPolls(spy: { mock: { calls: unknown[][] } }): number {
-    return spy.mock.calls.filter(([, ms]) => ms === FALLBACK_POLL_MS).length;
+  type IntervalHandle = ReturnType<typeof setInterval>;
+
+  /**
+   * Spy on setInterval and clearInterval, so a test can tell which intervals
+   * it started and whether each was cleared. Intervals are told apart by
+   * handle, not by delay: the presence heartbeat shares the poll's delay.
+   */
+  function trackIntervals(): { live: () => IntervalHandle[] } {
+    const setSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    return {
+      live: () => {
+        const cleared = new Set(clearSpy.mock.calls.map(([h]) => h));
+        return setSpy.mock.results
+          .map((r) => r.value as IntervalHandle)
+          .filter((h) => !cleared.has(h));
+      },
+    };
   }
 
   it('a page removed before its lazy imports resolve loads nothing and starts no poll', async () => {
     vi.mocked(apiFetch).mockClear();
-    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
     window.history.replaceState({}, '', '/chat');
@@ -1797,27 +1811,35 @@ describe('chat page — startup after the page is removed', () => {
     await flush();
 
     expect(dmListLoads()).toBe(0);
-    expect(fallbackPolls(setIntervalSpy)).toBe(0);
+    expect(el._fallbackPollInterval).toBeNull();
+    expect(intervals.live()).toEqual([]);
     expect(el.v2SpaceRailLoaded).toBe(false);
   });
 
   it('a page removed and connected again before its imports resolve initialises once', async () => {
     vi.mocked(apiFetch).mockClear();
-    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
     window.history.replaceState({}, '', '/chat');
-    document.body.appendChild(el);
-    el.remove();
-    document.body.appendChild(el);
+    try {
+      document.body.appendChild(el);
+      el.remove();
+      document.body.appendChild(el);
 
-    await flush();
+      await flush();
 
-    expect(el.v2SpaceRailLoaded).toBe(true);
-    expect(dmListLoads()).toBe(1);
-    // One poll, owned by the connected page; the first initV2 started none
-    // that its disconnect could no longer clear.
-    expect(fallbackPolls(setIntervalSpy)).toBe(1);
-    el.remove();
+      expect(el.v2SpaceRailLoaded).toBe(true);
+      expect(dmListLoads()).toBe(1);
+      // Exactly one live interval, and it is the connected page's poll: the
+      // first initV2 started nothing its disconnect could no longer clear.
+      expect(el._fallbackPollInterval).not.toBeNull();
+      expect(intervals.live()).toEqual([el._fallbackPollInterval]);
+
+      el.remove();
+      expect(intervals.live()).toEqual([]);
+    } finally {
+      el.remove();
+    }
   });
 });

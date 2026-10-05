@@ -444,7 +444,10 @@ export class ScionPageChat extends LitElement {
   /**
    * Bumped by each `initV2` and by `disconnectedCallback`. An `initV2`
    * resuming after its lazy imports goes on only if it is still the latest
-   * and the page is still connected.
+   * and the page is still connected. The disconnect bump and the
+   * `isConnected` check overlap on purpose: either alone stops a removed
+   * page, and the generation alone stops a superseded `initV2` after a
+   * reconnect.
    */
   private _initV2Generation = 0;
   /**
@@ -1490,10 +1493,8 @@ export class ScionPageChat extends LitElement {
     const generation = ++this._initV2Generation;
     // Lazy-load the space rail and members components
     await Promise.all([loadSpaceRail(), loadChatMembers()]);
-    // Removed while the imports were in flight (the router replaced the
-    // page), or removed and connected again, which started its own initV2:
-    // disconnectedCallback has already run its cleanup, so subscribing,
-    // polling or loading now would leak on a page nothing uses.
+    // Removed (or removed and re-connected) while the imports were in
+    // flight; disconnectedCallback already cleaned up.
     if (!this.isConnected || generation !== this._initV2Generation) return;
     this.v2SpaceRailLoaded = true;
 
