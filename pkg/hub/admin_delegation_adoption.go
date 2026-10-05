@@ -101,7 +101,11 @@ func (s *Server) authorizeDelegationAdoption(w http.ResponseWriter, r *http.Requ
 	if _, federated := user.(FederatedIdentity); federated {
 		return deny("federated identity")
 	}
-	kind := initiatorCredentialKindFor(identity, credential.Kind)
+	kindFor := initiatorCredentialKindFor
+	if s.delegationAdoptionInitiatorKindHook != nil {
+		kindFor = s.delegationAdoptionInitiatorKindHook
+	}
+	kind := kindFor(identity, credential.Kind)
 	switch kind {
 	case store.InitiatorCredentialKindSession:
 	case store.InitiatorCredentialKindDevLocal:
@@ -531,10 +535,15 @@ func (s *Server) handleDelegationAdoptionCommits(w http.ResponseWriter, r *http.
 			badPlan = "the plan contains records that cannot be reverted"
 			return errAdoptionStalePlan
 		}
+		// hops counts the edges written; on a revert, covered_records counts
+		// the additional records marked reverted with those edges.
+		var hops int
 		if plan.revert != nil {
 			written, err = s.commitAdoptionRevert(ctx, tx, plan.revert, actor, requestID)
+			hops = len(plan.revert.Hops)
 		} else {
 			written, err = s.commitAdoption(ctx, tx, plan.adopt, planID, actor, requestID)
+			hops = len(written)
 		}
 		if err != nil {
 			return err
@@ -545,7 +554,7 @@ func (s *Server) handleDelegationAdoptionCommits(w http.ResponseWriter, r *http.
 			ActorPrincipalID:   actor.UserID,
 			TargetType:         "delegation_adoption_plan",
 			TargetID:           planID,
-			AfterSummary:       fmt.Sprintf(`{"operation":%q,"plan_fingerprint":%q,"hops":%d,"policy_version":%d}`, req.Operation, req.PlanFingerprint, len(written), delegationadoption.PolicyVersion),
+			AfterSummary:       fmt.Sprintf(`{"operation":%q,"plan_fingerprint":%q,"hops":%d,"covered_records":%d,"policy_version":%d}`, req.Operation, req.PlanFingerprint, hops, len(written)-hops, delegationadoption.PolicyVersion),
 			CorrelationID:      requestID,
 		}
 		return s.writeAdoptionAudit(ctx, tx, summary)
@@ -654,7 +663,11 @@ func (s *Server) commitAdoptionRevert(ctx context.Context, tx store.Store, plan 
 		now := time.Now().UTC()
 		for _, rec := range h.Records() {
 			rec.Status = store.DelegationAdoptionReverted
-			rec.OriginalEdgeID = h.OriginalEdgeID
+			// The planner refuses a hop whose covered records name a
+			// different original edge, so only an empty value is filled.
+			if rec.OriginalEdgeID == "" {
+				rec.OriginalEdgeID = h.OriginalEdgeID
+			}
 			rec.RevertedByKind = store.DelegationPrincipalUser
 			rec.RevertedByID = actor.UserID
 			rec.RevertSummary = res.AfterSummary

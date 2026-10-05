@@ -183,6 +183,16 @@ func BuildRevert(ctx context.Context, r RevertReader, recordIDs []string, confir
 				h.cover(sib)
 			}
 		}
+		// The commit records the hop's original edge on every covered
+		// record. A covered record that names a different original edge
+		// refuses the hop instead of being rewritten.
+		for _, c := range h.covered {
+			if c.OriginalEdgeID != "" && c.OriginalEdgeID != h.OriginalEdgeID {
+				h.Outcome = RevertOutcomeRefused
+				h.Reason = ReasonCoveredOriginalDiffers
+				break
+			}
+		}
 	}
 	for _, h := range plan.Hops {
 		h.Fingerprint = revertFingerprint(h)

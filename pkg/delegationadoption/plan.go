@@ -95,6 +95,9 @@ const (
 	ReasonOriginalChanged    Reason = "original_changed"
 	ReasonAdoptedEdgeChanged Reason = "adopted_edge_changed"
 	ReasonRecordMissing      Reason = "record_missing"
+	// ReasonCoveredOriginalDiffers: a record covered by a revert hop names
+	// a different original edge than the hop it is reverted with.
+	ReasonCoveredOriginalDiffers Reason = "covered_original_differs"
 )
 
 // Outcome is the planned treatment of one hop.

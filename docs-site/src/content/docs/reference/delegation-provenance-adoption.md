@@ -215,7 +215,9 @@ kept.
 Each written hop gets a `delegation_adoptions` record (origin `admin_commit`)
 and a mutation audit record (`delegation_provenance_adoption` or
 `delegation_provenance_adoption_revert`) with before and after summaries.
-One `delegation_provenance_adoption_commit` record summarizes the commit.
+One `delegation_provenance_adoption_commit` record summarizes the commit:
+`hops` counts the edges written and, on a revert, `covered_records` counts
+the additional records marked `reverted` with those edges.
 Adopted edges from a commit record the admin as initiator.
 
 ## Reverting
@@ -227,7 +229,9 @@ Adopting again needs a new preview and commit.
 An edge is reverted once. When several records point at the same adopted
 edge (for example an admin commit and a later boot record that recognized
 it), the revert of that edge covers all of them: the preview lists the others
-under `coveredRecordIds`, and the commit marks them all `reverted`.
+under `coveredRecordIds`, and the commit marks them all `reverted`. A
+covered record that names a different original edge than the hop refuses
+the hop (reason `covered_original_differs`).
 
 Revoking access does not need a revert: deactivating an adopted ancestor's
 edge, deleting the ancestor, or suspending the root user denies descendants

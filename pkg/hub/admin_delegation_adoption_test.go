@@ -303,7 +303,7 @@ func TestDelegationAdoptionCommitWritesBeforeAfterAudit(t *testing.T) {
 	summary := f.adoptionAudits(t, mutationTypeDelegationAdoptionCommit)
 	require.Len(t, summary, 1)
 	assert.Equal(t, p.PlanID, summary[0].TargetID)
-	assert.Contains(t, summary[0].AfterSummary, `"hops":1`)
+	assert.Contains(t, summary[0].AfterSummary, `"hops":1,"covered_records":0`)
 }
 
 func (f *legacyFixture) recordFor(t *testing.T, agentID string) *store.DelegationAdoption {
@@ -484,6 +484,10 @@ func TestDelegationAdoptionRequiresInteractiveOrDevCredential(t *testing.T) {
 		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"hub.health.read"}})
 	federated := NewFederatedUserIdentity("https://issuer.adopt.test", "sub", admin.Email, "Fed", "admin", nil)
 	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.legacy.ID}, ProjectID: f.proj.ID}}
+	// A federated identity whose own ID holds the system super-admin
+	// binding, so only the federated-identity check refuses it.
+	federatedAdmin := &bindableFederatedAdmin{UserIdentity: adminUser, issuerURL: "https://issuer.adopt.test"}
+	require.True(t, f.srv.authzService.IsSystemAdmin(context.Background(), federatedAdmin.ID()))
 
 	cred := func(c CredentialContext) *CredentialContext { return &c }
 	denied := []struct {
@@ -502,6 +506,8 @@ func TestDelegationAdoptionRequiresInteractiveOrDevCredential(t *testing.T) {
 		{"unknown credential kind", adminUser, cred(CredentialContext{Kind: "something_else"})},
 		{"missing credential context", adminUser, nil},
 		{"dev credential on an admin session identity", adminUser, cred(CredentialContext{Kind: CredentialKindDev})},
+		{"user access token of an admin with an interactive kind", uat, cred(CredentialContext{Kind: CredentialKindInteractive})},
+		{"federated system admin with an interactive kind", federatedAdmin, cred(CredentialContext{Kind: CredentialKindInteractive})},
 	}
 
 	body := adoptBody(f.legacy.ID)
@@ -782,4 +788,152 @@ func TestDelegationAdoptionRevertCoversRecordsOnTheSameEdge(t *testing.T) {
 	require.Len(t, e, 1)
 	assert.Equal(t, original.ID, e[0].ID)
 	assert.Len(t, f.adoptionAudits(t, mutationTypeDelegationAdoptionRevert), 1, "the edge is reverted once")
+	var revertSummary *store.MutationAuditRecord
+	for _, a := range f.adoptionAudits(t, mutationTypeDelegationAdoptionCommit) {
+		if strings.Contains(a.AfterSummary, `"operation":"revert"`) {
+			revertSummary = a
+		}
+	}
+	require.NotNil(t, revertSummary)
+	assert.Contains(t, revertSummary.AfterSummary, `"hops":1,"covered_records":1`, "one edge, plus one covered record")
+}
+
+// adoptionStatusRequest calls the adoption status handler directly with the
+// given identity and credential context. A nil credential leaves the context
+// without a credential context.
+func adoptionStatusRequest(h http.HandlerFunc, identity Identity, credential *CredentialContext) *httptest.ResponseRecorder {
+	ctx := contextWithIdentity(context.Background(), identity)
+	if credential != nil {
+		ctx = contextWithCredentialContext(ctx, *credential)
+	}
+	req := httptest.NewRequest(http.MethodGet, delegationAdoptionPath, nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	h(w, req)
+	return w
+}
+
+// The request credential kind is checked on its own: with the recorded-kind
+// mapping replaced by one that admits every request, an admin under a
+// credential kind other than interactive or dev is refused on status,
+// preview and commit.
+func TestDelegationAdoptionRequestCredentialKindIsCheckedOnItsOwn(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-reqkind")
+	admin := adoptionAdmin(t, f.store, "adopt-reqkind-admin")
+	adminUser := authUser(admin)
+	body := adoptBody(f.legacy.ID)
+	p := f.adoptionPreview(t, admin, body)
+	commitBody := withFingerprint(body, p)
+
+	mapped := 0
+	f.srv.delegationAdoptionInitiatorKindHook = func(Identity, CredentialKind) string {
+		mapped++
+		return store.InitiatorCredentialKindSession
+	}
+
+	cred := func(c CredentialContext) *CredentialContext { return &c }
+	denied := []struct {
+		name       string
+		credential *CredentialContext
+	}{
+		{"broker credential", cred(CredentialContext{Kind: CredentialKindBroker, ID: "broker-1", Type: "broker"})},
+		{"user access token kind", cred(CredentialContext{Kind: CredentialKindUAT})},
+		{"agent credential kind", cred(CredentialContext{Kind: CredentialKindAgentJWT})},
+		{"federation credential kind", cred(CredentialContext{Kind: CredentialKindFederation})},
+		{"hub delivery credential", cred(CredentialContext{Kind: CredentialKindHubDelivery})},
+		{"unknown credential kind", cred(CredentialContext{Kind: "something_else"})},
+		{"missing credential context", nil},
+	}
+	for _, tc := range denied {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := adoptionStatusRequest(f.srv.handleDelegationAdoption, adminUser, tc.credential)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "status: %s", rec.Body.String())
+			rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", adminUser, tc.credential, body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "preview: %s", rec.Body.String())
+			rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", adminUser, tc.credential, commitBody)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "commit: %s", rec.Body.String())
+		})
+	}
+	assert.Zero(t, mapped, "a refused request kind is not mapped")
+	assert.Empty(t, f.adoptionRecords(t), "no denied request writes")
+
+	// The replaced mapping is in effect: an interactive admin is admitted
+	// through it.
+	rec := adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", adminUser,
+		cred(CredentialContext{Kind: CredentialKindInteractive}), body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, mapped)
+}
+
+// The status view shares the adoption credential rule: a broker request
+// carrying an admin user is refused, and an interactive admin is admitted.
+func TestDelegationAdoptionStatusRequiresInteractiveOrDevCredential(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-statuscred")
+	admin := adoptionAdmin(t, f.store, "adopt-statuscred-admin")
+	adminUser := authUser(admin)
+
+	rec := adoptionStatusRequest(f.srv.handleDelegationAdoption, adminUser,
+		&CredentialContext{Kind: CredentialKindBroker, ID: "broker-1", Type: "broker"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "snapshotTaken")
+
+	rec = adoptionStatusRequest(f.srv.handleDelegationAdoption, adminUser,
+		&CredentialContext{Kind: CredentialKindInteractive, Type: adminUser.Type()})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var status delegationAdoptionStatusResponse
+	decodeJSONBody(t, rec, &status)
+	assert.NotNil(t, status.Counts)
+}
+
+// A revert hop whose covered record names a different original edge is
+// refused: the preview reports the refusal, the commit returns 422, and no
+// record or edge changes.
+func TestDelegationAdoptionRevertRefusesCoveredRecordWithOtherOriginal(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-covorig")
+	admin := adoptionAdmin(t, f.store, "adopt-covorig-admin")
+	body := adoptBody(f.legacy.ID)
+	p := f.adoptionPreview(t, admin, body)
+	require.Equal(t, http.StatusOK, f.adoptionCommit(t, admin, withFingerprint(body, p)).Code)
+	runBootAdoption(t, f.store)
+
+	var adopted, recognized *store.DelegationAdoption
+	for _, r := range f.legacyRecords(t) {
+		switch r.Status {
+		case store.DelegationAdoptionAdopted:
+			adopted = r
+		case store.DelegationAdoptionRecognized:
+			recognized = r
+		}
+	}
+	require.NotNil(t, adopted)
+	require.NotNil(t, recognized)
+	require.NotEmpty(t, adopted.OriginalEdgeID)
+	require.Equal(t, adopted.AdoptedEdgeID, recognized.AdoptedEdgeID)
+
+	// The recognized record names another original edge.
+	otherID := "edge-not-the-original"
+	require.NotEqual(t, adopted.OriginalEdgeID, otherID)
+	recognized.OriginalEdgeID = otherID
+	require.NoError(t, f.store.UpdateDelegationAdoption(context.Background(), recognized))
+	adoptedEdge := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+
+	rbody := map[string]interface{}{"operation": "revert", "recordIds": []string{adopted.ID}}
+	rp := f.adoptionPreview(t, admin, rbody)
+	require.Len(t, rp.Reverts, 1)
+	assert.Equal(t, 1, rp.Refused)
+	assert.Equal(t, delegationadoption.RevertOutcomeRefused, rp.Reverts[0].Outcome)
+	assert.Equal(t, delegationadoption.ReasonCoveredOriginalDiffers, rp.Reverts[0].Reason)
+	assert.Equal(t, []string{recognized.ID}, rp.Reverts[0].CoveredRecordIDs)
+
+	resp := f.adoptionCommit(t, admin, withFingerprint(rbody, rp))
+	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
+	for _, r := range f.legacyRecords(t) {
+		assert.NotEqual(t, store.DelegationAdoptionReverted, r.Status, r.ID)
+		if r.ID == recognized.ID {
+			assert.Equal(t, otherID, r.OriginalEdgeID, "the covered record keeps its original edge")
+		}
+	}
+	e := activeEdgesFor(t, f.store, f.legacy.ID)
+	require.Len(t, e, 1)
+	assert.Equal(t, adoptedEdge.ID, e[0].ID)
+	assert.Empty(t, f.adoptionAudits(t, mutationTypeDelegationAdoptionRevert))
 }

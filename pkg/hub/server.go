@@ -1095,6 +1095,11 @@ type Server struct {
 	// delegation-adoption commit inside the transaction; an error fails the
 	// commit. Tests use it to inject a write failure.
 	delegationAdoptionHopHook func(i int) error
+	// delegationAdoptionInitiatorKindHook, when set, replaces the mapping
+	// from a request's identity and credential kind to the recorded
+	// initiator credential kind in the delegation-adoption admin gate.
+	// Tests use it to check the request credential kind on its own.
+	delegationAdoptionInitiatorKindHook func(identity Identity, kind CredentialKind) string
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
 	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
