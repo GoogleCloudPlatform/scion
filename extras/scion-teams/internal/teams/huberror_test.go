@@ -184,3 +184,98 @@ func TestCallbackHandler_AskResponse_HubDenialShowsActionableText(t *testing.T) 
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "no longer active")
 }
+
+func TestUserFacingHubError_WithoutEmailOmitsAccount(t *testing.T) {
+	for _, body := range []string{forbiddenListAgentsBody, messageDeniedBody} {
+		got, ok := userFacingHubError(hubErr(403, body), "", "web-app")
+		assert.True(t, ok)
+		assert.NotContains(t, got, "()")
+		assert.True(t, strings.HasPrefix(got, "Your Scion account doesn't have permission to "), got)
+	}
+}
+
+func TestActionPhrase_Pluralizes(t *testing.T) {
+	assert.Equal(t, "list agents", actionPhrase("list", "agent"))
+	assert.Equal(t, "view policies", actionPhrase("read", "policy"))
+	assert.Equal(t, "update keys", actionPhrase("update", "key"))
+	assert.Equal(t, "delete secrets", actionPhrase("delete", "secrets"))
+	assert.Equal(t, "create gateway routes", actionPhrase("create", "gateway_route"))
+	assert.Equal(t, "manage", actionPhrase("manage", ""))
+}
+
+func TestBroker_HandleMessage_AgentNotFoundShowsAgentsHint(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"agent_not_found","message":"Agent \"dev-1\" not found in project"}}`))
+	})
+	linkTestUser(t, broker)
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.Error(t, err)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, "Agent **dev-1** was not found in **test-project**. Use `agents` to see available agents.", ms.sent[0].Text)
+}
+
+// linkWithoutEmail stores a link mapping for testActivity's sender that has
+// no Scion email.
+func linkWithoutEmail(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	require.NoError(t, broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID: "aad-user-1",
+		ScionUserID: "scion-1",
+		LinkedAt:    time.Now(),
+	}))
+}
+
+func TestLinkWithoutEmail_ShowsStaleLinkText(t *testing.T) {
+	t.Run("command", func(t *testing.T) {
+		hubCalled := false
+		broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) { hubCalled = true })
+		linkWithoutEmail(t, broker)
+		linkTestChannel(t, broker)
+
+		handled, err := broker.commandHandler.Handle(context.Background(), testActivity("agents"))
+		assert.True(t, handled)
+		assert.NoError(t, err)
+		assert.False(t, hubCalled)
+		require.Len(t, ms.sent, 1)
+		assert.Equal(t, staleLinkText, ms.sent[0].Text)
+	})
+	t.Run("inbound message", func(t *testing.T) {
+		hubCalled := false
+		broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) { hubCalled = true })
+		linkWithoutEmail(t, broker)
+		linkDefaultAgentChannel(t, broker)
+
+		require.NoError(t, broker.handleMessage(context.Background(), testActivity("Please take a look")))
+		assert.False(t, hubCalled)
+		require.Len(t, ms.sent, 1)
+		assert.Equal(t, staleLinkText, ms.sent[0].Text)
+	})
+}
+
+func TestSaveConfirmedLink_WithoutEmailIsNotStored(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+
+	broker.commandHandler.saveConfirmedLink(context.Background(), testActivity("register"), "aad-user-1", "scion-1", "")
+
+	mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
+	require.NoError(t, err)
+	assert.Nil(t, mapping)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "no email address")
+}
+
+func TestSaveConfirmedLink_StoresMapping(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+
+	broker.commandHandler.saveConfirmedLink(context.Background(), testActivity("register"), "aad-user-1", "scion-1", "user@example.com")
+
+	mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
+	require.NoError(t, err)
+	require.NotNil(t, mapping)
+	assert.Equal(t, "user@example.com", mapping.ScionEmail)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "Linked!")
+}

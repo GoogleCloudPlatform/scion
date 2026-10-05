@@ -837,7 +837,7 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		)
 		// The webhook has already acknowledged this activity, so report the
 		// failure in the conversation.
-		b.replyText(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, inboundDeliveryFailureText(agentSlug)))
+		b.replyText(ctx, activity, inboundFailureText(err, mapping, link.ProjectSlug, agentSlug))
 		return fmt.Errorf("deliver to hub: %w", err)
 	}
 
@@ -860,8 +860,8 @@ func inboundDeliveryFailureText(agentSlug string) string {
 const linkCheckFailedText = "Couldn't check your account link. Please try again."
 
 // linkedUserByTeamsID returns the Scion account linked to teamsUserID. It
-// returns (nil, nil) when there is no usable link and an error when the link
-// could not be read.
+// returns (nil, nil) when there is no link and an error when the link could
+// not be read. Use linkProblem to check that the mapping is usable.
 func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string) (*TeamsUserMapping, error) {
 	if store == nil || teamsUserID == "" {
 		return nil, nil
@@ -869,9 +869,6 @@ func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string) (
 	mapping, err := store.GetUserMapping(ctx, teamsUserID)
 	if err != nil {
 		return nil, err
-	}
-	if mapping == nil || mapping.ScionEmail == "" {
-		return nil, nil
 	}
 	return mapping, nil
 }
@@ -885,6 +882,8 @@ func linkProblem(mapping *TeamsUserMapping, err error, unlinkedText string) stri
 		return linkCheckFailedText
 	case mapping == nil:
 		return unlinkedText
+	case mapping.ScionEmail == "":
+		return staleLinkText
 	}
 	return ""
 }

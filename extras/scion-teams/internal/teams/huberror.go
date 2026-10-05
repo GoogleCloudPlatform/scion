@@ -85,11 +85,7 @@ func userFacingHubError(err error, email, project string) (string, bool) {
 			return staleLinkText, true
 		}
 	}
-	if project == "" {
-		project = "this hub"
-	} else {
-		project = "**" + project + "**"
-	}
+	project = projectLabel(project)
 	switch he.Code {
 	case "forbidden":
 		action, _ := he.Details["denied_action"].(string)
@@ -105,7 +101,29 @@ func userFacingHubError(err error, email, project string) (string, bool) {
 }
 
 func permissionDeniedText(email, action, project string) string {
-	return fmt.Sprintf("Your Scion account (%s) doesn't have permission to %s in %s. Ask a project owner.", email, action, project)
+	account := "Your Scion account"
+	if email != "" {
+		account += " (" + email + ")"
+	}
+	return fmt.Sprintf("%s doesn't have permission to %s in %s. Ask a project owner.", account, action, project)
+}
+
+// projectLabel formats a project slug for a reply, or "this hub" when empty.
+func projectLabel(project string) string {
+	if project == "" {
+		return "this hub"
+	}
+	return "**" + project + "**"
+}
+
+// inboundFailureText returns the reply for a failed inbound delivery to
+// agentSlug in project.
+func inboundFailureText(err error, mapping *TeamsUserMapping, project, agentSlug string) string {
+	var he *HubError
+	if errors.As(err, &he) && he.StatusCode == http.StatusNotFound && he.Code == "agent_not_found" {
+		return fmt.Sprintf("Agent **%s** was not found in %s. Use `agents` to see available agents.", agentSlug, projectLabel(project))
+	}
+	return hubErrorText(err, mapping, project, inboundDeliveryFailureText(agentSlug))
 }
 
 // actionPhrase turns a denied action and resource type into readable text,
@@ -123,11 +141,19 @@ func actionPhrase(action, resourceType string) string {
 	if resourceType == "" {
 		return verb
 	}
-	noun := strings.ReplaceAll(resourceType, "_", " ")
-	if !strings.HasSuffix(noun, "s") {
-		noun += "s"
+	return verb + " " + pluralize(strings.ReplaceAll(resourceType, "_", " "))
+}
+
+// pluralize returns the plural of a resource noun, e.g. "agent" -> "agents",
+// "policy" -> "policies".
+func pluralize(noun string) string {
+	switch {
+	case strings.HasSuffix(noun, "s"):
+		return noun
+	case len(noun) > 1 && strings.HasSuffix(noun, "y") && !strings.ContainsAny(noun[len(noun)-2:len(noun)-1], "aeiou"):
+		return noun[:len(noun)-1] + "ies"
 	}
-	return verb + " " + noun
+	return noun + "s"
 }
 
 // hubErrorText returns actionable text for err when it is a permission or

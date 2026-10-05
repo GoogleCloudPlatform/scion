@@ -689,26 +689,7 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 			}
 
 			if status == "confirmed" && userID != "" {
-				// Save user mapping.
-				store := h.getStore()
-
-				if store != nil {
-					mapping := &TeamsUserMapping{
-						TeamsUserID:      teamsUserID,
-						TeamsDisplayName: activity.From.Name,
-						ScionUserID:      userID,
-						ScionEmail:       email,
-						LinkedAt:         time.Now(),
-					}
-					if err := store.CreateUserMapping(ctx, mapping); err != nil {
-						h.log.Error("Failed to save user mapping", "error", err)
-					}
-				}
-
-				// Send confirmation reply.
-				replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))
-				replyCancel()
+				h.saveConfirmedLink(ctx, activity, teamsUserID, userID, email)
 
 				// Clean up pending link.
 				h.pendingMu.Lock()
@@ -720,6 +701,35 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 			}
 		}
 	}
+}
+
+// saveConfirmedLink stores the confirmed link and tells the user. A link
+// without a Scion email is not stored, because requests are made as
+// "user:<email>".
+func (h *CommandHandler) saveConfirmedLink(ctx context.Context, activity *Activity, teamsUserID, userID, email string) {
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer replyCancel()
+
+	if email == "" {
+		h.log.Error("Confirmed link has no Scion email, not saving", "teams_user_id", teamsUserID, "user_id", userID)
+		_ = h.sendReply(replyCtx, activity, "Couldn't finish linking: your Scion account has no email address. Please run `register` again, or ask a hub admin for help.")
+		return
+	}
+
+	if store := h.getStore(); store != nil {
+		mapping := &TeamsUserMapping{
+			TeamsUserID:      teamsUserID,
+			TeamsDisplayName: activity.From.Name,
+			ScionUserID:      userID,
+			ScionEmail:       email,
+			LinkedAt:         time.Now(),
+		}
+		if err := store.CreateUserMapping(ctx, mapping); err != nil {
+			h.log.Error("Failed to save user mapping", "error", err)
+		}
+	}
+
+	_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))
 }
 
 // handleUnregister removes the user's Teams-to-Scion identity link.
