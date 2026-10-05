@@ -41,6 +41,7 @@ func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_ADMIN_EMAILS":      "SCION_SEED_SERVER_HUB_ADMINEMAILS",
 		"SCION_SERVER_HUB_READ_TIMEOUT":           "SCION_SERVER_HUB_READTIMEOUT",
 		"SCION_SEED_SERVER_HUB_STALLED_THRESHOLD": "SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD",
+		"SCION_SEED_IMAGE_REGISTRY":               "SCION_SEED_IMAGEREGISTRY",
 		// Former schema names.
 		"SCION_SERVER_BROKER_PORT":           "SCION_SERVER_RUNTIMEBROKER_PORT",
 		"SCION_SERVER_BROKER_BROKERID":       "SCION_SERVER_BROKER_BROKER_ID",
@@ -86,6 +87,10 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
 		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
 		"SCION_SERVER_LOG_FORMAT",
+		// No SEED spelling maps to auto_expose_ports.enabled (no snake-case
+		// mapping for autoexposeports); seed it from settings.yaml.
+		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",
+		"SCION_SEED_SERVER_HUB_IMAGEREGISTRY", // image_registry is top-level
 	}
 	var environ []string
 	for _, n := range names {
@@ -117,6 +122,7 @@ func TestFindUnmatchedSettingsEnv_AcceptsValidNames(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_ADMINEMAILS=x",
 		"SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=x",
 		"SCION_SEED_TELEMETRY_ENABLED=x",
+		"SCION_SEED_IMAGEREGISTRY=x",
 		// Unrelated prefixes are ignored entirely.
 		"SCION_PROJECT=x",
 		"HOME=/tmp",
@@ -172,5 +178,18 @@ func TestFindUnmatchedSettingsEnv_CORSHintsBind(t *testing.T) {
 				t.Errorf("CORSMaxAge hub=%d broker=%d, want 4243/4244", gc.Hub.CORSMaxAge, gc.RuntimeBroker.CORSMaxAge)
 			}
 		})
+	}
+}
+
+// TestSeedImageRegistry_ReachesBootstrap checks the documented seed name for
+// image_registry (reference/admin-settings.md) lands on the registry key.
+func TestSeedImageRegistry_ReachesBootstrap(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SEED_IMAGEREGISTRY", "registry.example.com/scion")
+	if got := config.LoadBootstrapKoanf().String("image_registry"); got != "registry.example.com/scion" {
+		t.Errorf("bootstrap image_registry = %q, want registry.example.com/scion", got)
+	}
+	if !IsLayer1Key("image_registry") {
+		t.Error("image_registry is not a Layer-1 key")
 	}
 }

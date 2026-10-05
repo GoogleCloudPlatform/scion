@@ -267,7 +267,8 @@ func seedEnvMatches(name string, isLayer1 func(string) bool) bool {
 // suggestEnvName proposes a matching spelling for an unmatched name: first
 // with the BROKER segment replaced by RUNTIMEBROKER (SCION_SERVER_ only),
 // then with the trailing segments collapsed into one (HUB_ADMIN_EMAILS ->
-// HUB_ADMINEMAILS), trying the shortest collapse first.
+// HUB_ADMINEMAILS, IMAGE_REGISTRY -> IMAGEREGISTRY), trying the shortest
+// collapse first.
 func suggestEnvName(name, prefix string, matches func(string) bool) string {
 	rest := strings.TrimPrefix(name, prefix)
 	bases := []string{rest}
@@ -276,8 +277,11 @@ func suggestEnvName(name, prefix string, matches func(string) bool) string {
 	}
 	for _, base := range bases {
 		segs := strings.Split(base, "_")
-		for i := len(segs) - 1; i >= 1; i-- {
-			cand := strings.Join(segs[:i], "_") + "_" + strings.Join(segs[i:], "")
+		for i := len(segs) - 1; i >= 0; i-- {
+			cand := strings.Join(segs[i:], "")
+			if i > 0 {
+				cand = strings.Join(segs[:i], "_") + "_" + cand
+			}
 			if cand == rest {
 				continue
 			}
