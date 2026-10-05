@@ -40,8 +40,36 @@ func (p ProjectOption) DisplayName() string {
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	// ListProjectsForUser lists the projects of the Scion user with the
+	// given ID. linkedUser ("user:<email>") is the Slack user's linked Scion
+	// account, sent with the request.
+	ListProjectsForUser(ctx context.Context, ownerID, linkedUser string) ([]ProjectOption, error)
+	// ListAgents lists the agents of a project. linkedUser ("user:<email>")
+	// is the Slack user's linked Scion account, sent with the request; the
+	// hub denies a project agent list without it.
+	ListAgents(ctx context.Context, projectID, linkedUser string) ([]AgentInfo, error)
+}
+
+// headerOnBehalfOf names the linked Scion user a request is made for.
+const headerOnBehalfOf = "X-Scion-On-Behalf-Of"
+
+// linkedUserPrincipal returns the "user:<email>" value for a Slack user's
+// linked Scion account, or "" when the mapping has no email.
+func linkedUserPrincipal(m *SlackUserMapping) string {
+	if m == nil || m.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + m.ScionEmail
+}
+
+// setLinkedUser adds the linked user to a hub request. It must be called
+// before the request is signed.
+func setLinkedUser(req *http.Request, linkedUser string) {
+	if linkedUser == "" {
+		return
+	}
+	req.Header.Set(headerOnBehalfOf, linkedUser)
+	req.Header.Set(apiclient.HeaderSignedHeaders, "x-scion-on-behalf-of")
 }
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
@@ -151,13 +179,14 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID, linkedUser string) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setLinkedUser(req, linkedUser)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -185,13 +214,14 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, linkedUser string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setLinkedUser(req, linkedUser)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)

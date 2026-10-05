@@ -864,7 +864,8 @@ func (b *SlackBroker) getProjectAgents(ctx context.Context, projectID string) []
 		return nil
 	}
 
-	agents, err := hubClient.ListAgents(ctx, projectID)
+	// Not tied to a Slack user: request without the linked user.
+	agents, err := hubClient.ListAgents(ctx, projectID, "")
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
