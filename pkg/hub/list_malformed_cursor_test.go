@@ -35,12 +35,14 @@ import (
 )
 
 // TestPaginatedLists_MalformedCursorReturns400 sends a malformed ?cursor to
-// every paginated hub list endpoint backed by an entadapter cursor decoder
-// (decodeListCursor, decodeCursor, or a UUID cursor) and asserts 400, never
-// 500 (ptone/scion#1957). Some endpoints validate or unseal the cursor before
-// the store sees it; others (runtime brokers, skills, messages, schedules)
-// hand it straight to the store, which is where the decoders'
-// store.ErrInvalidInput wrapping matters.
+// every hub list endpoint whose cursor reaches an entadapter cursor decoder
+// (decodeListCursor, decodeCursor, or a UUID ID cursor) and asserts 400,
+// never 500 (ptone/scion#1957). Some endpoints validate or unseal the cursor
+// before the store sees it; others (runtime brokers, skills, messages,
+// schedules, admin invites) hand it straight to the store, which is where the
+// decoders' store.ErrInvalidInput wrapping matters. Endpoints backed by
+// ListUsers (users, admin allow-list) are not listed: its numeric offset
+// cursor ignores unparseable input by design.
 func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -101,6 +103,7 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		"schedules":             {path: "/api/v1/projects/" + projectID + "/schedules"},
 		// UUID cursor.
 		"scheduled events": {path: "/api/v1/projects/" + projectID + "/scheduled-events"},
+		"admin invites":    {path: "/api/v1/admin/invites"},
 	}
 
 	for epName, ep := range endpoints {
@@ -118,4 +121,15 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestAdminInvitesList_UnknownCursorReturns400: a well-formed UUID cursor that
+// names no invite (deleted since the page was issued, or never issued) is a
+// bad cursor, so 400, not a 404 for the list itself or a 500.
+// ptone/scion#1957.
+func TestAdminInvitesList_UnknownCursorReturns400(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/invites?"+url.Values{"cursor": {uuid.NewString()}}.Encode(), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 }

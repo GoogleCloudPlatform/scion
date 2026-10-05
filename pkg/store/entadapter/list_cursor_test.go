@@ -102,10 +102,13 @@ func TestDecodeCursor_ErrorsAreInvalidInput(t *testing.T) {
 	})
 }
 
-// TestListStores_MalformedCursorIsInvalidInput hits every paginated store
-// list method (decodeListCursor, decodeCursor and UUID cursors) and asserts the error
-// surfaces as store.ErrInvalidInput (HTTP 400 at the hub), not a bare error
-// (HTTP 500). ptone/scion#1957.
+// TestListStores_MalformedCursorIsInvalidInput hits every entadapter list
+// method that decodes an opaque cursor (decodeListCursor, decodeCursor or a
+// UUID ID cursor) and asserts the error surfaces as store.ErrInvalidInput
+// (HTTP 400 at the hub), not a bare error (HTTP 500). ptone/scion#1957.
+// Not here: ListUsers, whose numeric offset cursor ignores unparseable input
+// by design, and sorted-mode ListAgents, whose cursor is
+// store.DecodeAgentCursor (tested in pkg/store).
 func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
@@ -152,9 +155,17 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 			_, err := cs.ListSchedules(ctx, store.ScheduleFilter{}, opts)
 			return err
 		},
-		// UUID cursor (parseUUID), included so every paginated list is covered.
+		// UUID cursors (parseUUID).
 		"scheduled events": func(opts store.ListOptions) error {
 			_, err := cs.ListScheduledEvents(ctx, store.ScheduledEventFilter{}, opts)
+			return err
+		},
+		"invite codes": func(opts store.ListOptions) error {
+			_, err := cs.ListInviteCodes(ctx, opts)
+			return err
+		},
+		"allow list entries": func(opts store.ListOptions) error {
+			_, err := cs.ListAllowListEntries(ctx, opts)
 			return err
 		},
 	}
@@ -168,4 +179,24 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestListStores_UnknownIDCursorIsInvalidInput covers the ID-cursor lists that
+// resolve the cursor to a row: a well-formed UUID naming no row is a bad
+// cursor (store.ErrInvalidInput, HTTP 400), not store.ErrNotFound, which the
+// hub would report as 404 for the list itself. ptone/scion#1957.
+func TestListStores_UnknownIDCursorIsInvalidInput(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	opts := store.ListOptions{Limit: 5, Cursor: uuid.NewString()}
+
+	_, err := cs.ListInviteCodes(ctx, opts)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.NotErrorIs(t, err, store.ErrNotFound)
+
+	_, err = cs.ListAllowListEntries(ctx, opts)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.NotErrorIs(t, err, store.ErrNotFound)
 }
