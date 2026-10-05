@@ -52,6 +52,13 @@ var (
 	// role (super-admin, project-owner) is attempted with a non-user principal.
 	ErrDirectUserOnly = errors.New("this role requires a direct user principal")
 
+	// ErrProjectMembersGroupPrincipal is returned when a role binding or a
+	// child-group edge would name a project members group (see
+	// IsProjectMembersGroup). Project members groups are system-managed and
+	// cannot be granted roles or nested in another group. It wraps
+	// ErrInvalidInput so generic mappers report it as a bad request.
+	ErrProjectMembersGroupPrincipal = fmt.Errorf("%w: project members groups cannot be role-binding principals or child groups", ErrInvalidInput)
+
 	// ErrScopeMismatch is returned when a role binding's scope type does not
 	// match the role definition's scope type.
 	ErrScopeMismatch = errors.New("binding scope type does not match role definition scope type")
@@ -290,6 +297,11 @@ type AgentStore interface {
 	// Returns only agents that exist; missing IDs are silently skipped.
 	// The returned map is keyed by agent ID.
 	GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*Agent, error)
+
+	// GetAgentsByIDsIncludingDeleted is GetAgentsByIDs without the
+	// soft-delete filter: like GetAgent, it also returns agents whose
+	// DeletedAt is set. Missing or malformed IDs are silently skipped.
+	GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*Agent, error)
 
 	// UpdateAgent updates an existing agent.
 	// Uses optimistic locking via StateVersion.
@@ -1162,8 +1174,13 @@ type BrokerDispatchStore interface {
 	// CompleteBrokerDispatch marks a dispatch done with an optional result JSON.
 	CompleteBrokerDispatch(ctx context.Context, id, result string) error
 
-	// FailBrokerDispatch marks a dispatch failed, records the error, bumps attempts.
-	FailBrokerDispatch(ctx context.Context, id, errMsg string) error
+	// FailBrokerDispatch marks a dispatch failed, records the error, bumps
+	// attempts, and records result (when non-empty) in the same update. On a
+	// failed row, result carries the typed failure envelope for the
+	// originating node: the broker's HTTP error answer (brokerError), the
+	// env requirements a finalize still lacks (envStillMissing), and/or the
+	// hub sentinel errors it failed with (hubErrors).
+	FailBrokerDispatch(ctx context.Context, id, errMsg, result string) error
 
 	// GetBrokerDispatch returns a single dispatch row by ID (used by the
 	// originator to read the result after the owner completes it).
@@ -1320,6 +1337,11 @@ type UserStore interface {
 	// GetUser retrieves a user by ID.
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUser(ctx context.Context, id string) (*User, error)
+
+	// GetUsersByIDs retrieves users by a list of IDs in one lookup.
+	// Returns only users that exist; missing or malformed IDs are silently
+	// skipped. The returned map is keyed by user ID.
+	GetUsersByIDs(ctx context.Context, ids []string) (map[string]*User, error)
 
 	// GetUserByEmail retrieves a user by email.
 	// Returns ErrNotFound if the user doesn't exist.
@@ -2077,6 +2099,18 @@ type MessageStore interface {
 	// Results are ordered by created_at DESC.
 	ListMessages(ctx context.Context, filter MessageFilter, opts ListOptions) (*ListResult[Message], error)
 
+	// LatestMessagesByThreadIDs returns, for each thread ID, the newest
+	// message with that thread_id matching opts, using the ListMessages
+	// order (created DESC, then id DESC). It answers the same question as
+	// ListMessages with a ThreadID filter and Limit 1, for many threads in
+	// one lookup. Threads with no matching message are absent from the map.
+	LatestMessagesByThreadIDs(ctx context.Context, threadIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
+
+	// LatestMessagesByConversationIDs is LatestMessagesByThreadIDs keyed
+	// by conversation_id instead of thread_id. Malformed conversation IDs
+	// are rejected with an error, as ListMessages rejects them.
+	LatestMessagesByConversationIDs(ctx context.Context, conversationIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
+
 	// MarkMessageRead marks a message as read.
 	// Returns ErrNotFound if the message doesn't exist.
 	MarkMessageRead(ctx context.Context, id string) error
@@ -2479,6 +2513,12 @@ type ConversationStore interface {
 	// This is the read-only counterpart of UpsertConversationByExternalRef.
 	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*Conversation, error)
 
+	// GetConversationsByExternalRefs is GetConversationByExternalRef for
+	// many external refs on one surface in one lookup. Only active
+	// (non-deleted) conversations are returned; refs with no match are
+	// absent. The returned map is keyed by external ref.
+	GetConversationsByExternalRefs(ctx context.Context, surface string, externalRefs []string) (map[string]*Conversation, error)
+
 	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
 	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
 	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.
@@ -2654,9 +2694,24 @@ type DelegationEdgeStore interface {
 	// the given principal is the delegator (granting authority).
 	GetDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string) ([]*DelegationEdge, error)
 
-	// DeactivateDelegationEdge marks an edge as inactive.
-	// Returns ErrNotFound if the edge doesn't exist.
-	DeactivateDelegationEdge(ctx context.Context, edgeID string) error
+	// DeactivateDelegationEdgesForDelegate deactivates every active edge
+	// whose delegate is (delegateType, delegateID) and records d on each.
+	// d.Cause and d.OpID are required; a zero d.At is set to the current
+	// time. Returns the number of edges deactivated.
+	DeactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, d Deactivation) (int, error)
+
+	// DeactivateDelegationEdgesForDelegator deactivates every active edge
+	// whose delegator is (delegatorType, delegatorID) and records d on each,
+	// with the same rules as DeactivateDelegationEdgesForDelegate.
+	DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d Deactivation) (int, error)
+
+	// ReactivateDelegationEdgesForDelegate reactivates exactly the inactive
+	// edges of the delegate whose recorded deactivation cause equals cause
+	// and whose operation ID equals opID, and clears their deactivation
+	// record. A reactivation that would give the delegate a second active
+	// edge in the same scope returns ErrAlreadyExists. Returns the number of
+	// edges reactivated.
+	ReactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) (int, error)
 }
 
 // =============================================================================

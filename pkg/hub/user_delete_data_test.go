@@ -505,29 +505,26 @@ func TestRestoreAgent_OwnerUserExistsRestored(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// TestCreateAgentWithIdentityKeyAndEdge_OwnerUserMissing: an agent create
-// whose owner user no longer exists fails in the create transaction and
-// writes nothing; an agent-delegated create is not checked against users.
-func TestCreateAgentWithIdentityKeyAndEdge_OwnerUserMissing(t *testing.T) {
+// TestCommitAgentCreate_OwnerUserMissing: an agent create whose owner user
+// no longer exists fails in the create transaction and writes nothing. (The
+// create tests through the HTTP route cover an owner user that exists.)
+func TestCommitAgentCreate_OwnerUserMissing(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 	gone := tid("user-gone")
 
 	a := &store.Agent{ID: tid("agent-orphan"), Slug: "orphan", Name: "orphan", ProjectID: project.ID,
 		Phase: "created", OwnerID: gone, CreatedBy: gone}
-	edge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: gone,
-		DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
-		ScopeID: project.ID, Role: string(AgentRoleNone), Active: true}
-	err := srv.createAgentWithIdentityKeyAndEdge(ctx, a, "orphan", edge)
+	err := srv.commitAgentCreate(ctx, agentCreateWrite{
+		Provenance: store.AuthorityProvenance{ProvenanceVersion: 1},
+		Agent:      a,
+		Slug:       "orphan",
+		Edge: &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: gone,
+			DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+			ScopeID: project.ID, Role: string(AgentRoleNone), Active: true},
+		Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation},
+	})
 	require.ErrorIs(t, err, errAgentOwnerUserMissing)
 	_, err = s.GetAgent(ctx, a.ID)
 	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
-
-	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
-	ok := &store.Agent{ID: tid("agent-ok"), Slug: "ok-agent", Name: "ok-agent", ProjectID: project.ID,
-		Phase: "created", OwnerID: dave.ID, CreatedBy: dave.ID}
-	okEdge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: dave.ID,
-		DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
-		ScopeID: project.ID, Role: string(AgentRoleNone), Active: true}
-	require.NoError(t, srv.createAgentWithIdentityKeyAndEdge(ctx, ok, "ok-agent", okEdge))
 }

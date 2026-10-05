@@ -221,15 +221,16 @@ resolves it with `scion_harness.resolve_thinking(ctx)`, which owns the only pars
 is stripped, signs are accepted (`-5`, `+7`), and the result is clamped to 0-100. A value that is
 not an integer (`abc`, `1.5`) logs a warning and is treated as unset. Writing the resolved value
 to the harness's native setting is up to each `provision.py`: for example, codex writes
-`model_reasoning_effort` in `~/.codex/config.toml`, and antigravity passes `agy --effort`.
+`model_reasoning_effort` in `~/.codex/config.toml`, antigravity passes `agy --effort`, and claude
+sets the `CLAUDE_CODE_EFFORT_LEVEL` environment variable.
 
-A harness with no `thinking:` block ignores the thinking level. Currently only `codex` and
-`antigravity` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for their
-tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
+A harness with no `thinking:` block ignores the thinking level. Currently only `codex`,
+`antigravity` and `claude` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for
+their tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
 `thinking:` block from the bundled file, or run `scion harness-config upgrade <name>`, which
 merges missing top-level keys such as `thinking:` without overwriting your values. Without the
 block, the provisioner writes no thinking setting, so the CLI's own default applies. codex logs
-a warning on every start; antigravity logs one when a thinking level was requested.
+a warning on every start; antigravity and claude log one when a thinking level was requested.
 
 ### Command Execution (`command`)
 
