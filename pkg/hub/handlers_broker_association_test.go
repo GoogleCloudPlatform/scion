@@ -171,6 +171,31 @@ func TestBrokerAssociation_RegisterExistingProjectWithOtherUsersBrokerDenied(t *
 	assertDefaultBroker(t, f.store, f.project.ID, "")
 }
 
+// Re-registering an existing project with a broker that is already its
+// provider still needs broker.update on that broker, so the provider row's
+// LinkedBy is written only by a caller who may associate the broker.
+func TestBrokerAssociation_RegisterExistingProviderCannotRewriteLinkedBy(t *testing.T) {
+	f := brokerAssocSetup(t, "assoc-reg-linkedby")
+	ctx := context.Background()
+	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: f.otherBroker.ID, BrokerName: f.otherBroker.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: "agent-create",
+	}))
+
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:       f.project.ID,
+		Name:     f.project.Name,
+		BrokerID: f.otherBroker.ID,
+	})
+
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), brokerProvideDeniedMessage)
+	provider, err := f.store.GetProjectProvider(ctx, f.project.ID, f.otherBroker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-create", provider.LinkedBy, "the provider row's LinkedBy stays")
+	assert.False(t, f.srv.brokerProviderHasOwnerConsent(ctx, f.otherBroker, f.project.ID))
+}
+
 func TestBrokerAssociation_RegisterNewProjectWithOtherUsersBrokerCreatesNothing(t *testing.T) {
 	f := brokerAssocSetup(t, "assoc-reg-new")
 	ctx := context.Background()
