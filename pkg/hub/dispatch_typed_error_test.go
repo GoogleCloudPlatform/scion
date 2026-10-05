@@ -764,3 +764,41 @@ func TestDispatchFailureError_HubSentinels(t *testing.T) {
 		assert.NotErrorIs(t, err, store.ErrDeleteInProgress)
 	})
 }
+
+// A cross-node create that the owner refused because the agent left the
+// launchable phases (a stop or delete reached the record first) answers 409
+// invalid_state through the create handler and leaves the record to that
+// operation, as a direct create does: no failed-create cleanup runs.
+func TestCrossNodeCreateHandler_LaunchInvalidPhaseKeepsRecord(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
+	bus := NewChannelEventPublisher()
+	t.Cleanup(bus.Close)
+	srv.events = bus
+
+	owner := &Server{
+		store:             s,
+		instanceID:        "hub-owner-" + uuid.NewString()[:8],
+		agentLifecycleLog: slog.Default(),
+		events:            bus,
+	}
+	ownerDisp := &ownerErrDispatcher{err: fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase)}
+	owner.SetDispatcher(ownerDisp)
+	owner.execDispatch = owner.executeDispatch
+	owner.deliverMsg = owner.deliverMessage
+
+	requesterClient := &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
+	requester := NewHTTPAgentDispatcherWithClient(s, requesterClient, false, slog.Default())
+	requester.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	requester.SetCrossNodeDeps(bus, ownerSignalBus{owner: owner})
+	srv.SetDispatcher(requester)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "xnode-invalid-phase", "projectId": project.ID, "task": "do it",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, "invalid_state", decodeLaunchGuardError(t, rec).Code)
+	assert.Equal(t, int32(1), ownerDisp.createCalled.Load(), "the owner ran the create")
+	assert.False(t, requesterClient.deleteCalled, "no failed-create delete")
+	_, err := s.GetAgentBySlug(context.Background(), project.ID, "xnode-invalid-phase")
+	assert.NoError(t, err, "the record is left to the operation that stopped it")
+}

@@ -79,8 +79,9 @@ func (e *dispatchHubError) Error() string   { return e.msg }
 func (e *dispatchHubError) Unwrap() []error { return e.sentinels }
 
 // dispatchFailureResult returns the result to record on a failed dispatch row
-// for execErr: an envelope carrying the broker's HTTP error answer and/or the
-// still-missing env requirements found in execErr's chain, else "". The
+// for execErr: an envelope carrying the broker's HTTP error answer, the
+// still-missing env requirements and/or the hub sentinels
+// (dispatchHubSentinels) found in execErr's chain, else "". The
 // broker body is cut to maxBrokerErrorBodyBytes, the same bound the HTTP
 // transport applies when it reads an error body.
 func dispatchFailureResult(execErr error) string {
