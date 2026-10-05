@@ -1768,8 +1768,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// abort a wake in progress, nor the persist and dispatch after it.
 		// The send then runs to its end with its idempotency key in flight
 		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. The wake stays bounded by its budget and
-		// each later step by its own timeout.
+		// the finished outcome. Only some steps carry a deadline: the wake
+		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
+		// finalization timeout). The store and event calls after the wake
+		// have none, as on the request context, which had no deadline
+		// either.
 		ctx = context.WithoutCancel(ctx)
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
