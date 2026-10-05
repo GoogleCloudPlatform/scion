@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -360,22 +361,73 @@ func TestV2_RecipientCanReadProject_ConcurrentMissesShareOneCall(t *testing.T) {
 	b, _, hub, _ := newDMScopeBroker(t)
 	hub.projects = []ProjectOption{{ID: "proj-1"}}
 	gate := make(chan struct{})
+	entered := make(chan struct{}, 16)
 	hub.listUserProjectsGate = gate
+	hub.listUserProjectsEntered = entered
+	const n = 8
+	reached := make(chan struct{}, n)
+	b.beforeUserProjectsShare = func() { reached <- struct{}{} }
 	mapping, err := b.store.GetUserMapping(context.Background(), "456")
 	require.NoError(t, err)
 
-	const n = 8
 	results := make(chan bool, n)
 	for i := 0; i < n; i++ {
 		go func() { results <- b.recipientCanReadProject(context.Background(), mapping, "proj-1") }()
 	}
-	require.Eventually(t, func() bool { return len(hub.userProjectCalls()) == 1 }, 2*time.Second, 5*time.Millisecond)
-	time.Sleep(50 * time.Millisecond) // let the other callers join the in-flight call
+	// Hold the hub call until every caller has reached the shared call.
+	<-entered
+	for i := 0; i < n; i++ {
+		<-reached
+	}
 	close(gate)
 	for i := 0; i < n; i++ {
 		assert.True(t, <-results)
 	}
 	assert.Len(t, hub.userProjectCalls(), 1)
+}
+
+func TestV2_RecipientCanReadProject_SharedCallOutlivesFirstCallersContext(t *testing.T) {
+	b, _, hub, _ := newDMScopeBroker(t)
+	hub.projects = []ProjectOption{{ID: "proj-1"}}
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 4)
+	hub.listUserProjectsGate = gate
+	hub.listUserProjectsEntered = entered
+	mapping, err := b.store.GetUserMapping(context.Background(), "456")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan bool, 1)
+	go func() { result <- b.recipientCanReadProject(ctx, mapping, "proj-1") }()
+	<-entered
+	cancel() // the first caller's context ends while the call is in flight
+	close(gate)
+
+	assert.True(t, <-result, "the shared call is not cut short by the caller's context")
+	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+	assert.Len(t, hub.userProjectCalls(), 1)
+}
+
+func TestV2_FetchUserProjects_ContextFailureIsNotCached(t *testing.T) {
+	for name, ctxErr := range map[string]error{"canceled": context.Canceled, "deadline": context.DeadlineExceeded} {
+		t.Run(name, func(t *testing.T) {
+			b, _, hub, _ := newDMScopeBroker(t)
+			hub.listUserProjectsErr = fmt.Errorf("list user projects request failed: %w", ctxErr)
+			mapping, err := b.store.GetUserMapping(context.Background(), "456")
+			require.NoError(t, err)
+
+			assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+			_, cached := b.cachedUserProjects("user:alice@example.com")
+			assert.False(t, cached, "a context failure is not remembered")
+
+			hub.mu.Lock()
+			hub.listUserProjectsErr = nil
+			hub.projects = []ProjectOption{{ID: "proj-1"}}
+			hub.mu.Unlock()
+			assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+			assert.Len(t, hub.userProjectCalls(), 2)
+		})
+	}
 }
 
 func TestV2_RecipientCanReadProject_EvictsExpiredEntriesOnWrite(t *testing.T) {
@@ -395,4 +447,54 @@ func TestV2_RecipientCanReadProject_EvictsExpiredEntriesOnWrite(t *testing.T) {
 	assert.NotContains(t, b.userProjects, "user:old@example.com")
 	assert.Contains(t, b.userProjects, "user:fresh@example.com")
 	assert.Contains(t, b.userProjects, "user:alice@example.com")
+}
+
+func TestCallbackHandler_NotifyToggle_UnlistedAgentIsRejected(t *testing.T) {
+	h, tgSrv, _, store := setupToggleScope(t)
+
+	_, err := h.HandleCallback(context.Background(), notifyCallback("proj-1", "ghost-agent", 42))
+	require.NoError(t, err)
+
+	assert.Empty(t, tgSrv.getEditedMarkups())
+	pref, err := store.GetNotificationPref(context.Background(), "42", "proj-1", "ghost-agent")
+	require.NoError(t, err)
+	assert.Nil(t, pref, "no preference saved for an agent that is not listed")
+	answered := tgSrv.getAnsweredCallbacks()
+	require.Len(t, answered, 1)
+	assert.Contains(t, answered[0].Text, "no longer available")
+}
+
+func TestV2_StateChangeDM_DisabledPrefSkipsProjectCheck(t *testing.T) {
+	b, tgSrv, hub, principal := newDMScopeBroker(t)
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1"}}}
+	require.NoError(t, b.store.SaveNotificationPref(context.Background(), &NotificationPref{
+		TelegramUserID: "456", ProjectID: "proj-1", AgentSlug: "coder", Enabled: false,
+	}))
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", stateChangeFor("user:alice@example.com")))
+
+	assert.Empty(t, tgSrv.getSentMessages())
+	assert.Empty(t, hub.userProjectCalls(), "the local preference is checked first")
+}
+
+func TestCommandHandler_Notifications_RequiresUsableLink(t *testing.T) {
+	t.Run("unlinked", func(t *testing.T) {
+		h, tgSrv, hub, _ := newTestCommandHandler(t)
+		h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+		sent := tgSrv.getSentMessages()
+		require.Len(t, sent, 1)
+		assert.Equal(t, registerHint, sent[0].Text)
+		assert.Empty(t, hub.userProjectCalls())
+	})
+	t.Run("link without email", func(t *testing.T) {
+		h, tgSrv, hub, store := newTestCommandHandler(t)
+		require.NoError(t, store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+			TelegramUserID: "42", ScionUserID: "u-42", LinkedAt: time.Now().UTC(),
+		}))
+		h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+		sent := tgSrv.getSentMessages()
+		require.Len(t, sent, 1)
+		assert.Equal(t, staleLinkText, sent[0].Text)
+		assert.Empty(t, hub.userProjectCalls())
+	})
 }

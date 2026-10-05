@@ -53,6 +53,9 @@ type fakeHubClient struct {
 	// listUserProjectsGate, when set, is waited on by ListProjectsForUser
 	// after recording the call.
 	listUserProjectsGate chan struct{}
+	// listUserProjectsEntered, when set, receives a value each time
+	// ListProjectsForUser is entered.
+	listUserProjectsEntered chan struct{}
 
 	// Calls recorded for assertions: the principal passed on each call.
 	listAgentsCalls       []fakeListAgentsCall
@@ -71,13 +74,21 @@ func newFakeHubClient() *fakeHubClient {
 	}
 }
 
-func (f *fakeHubClient) ListProjectsForUser(_ context.Context, onBehalfOf string) ([]ProjectOption, error) {
+func (f *fakeHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	f.mu.Lock()
 	f.listUserProjectsCalls = append(f.listUserProjectsCalls, onBehalfOf)
 	gate := f.listUserProjectsGate
+	entered := f.listUserProjectsEntered
 	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

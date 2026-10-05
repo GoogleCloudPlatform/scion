@@ -35,6 +35,16 @@ type notificationEntries struct {
 	Readable map[string]bool
 }
 
+// has reports whether a toggle for the agent is listed.
+func (n *notificationEntries) has(projectID, agentSlug string) bool {
+	for _, e := range n.Entries {
+		if e.ProjectID == projectID && e.AgentSlug == agentSlug {
+			return true
+		}
+	}
+	return false
+}
+
 // set updates the Enabled state of a toggle if it is listed.
 func (n *notificationEntries) set(projectID, agentSlug string, enabled bool) {
 	for i := range n.Entries {

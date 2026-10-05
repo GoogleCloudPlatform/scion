@@ -113,6 +113,9 @@ type TelegramBrokerV2 struct {
 	userProjects      map[string]userProjectsEntry
 	userProjectsMu    sync.Mutex
 	userProjectsGroup singleflight.Group
+	// beforeUserProjectsShare, when set (tests only), is called just before
+	// a caller joins the shared project-list call.
+	beforeUserProjectsShare func()
 }
 
 type userProjectsEntry struct {
@@ -1168,11 +1171,6 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
-	if !b.recipientCanReadProject(ctx, mapping, projectID) {
-		b.log.Debug("State-change recipient cannot read project, dropping DM", "project_id", projectID)
-		return nil
-	}
-
 	// Respect per-user notification preferences: if the user explicitly
 	// disabled notifications for this agent, skip the DM.
 	if projectID != "" && agentSlug != "" {
@@ -1185,6 +1183,11 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 				"recipient", recipientVal, "project", projectID, "agent", agentSlug)
 			return nil
 		}
+	}
+
+	if !b.recipientCanReadProject(ctx, mapping, projectID) {
+		b.log.Debug("State-change recipient cannot read project, dropping DM", "project_id", projectID)
+		return nil
 	}
 
 	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
@@ -2688,26 +2691,54 @@ func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping 
 		return false
 	}
 
-	b.userProjectsMu.Lock()
-	entry, ok := b.userProjects[principal]
-	b.userProjectsMu.Unlock()
-	if !ok || time.Since(entry.fetchedAt) >= entry.ttl() {
+	entry, ok := b.cachedUserProjects(principal)
+	if !ok {
+		if b.beforeUserProjectsShare != nil {
+			b.beforeUserProjectsShare()
+		}
 		v, _, _ := b.userProjectsGroup.Do(principal, func() (interface{}, error) {
-			return b.fetchUserProjects(ctx, principal), nil
+			// A caller arriving after a shared call finished finds its
+			// result here instead of starting another call.
+			if e, ok := b.cachedUserProjects(principal); ok {
+				return e, nil
+			}
+			// The shared call must not end when the first caller's context
+			// does, so it runs on its own bounded context.
+			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userProjectsFetchTimeout)
+			defer cancel()
+			return b.fetchUserProjects(fetchCtx, principal), nil
 		})
 		entry = v.(userProjectsEntry)
 	}
 	return !entry.failed && entry.ids[projectID]
 }
 
+// cachedUserProjects returns the unexpired cache entry for principal.
+func (b *TelegramBrokerV2) cachedUserProjects(principal string) (userProjectsEntry, bool) {
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	e, ok := b.userProjects[principal]
+	if !ok || time.Since(e.fetchedAt) >= e.ttl() {
+		return userProjectsEntry{}, false
+	}
+	return e, true
+}
+
+// userProjectsFetchTimeout bounds one shared recipient project-list call.
+const userProjectsFetchTimeout = 10 * time.Second
+
 // fetchUserProjects lists the user's projects as that user and caches the
-// result (or the failure), evicting expired entries.
+// result (or the failure), evicting expired entries. A failure caused by a
+// cancelled or timed-out context is returned but not cached.
 func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal string) userProjectsEntry {
 	entry := userProjectsEntry{fetchedAt: time.Now()}
 	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
 	if err != nil {
 		b.log.Warn("Failed to list projects for notification recipient", "error", err)
 		entry.failed = true
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return entry
+		}
 	} else {
 		entry.ids = make(map[string]bool, len(projects))
 		for _, p := range projects {

@@ -622,6 +622,10 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		h.answerCallback(ctx, cb.ID, "Your Scion account can no longer read this project.", true)
 		return nil
 	}
+	if !result.has(projectID, agentSlug) {
+		h.answerCallback(ctx, cb.ID, "This agent is no longer available. Run /notifications again.", true)
+		return nil
+	}
 
 	existing, err := h.store.GetNotificationPref(ctx, senderID, projectID, agentSlug)
 	if err != nil {

@@ -700,28 +700,8 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	senderID := ""
-	if msg.From != nil {
-		senderID = strconv.FormatInt(msg.From.ID, 10)
-	}
-	if senderID == "" {
-		h.reply(chatID, "Could not identify your user.")
-		return
-	}
-
-	mapping, err := h.store.GetUserMapping(ctx, senderID)
-	if err != nil {
-		h.log.Error("Failed to check user mapping", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.reply(chatID, "Please /register first to manage notifications.")
-		return
-	}
-	principal := linkedUserPrincipal(mapping)
-	if principal == "" {
-		h.reply(chatID, staleLinkText)
+	mapping, _, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
 		return
 	}
 
