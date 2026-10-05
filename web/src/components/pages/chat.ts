@@ -2629,9 +2629,9 @@ export class ScionPageChat extends LitElement {
    * over SSE; the page retains the hub entry while connected, so every
    * ready snapshot after the first publish updates the sidebar (see
    * {@link _handleHubAgentSnapshot}). `options.refresh` (the fallback poll)
-   * therefore asks the store only while the list is not shown yet (a failed
-   * first load, say) or the store's list is not ready (a failed
-   * revalidation), so in steady state it requests no agent list.
+   * therefore asks the store only while the store's list is not ready (a
+   * failed first load or revalidation), so in steady state it requests no
+   * agent list. A ready list is shown: the snapshot listener publishes it.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
     // Claim the sidebar for the hub view before anything else, so a project
@@ -2640,10 +2640,7 @@ export class ScionPageChat extends LitElement {
     ++this._membersViewSeq;
     this._sidebarOwner = 'hub';
     const generation = this._hubMembersGeneration;
-    const loadAgents =
-      !options?.refresh ||
-      !this._hubAgentsLive ||
-      agentStore.peek(HUB_AGENTS_QUERY)?.status !== 'ready';
+    const loadAgents = !options?.refresh || agentStore.peek(HUB_AGENTS_QUERY)?.status !== 'ready';
     queueMicrotask(() => {
       if (generation !== this._hubMembersGeneration) return;
       this._loadHubUsers(generation);
