@@ -334,7 +334,7 @@ func (f *fakeLogQuerier) Close() error { return nil }
 // TestHandleAgentCloudLogs_HandlersBuildSameFilter checks, through the
 // HTTP handlers, that the list and stream endpoints pass the same filter
 // to the log query service, with no project_id clause, and that the list
-// endpoint keeps its paging and time-range options.
+// endpoint also keeps its paging and time-range options.
 func TestHandleAgentCloudLogs_HandlersBuildSameFilter(t *testing.T) {
 	srv, s := testServer(t)
 	fake := &fakeLogQuerier{}
@@ -365,7 +365,13 @@ func TestHandleAgentCloudLogs_HandlersBuildSameFilter(t *testing.T) {
 		t.Fatalf("calls: Query = %d, Tail = %d, want 1 each", len(fake.queryOpts), len(fake.tailOpts))
 	}
 	list, stream := fake.queryOpts[0], fake.tailOpts[0]
+	if list.Tail != 25 || list.Since.IsZero() || list.Until.IsZero() {
+		t.Errorf("list options lost paging or time range: %+v", list)
+	}
 
+	// The time range adds timestamp clauses that the stream has no use
+	// for; compare the remaining filter.
+	list.Tail, list.Since, list.Until = 0, time.Time{}, time.Time{}
 	listFilter := BuildLogFilter(list, "gcp-proj")
 	streamFilter := BuildLogFilter(stream, "gcp-proj")
 	if listFilter != streamFilter {
@@ -378,8 +384,5 @@ func TestHandleAgentCloudLogs_HandlersBuildSameFilter(t *testing.T) {
 		if !strings.Contains(f, `labels.agent_id = "`+agent.ID+`"`) {
 			t.Errorf("%s filter missing agent_id clause: %s", name, f)
 		}
-	}
-	if list.Tail != 25 || list.Since.IsZero() || list.Until.IsZero() {
-		t.Errorf("list options lost paging or time range: %+v", list)
 	}
 }
