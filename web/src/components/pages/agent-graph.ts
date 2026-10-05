@@ -248,7 +248,6 @@ export class AgentGraphPage extends LitElement {
       this.connectTimer = undefined;
       if (settled || !this.isConnected) return;
       this.firstConnectLate = true;
-      if (this.cappedAll) this.cappedAll.stale = true;
       if (!this.drainRunner.running) this.stale = true;
     }, DRAIN_CONNECT_TIMEOUT_MS);
     stateManager.sseConnected(gen).then(
@@ -294,6 +293,7 @@ export class AgentGraphPage extends LitElement {
     }
     const ids = new Set<string>([...(detail.upserted ?? []), ...created]);
     for (const id of ids) {
+      // Defensive: the store drops a live create for a tombstoned ID.
       if (tombstones.has(id)) continue;
       const agent = stateManager.getAgent(id);
       if (!agent) continue;
