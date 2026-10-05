@@ -2667,6 +2667,9 @@ export class ScionPageChat extends LitElement {
       // The generation check is defence in depth: every bump also detaches
       // this load, whose signal then rejects it before this line.
       if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
+      // A space claimed the sidebar meanwhile (on mobile, with no
+      // conversation and no generation bump): its members stay.
+      if (this._sidebarOwner !== 'hub') return;
       this._publishHubAgents(snapshot);
     } catch {
       // Non-critical — the sidebar keeps whatever it already had.
@@ -2732,8 +2735,8 @@ export class ScionPageChat extends LitElement {
    * (any page) leaves the list exactly as it was, so the sidebar never
    * blanks on error.
    *
-   * Skips publishing if a conversation is open, or the generation moved on,
-   * by the time the walk finishes, and stops requesting further pages as
+   * Skips publishing if a conversation is open, the generation moved on or
+   * a space claimed the sidebar by the time the walk finishes, and stops requesting further pages as
    * soon as either becomes true (`shouldContinue`, checked by `paginateAll`
    * before every page). A conversation that opened and closed again within
    * one Lit update batch never bumps the generation, but `shouldContinue`
@@ -2760,6 +2763,8 @@ export class ScionPageChat extends LitElement {
       return err instanceof PaginationStoppedError;
     }
     if (this.v2Conversation || generation !== this._hubMembersGeneration) return false;
+    // A space claimed the sidebar meanwhile: its members stay.
+    if (this._sidebarOwner !== 'hub') return false;
     try {
       // /api/v1/users carries no presence state. Preserve whatever
       // refreshHubMemberPresence() (or an SSE presence event) already

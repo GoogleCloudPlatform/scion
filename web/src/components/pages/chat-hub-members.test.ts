@@ -97,6 +97,7 @@ interface ChatPage extends HTMLElement {
   _hubMembersGeneration: number;
   _loadHubAgents(generation: number): Promise<void>;
   _handleAgentsUpdated(): void;
+  _sidebarOwner: string;
 }
 
 beforeAll(async () => {
@@ -602,6 +603,70 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
       expect(usersRequests()).toBe(usersBefore);
       expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
       expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a hub store walk landing after a space claimed the sidebar leaves the space agents', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const release = harness.server.pause();
+    const page = await mountPage();
+    try {
+      expect(page._hubAgentsLoad).not.toBeNull();
+      vi.mocked(apiFetch).mockImplementation((url) =>
+        Promise.resolve(
+          url === '/api/v1/chat/spaces/p1/members'
+            ? new Response(
+                JSON.stringify({
+                  humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+                  agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                }),
+                { status: 200 }
+              )
+            : new Response('{}', { status: 200 })
+        )
+      );
+      await page.loadV2Members('p1');
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+
+      release();
+      await settle();
+
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('ready');
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+      expect(ids(page.v2Members)).toEqual(['h1', 'sp1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a hub users walk landing after a space claimed the sidebar leaves the space humans', async () => {
+    const pendingUsers = deferred<Response>();
+    serveUsers(() => pendingUsers.promise);
+    const page = await mountPage();
+    try {
+      vi.mocked(apiFetch).mockImplementation((url) =>
+        Promise.resolve(
+          url === '/api/v1/chat/spaces/p1/members'
+            ? new Response(
+                JSON.stringify({
+                  humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+                  agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                }),
+                { status: 200 }
+              )
+            : new Response('{}', { status: 200 })
+        )
+      );
+      await page.loadV2Members('p1');
+      expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+
+      pendingUsers.resolve(usersPage(['hub-user']));
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+      expect(ids(page.v2Members)).toEqual(['h1', 'sp1']);
     } finally {
       unmount(page);
     }
@@ -1139,6 +1204,7 @@ describe('hub members: reconnect and disconnect', () => {
     harness.store.retain({ scope: 'hub' }, () => {});
     await harness.connect();
 
+    page._sidebarOwner = 'hub';
     void page._loadHubAgents(0);
     page._hubMembersGeneration = 1;
     void page._loadHubAgents(1);
@@ -1160,6 +1226,7 @@ describe('hub members: reconnect and disconnect', () => {
     harness.store.retain({ scope: 'hub' }, () => {});
     await harness.connect();
 
+    page._sidebarOwner = 'hub';
     void page._loadHubAgents(0);
     page._hubMembersGeneration = 1;
     release();
