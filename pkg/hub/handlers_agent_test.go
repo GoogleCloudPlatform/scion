@@ -5238,12 +5238,18 @@ func postAgentStatusAsAgent(t *testing.T, srv *Server, agent *store.Agent, body 
 // response says so.
 func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		body string
+		name       string
+		phase      state.Phase
+		reincState string
+		body       string
 	}{
-		{"message only", `{"message":"x"}`},
-		{"exit code only", `{"exitCode":137}`},
-		{"exit reason only", `{"exitReason":"crashed"}`},
+		{"message only", state.PhaseStarting, store.ReincarnationStateStopping, `{"message":"x"}`},
+		{"exit code only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitCode":137}`},
+		{"exit reason only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitReason":"crashed"}`},
+		// A suspended agent whose reincarnation is pending (the worker has
+		// not written its first step yet): Guard 0b must win over Guard 0
+		// (suspended), which would only blank Phase/Activity.
+		{"suspended, reincarnation pending, message only", state.PhaseSuspended, store.ReincarnationStatePending, `{"message":"x"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
@@ -5253,15 +5259,16 @@ func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *te
 			require.NoError(t, s.CreateProject(ctx, project))
 			agent := &store.Agent{
 				ID: tid("agent-reinc-msg"), Slug: "reinc-msg-slug", Name: "Reinc Msg Agent",
-				ProjectID: project.ID, Phase: string(state.PhaseStarting),
+				ProjectID: project.ID, Phase: string(tc.phase),
 				Message: "Reincarnating",
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
-			agent.ReincarnationState = store.ReincarnationStateStopping
+			agent.ReincarnationState = tc.reincState
 			require.NoError(t, s.UpdateAgent(ctx, agent))
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
 			before, err := s.GetAgent(ctx, agent.ID)
 			require.NoError(t, err)
-			require.Equal(t, store.ReincarnationStateStopping, before.ReincarnationState)
+			require.Equal(t, tc.reincState, before.ReincarnationState)
 
 			rec := postAgentStatusAsAgent(t, srv, agent, tc.body)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -5275,11 +5282,36 @@ func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *te
 			assert.Equal(t, "Reincarnating", after.Message, "message must not change while a reincarnation is in flight")
 			assert.Equal(t, before.ExitCode, after.ExitCode)
 			assert.Equal(t, before.ExitReason, after.ExitReason)
-			assert.Equal(t, string(state.PhaseStarting), after.Phase)
-			assert.True(t, before.LastSeen.Equal(after.LastSeen) && before.Updated.Equal(after.Updated),
-				"a dropped report must skip the store write (LastSeen/Updated unchanged)")
+			assert.Equal(t, string(tc.phase), after.Phase)
+			assertAgentWriteTimestampsAt(t, after, past)
 		})
 	}
+}
+
+// backdateAgentWriteTimestamps sets the agent's last_seen and updated
+// columns to a fixed time an hour in the past and returns it, so a test can
+// tell "no store write happened" from "a write happened within the
+// timestamp resolution".
+func backdateAgentWriteTimestamps(t *testing.T, s store.Store, agentID string) time.Time {
+	t.Helper()
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE agents SET last_seen = ?, updated = ? WHERE id = ?", past, past, agentID)
+	require.NoError(t, err)
+	got, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	require.True(t, got.LastSeen.Equal(past) && got.Updated.Equal(past),
+		"sanity: backdated timestamps must be stored (last_seen=%v updated=%v want %v)", got.LastSeen, got.Updated, past)
+	return past
+}
+
+// assertAgentWriteTimestampsAt asserts that no store write has touched the
+// agent since backdateAgentWriteTimestamps set its timestamps to past.
+func assertAgentWriteTimestampsAt(t *testing.T, agent *store.Agent, past time.Time) {
+	t.Helper()
+	assert.True(t, agent.LastSeen.Equal(past) && agent.Updated.Equal(past),
+		"a dropped report must skip the store write (last_seen=%v updated=%v want %v)", agent.LastSeen, agent.Updated, past)
 }
 
 // TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied: a status
@@ -5312,8 +5344,7 @@ func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
 			tc.mark(t, s, agent)
-			before, err := s.GetAgent(ctx, agent.ID)
-			require.NoError(t, err)
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
 
 			rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","exitCode":1}`)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -5326,8 +5357,7 @@ func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "old", after.Message)
 			assert.Nil(t, after.ExitCode)
-			assert.True(t, before.LastSeen.Equal(after.LastSeen) && before.Updated.Equal(after.Updated),
-				"a dropped report must skip the store write (LastSeen/Updated unchanged)")
+			assertAgentWriteTimestampsAt(t, after, past)
 		})
 	}
 }

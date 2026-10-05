@@ -145,6 +145,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// not own (heartbeat, toolName, taskSummary, limits, metadata, ...),
 		// those are still written and the response is {"applied":true} even
 		// though the guarded fields were dropped.
+		//
+		// Best effort: {"applied":true} means "not guarded when the handler
+		// read the agent". A delete or reincarnation claimed between that
+		// read and the write can make it inaccurate. The persisted state is
+		// still correct for a delete (the store repeats Guard 0c inside the
+		// UpdateAgentStatus transaction); Guard 0b has no store-side twin.
 		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
 			return
@@ -187,9 +193,12 @@ const (
 )
 
 // statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
-// that blanks every field it owns on agent's status reports, or "" when
-// neither does. Checked in guardAgentPhaseTransition's order: Guard 0c
-// before Guard 0b.
+// that blanks every guarded field (Phase/Activity/Message/ExitCode/
+// ExitReason) of agent's status reports, or "" when none does. It mirrors
+// guardAgentPhaseTransition's order: Guard 0c (delete) takes precedence
+// over Guard 0b (reincarnation), and both run before Guard 0 (suspended).
+// Guard 0 blanks only Phase/Activity, so it never yields a no-op on its
+// own and has no reason here.
 func statusGuardNoopReason(agent *store.Agent) string {
 	switch {
 	case deletionActive(agent) || !agent.DeletedAt.IsZero():
@@ -209,10 +218,13 @@ type statusUpdateResult struct {
 }
 
 // statusUpdateTouchesGuardedFields reports whether the update sets any field
-// guardAgentPhaseTransition may blank or rewrite.
+// guardAgentPhaseTransition may blank or rewrite. The internal ClearExit
+// and ClearMessageIf (json:"-") are never set on a decoded status POST, so
+// they do not trigger the guards here; statusUpdateIsEmpty still counts
+// them.
 func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 	return su.Phase != "" || su.Activity != "" || su.Message != "" ||
-		su.ExitCode != nil || su.ExitReason != "" || su.ClearExit
+		su.ExitCode != nil || su.ExitReason != ""
 }
 
 // statusUpdateIsEmpty reports whether the update carries nothing for the
@@ -222,7 +234,7 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.ToolName == "" && su.ConnectionState == "" && su.ContainerStatus == "" &&
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
-		su.StartedAt == "" && su.ClearMessageIf == ""
+		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == ""
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
@@ -258,6 +270,27 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 		return
 	}
 
+	// Guard 0b: a `scion reincarnate` migration in flight is sticky like a
+	// delete — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
+	// Message for the agent until it completes or fails, so an async
+	// sciontool /status POST from the OLD container racing the migration
+	// (e.g. a crash report from the generation the worker is in the middle of
+	// tearing down and replacing) must not surface as the agent's live status.
+	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
+	// concern here (this endpoint does not set them), so nothing further
+	// needs blanking. It runs before Guard 0 (suspended) because it blanks a
+	// superset of Guard 0's fields: a suspended agent with a reincarnation
+	// pending (the worker has not yet written its first step) must have a
+	// message- or exit-only report dropped too (ptone/scion#2267).
+	if reincarnationInFlight(agent) {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
+		return
+	}
+
 	// Guard 0: suspended is sticky against async status updates. When an agent
 	// is suspended, its container is being torn down, and the dying container's
 	// async sciontool /status POST (e.g. phase=stopped, activity=crashed) must
@@ -268,24 +301,6 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""
-		return
-	}
-
-	// Guard 0b: a `scion reincarnate` migration in flight is sticky the same
-	// way — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
-	// Message for the agent until it completes or fails, so an async
-	// sciontool /status POST from the OLD container racing the migration
-	// (e.g. a crash report from the generation the worker is in the middle of
-	// tearing down and replacing) must not surface as the agent's live status.
-	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
-	// concern here (this endpoint does not set them), so nothing further
-	// needs blanking.
-	if reincarnationInFlight(agent) {
-		status.Phase = ""
-		status.Activity = ""
-		status.ExitCode = nil
-		status.ExitReason = ""
-		status.Message = ""
 		return
 	}
 
