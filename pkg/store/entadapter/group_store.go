@@ -1058,14 +1058,40 @@ func liveGroupMembership() predicate.GroupMembership {
 }
 
 // DeleteGroupMembershipsForUser removes every group membership of userID.
+//
+// On PostgreSQL it first locks the groups the user owns FOR UPDATE, in
+// ascending group-ID order, so a user delete takes its locks in the same
+// order as before the explicit membership delete existed: owned group rows
+// (which the user-row delete's owner_id SET NULL updates), then membership
+// rows. Locking memberships first would invert that order against
+// ProjectDeletionService, which deletes a project group's row and then the
+// next group's memberships, and could deadlock (40P01) when the user owns
+// one project group and is a member of another (ptone/scion#2769). On
+// SQLite the lock is a plain read (writes are already serialized).
 func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return 0, err
 	}
+	if err := lockOwnedGroupIDs(ctx, s.client, uid); err != nil {
+		return 0, fmt.Errorf("lock owned groups: %w", mapError(err))
+	}
 	return s.client.GroupMembership.Delete().
 		Where(groupmembership.UserIDEQ(uid)).
 		Exec(ctx)
+}
+
+// lockOwnedGroupIDs locks the groups owned by userID FOR UPDATE, in
+// ascending ID order, on PostgreSQL. On SQLite it is a plain read.
+func lockOwnedGroupIDs(ctx context.Context, client *ent.Client, userID uuid.UUID) error {
+	q := client.Group.Query().
+		Where(group.OwnerIDEQ(userID)).
+		Order(ent.Asc(group.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	_, err := q.IDs(ctx)
+	return err
 }
 
 // groupMembershipDeleteBatchSize caps the IN(...) list of one

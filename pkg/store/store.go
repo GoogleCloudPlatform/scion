@@ -1645,6 +1645,13 @@ type GroupStore interface {
 	// given user and returns the number of rows removed. Call it before the
 	// user row is deleted: the FK is ON DELETE SET NULL, so afterwards the
 	// rows no longer carry the user ID (ptone/scion#2769).
+	//
+	// Must be called inside the same transaction as the user delete. On
+	// PostgreSQL it first locks the groups the user owns (SELECT ... FOR
+	// UPDATE ordered by ID), so the transaction locks owned group rows
+	// before membership rows, matching ProjectDeletionService's
+	// group-row-then-memberships order and avoiding a deadlock with a
+	// concurrent project delete.
 	DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error)
 
 	// DeleteGroupMembershipsForAgents removes every group membership of the

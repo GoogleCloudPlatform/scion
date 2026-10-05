@@ -123,9 +123,10 @@ func GroupMembershipCleanupConformance(t *testing.T, factory Factory) {
 
 		t.Run("orphaned rows are not counted or listed, and the sweep removes only them", func(t *testing.T) {
 			f := setup(t)
-			// Delete the principals without the membership cleanup, the way
-			// a pre-fix delete path left them: ON DELETE SET NULL turns
-			// their rows into orphans.
+			// Delete bob's user row without the membership cleanup, the way
+			// a pre-fix delete path left it: ON DELETE SET NULL turns his row
+			// into an orphan. DeleteAgent removes the agent's own memberships,
+			// so agentB leaves no orphan behind.
 			require.NoError(t, f.s.DeleteUser(ctx, f.bob))
 			require.NoError(t, f.s.DeleteAgent(ctx, f.agentB))
 

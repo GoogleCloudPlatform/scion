@@ -270,7 +270,10 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		// and purge, finalize-hard and DeleteAgent lock the agent before
 		// deleting its memberships; deleting memberships first here would
 		// invert that order and could deadlock (40P01). DeleteProject below
-		// re-locks the same rows in the same order, which is a no-op.
+		// re-locks the same rows in the same order, which is a no-op. A
+		// concurrent user delete locks the groups the user owns before the
+		// user's memberships (DeleteGroupMembershipsForUser), matching the
+		// cascade's group-row-then-memberships order below.
 		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project agents for deletion: %w", err)
 		}

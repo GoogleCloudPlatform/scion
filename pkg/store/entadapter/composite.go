@@ -330,6 +330,14 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // ProjectDeletionService, which calls LockProjectAgents before its
 // project-group cascade deletes any membership. So none of them can deadlock
 // (40P01) against another on overlapping agents.
+//
+// The user-delete path (deleteUser and the admin allow-list delete in
+// pkg/hub) also overlaps ProjectDeletionService's group cascade, which
+// deletes each project group's memberships and then its row. Its
+// DeleteGroupMembershipsForUser call locks the groups the user owns (FOR
+// UPDATE, ascending ID) before deleting the user's memberships, so it takes
+// owned group rows before membership rows, the same order as the cascade,
+// and the user-row delete's owner_id SET NULL finds those rows already held.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })

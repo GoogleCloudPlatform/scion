@@ -282,3 +282,121 @@ func TestCompositeDeleteProject_LocksAgentsInIDOrder(t *testing.T) {
 	assert.NoError(t, t1Err, "the ascending locker must not fail (40P01 means DeleteProject locks out of ID order)")
 	assert.NoError(t, dErr, "DeleteProject must not fail (40P01 means it locks out of ID order)")
 }
+
+// TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade (review
+// r4 L1; PostgreSQL only): a user delete (DeleteGroupMembershipsForUser,
+// then DeleteUser, as deleteUser and the allow-list delete do) must not
+// deadlock against ProjectDeletionService's group cascade, which deletes one
+// project group at a time: its memberships, then its row.
+//
+// User U owns project group Ga (deleted first) and is a member of project
+// group Gb (deleted later). T2 plays the project delete with the same store
+// calls as ProjectDeletionService: lock the project and its agents, delete
+// Ga (holding Ga's row), pause, delete Gb, delete the project. While T2 is
+// paused, T1 deletes U. If T1 deleted M(U,Gb) before locking the groups U
+// owns, it would hold M(U,Gb) while its user-row delete waits on Ga's row
+// (owner_id ON DELETE SET NULL), and T2's delete of Gb would wait on
+// M(U,Gb): deadlock (SQLSTATE 40P01). DeleteGroupMembershipsForUser locks
+// U's owned groups first, so T1 waits on Ga before touching any membership.
+func TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade(t *testing.T) {
+	skipUnlessPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), lockOrderTimeout)
+	defer cancel()
+	cs := newTestCompositeStore(t)
+	db := cs.DB()
+	require.NotNil(t, db, "raw database handle needed to watch for lock waits")
+
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projectID, Name: "uo", Slug: "uo-" + projectID[:8]}))
+	u := newCleanupUser(t, cs, "uo-user@example.com")
+	ga, gb := uuid.NewString(), uuid.NewString()
+	require.NoError(t, cs.CreateGroup(ctx, &store.Group{
+		ID: ga, Name: "uo-ga", Slug: "uo-ga-" + ga[:8], GroupType: store.GroupTypeExplicit,
+		ProjectID: projectID, OwnerID: u,
+	}))
+	require.NoError(t, cs.CreateGroup(ctx, &store.Group{
+		ID: gb, Name: "uo-gb", Slug: "uo-gb-" + gb[:8], GroupType: store.GroupTypeExplicit,
+		ProjectID: projectID,
+	}))
+	addCleanupMember(t, cs, gb, store.GroupMemberTypeUser, u, store.GroupMemberRoleMember)
+
+	// T2: the project delete, paused after deleting Ga.
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	t2Err := make(chan error, 1)
+	go func() {
+		t2Err <- cs.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.LockProjectForMembership(ctx, projectID); err != nil {
+				return err
+			}
+			if err := tx.LockProjectAgents(ctx, projectID); err != nil {
+				return err
+			}
+			if err := tx.DeleteGroup(ctx, ga); err != nil {
+				return err
+			}
+			close(paused)
+			select {
+			case <-resume:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if err := tx.DeleteGroup(ctx, gb); err != nil {
+				return err
+			}
+			return tx.DeleteProject(ctx, projectID)
+		})
+	}()
+	select {
+	case <-paused:
+	case err := <-t2Err:
+		t.Fatalf("project delete failed before pausing: %v", err)
+	case <-ctx.Done():
+		t.Fatal("project delete never paused")
+	}
+
+	// T1: the user delete, which must wait on T2's lock on Ga.
+	t1Err := make(chan error, 1)
+	go func() {
+		t1Err <- cs.WithTx(ctx, func(tx store.Store) error {
+			if _, err := tx.DeleteGroupMembershipsForUser(ctx, u); err != nil {
+				return err
+			}
+			return tx.DeleteUser(ctx, u)
+		})
+	}()
+
+	// Wait until T1 is blocked on a lock. With the fix it blocks on the
+	// owned-group lock before deleting any membership; without it, it has
+	// already deleted M(U,Gb) and blocks on the user-row delete.
+	require.Eventually(t, func() bool {
+		var waiting int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			return false
+		}
+		return waiting > 0
+	}, lockOrderTimeout/2, 20*time.Millisecond, "the user delete never waited on the owned group's row lock")
+	close(resume)
+
+	var err1, err2 error
+	for i := 0; i < 2; i++ {
+		select {
+		case err1 = <-t1Err:
+		case err2 = <-t2Err:
+		case <-time.After(lockOrderTimeout):
+			t.Fatal("a delete did not finish")
+		}
+	}
+	assert.NoError(t, err2, "the project delete must not fail (40P01 means a lock-order inversion)")
+	assert.NoError(t, err1, "the user delete must not fail (40P01 means a lock-order inversion)")
+	if t.Failed() {
+		return
+	}
+	_, err := cs.GetUser(ctx, u)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = cs.GetProject(ctx, projectID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Zero(t, orphanedMembershipCount(t, cs))
+}
