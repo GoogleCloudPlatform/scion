@@ -1,0 +1,1075 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * The chat sidebar's hub view: every user (a `/api/v1/users` walk the page
+ * owns, single-flight per view) and every agent (the agent store's hub
+ * list, retained by the page). Users requests go through the mocked
+ * `apiFetch`; agent-list requests go to the store's in-memory server.
+ */
+
+// @vitest-environment happy-dom
+
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { apiFetch } from '../../client/api.js';
+import type { AgentStore } from '../../client/agent-store.js';
+import { agent, createHarness, settle } from '../../client/__fixtures__/agent-store-harness.js';
+import type { Harness } from '../../client/__fixtures__/agent-store-harness.js';
+import type { Agent } from '../../shared/types.js';
+import type { ChatAgentMember, ChatHumanMember } from '../shared/chat/chat-members.js';
+
+/** The global agent map, as far as the page uses it: rows seeded into it are kept. */
+const globalMap = vi.hoisted(() => {
+  const agents = new Map<string, Agent>();
+  const target = new EventTarget();
+  return {
+    agents,
+    stateManager: Object.assign(target, {
+      seedAgents: (list: Agent[]): void => {
+        for (const a of list) agents.set(a.id, a);
+      },
+      getAgents: (): Agent[] => Array.from(agents.values()),
+      getDeletedAgentIds: (): Set<string> => new Set<string>(),
+      removeAgent: (id: string): void => {
+        agents.delete(id);
+      },
+      setScope: (): void => {},
+    }),
+  };
+});
+
+vi.mock('../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  stateManager: globalMap.stateManager,
+}));
+
+vi.mock('../../client/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/api.js')>();
+  return { ...actual, apiFetch: vi.fn() };
+});
+
+let harness: Harness;
+
+/** The store singleton, as the chat page sees it: this test's store. */
+vi.mock('../../client/agent-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/agent-store.js')>();
+  const agentStore = new Proxy({} as AgentStore, {
+    get: (_target, key): unknown => {
+      const store = harness.store;
+      const value: unknown = Reflect.get(store, key);
+      return typeof value === 'function' ? (value as () => unknown).bind(store) : value;
+    },
+  });
+  return { ...actual, agentStore };
+});
+
+// Mounting awaits these lazy imports before the no-conversation load; their
+// components are irrelevant here.
+vi.mock('../shared/chat/chat-space-rail.js', () => ({}));
+vi.mock('../shared/chat/chat-members.js', () => ({}));
+
+/** The page's private surface these tests drive and read. */
+interface ChatPage extends HTMLElement {
+  pageData: unknown;
+  v2Conversation: Record<string, unknown> | null;
+  v2HumanMembers: ChatHumanMember[];
+  v2AgentMembers: ChatAgentMember[];
+  v2Members: Array<{ id: string }>;
+  loadHubMembers(options?: { refresh?: boolean }): void;
+  loadV2Members(projectId: string): Promise<void>;
+  disconnectedCallback(): void;
+  _hubUsersLoad: unknown;
+  _hubAgentsLoad: unknown;
+  _hubMembersGeneration: number;
+  _loadHubAgents(generation: number): Promise<void>;
+}
+
+beforeAll(async () => {
+  await import('./chat.js');
+});
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function usersPage(ids: string[], nextCursor?: string): Response {
+  const users = ids.map((id) => ({ id, displayName: id }));
+  return new Response(JSON.stringify({ users, ...(nextCursor ? { nextCursor } : {}) }), {
+    status: 200,
+  });
+}
+
+type UsersResponder = (
+  url: string,
+  init?: { signal?: AbortSignal | null | undefined }
+) => Response | Promise<Response>;
+
+/** Serve `/api/v1/users` with `users`; every other page request gets `{}`. */
+function serveUsers(users: UsersResponder): void {
+  vi.mocked(apiFetch).mockImplementation(async (url, init) => {
+    if (url.startsWith('/api/v1/users')) return users(url, init);
+    return new Response('{}', { status: 200 });
+  });
+}
+
+function usersRequests(): number {
+  return vi.mocked(apiFetch).mock.calls.filter((c) => c[0].startsWith('/api/v1/users')).length;
+}
+
+/** Every agent-list request the page made itself, outside the store: none expected. */
+function pageAgentRequests(): number {
+  return vi.mocked(apiFetch).mock.calls.filter((c) => c[0].startsWith('/api/v1/agents')).length;
+}
+
+/** Hub-list walks the store started. */
+function storeWalks(): number {
+  return harness.server.walks('/api/v1/agents');
+}
+
+function ids(list: Array<{ id: string }>): string[] {
+  return list.map((m) => m.id);
+}
+
+function createPage(): ChatPage {
+  const page = document.createElement('scion-page-chat') as unknown as ChatPage;
+  page.v2HumanMembers = [];
+  page.v2AgentMembers = [];
+  page.v2Members = [];
+  return page;
+}
+
+/** A connected page with its feed open: its no-conversation load has started. */
+async function mountPage(): Promise<ChatPage> {
+  window.history.pushState({}, '', '/chat');
+  const page = document.createElement('scion-page-chat') as unknown as ChatPage;
+  page.pageData = { user: { id: 'user-me' } };
+  document.body.appendChild(page);
+  await settle();
+  harness.stream().open();
+  await settle();
+  return page;
+}
+
+function unmount(page: ChatPage): void {
+  if (page.isConnected) document.body.removeChild(page);
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.mocked(apiFetch).mockReset();
+  globalMap.agents.clear();
+  harness = createHarness([agent('a1'), agent('a2')]);
+});
+
+afterEach(() => {
+  harness.store.destroy();
+  document.body.innerHTML = '';
+  vi.useRealTimers();
+});
+
+describe('hub members: one load per view', () => {
+  it('same-turn calls batch into one users walk and one store walk', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+
+    page.loadHubMembers();
+    page.loadHubMembers();
+    page.loadHubMembers();
+    page.loadHubMembers();
+    await settle();
+
+    expect(usersRequests()).toBe(1);
+    expect(storeWalks()).toBe(1);
+    expect(pageAgentRequests()).toBe(0);
+    expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+    expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+  });
+
+  it('issues no extra request when nothing new is triggered', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      // A mount's route parses can each walk the users once the previous
+      // walk has finished (single-flight, not a cache).
+      const usersBefore = usersRequests();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(usersRequests()).toBe(usersBefore);
+      expect(storeWalks()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('join and refresh calls during an in-flight users walk join it: no trailing walk', async () => {
+    const firstUsers = deferred<Response>();
+    serveUsers(() => firstUsers.promise);
+    const page = await mountPage();
+    try {
+      expect(usersRequests()).toBe(1);
+
+      page.loadHubMembers();
+      page.loadHubMembers({ refresh: true });
+      page.loadHubMembers({ refresh: true });
+      page.loadHubMembers({ refresh: true });
+      await settle();
+
+      firstUsers.resolve(usersPage(['u1']));
+      await settle();
+
+      expect(usersRequests()).toBe(1);
+      expect(storeWalks()).toBe(1);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a real cold mount: the route parse, the no-conversation branch and a rail-loaded re-parse share one users walk and one store walk', async () => {
+    const pendingUsers = deferred<Response>();
+    serveUsers(() => pendingUsers.promise);
+    const page = await mountPage();
+    try {
+      page.dispatchEvent(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+      await settle();
+
+      pendingUsers.resolve(usersPage(['u1']));
+      await settle();
+
+      expect(usersRequests()).toBe(1);
+      expect(storeWalks()).toBe(1);
+      expect(pageAgentRequests()).toBe(0);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      expect(ids(page.v2Members)).toEqual(['u1', 'a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: the fallback poll', () => {
+  it('walks the users again and issues no agent-list request once the agents are shown', async () => {
+    let call = 0;
+    serveUsers(() => usersPage([`u${++call}`]));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      const usersBefore = usersRequests();
+      const agentRequestsBefore = harness.server.requests.filter(
+        (p) => !p.includes('sort=')
+      ).length;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(ids(page.v2HumanMembers)).toEqual([`u${usersBefore + 1}`]);
+      // The store's own probes (sort=updated) are not walks.
+      expect(harness.server.requests.filter((p) => !p.includes('sort=')).length).toBe(
+        agentRequestsBefore
+      );
+      expect(storeWalks()).toBe(1);
+      expect(pageAgentRequests()).toBe(0);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('asks the store again while the agents are not shown yet: a failed first load is retried', async () => {
+    serveUsers(() => usersPage(['u1']));
+    harness.server.status = 500;
+    const page = await mountPage();
+    try {
+      expect(storeWalks()).toBe(1);
+      expect(page.v2AgentMembers).toEqual([]);
+
+      harness.server.status = 200;
+      page.loadHubMembers({ refresh: true });
+      await settle();
+
+      expect(storeWalks()).toBe(2);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: live updates from the store', () => {
+  it('an SSE create, status change and delete reach the sidebar with no request', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const requestsBefore = harness.server.requests.length;
+
+      harness.server.agents.push(agent('a3'));
+      await harness.emitAgent('created', {
+        agentId: 'a3',
+        name: 'a3',
+        slug: 'a3',
+        projectId: 'p1',
+      });
+      expect(ids(page.v2AgentMembers)).toContain('a3');
+      expect(ids(page.v2Members)).toContain('a3');
+
+      await harness.emitAgent('status', {
+        agentId: 'a1',
+        projectId: 'p1',
+        activity: 'working',
+        detail: { message: '<b>Running</b> tests' },
+      });
+      expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.activity).toBe('working');
+      // The agent's free-text detail stays plain text (rendered as text by the sidebar).
+      expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.detailMessage).toBe(
+        '<b>Running</b> tests'
+      );
+
+      await harness.emitAgent('deleted', { agentId: 'a2', projectId: 'p1' });
+      expect(ids(page.v2AgentMembers)).not.toContain('a2');
+
+      // No list request: probes (sort=updated) and the store's single read of
+      // the created row are not walks.
+      expect(
+        harness.server.requests
+          .slice(requestsBefore)
+          .filter((p) => !p.includes('sort=') && !p.startsWith('/api/v1/agents/'))
+      ).toEqual([]);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a DM opened from the hub view keeps the hub list live, read from the store', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = {
+        conversationKey: 'dm:agent:a1:user:user-me',
+        projectId: '',
+        isDM: true,
+      };
+      await settle();
+
+      await harness.emitAgent('status', { agentId: 'a2', projectId: 'p1', activity: 'thinking' });
+      expect(page.v2AgentMembers.find((m) => m.id === 'a2')?.activity).toBe('thinking');
+
+      // The global map's agents-updated, in this view, also reads the store's
+      // list: a row only the global map holds (the chat scope's) is not shown.
+      globalMap.agents.set('scope-only', agent('scope-only', { projectId: 'p7' }));
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      expect(page.v2AgentMembers.find((m) => m.id === 'a2')?.activity).toBe('thinking');
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a space view claiming the sidebar stops the hub list updating it, whatever the conversation', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = {
+        conversationKey: 'dm:agent:a1:user:user-me',
+        projectId: '',
+        isDM: true,
+      };
+      vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>(() => {}));
+      void page.loadV2Members('p1');
+      page.v2AgentMembers = [{ id: 'proj-agent', kind: 'agent', displayName: 'Proj Agent' }];
+      await settle();
+
+      harness.server.agents.push(agent('a3'));
+      await harness.emitAgent('created', {
+        agentId: 'a3',
+        name: 'a3',
+        slug: 'a3',
+        projectId: 'p1',
+      });
+      expect(ids(page.v2AgentMembers)).toEqual(['proj-agent']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a project view stops hearing the hub list', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      page.v2AgentMembers = [{ id: 'proj-agent', kind: 'agent', displayName: 'Proj Agent' }];
+      vi.mocked(apiFetch).mockImplementation(async () => new Promise<Response>(() => {}));
+      void page.loadV2Members('p1');
+      await settle();
+
+      await harness.emitAgent('created', {
+        agentId: 'a3',
+        name: 'a3',
+        slug: 'a3',
+        projectId: 'p9',
+      });
+      expect(ids(page.v2AgentMembers)).toEqual(['proj-agent']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: compact rows never reach the global agent map', () => {
+  it('no hub-list row is seeded on mount, live updates, the poll, a scope change or agents-updated', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      harness.server.agents.push(agent('a3'));
+      await harness.emitAgent('created', {
+        agentId: 'a3',
+        name: 'a3',
+        slug: 'a3',
+        projectId: 'p1',
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      globalMap.stateManager.dispatchEvent(new Event('scope-changed'));
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      await settle();
+
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2', 'a3']);
+      expect(globalMap.agents.size).toBe(0);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a later space view seeds its own rows, and a scope change back on the hub view does not re-seed hub rows', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              humans: [],
+              agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1' }],
+            }),
+            { status: 200 }
+          )
+        )
+      );
+      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      await page.loadV2Members('p1');
+      expect(Array.from(globalMap.agents.keys())).toEqual(['sp1']);
+
+      globalMap.agents.clear();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      globalMap.stateManager.dispatchEvent(new Event('scope-changed'));
+      expect(globalMap.agents.size).toBe(0);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: view-change race', () => {
+  it('a load in flight when the user opens a project does not overwrite that project members', async () => {
+    const pendingUsers = deferred<Response>();
+    serveUsers(() => pendingUsers.promise);
+    const release = harness.server.pause();
+    const page = await mountPage();
+    try {
+      page.v2Conversation = { projectId: 'p1' };
+      page.v2HumanMembers = [{ id: 'proj-user', kind: 'user', displayName: 'Proj User' }];
+      page.v2AgentMembers = [{ id: 'proj-agent', kind: 'agent', displayName: 'Proj Agent' }];
+      page.v2Members = [{ id: 'proj-user' }];
+      await settle();
+
+      release();
+      pendingUsers.resolve(usersPage(['hub-user']));
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['proj-user']);
+      expect(ids(page.v2AgentMembers)).toEqual(['proj-agent']);
+      expect(ids(page.v2Members)).toEqual(['proj-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a DM opened mid-load drops the detached store result, and the hub list does not reach that DM', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const release = harness.server.pause();
+    const page = await mountPage();
+    try {
+      expect(page._hubAgentsLoad).not.toBeNull();
+      page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
+      await settle();
+      expect(page._hubAgentsLoad).toBeNull();
+
+      release();
+      await settle();
+
+      // The walk itself went on: the page retains the hub list for its palette.
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('ready');
+      expect(page.v2AgentMembers).toEqual([]);
+      await harness.emitAgent('created', {
+        agentId: 'a3',
+        name: 'a3',
+        slug: 'a3',
+        projectId: 'p1',
+      });
+      expect(page.v2AgentMembers).toEqual([]);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('opening then closing a conversation mid-walk does not publish a truncated users list; a fresh walk publishes the full one', async () => {
+    let userCall = 0;
+    const usersPage1 = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? usersPage1.promise : usersPage(['u1', 'u2'])));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = { projectId: 'p1' };
+      usersPage1.resolve(usersPage(['u1'], 'u-cursor'));
+      await settle();
+
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      expect(usersRequests()).toBe(2);
+      expect(storeWalks()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('opening and closing a conversation within one Lit update batch does not publish a truncated users list', async () => {
+    let userCall = 0;
+    const usersPage1 = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? usersPage1.promise : usersPage(['u1', 'u2'])));
+    const page = await mountPage();
+    try {
+      usersPage1.resolve(usersPage(['u1'], 'u-cursor'));
+      // Up to the microtask where the walk re-checks shouldContinue before
+      // its second page.
+      for (let i = 0; i < 3; i++) await Promise.resolve();
+      queueMicrotask(() => {
+        page.v2Conversation = null;
+        page.loadHubMembers();
+      });
+      page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+      await settle();
+
+      // The users walk stopped for the moment the conversation was open
+      // (page 1 only) and walked again for the hub view still on screen.
+      expect(usersRequests()).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a superseded single-page users walk settling last does not overwrite the fresh walk', async () => {
+    let userCall = 0;
+    const staleUsers = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? staleUsers.promise : usersPage(['fresh-user'])));
+    const page = await mountPage();
+    try {
+      page.v2Conversation = { projectId: 'p1' };
+      await settle();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(userCall).toBe(2);
+
+      staleUsers.resolve(usersPage(['stale-user']));
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['fresh-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: users pagination and errors', () => {
+  it('walks every users page, and the store walks every agents page, with one request per page', async () => {
+    harness = createHarness(Array.from({ length: 450 }, (_, i) => agent(`a${i}`)));
+    const userIds = Array.from({ length: 120 }, (_, i) => `u${i}`);
+    serveUsers((url) =>
+      url.includes('cursor=')
+        ? usersPage(userIds.slice(100))
+        : usersPage(userIds.slice(0, 100), 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      // Whole walks only: each walk is two users requests.
+      expect(usersRequests() % 2).toBe(0);
+      expect(storeWalks()).toBe(1);
+      expect(harness.server.requests.filter((p) => p.includes('cursor=')).length).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(userIds);
+      expect(page.v2AgentMembers.length).toBe(450);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('de-dupes a user returned on two pages (the offset-pagination boundary-shift case)', async () => {
+    serveUsers((url) =>
+      url.includes('cursor=') ? usersPage(['u2', 'u3']) : usersPage(['u1', 'u2'], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2', 'u3']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a failed second users page keeps the previous users; a failed agents revalidation keeps the agents', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+
+      serveUsers((url) =>
+        url.includes('cursor=') ? new Response('', { status: 500 }) : usersPage(['u2'], 'u-cursor')
+      );
+      page.loadHubMembers({ refresh: true });
+      harness.server.status = 500;
+      harness.store.invalidate('manual');
+      await settle();
+
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: hung page', () => {
+  it('a stalled users page times out, clears the in-flight marker, keeps the users, and the next poll reloads', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(page._hubUsersLoad).toBeNull();
+      const usersBefore = usersRequests();
+
+      serveUsers((url, init) => {
+        if (!url.includes('cursor=')) return usersPage(['u2'], 'u-cursor');
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        });
+      });
+      page.loadHubMembers({ refresh: true });
+      await settle();
+      expect(page._hubUsersLoad).not.toBeNull();
+      expect(usersRequests()).toBe(usersBefore + 2);
+
+      // A view re-parse while the page is stalled joins the walk.
+      page.loadHubMembers();
+      await settle();
+      expect(usersRequests()).toBe(usersBefore + 2);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(page._hubUsersLoad).toBeNull();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+
+      serveUsers(() => usersPage(['u3']));
+      page.loadHubMembers({ refresh: true });
+      await settle();
+      expect(usersRequests()).toBe(usersBefore + 3);
+      expect(ids(page.v2HumanMembers)).toEqual(['u3']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a stalled agents page times out in the store, clears the sidebar caller, and the next trigger walks again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    harness = createHarness(Array.from({ length: 250 }, (_, i) => agent(`a${i}`)));
+    const realFetch = harness.server.fetch.getMockImplementation()!;
+    harness.server.fetch.mockImplementation((path, options) => {
+      if (!path.includes('cursor=')) return realFetch(path, options);
+      return new Promise<Response>((_, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      });
+    });
+    const page = await mountPage();
+    try {
+      expect(storeWalks()).toBe(1);
+      expect(page._hubAgentsLoad).not.toBeNull();
+
+      // A view re-parse while the page is stalled joins the walk.
+      page.loadHubMembers();
+      await settle();
+      expect(storeWalks()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(page._hubAgentsLoad).toBeNull();
+      expect(page.v2AgentMembers).toEqual([]);
+
+      harness.server.fetch.mockImplementation(realFetch);
+      page.loadHubMembers({ refresh: true });
+      await settle();
+      expect(storeWalks()).toBe(2);
+      expect(page.v2AgentMembers.length).toBe(250);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: reconnect and disconnect', () => {
+  it('a disconnect-then-reconnect while the users walk is in flight starts a fresh walk, and the stale walk does not overwrite it', async () => {
+    let userCall = 0;
+    const staleUsers = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? staleUsers.promise : usersPage(['u-fresh'])));
+    const page = await mountPage();
+    try {
+      document.body.removeChild(page);
+      document.body.appendChild(page);
+      await settle();
+
+      staleUsers.resolve(usersPage(['u-stale']));
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      // The store answers the reconnected page from memory.
+      expect(storeWalks()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a stale load settling after reconnect does not clear the in-flight markers of the still-running fresh loads', async () => {
+    let userCall = 0;
+    const staleUsers = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? staleUsers.promise : new Promise<Response>(() => {})));
+    const release = harness.server.pause();
+    const page = await mountPage();
+    try {
+      document.body.removeChild(page);
+      document.body.appendChild(page);
+      await settle();
+      expect(userCall).toBe(2);
+      const freshAgents = page._hubAgentsLoad;
+      expect(freshAgents).not.toBeNull();
+
+      staleUsers.resolve(usersPage(['u-stale']));
+      await settle();
+
+      expect(page._hubUsersLoad).not.toBeNull();
+      expect(page._hubAgentsLoad).toBe(freshAgents);
+      page.loadHubMembers();
+      await settle();
+      expect(userCall).toBe(2);
+      release();
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a load requested just before a disconnect in the same turn issues no requests', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+    vi.mocked(apiFetch).mockClear();
+    const walksBefore = storeWalks();
+
+    page.loadHubMembers();
+    document.body.removeChild(page);
+    // With the feed down, a store read would walk rather than answer from
+    // memory: any read the load made would show as a walk.
+    harness.stream().drop();
+    await settle();
+    // Past the store's wait for the feed to reconnect.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(storeWalks()).toBe(walksBefore);
+    expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+  });
+
+  it('a superseded store read settling after a newer one started does not clear the newer one', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const release = harness.server.pause();
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+
+    void page._loadHubAgents(0);
+    page._hubMembersGeneration = 1;
+    void page._loadHubAgents(1);
+    const fresh = page._hubAgentsLoad;
+    // The superseded read was detached; its rejection settles now.
+    await settle();
+
+    expect(page._hubAgentsLoad).toBe(fresh);
+    release();
+    await settle();
+    expect(page._hubAgentsLoad).toBeNull();
+    expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+  });
+
+  it('stops requesting users pages once the element disconnects mid-walk', async () => {
+    let userCall = 0;
+    const page2 = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? usersPage(['u1'], 'u-cursor') : page2.promise));
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+    page.loadHubMembers();
+    await settle();
+    expect(userCall).toBe(2);
+
+    page.disconnectedCallback();
+    page2.resolve(usersPage(['u2'], 'u2-cursor'));
+    await settle();
+
+    expect(userCall).toBe(2);
+  });
+
+  it('stops requesting users pages once a conversation opens mid-walk', async () => {
+    let userCall = 0;
+    const page2 = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? usersPage(['u1'], 'u-cursor') : page2.promise));
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+    page.loadHubMembers();
+    await settle();
+    expect(userCall).toBe(2);
+
+    page.v2Conversation = { projectId: 'p1' };
+    page2.resolve(usersPage(['u2'], 'u2-cursor'));
+    await settle();
+
+    expect(userCall).toBe(2);
+  });
+
+  it('a disconnect mid-walk releases the hub list: the store aborts a walk no one else wants', async () => {
+    serveUsers(() => usersPage(['u1']));
+    harness = createHarness(Array.from({ length: 450 }, (_, i) => agent(`a${i}`)));
+    const realFetch = harness.server.fetch.getMockImplementation()!;
+    const page2 = deferred<void>();
+    const asked: string[] = [];
+    harness.server.fetch.mockImplementation(async (path, options) => {
+      asked.push(path);
+      if (path.includes('cursor=')) await page2.promise;
+      return realFetch(path, options);
+    });
+    const page = await mountPage();
+    // Page 1 served, page 2 held.
+    expect(asked.length).toBe(2);
+
+    document.body.removeChild(page);
+    page2.resolve();
+    await settle();
+
+    // No third page: the walk stopped with its last waiter and retainer gone.
+    expect(asked.length).toBe(2);
+    expect(page.v2AgentMembers).toEqual([]);
+  });
+});
+
+describe('hub members: users stopped state is per attempt', () => {
+  it('a superseded users walk stopping after a conversation opens and closes does not make the fresh walk re-run or discard its result', async () => {
+    const staleUsers = deferred<Response>();
+    const freshUsers = deferred<Response>();
+    let userCall = 0;
+    serveUsers(() => {
+      userCall++;
+      if (userCall === 1) return staleUsers.promise;
+      if (userCall === 2) return freshUsers.promise;
+      return usersPage(['u-rerun']);
+    });
+    const page = await mountPage();
+    try {
+      page.v2Conversation = { projectId: 'p1' };
+      await settle();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(userCall).toBe(2);
+
+      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
+      await settle();
+      freshUsers.resolve(usersPage(['u-fresh']));
+      await settle();
+
+      expect(usersRequests()).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a superseded users walk stopping after a disconnect and reconnect does not make the fresh walk re-run or discard its result', async () => {
+    const staleUsers = deferred<Response>();
+    const freshUsers = deferred<Response>();
+    let userCall = 0;
+    serveUsers(() => {
+      userCall++;
+      if (userCall === 1) return staleUsers.promise;
+      if (userCall === 2) return freshUsers.promise;
+      return usersPage(['u-rerun']);
+    });
+    const page = await mountPage();
+    try {
+      document.body.removeChild(page);
+      document.body.appendChild(page);
+      await settle();
+      expect(userCall).toBe(2);
+
+      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
+      await settle();
+      freshUsers.resolve(usersPage(['u-fresh']));
+      await settle();
+
+      expect(usersRequests()).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: request counts per trigger', () => {
+  /** Two users pages; the first request can be held so a trigger lands mid-walk. */
+  function twoUserPages(holdFirst: Deferred<Response>): void {
+    let userCall = 0;
+    serveUsers((url) => {
+      userCall++;
+      if (userCall === 1) return holdFirst.promise;
+      return url.includes('cursor=') ? usersPage(['u2']) : usersPage(['u1'], 'u-cursor');
+    });
+  }
+
+  const cases: Array<{
+    trigger: string;
+    run: (page: ChatPage, held: Deferred<Response>) => Promise<void>;
+    users: number;
+  }> = [
+    {
+      trigger: 'cold mount',
+      run: async (_page, held): Promise<void> => {
+        held.resolve(usersPage(['u1'], 'u-cursor'));
+        await settle();
+      },
+      users: 2,
+    },
+    {
+      trigger: 'open a conversation, then return to /chat mid-walk (separate update batches)',
+      run: async (page, held): Promise<void> => {
+        page.v2Conversation = { projectId: 'p1' };
+        await settle();
+        page.v2Conversation = null;
+        page.loadHubMembers();
+        await settle();
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        await settle();
+      },
+      // Superseded walk: page 1 only (stopped). Fresh walk: 2.
+      users: 3,
+    },
+    {
+      trigger: 'open and close a conversation within one update batch mid-walk',
+      run: async (page, held): Promise<void> => {
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+        queueMicrotask(() => {
+          page.v2Conversation = null;
+          page.loadHubMembers();
+        });
+        page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+        await settle();
+      },
+      // Stopped attempt: page 1 only. Re-run: 2.
+      users: 3,
+    },
+    {
+      trigger: 'disconnect and reconnect mid-walk',
+      run: async (page, held): Promise<void> => {
+        document.body.removeChild(page);
+        document.body.appendChild(page);
+        await settle();
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        await settle();
+      },
+      users: 3,
+    },
+    {
+      trigger: 'fallback poll (three refresh calls) mid-walk',
+      run: async (page, held): Promise<void> => {
+        page.loadHubMembers({ refresh: true });
+        page.loadHubMembers({ refresh: true });
+        page.loadHubMembers({ refresh: true });
+        held.resolve(usersPage(['u1'], 'u-cursor'));
+        await settle();
+      },
+      // They join the walk: no trailing walk.
+      users: 2,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.trigger}: ${c.users} users requests and one store walk, full lists published`, async () => {
+      const held = deferred<Response>();
+      twoUserPages(held);
+      const page = await mountPage();
+      try {
+        await c.run(page, held);
+        expect(usersRequests()).toBe(c.users);
+        expect(storeWalks()).toBe(1);
+        expect(pageAgentRequests()).toBe(0);
+        expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
+        expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      } finally {
+        unmount(page);
+      }
+    });
+  }
+});

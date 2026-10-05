@@ -15,6 +15,7 @@
     "shared/agent-tree-view.test.ts",
     "shared/deep-active-element.test.ts",
     "pages/chat-palette-shortcut.test.ts",
+    "pages/chat-hub-members.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts",

@@ -79,6 +79,7 @@ module.exports = {
                 'src/components/shared/header.test.ts',
                 'src/components/shared/group-member-editor-membership.test.ts',
                 'src/components/pages/onboarding.test.ts',
+                'src/components/pages/chat-hub-members.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },

@@ -28,32 +28,6 @@ const PAGE_ONE_AGENT = { id: 'agent-page-one', name: 'Page One Agent', slug: 'pa
 const PAGE_TWO_AGENT = { id: 'agent-page-two', name: 'Page Two Agent', slug: 'page-two' };
 const CREATED_AGENT = { id: 'agent-created', name: 'Created Agent', slug: 'created' };
 
-/**
- * Waits until `count()` has not changed for `quietMs`, up to `timeoutMs`
- * total, so the page's own pre-palette requests to this endpoint have
- * finished before a test takes its baseline.
- */
-async function waitForCountToSettle(
-  count: () => number,
-  quietMs = 300,
-  timeoutMs = 5_000
-): Promise<number> {
-  const deadline = Date.now() + timeoutMs;
-  let last = count();
-  let lastChangeAt = Date.now();
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const current = count();
-    if (current !== last) {
-      last = current;
-      lastChangeAt = Date.now();
-    } else if (Date.now() - lastChangeAt >= quietMs) {
-      return last;
-    }
-  }
-  return last;
-}
-
 function paletteOptions(page: Page) {
   return page.locator('scion-quick-palette .palette-option');
 }
@@ -89,17 +63,18 @@ test('agent status events during and after a slow multi-page walk are applied wi
   });
   await page.goto('/e2e/chat-palette/fixture.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
-  // The page's own requests to this endpoint (not the palette's) settle
-  // first; every count below is relative to them.
-  await waitForCountToSettle(callCount);
-  await expect.poll(() => fulfilledCount() - callCount(), { timeout: 10_000 }).toBe(0);
-  const startedBefore = callCount();
-  const fulfilledBefore = fulfilledCount();
-  const started = (): number => callCount() - startedBefore;
-  const fulfilled = (): number => fulfilledCount() - fulfilledBefore;
+  // The page's members sidebar starts the agent store's hub walk on mount;
+  // the palette, opened while it reads its slow second page, joins it. Every
+  // request to the endpoint counts.
+  await expect.poll(callCount).toBeGreaterThan(0);
+  const started = callCount;
+  const fulfilled = fulfilledCount;
 
   await page.keyboard.press('Control+k');
-  await expect(agentsLoading(page)).toBeVisible();
+  // Joined mid-walk: the rows read so far, while the slow second page is
+  // still on its way.
+  await expect(paletteOptions(page).filter({ hasText: PAGE_ONE_AGENT.name })).toBeVisible();
+  await expect(paletteOptions(page).filter({ hasText: PAGE_TWO_AGENT.name })).toHaveCount(0);
 
   // Status traffic while the walk is still reading pages.
   for (let i = 0; i < 4; i++) {
