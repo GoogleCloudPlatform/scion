@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // attachCmd represents the attach command
@@ -45,14 +46,17 @@ var attachCmd = &cobra.Command{
 	Short: "Attach to an agent's interactive session",
 	Long: `Attach your terminal to the interactive tmux session of a running agent.
 
-scion attach needs an interactive terminal. Without one (for example when it
-runs from a script or a coding harness) it fails with an error and a non-zero
-exit, rather than returning without attaching.
+scion attach needs an interactive terminal on stdin and stdout. Without one
+(for example when it runs from a script or a coding harness, or its output is
+piped) it fails with an error and a non-zero exit, rather than returning
+without attaching.
 
 Detaching:
   Press Ctrl-b, then d (the tmux detach key). The agent keeps running and you
-  can attach again later. Ctrl-p Ctrl-q (the docker/podman exec default) is
-  not used.
+  can attach again later. The docker/podman default Ctrl-p Ctrl-q is not used,
+  so Ctrl-p reaches the agent. Podman's detach keys are off. On docker they
+  move to Ctrl-\ then Ctrl-^: a lone Ctrl-\ is delayed until the next key,
+  and the full sequence ends the attach (the agent keeps running).
 
 Local vs Hub mode:
   With a local project, scion attach runs the container runtime's exec on this
@@ -152,9 +156,12 @@ Disconnects:
 
 // localAttachNotFoundFormats are the "not found" errors the local runtimes
 // return from Attach (pkg/runtime docker.go, podman.go, apple_container.go
-// and k8s_runtime.go), with %s standing for the ID passed to Attach. Keep
-// these in step with the runtimes' wording; TestLocalAttachError checks
-// the current wording.
+// and k8s_runtime.go), with %s standing for the ID passed to Attach.
+// TestLocalAttachError_RealRuntimeErrors drives the real docker, podman and
+// Apple container Attach against an empty container list and checks that
+// their errors match, so a runtime rewording fails that test. The k8s pod
+// wording is checked only by hand-written strings (its Attach needs a
+// cluster client).
 var localAttachNotFoundFormats = []string{
 	"agent '%s' not found",
 	"agent '%s' container not found, it may have exited and been removed",
@@ -176,17 +183,24 @@ func localAttachError(err error, attachID, agentName, projectName string) error 
 	return err
 }
 
-// attachTerminalCheck reports whether stdin is an interactive terminal. It is
-// a variable so tests can override it.
+// attachTerminalCheck reports whether stdin and stdout are both interactive
+// terminals: stdin so keystrokes can be read in raw mode, stdout so the
+// remote screen can render. It is a variable so tests can override it.
 var attachTerminalCheck = func() bool {
-	return util.IsTerminal()
+	return stdioAreTerminals(util.IsTerminal(), term.IsTerminal(int(os.Stdout.Fd())))
+}
+
+// stdioAreTerminals is the attach terminal rule: both stdin and stdout must
+// be terminals.
+func stdioAreTerminals(stdinTTY, stdoutTTY bool) bool {
+	return stdinTTY && stdoutTTY
 }
 
 // errAttachNeedsTerminal is returned when attach is requested without an
 // interactive terminal. Without this check the attach would read EOF from
 // stdin at once and exit 0 having done nothing, which scripts and coding
 // harnesses read as success.
-var errAttachNeedsTerminal = errors.New("attach requires an interactive terminal (stdin is not a TTY)\n\nRun it from a terminal, or use scion look <agent> to view the session and scion message <agent> to send input")
+var errAttachNeedsTerminal = errors.New("attach requires an interactive terminal (stdin and stdout must both be a TTY)\n\nRun it from a terminal, or use scion look <agent> to view the session and scion message <agent> to send input")
 
 // requireAttachTerminal fails fast when there is no interactive terminal to
 // attach. Every attach entry point (scion attach, start -a, resume -a) calls
@@ -412,6 +426,13 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
 	}
 
+	// Check attach support before the phase: an agent whose runtime can never
+	// be attached must not be told to resume first (resuming has side effects
+	// and would still end in "attach is not supported").
+	if err := attachUnsupportedErr(ctx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
+		return err
+	}
+
 	// Check agent lifecycle status - the agent must be running to attach.
 	agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 	if agentPhase != string(state.PhaseRunning) {
@@ -445,6 +466,8 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		Runtime:  agent.Runtime,
 		BrokerID: agent.RuntimeBrokerID,
 		Profile:  agentProfileName(agent),
+		// attachUnsupportedErr already ran above, before the phase check.
+		GateChecked: true,
 	})
 }
 
@@ -475,6 +498,9 @@ type hubAttachTarget struct {
 	Runtime  string
 	BrokerID string
 	Profile  string
+	// GateChecked means the caller already ran attachUnsupportedErr for this
+	// agent, so attachHubSession skips a second broker lookup.
+	GateChecked bool
 }
 
 // attachHubSession is the shared Hub attach flow used by scion attach and by
@@ -488,8 +514,10 @@ func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachT
 	// here instead, using broker metadata the Hub already serves, so the user
 	// gets a fixed, explicit, non-zero-exit error before any WebSocket dial
 	// is attempted.
-	if err := attachUnsupportedErr(ctx, hubCtx, target.Runtime, target.BrokerID, target.Profile); err != nil {
-		return err
+	if !target.GateChecked {
+		if err := attachUnsupportedErr(ctx, hubCtx, target.Runtime, target.BrokerID, target.Profile); err != nil {
+			return err
+		}
 	}
 
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode

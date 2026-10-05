@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -95,6 +98,13 @@ func TestRunAgent_AttachNoTTY_FailsBeforeStarting(t *testing.T) {
 
 	err = RunAgent(resumeCmd, []string{"some-agent"}, true)
 	require.ErrorIs(t, err, errAttachNeedsTerminal)
+}
+
+func TestStdioAreTerminals(t *testing.T) {
+	assert.True(t, stdioAreTerminals(true, true))
+	assert.False(t, stdioAreTerminals(true, false), "stdout captured (e.g. piped to tee) must fail")
+	assert.False(t, stdioAreTerminals(false, true), "no TTY on stdin must fail")
+	assert.False(t, stdioAreTerminals(false, false))
 }
 
 func TestRequireAttachTerminal_WithTTY(t *testing.T) {
@@ -233,33 +243,106 @@ func TestAttachViaHub_CloseCodeIsDescribed(t *testing.T) {
 	assert.Contains(t, err.Error(), "scion resume cc-agent --attach")
 }
 
+// TestStartAgentViaHub_Attach_CloseCodeIsDescribed covers start -a and
+// resume -a: both go through attachHubSession, so a close code is described
+// the same way scion attach describes it.
 func TestStartAgentViaHub_Attach_CloseCodeIsDescribed(t *testing.T) {
-	clearAppTokenSources(t)
-	t.Setenv("SCION_HUB_TOKEN", "test-token")
-	stubPlainTransport(t)
-	gotID := stubAttachSession(t, func() error {
-		return &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: wsprotocol.CloseReasonBrokerDisconnected}
-	})
+	for _, resume := range []bool{false, true} {
+		name := "start -a"
+		if resume {
+			name = "resume -a"
+		}
+		t.Run(name, func(t *testing.T) {
+			clearAppTokenSources(t)
+			t.Setenv("SCION_HUB_TOKEN", "test-token")
+			stubPlainTransport(t)
+			gotID := stubAttachSession(t, func() error {
+				return &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: wsprotocol.CloseReasonBrokerDisconnected}
+			})
 
-	restore := saveAttachTestState()
-	defer restore()
-	attach = true
-	templateName = ""
-	labelFlags = nil
-	runtimeBrokerID = ""
-	harnessConfigFlag = ""
-	harnessAuthFlag = ""
+			restore := saveAttachTestState()
+			defer restore()
+			attach = true
+			templateName = ""
+			labelFlags = nil
+			runtimeBrokerID = ""
+			harnessConfigFlag = ""
+			harnessAuthFlag = ""
 
-	srv := newStartAgentMockHubServer(t, "proj-start-cc", "start-cc-agent", "start-cc-uuid", "")
+			srv := newStartAgentMockHubServer(t, "proj-start-cc", "start-cc-agent", "start-cc-uuid", "")
+			client, err := hubclient.New(srv.URL)
+			require.NoError(t, err)
+
+			err = startAgentViaHub(nil, &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-start-cc"}, "start-cc-agent", "", resume, nil)
+			require.Error(t, err)
+			assert.Equal(t, "start-cc-uuid", *gotID)
+			assert.Contains(t, err.Error(), "attach to agent 'start-cc-agent' ended")
+			assert.Contains(t, err.Error(), "close code 4503: broker_disconnected")
+			assert.Contains(t, err.Error(), "scion attach start-cc-agent")
+		})
+	}
+}
+
+// TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst: a stopped
+// agent on a runtime that can never be attached gets the unsupported error,
+// not a hint to resume it first.
+func TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst(t *testing.T) {
+	const (
+		projectID = "proj-stopped-noattach"
+		agentName = "stopped-noattach"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-2", Name: agentName, Phase: "stopped",
+				Runtime: "noattach", RuntimeBrokerID: mockAttachBrokerID})
+		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker("noattach"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
-	err = startAgentViaHub(nil, &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-start-cc"}, "start-cc-agent", "", false, nil)
+	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
 	require.Error(t, err)
-	assert.Equal(t, "start-cc-uuid", *gotID)
-	assert.Contains(t, err.Error(), "attach to agent 'start-cc-agent' ended")
-	assert.Contains(t, err.Error(), "close code 4503: broker_disconnected")
-	assert.Contains(t, err.Error(), "scion attach start-cc-agent")
+	assert.Equal(t, "attach is not supported for agents on the noattach runtime", err.Error())
+}
+
+// TestAttachViaHub_GateRunsOnce: scion attach runs the capability gate before
+// the phase check and tells attachHubSession not to repeat the broker lookup.
+func TestAttachViaHub_GateRunsOnce(t *testing.T) {
+	clearAppTokenSources(t)
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
+	stubAttachSession(t, func() error { return nil })
+
+	const (
+		projectID = "proj-gate-once"
+		agentName = "gate-once"
+	)
+	brokerGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-3", Name: agentName, Phase: "running", RuntimeBrokerID: mockAttachBrokerID})
+		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
+			brokerGets++
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName))
+	assert.Equal(t, 1, brokerGets)
 }
 
 func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {
@@ -273,6 +356,40 @@ func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {
 }
 
 // --- #3311: local not-found message ---
+
+// fakeEmptyRuntimeBinary writes a runtime binary that prints out for every
+// call, standing in for a runtime whose container list is empty.
+func fakeEmptyRuntimeBinary(t *testing.T, out string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-runtime")
+	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' '"+out+"'\n"), 0o700))
+	return bin
+}
+
+// TestLocalAttachError_RealRuntimeErrors feeds each local runtime's own
+// Attach "not found" error (produced by the real runtime code against an
+// empty container list) through localAttachError, so a runtime rewording
+// its error fails this test instead of silently hiding the friendly message.
+func TestLocalAttachError_RealRuntimeErrors(t *testing.T) {
+	const id = "c0ffee"
+	tests := []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"docker", &runtime.DockerRuntime{Command: fakeEmptyRuntimeBinary(t, "")}},
+		{"podman", &runtime.PodmanRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
+		{"apple container", &runtime.AppleContainerRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rtErr := tc.rt.Attach(context.Background(), id)
+			require.Error(t, rtErr)
+			got := localAttachError(rtErr, id, "a1", "proj")
+			assert.Contains(t, got.Error(), "agent 'a1' not found in project 'proj'",
+				"runtime error %q was not recognised as not-found", rtErr)
+		})
+	}
+}
 
 func TestLocalAttachError(t *testing.T) {
 	const id = "c0ffee"

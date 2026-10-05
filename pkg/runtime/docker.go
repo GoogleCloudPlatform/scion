@@ -354,7 +354,9 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 
 // dockerExecDetachKeys is the --detach-keys value used for docker exec of a
 // tmux attach. docker cannot turn detach keys off (an empty value means "use
-// the default"), so this is a sequence nobody types by accident.
+// the default"), so this moves them to a rarely typed sequence. docker holds
+// back a lone Ctrl-\ until the next key arrives, and the full sequence ends
+// the exec (the tmux session keeps running).
 const dockerExecDetachKeys = "ctrl-\\,ctrl-^"
 
 // ExecDetachKeysArgs returns the --detach-keys flag for an interactive
@@ -363,7 +365,8 @@ const dockerExecDetachKeys = "ctrl-\\,ctrl-^"
 // hold back every Ctrl-p until the next key arrives, and Ctrl-p is a common
 // history key in agent CLIs. Detaching from an attach session is tmux's job
 // (Ctrl-b d), so podman gets an empty sequence, which disables its detach
-// keys, and docker gets dockerExecDetachKeys. Matching is on the binary's
+// keys, and docker gets dockerExecDetachKeys, a rarely typed sequence (docker
+// cannot disable them). Matching is on the binary's
 // base name, so other runtimes (and test adapters) get no extra flag.
 func ExecDetachKeysArgs(runtimeCmd string) []string {
 	switch filepath.Base(runtimeCmd) {
