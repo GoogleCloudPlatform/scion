@@ -173,7 +173,7 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `POST /`: Upload a new template or version.
 
 #### Auth (`/api/v1/auth`)
-- `GET /scopes`: Dynamically discover all available User Access Token (UAT) scopes and their descriptions. With `projectId`, each scope also reports `eligible` and, when not eligible, `eligibilityReason`, for the caller in that project. A project the caller cannot access and a nonexistent project are denied identically. Minting a token (`POST /api/v1/auth/tokens`) re-checks every requested scope against the caller's live authority and refuses an ineligible one with `403 scope_violation`.
+- `GET /scopes`: Dynamically discover all available User Access Token (UAT) scopes and their descriptions. With `projectId`, each scope also reports `eligible` and, when not eligible, `eligibilityReason`, for the caller in that project. A project the caller cannot access and a nonexistent project are denied identically. Minting a token (`POST /api/v1/auth/tokens`) re-checks every requested scope against the caller's live authority and refuses an ineligible one with `403 scope_violation`. The mint body names the token's boundary either with the `projectId` shorthand or with `boundary: {kind, projectId}`, where `kind` is `project` or `hub`; a missing or blank boundary, conflicting forms, an unknown kind, or a hub boundary with a project ID is rejected with `400`. Hub token responses carry `boundary: {"kind": "hub"}` and no `projectId`. See [Hub-bound tokens](/scion/hosted/user/personal-access-tokens/#hub-bound-tokens-api-only).
 
 #### Users (`/api/v1/users`)
 - `GET /`: List users (admin only).
