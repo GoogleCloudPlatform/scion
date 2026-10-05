@@ -1391,6 +1391,54 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(typeOutside('x').defaultPrevented).toBe(false);
   });
 
+  it('the initial focus applies the keys once, with no repeat', async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    const el = await mountClosed(typeahead);
+    await show(el);
+    typeOutside('a');
+    typeOutside('b');
+    const onFocus = vi.fn();
+    input(el).addEventListener('focus', onFocus);
+    await fireInitialFocus(el);
+
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(input(el).value).toBe('ab');
+    expect(typeahead.pending).toBe('');
+  });
+
+  it('the initial focus applies the keys when focusing fires no focus event, as in a window without focus', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    vi.spyOn(input(el), 'focus').mockImplementation(() => {});
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('a');
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it("the initial focus applies a host's keys captured while the input kept focus", async () => {
+    const typeahead = new PaletteTypeahead();
+    const el = await mountClosed(typeahead);
+    typeahead.start();
+    await show(el);
+    await fireInitialFocus(el);
+    typeahead.stop();
+    el.open = false;
+    await el.updateComplete;
+    // A host reopen during the close animation, with focus still in the input.
+    input(el).focus();
+    expect(el.shadowRoot!.activeElement).toBe(input(el));
+    typeahead.start();
+    typeOutside('z');
+    await show(el);
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('z');
+    expect(typeahead.isCapturing).toBe(false);
+  });
+
   it('Escape and modifier chords between the open and the initial focus pass through', async () => {
     const el = await mountClosed();
     await show(el);
