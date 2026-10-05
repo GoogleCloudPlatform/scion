@@ -777,7 +777,7 @@ func TestWebHealthz_DegradedHub(t *testing.T) {
 			Version:      "0.1.0",
 			ScionVersion: "abc1234",
 			Uptime:       "1m0s",
-			Checks:       map[string]string{"database": "unhealthy"},
+			Checks:       map[string]string{"database": "healthy", "colocated_broker": "unhealthy: registration failed"},
 		}
 	})
 
@@ -799,6 +799,50 @@ func TestWebHealthz_DegradedHub(t *testing.T) {
 	hubObj, ok := result["hub"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "degraded", hubObj["status"])
+}
+
+// TestWebHealthz_UnhealthyHub: the composite /healthz uses the same severity
+// semantics as GetHealthInfo, so an unhealthy hub (critical check failed)
+// makes the composite unhealthy rather than merely degraded.
+func TestWebHealthz_UnhealthyHub(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetHubHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{Status: "unhealthy", Checks: map[string]string{"database": "unhealthy"}}
+	})
+	// A degraded broker must not lower the composite back to degraded.
+	ws.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{Status: "degraded"}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	assert.Equal(t, "unhealthy", result["status"])
+}
+
+// TestWebHealthz_DegradedBroker: a healthy hub with a degraded broker gives a
+// degraded composite.
+func TestWebHealthz_DegradedBroker(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetHubHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{Status: "healthy", Checks: map[string]string{"database": "healthy"}}
+	})
+	ws.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{Status: "degraded"}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	assert.Equal(t, "degraded", result["status"])
 }
 
 func TestIsHashedAsset(t *testing.T) {

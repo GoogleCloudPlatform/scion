@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -109,4 +110,70 @@ func TestGetHealthInfo_DegradedWhenColocatedBrokerRegistrationFailed(t *testing.
 	assert.Equal(t, "unhealthy: registration failed", info.Checks["colocated_broker"])
 	assert.NotContains(t, info.Checks["colocated_broker"], "invalid UUID",
 		"the raw registration error must not reach the public health check value")
+}
+
+// pingFailStore wraps a real store but reports the database as unreachable,
+// so GetHealthInfo's critical database check fails while everything else
+// (stats queries, summary aggregation) still works.
+type pingFailStore struct {
+	store.Store
+}
+
+func (pingFailStore) Ping(context.Context) error { return errors.New("database is down") }
+
+// TestDeriveHealthStatus pins the severity distinction from
+// ptone/scion#1094: only a critical check (database) makes the composite
+// status unhealthy; any other non-healthy key only degrades it, so
+// informational keys no longer read as "down" to consumers.
+func TestDeriveHealthStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		checks map[string]string
+		want   string
+	}{
+		{"no checks", nil, HealthStatusHealthy},
+		{"all healthy", map[string]string{"database": "healthy", "colocated_broker": "healthy"}, HealthStatusHealthy},
+		{"non-critical only", map[string]string{"database": "healthy", "colocated_broker": "unhealthy: registration failed"}, HealthStatusDegraded},
+		{"informational key", map[string]string{"database": "healthy", "workspace_storage": "healthy", "workspace_storage_mount_verification": "unavailable: could not compare filesystem device IDs"}, HealthStatusDegraded},
+		{"database down", map[string]string{"database": "unhealthy"}, HealthStatusUnhealthy},
+		{"database down wins over non-critical", map[string]string{"database": "unhealthy", "colocated_broker": "unhealthy: registration pending"}, HealthStatusUnhealthy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Map iteration order is random; repeat to catch an
+			// order-dependent early return.
+			for i := 0; i < 20; i++ {
+				assert.Equal(t, tt.want, deriveHealthStatus(tt.checks))
+			}
+		})
+	}
+}
+
+func TestWorseHealthStatus(t *testing.T) {
+	assert.Equal(t, HealthStatusHealthy, worseHealthStatus("healthy", "healthy"))
+	assert.Equal(t, HealthStatusDegraded, worseHealthStatus("healthy", "degraded"))
+	assert.Equal(t, HealthStatusDegraded, worseHealthStatus("degraded", "healthy"))
+	assert.Equal(t, HealthStatusUnhealthy, worseHealthStatus("degraded", "unhealthy"))
+	assert.Equal(t, HealthStatusUnhealthy, worseHealthStatus("unhealthy", "degraded"))
+	assert.Equal(t, HealthStatusUnhealthy, worseHealthStatus("unhealthy", "healthy"))
+	// Unknown values are a problem we cannot classify: degraded, not down.
+	assert.Equal(t, HealthStatusDegraded, worseHealthStatus("healthy", "something-else"))
+	assert.Equal(t, HealthStatusDegraded, worseHealthStatus("healthy", ""))
+}
+
+// TestGetHealthInfo_UnhealthyWhenDatabaseDown: a failed critical check must
+// make the composite status "unhealthy", distinct from "degraded".
+func TestGetHealthInfo_UnhealthyWhenDatabaseDown(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.store = pingFailStore{srv.store}
+
+	info := srv.GetHealthInfo(context.Background())
+	assert.Equal(t, HealthStatusUnhealthy, info.Status)
+	assert.Equal(t, "unhealthy", info.Checks["database"])
+
+	// Still unhealthy (not merely degraded) with a non-critical failure too.
+	srv.ExpectEmbeddedBroker()
+	srv.EmbeddedBrokerRegistrationFailed(errors.New("boom"))
+	info = srv.GetHealthInfo(context.Background())
+	assert.Equal(t, HealthStatusUnhealthy, info.Status)
 }

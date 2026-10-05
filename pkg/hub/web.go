@@ -980,10 +980,11 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Hub = hubHealth
 
 		// Inherit top-level version/uptime from hub health if available.
+		// Same severity semantics as GetHealthInfo: the composite is the
+		// worst of its components, so an unhealthy hub (critical check
+		// failed) makes the composite unhealthy, not merely degraded.
 		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 		// Use hub's uptime as the authoritative uptime.
 		if h, ok := hubHealth.(*HealthResponse); ok {
@@ -1002,9 +1003,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Broker = brokerHealth
 
 		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 	}
 
