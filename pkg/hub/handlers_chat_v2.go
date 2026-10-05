@@ -168,7 +168,10 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 // chatSpacesTopicBatch and chatSpacesReadStateBatch bound the number of
 // bind parameters in one rollup query, keeping each well under SQLite's
 // limit while still covering a typical hub in a single query each. They
-// are variables only so tests can exercise batch boundaries.
+// are variables only so tests can exercise batch boundaries: tests
+// overwrite them (TestChatSpaces_RollupBatchBoundaries), so a test that
+// does must not use t.Parallel, and neither may any test that reads them
+// through GET /chat/spaces while one is overwritten.
 var (
 	chatSpacesTopicBatch     = 200
 	chatSpacesReadStateBatch = 500
