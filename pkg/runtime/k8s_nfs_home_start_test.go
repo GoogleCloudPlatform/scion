@@ -637,7 +637,7 @@ func TestDelete_GracefulForNFSHomePods(t *testing.T) {
 			}
 			deletes := keepPodsOnDelete(cs)
 			done := make(chan error, 1)
-			go func() { done <- rt.Stop(context.Background(), "default/a") }()
+			go func() { done <- rt.Stop(context.Background(), RunRef{ID: "default/a"}) }()
 			select {
 			case err := <-done:
 				if err != nil {
