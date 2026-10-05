@@ -24,6 +24,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 import {
+  AGENT_PROBE_FULL_WALK_MS,
   AGENT_PROBE_INTERVAL_MS,
   AGENT_PROBE_JITTER_MS,
   AGENT_PROBE_LIMIT,
@@ -548,7 +549,72 @@ describe('AgentStore delta probe', () => {
     });
   });
 
+  describe('a periodic full walk', () => {
+    /** Run `intervals` probe intervals; the minutes, from `from`, at which walks started. */
+    async function run(h: Harness, intervals: number, from = 0): Promise<number[]> {
+      const walkMinutes: number[] = [];
+      for (let i = 1; i <= intervals; i++) {
+        const walks = h.server.walks();
+        await tick();
+        if (h.server.walks() > walks) walkMinutes.push(((from + i) * 30) / 60);
+      }
+      return walkMinutes;
+    }
+
+    it('walks instead of probing once five minutes have passed since the last walk, and no more often', async () => {
+      const h = await loaded([row('a1', 1)]);
+      expect(AGENT_PROBE_FULL_WALK_MS).toBe(5 * 60_000);
+      expect(await run(h, 20)).toEqual([5, 10]);
+      expect(h.server.probes()).toBe(18);
+    });
+
+    it('picks up a rename the probe does not see', async () => {
+      const fleet = Array.from({ length: AGENT_PROBE_LIMIT + 10 }, (_, i) =>
+        row(`a${i}`, i + 1, { lastActivityEvent: t(i + 1) })
+      );
+      const h = await loaded(fleet);
+      // A rename moves `updated` but not the activity time, so the row
+      // stays below the probe's first page.
+      h.server.agents[0] = { ...h.server.agents[0], name: 'renamed', updated: t(500) };
+      await run(h, 9);
+      expect(find(h.store.peek(HUB), 'a0')?.name).not.toBe('renamed');
+      await run(h, 1, 9);
+      expect(find(h.store.peek(HUB), 'a0')?.name).toBe('renamed');
+    });
+
+    it('waits five minutes from a walk a probe started', async () => {
+      const h = await loaded([row('a1', 1), row('a2', 2)]);
+      expect(await run(h, 3)).toEqual([]);
+      // Revoked without an event: the probe's count walks.
+      h.server.agents.pop();
+      expect(await run(h, 13, 3)).toEqual([2, 7]);
+    });
+
+    it('does not walk while the page is hidden, and walks on the first probe once it is visible', async () => {
+      const h = await loaded([row('a1', 1)]);
+      h.visibility.set('hidden');
+      await tick(4 * AGENT_PROBE_FULL_WALK_MS);
+      expect(h.server.walks()).toBe(1);
+      h.visibility.set('visible');
+      await tick();
+      expect(h.server.walks()).toBe(2);
+      expect(h.server.probes()).toBe(0);
+    });
+
+    it('does not walk a list nobody retains', async () => {
+      const h = createHarness([row('a1', 1)]);
+      const release = h.store.retain(HUB, () => {});
+      const load = h.store.ensure(HUB);
+      await h.connect();
+      await load;
+      release();
+      await tick(4 * AGENT_PROBE_FULL_WALK_MS);
+      expect(h.server.walks()).toBe(1);
+    });
+  });
+
   describe('sustained churn the probe cannot catch up with', () => {
+    // The periodic full walk is off here, so the back-off is measured alone.
     const fleet = (): Agent[] => Array.from({ length: 400 }, (_, i) => row(`a${i}`, 1));
 
     /** Heartbeat every row before each probe for `intervals`; the minutes walks started at. */
@@ -564,7 +630,7 @@ describe('AgentStore delta probe', () => {
     }
 
     it('walks on overflow at most at doubling intervals, and probes read one page meanwhile', async () => {
-      const h = await loaded(fleet());
+      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
       const requests = h.server.requests.length;
       const walkMinutes = await churn(h, 120);
 
@@ -576,7 +642,7 @@ describe('AgentStore delta probe', () => {
     });
 
     it('walks at once again on overflow after a probe has caught up', async () => {
-      const h = await loaded(fleet());
+      const h = await loaded(fleet(), HUB, { probeFullWalkMs: Infinity });
       expect(await churn(h, 14)).toEqual([0.5, 2.5, 6.5]);
       await tick();
       // Without the catch-up, the next walk would wait until 14.5 minutes.
@@ -749,7 +815,7 @@ describe('AgentStore delta probe', () => {
 
   it('pauses probing a project list whose sorted view the server refuses, and keeps probing the hub', async () => {
     const info = vi.mocked(console.info);
-    const h = await loaded([row('a1', 1)], P1);
+    const h = await loaded([row('a1', 1)], P1, { probeFullWalkMs: Infinity });
     h.store.retain(HUB, () => {});
     await h.store.ensure(HUB);
     h.server.sortedStatus = (path): number | undefined =>

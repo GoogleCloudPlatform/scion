@@ -45,7 +45,8 @@
  *   page of the 50 most recently active rows (by last activity time, else
  *   `updated`), applied as a seeded merge. It walks once when it cannot
  *   catch up in five pages or when the server's count differs from the rows
- *   held. A probe never sets the completeness flag.
+ *   held. A probe never sets the completeness flag. A probe due five minutes
+ *   or more after the list's last walk began walks instead.
  */
 
 import type { Agent, Capabilities } from '../shared/types.js';
@@ -126,6 +127,11 @@ export interface AgentStoreOptions {
   visibility?: VisibilitySource | null;
   /** Random source for probe jitter, in [0, 1). */
   random?: () => number;
+  /**
+   * How long after a probed list's last walk began a due probe walks in
+   * full instead. Defaults to {@link AGENT_PROBE_FULL_WALK_MS}.
+   */
+  probeFullWalkMs?: number;
 }
 
 /** The part of `document` the probe schedule reads. */
@@ -172,6 +178,12 @@ export const AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS = 16 * 60_000;
 export const AGENT_PROBE_TIMEOUT_MS = 30_000;
 /** After the server refuses a list's sorted view, wait this long before probing it again. */
 export const AGENT_PROBE_REFUSED_RETRY_MS = 10 * 60_000;
+/**
+ * A probed list also walks in full when a probe is due and this long has
+ * passed since its last walk began: a rename or label change leaves the
+ * activity time alone, so the probe's first page does not show it.
+ */
+export const AGENT_PROBE_FULL_WALK_MS = 5 * 60_000;
 
 interface Waiter {
   resolve: (snapshot: AgentListSnapshot) => void;
@@ -226,6 +238,8 @@ interface Entry {
   overflowWalkAt?: number | undefined;
   /** How long after that the next overflow walk may start. */
   overflowBackoffMs: number;
+  /** When the last walk began (epoch ms). */
+  walkedAt?: number | undefined;
 }
 
 interface ProbePage {
@@ -396,6 +410,7 @@ export class AgentStore {
   private readonly feedIdleMs: number;
   private readonly visibility: VisibilitySource | null;
   private readonly random: () => number;
+  private readonly probeFullWalkMs: number;
 
   constructor(options: AgentStoreOptions = {}) {
     this.fetchPage = options.fetch ?? defaultFetch;
@@ -417,6 +432,7 @@ export class AgentStore {
           : null
         : options.visibility;
     this.random = options.random ?? Math.random;
+    this.probeFullWalkMs = options.probeFullWalkMs ?? AGENT_PROBE_FULL_WALK_MS;
 
     const events =
       options.events === undefined
@@ -728,6 +744,7 @@ export class AgentStore {
     entry.probe?.abort();
     entry.probe = null;
     entry.walk = walk;
+    entry.walkedAt = this.now();
     entry.followUp = false;
     entry.status = 'loading';
     entry.complete = false;
@@ -980,6 +997,10 @@ export class AgentStore {
     // A walk in flight reads everything a probe would; try on the next tick.
     if (!feed || entry.walk) {
       this.syncProbe(entry);
+      return;
+    }
+    if (this.now() - (entry.walkedAt ?? 0) >= this.probeFullWalkMs) {
+      this.startWalk(entry);
       return;
     }
     const controller = new AbortController();
