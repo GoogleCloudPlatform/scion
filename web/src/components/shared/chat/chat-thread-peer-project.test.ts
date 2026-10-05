@@ -221,7 +221,7 @@ describe('agent DM peer project', () => {
     apiFetch.mockImplementation((path, init) => {
       if (path === '/api/v1/agents/coder') {
         return new Promise<Response>((resolve) => {
-          failCoder = () => resolve(json({ error: 'x' }, 500));
+          failCoder = (): void => resolve(json({ error: 'x' }, 500));
         });
       }
       return base(path, init);
