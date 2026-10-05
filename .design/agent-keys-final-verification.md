@@ -94,7 +94,7 @@ by a test added on this branch. Every listed package passed at the tested revisi
 | Hub | No raw DTO field, no bridge, all ingresses reject `raw` | A current Hub never sends raw to a broker: `MessageRequest` and `StructuredMessage` have no Raw field. |
 | Runtime broker | `/message` rejects `structured_message.raw` and top-level `raw`; `/keys` is the only injection route | An older Hub that still sends raw to a current broker gets 422. A current Hub with an older broker that lacks `/keys` gets `422 keys_unsupported`, never a message downgrade (`TestHTTPRuntimeBrokerClient_ExecuteKeys_OldBrokerIsUnsupported`, `TestControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported`). |
 | CLI | `--raw` rejected in argument validation; `scion keys` posts only to `/keys` | An older CLI that sends `raw` to a current Hub gets 422. A current CLI against an older Hub without `/keys` reports `hub_unsupported` and does not fall back. An older CLI binary in **local** mode still has its own local raw path; that is client-side code outside this tree, and an upgrade removes it. |
-| Extras (chat apps, broker-log, a2a bridge) | Every `extras/*/go.mod` uses `replace github.com/GoogleCloudPlatform/scion => ../../`; no copied message types with a Raw field | Built from the same tree, so no skew. |
+| Extras (chat apps, broker-log, a2a bridge) | Every extras module that depends on the core module uses `replace github.com/GoogleCloudPlatform/scion => ../../`; no copied message types with a Raw field | Built from the same tree, so no skew. |
 | Image builds | `image-build/*` build `scion` and `sciontool` from the same checkout (`VERSION` and `GIT_COMMIT` are labels only). Go pins match `go.mod` (1.26.1). | No drift. |
 
 No skew path silently reintroduces raw delivery: each mismatch ends in an explicit 422 or a
@@ -170,7 +170,7 @@ when closing core:
 | --- | --- | --- |
 | Phase 5: ptone/scion#2190, task 5.1 ptone/scion#2203 (use the common relationship authorization pipeline) | Open, not dispatched | Depends on the auth refactor (ptone/scion#2119, #2120). It is a separate lane by design and must not be marked complete with core. |
 | ptone/scion#2460 agent-caller relationship check in the keys gate | Closed; delivered in upstream #2224 | Listed for completeness; Phase 5's broader pipeline work stays open. |
-| ptone/scion#2585 apiclient retry loop does not rewind request bodies on 5xx | Open | General client defect. Keys bypasses retries (`TestSendKeys_NoReplay_WithRetryConfigured`), so the keys no-replay guarantee does not depend on it. |
+| ptone/scion#2585 apiclient retry loop does not rewind request bodies on 5xx | Closed; fixed upstream by GoogleCloudPlatform/scion#2442 (`8eb0a7c0`), which is in the tested base | General client defect. Keys bypasses retries (`TestSendKeys_NoReplay_WithRetryConfigured`), so the keys no-replay guarantee does not depend on it. |
 | ptone/scion#2628 classify never-dispatched HTTP-route failures as `keys_unavailable` | Open | Outcome-classification precision: today the result is a safe but pessimistic `keys_outcome_unknown`. |
 | ptone/scion#2647 deterministic concurrency test for rate budgets | Open | Test-precision follow-up from 4.1. |
 | ptone/scion#2726 filter parity and created-only messaging in the local on-disk scan | Open | Hardening follow-up from the ptone/scion#2722 review. |
