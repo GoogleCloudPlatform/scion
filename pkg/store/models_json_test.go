@@ -100,6 +100,9 @@ func TestAgent_JSON_CanonicalKeysOnly(t *testing.T) {
 		// deletion is an explicit null when no delete is in view (design
 		// ptone/scion#2483 §2.4); the raw deletion_* columns never appear.
 		"deletion",
+		// provisionedOnly is always sent, false included, so a merging
+		// client clears a stale true (ptone/scion#2929).
+		"provisionedOnly",
 	})
 
 	var m map[string]interface{}

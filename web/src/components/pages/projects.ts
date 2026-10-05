@@ -86,6 +86,14 @@ export class ScionPageProjects extends LitElement {
         margin-bottom: 1rem;
       }
 
+      /* The header's only child holds the name and the git remote. As a flex
+         item it defaults to min-width:auto and grows to fit a long unbroken
+         name or URL, pushing both past the card edge; min-width:0 lets it
+         shrink so the shared wrapping rules can break them instead. */
+      .project-header > div {
+        min-width: 0;
+      }
+
       .project-path {
         font-size: 0.875rem;
         color: var(--scion-text-muted, #64748b);
@@ -455,7 +463,8 @@ export class ScionPageProjects extends LitElement {
         <div class="project-header">
           <div>
             <h3 class="resource-name">
-              ${this.renderProjectIcon()} ${project.name}${this.renderLinkedBadge(project)}
+              ${this.renderProjectIcon()}
+              <span>${project.name}${this.renderLinkedBadge(project)}</span>
             </h3>
             <div class="project-path">
               <scion-git-remote-display

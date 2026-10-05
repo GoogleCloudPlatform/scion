@@ -21,7 +21,7 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mounting <scion-header> also mounts its tray children
 // (<scion-inbox-tray>/<scion-notification-tray>), which fetch on connect —
@@ -51,6 +51,8 @@ import {
   setGraphPaletteAvailable,
 } from '../../client/graph-palette-events.js';
 import type { User } from '../../shared/types.js';
+import { apiFetch } from '../../client/api.js';
+import { stateManager } from '../../client/state.js';
 
 describe('projectIdFromDashboardPath', () => {
   it('extracts the project ID from /projects/:id', () => {
@@ -479,5 +481,343 @@ describe('palette button: tooltip and aria-keyshortcuts follow the mocked modali
     stubTouchPrimary(false);
     el = await mountHeader();
     expect(paletteButton(el)?.getAttribute('aria-haspopup')).toBe('dialog');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tray badge counts follow the signed-in user.
+// ---------------------------------------------------------------------------
+
+describe('tray badge counts: user switch', () => {
+  /** How many unread items each tray list request returns. */
+  let unread = 0;
+
+  function serveUnread(): void {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const items = Array.from({ length: unread }, (_, i) => ({
+        id: `item-${i}`,
+        status: 'COMPLETED',
+        message: `item ${i}`,
+        sender: 'agent:helper',
+        msg: `item ${i}`,
+        type: 'instruction',
+        agentId: 'agent-1',
+        createdAt: new Date().toISOString(),
+      }));
+      let body: unknown = {};
+      if (url.startsWith('/api/v1/notifications')) body = items;
+      else if (url.startsWith('/api/v1/messages')) body = { items };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+  }
+
+  /** The inbox and notification counts shown on the wide-layout trigger badges. */
+  function badges(el: ScionHeader): string[] {
+    return [...(el.shadowRoot?.querySelectorAll('.wide-right .trigger-badge') ?? [])].map(
+      (b) => b.textContent?.trim() ?? ''
+    );
+  }
+
+  async function switchUser(el: ScionHeader, u: User): Promise<void> {
+    el.user = u;
+    await el.updateComplete;
+  }
+
+  /** Gives late tray fetches and timers time to run before re-checking. */
+  async function afterLateUpdates(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 700));
+  }
+
+  afterEach(() => {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 200 }))
+    );
+  });
+
+  it('shows the next user counts after a user switch', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    unread = 0;
+    await switchUser(el, { id: 'u2', email: 'u2@example.com', name: 'U2' });
+    expect(badges(el)).toEqual([]);
+    await afterLateUpdates();
+    expect(badges(el)).toEqual([]);
+
+    unread = 1;
+    await switchUser(el, { id: 'u3', email: 'u3@example.com', name: 'U3' });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['1', '1']), { timeout: 3000 });
+  });
+
+  it('keeps the counts when the same user is handed over as a new object', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    await switchUser(el, { id: 'u1', email: 'u1@example.com', name: 'U1' });
+    expect(badges(el)).toEqual(['2', '2']);
+    await afterLateUpdates();
+    expect(badges(el)).toEqual(['2', '2']);
+  });
+
+  it('clears the counts after sign-out and signing back in', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    unread = 0;
+    el.user = null;
+    await el.updateComplete;
+
+    await switchUser(el, { id: 'u1', email: 'u1@example.com', name: 'U1' });
+    expect(badges(el)).toEqual([]);
+    await afterLateUpdates();
+    expect(badges(el)).toEqual([]);
+  });
+
+  it('never renders the next user with the previous user counts', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    // The counts are private; read them through a structural view.
+    const counts = el as unknown as { inboxCount: number; notificationCount: number };
+    const renders: { id: string | undefined; inbox: number; notif: number }[] = [];
+    const originalRender = el.render.bind(el);
+    el.render = (): ReturnType<typeof originalRender> => {
+      renders.push({ id: el.user?.id, inbox: counts.inboxCount, notif: counts.notificationCount });
+      return originalRender();
+    };
+
+    unread = 0;
+    await switchUser(el, { id: 'u2', email: 'u2@example.com', name: 'U2' });
+
+    const u2Renders = renders.filter((r) => r.id === 'u2');
+    expect(u2Renders.length).toBeGreaterThan(0);
+    for (const r of u2Renders) {
+      expect(r).toEqual({ id: 'u2', inbox: 0, notif: 0 });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tray badge counts follow the trays' count events, however slow a fetch is.
+// ---------------------------------------------------------------------------
+
+describe('tray badge counts: slow fetches', () => {
+  interface Held {
+    url: string;
+    method: string;
+    release: (count: number) => void;
+  }
+
+  /** Requests the trays made that have not been answered yet. */
+  let held: Held[] = [];
+
+  function itemsOf(count: number): unknown[] {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `item-${i}`,
+      status: 'COMPLETED',
+      message: `item ${i}`,
+      sender: 'agent:helper',
+      msg: `item ${i}`,
+      type: 'instruction',
+      agentId: 'agent-1',
+      createdAt: new Date().toISOString(),
+    }));
+  }
+
+  function holdRequests(): void {
+    vi.mocked(apiFetch).mockImplementation(
+      (url: string, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          held.push({
+            url,
+            method: init?.method ?? 'GET',
+            release: (count) => {
+              let body: unknown = {};
+              if (url.startsWith('/api/v1/notifications')) body = itemsOf(count);
+              else if (url.startsWith('/api/v1/messages')) body = { items: itemsOf(count) };
+              resolve(new Response(JSON.stringify(body), { status: 200 }));
+            },
+          });
+        })
+    );
+  }
+
+  /** Takes every held list request, leaving action requests in place. */
+  function takeLists(): Held[] {
+    const lists = held.filter((h) => h.method === 'GET');
+    held = held.filter((h) => h.method !== 'GET');
+    return lists;
+  }
+
+  /** Answers every held list request with count items. */
+  async function releaseLists(count: number): Promise<void> {
+    const lists = takeLists();
+    expect(lists.length).toBeGreaterThan(0);
+    for (const h of lists) h.release(count);
+    await settle();
+  }
+
+  /** Answers every held list request, with a count per tray. */
+  async function releaseListsPerTray(inbox: number, notifications: number): Promise<void> {
+    const lists = takeLists();
+    expect(lists.some((h) => h.url.startsWith('/api/v1/messages'))).toBe(true);
+    expect(lists.some((h) => h.url.startsWith('/api/v1/notifications'))).toBe(true);
+    for (const h of lists) {
+      h.release(h.url.startsWith('/api/v1/messages') ? inbox : notifications);
+    }
+    await settle();
+  }
+
+  /** Lets response chains and the resulting Lit updates run. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+  }
+
+  function badges(el: ScionHeader): string[] {
+    return [...(el.shadowRoot?.querySelectorAll('.wide-right .trigger-badge') ?? [])].map(
+      (b) => b.textContent?.trim() ?? ''
+    );
+  }
+
+  /** The trays' private actions, read through a structural view. */
+  interface TrayActions {
+    ackOne(id: string): Promise<void>;
+    markAll(): Promise<void>;
+  }
+
+  function tray(el: ScionHeader, tag: string): TrayActions {
+    return el.shadowRoot?.querySelector(tag) as unknown as TrayActions;
+  }
+
+  beforeEach(() => {
+    held = [];
+    holdRequests();
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 200 }))
+    );
+  });
+
+  async function mount(id: string): Promise<ScionHeader> {
+    const el = await mountHeader({ user: { id, email: `${id}@example.com`, name: id } });
+    await settle();
+    return el;
+  }
+
+  it('shows the badges when a slow first fetch resolves', async () => {
+    const el = await mount('u1');
+    await vi.advanceTimersByTimeAsync(600);
+    expect(badges(el)).toEqual([]);
+
+    await releaseLists(2);
+    expect(badges(el)).toEqual(['2', '2']);
+  });
+
+  it('shows the next user counts when a slow fetch after a user switch resolves', async () => {
+    const el = await mount('u1');
+    await releaseLists(2);
+    expect(badges(el)).toEqual(['2', '2']);
+
+    el.user = { id: 'u2', email: 'u2@example.com', name: 'u2' };
+    await el.updateComplete;
+    await settle();
+    expect(badges(el)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(badges(el)).toEqual([]);
+
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+  });
+
+  it('ignores a response for the previous user', async () => {
+    const el = await mount('u1');
+    const stale = takeLists();
+    expect(stale.length).toBeGreaterThan(0);
+
+    el.user = { id: 'u2', email: 'u2@example.com', name: 'u2' };
+    await el.updateComplete;
+    await settle();
+
+    for (const h of stale) h.release(3);
+    await settle();
+    expect(badges(el)).toEqual([]);
+
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+
+    // A late response for the previous user changes no badge either.
+    el.user = { id: 'u3', email: 'u3@example.com', name: 'u3' };
+    await el.updateComplete;
+    await settle();
+    const staleU3 = takeLists();
+    el.user = { id: 'u2', email: 'u2@example.com', name: 'u2' };
+    await el.updateComplete;
+    await settle();
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+    for (const h of staleU3) h.release(4);
+    await settle();
+    expect(badges(el)).toEqual(['1', '1']);
+  });
+
+  it('updates the badges when items are acknowledged or marked read', async () => {
+    const el = await mount('u1');
+    await releaseLists(2);
+    expect(badges(el)).toEqual(['2', '2']);
+
+    const ack = tray(el, 'scion-notification-tray').ackOne('item-0');
+    await settle();
+    for (const h of held.splice(0)) h.release(0);
+    await ack;
+    await settle();
+    expect(badges(el)).toEqual(['2', '1']);
+
+    const mark = tray(el, 'scion-inbox-tray').markAll();
+    await settle();
+    for (const h of held.splice(0)) h.release(0);
+    await mark;
+    await settle();
+    expect(badges(el)).toEqual(['1']);
+    const notifBadge = el.shadowRoot?.querySelector(
+      '.wide-right sl-icon-button[name="bell"] + .trigger-badge'
+    );
+    expect(notifBadge?.textContent?.trim()).toBe('1');
+  });
+
+  it('keeps updating the badges after the header is detached and attached again', async () => {
+    const el = await mount('u1');
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+
+    el.remove();
+    await settle();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await settle();
+    // The trays fetch again when they reconnect.
+    await releaseLists(1);
+    expect(badges(el)).toEqual(['1', '1']);
+
+    stateManager.dispatchEvent(new CustomEvent('user-message-created'));
+    stateManager.dispatchEvent(new CustomEvent('notification-created'));
+    await settle();
+    await releaseListsPerTray(3, 4);
+    expect(badges(el)).toEqual(['3', '4']);
+    el.remove();
   });
 });
