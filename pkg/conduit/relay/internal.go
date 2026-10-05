@@ -264,7 +264,7 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 // The Want must name the stream kind as its Capability (RemoteSession sets
 // it from the kind), and the opening frame's kind must equal it: the owner
 // opens only what it re-checked admission for. Otherwise the hop is closed
-// 4400 bad_frame.
+// 4400 bad_frame at once, without waiting for the caller to close its side.
 func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sessionID string) {
 	ls, want, ok := r.admitInternal(w, req, sessionID, true)
 	if !ok {
@@ -299,7 +299,7 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	hop = newWSStream(conn, callerWin, 0, r.clk, r.handshakeTimeout())
 	if kind, err := conduit.StreamKindFromProto(open.GetKind()); err != nil || string(kind) != want.Capability {
 		r.log.Debug("Conduit internal stream: kind does not match the admitted capability", "peer", peer, "kind", open.GetKind().String(), "capability", want.Capability)
-		_ = hop.CloseWithCode(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
+		hop.abort(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
 		return
 	}
 

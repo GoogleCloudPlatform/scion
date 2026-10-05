@@ -232,6 +232,17 @@ func (s *wsStream) fail(code uint32, reason string) {
 	s.end(&conduit.CloseError{Code: code, Reason: reason}, false)
 }
 
+// abort closes the hop with code after a protocol error this side
+// detected, such as a StreamOpen it refuses: StreamClose is sent and the
+// link closed at once, without waiting for the peer to close its side.
+func (s *wsStream) abort(code uint32, reason string) {
+	if ended, _ := s.endedErr(); ended {
+		return
+	}
+	_ = s.send(closeFrame(code, reason))
+	s.end(nil, true)
+}
+
 // end marks the stream ended (first reason wins), wakes every waiter and
 // closes the link.
 func (s *wsStream) end(err error, local bool) bool {
