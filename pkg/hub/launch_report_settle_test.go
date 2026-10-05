@@ -73,14 +73,24 @@ func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 
 func (f *launchSettleFixture) report(t *testing.T, reportState, runID string) {
 	t.Helper()
-	rep := AgentLaunchReport{LaunchID: f.launchID, InstanceID: "i1", State: reportState}
-	if reportState == store.LaunchReportStateSucceeded {
-		rep.Agent = &RemoteAgentInfo{ID: f.agent.Slug, Slug: f.agent.Slug, RunID: runID}
-	} else {
+	f.reportResult(t, reportState, runID)
+}
+
+// reportResult sends the report and returns its 200 result. The agent info
+// (with runID) is attached whatever the state, so the settle's state gate,
+// not a missing run ID, is what a failed report is tested against.
+func (f *launchSettleFixture) reportResult(t *testing.T, reportState, runID string) string {
+	t.Helper()
+	rep := AgentLaunchReport{LaunchID: f.launchID, InstanceID: "i1", State: reportState,
+		Agent: &RemoteAgentInfo{ID: f.agent.Slug, Slug: f.agent.Slug, RunID: runID}}
+	if reportState == store.LaunchReportStateFailed {
 		rep.ErrorCode = "boom"
 	}
 	rec := postLaunchReport(t, f.srv, f.brokerID, f.agent.ID, f.brokerID, rep)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body agentLaunchReportAppliedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body.Result
 }
 
 func (f *launchSettleFixture) previousRuns(t *testing.T) []string {
@@ -135,11 +145,34 @@ func TestLaunchReportSettle_OlderRun_Keeps(t *testing.T) {
 	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
 }
 
-// A failed launch settles nothing.
+// A failed launch settles nothing, even when its report names the current
+// run.
 func TestLaunchReportSettle_Failed_Keeps(t *testing.T) {
 	f := newLaunchSettleFixture(t, "lrsettle-fail")
-	f.report(t, store.LaunchReportStateFailed, "")
+	f.report(t, store.LaunchReportStateFailed, "run-1")
 	assert.Equal(t, []string{"run-0"}, f.previousRuns(t))
+}
+
+// A repeated succeeded report is not applied again and settles nothing: a
+// list recorded after the first report is kept. The store answers a repeat
+// of a terminal report for an ended launch "completed" (ApplyLaunchReport's
+// ended branch), never "duplicate", so this also pins that a completed
+// answer is deliberately not settled.
+func TestLaunchReportSettle_DuplicateSucceeded_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-dup")
+	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-1"))
+	require.Empty(t, f.previousRuns(t))
+
+	ctx := context.Background()
+	_, err := f.store.SetAgentRunID(ctx, f.agent.ID, "run-2")
+	require.NoError(t, err)
+	swapped, err := f.store.RevertAgentRunID(ctx, f.agent.ID, "run-2", "run-1")
+	require.NoError(t, err)
+	require.True(t, swapped)
+	require.Equal(t, []string{"run-1"}, f.previousRuns(t))
+
+	assert.Equal(t, store.LaunchReportResultCompleted, f.reportResult(t, store.LaunchReportStateSucceeded, "run-1"))
+	assert.Equal(t, []string{"run-1"}, f.previousRuns(t), "a repeated report does not settle")
 }
 
 // A report for a superseded launch is rejected (409 stale_launch) and

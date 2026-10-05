@@ -162,11 +162,15 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// An applied succeeded report settles the run the launch started
 	// (ptone/scion#3176), as a synchronous dispatch that lands does
 	// (adoptBrokerRunID): the broker's Start removed every earlier entry of
-	// the name, so the previous runs are cleared. The same-value swap is
-	// keyed on the run the broker reports it labelled, so a report for an
-	// older run never clears a newer run's list. A broker that reports no
-	// run ID gets no clear; a later delete then repeats the previous runs
-	// as run-scoped 404s.
+	// the name that was not running, so the previous runs are cleared (a
+	// start that found the agent running reports that entry's run, which
+	// the keyed swap does not match). The same-value swap is keyed on the
+	// run the broker reports it labelled, so a report for an older run
+	// never clears a newer run's list. A broker that reports no run ID gets
+	// no clear; a later delete then repeats the previous runs as run-scoped
+	// 404s. Only an applied report settles: a duplicate, and a completed
+	// answer (the hub had already resolved the launch), are deliberately
+	// not settled; the conservative cost is extra 404s on a later delete.
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		s.settleLaunchedRun(ctx, agentID, req.Agent)
 	}
@@ -197,8 +201,14 @@ func (s *Server) settleLaunchedRun(ctx context.Context, agentID string, info *Re
 	if info == nil || info.RunID == "" {
 		return
 	}
-	if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, info.RunID, info.RunID); err != nil {
+	swapped, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, info.RunID, info.RunID)
+	if err != nil {
 		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
 			"agent_id", agentID, "run_id", info.RunID, "error", err)
+		return
+	}
+	if !swapped {
+		s.agentLifecycleLog.Debug("Launch report: another run is recorded; not settling the launched run",
+			"agent_id", agentID, "run_id", info.RunID)
 	}
 }
