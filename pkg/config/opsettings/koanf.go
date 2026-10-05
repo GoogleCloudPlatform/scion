@@ -115,6 +115,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	},
 	"endpoints": {
 		"server.hub.public_url": "public_url",
+		"server.hub.hub_name":   "hub_name",
 		"image_registry":        "image_registry",
 	},
 	"github_app": {
@@ -166,6 +167,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"endpoints": {
 		"public_url":     "server.hub.public_url",
+		"hub_name":       "server.hub.hub_name",
 		"image_registry": "image_registry",
 	},
 	"github_app": {
@@ -247,6 +249,7 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
 		"default_max_agent_role", "default_agent_role",
+		"default_runtime_broker", "default_timezone",
 		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {

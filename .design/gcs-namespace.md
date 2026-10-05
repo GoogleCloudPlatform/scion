@@ -56,7 +56,7 @@ The DB is authoritative for metadata; GCS holds the file bytes. Object paths are
 `hub_id` is a Layer-0 setting resolved at startup via `cfg.Hub.ResolveHubID()` (`pkg/config/hub_config.go:96`). It defaults to `SHA256(hostname)[:12]` or accepts any explicit string slug. It flows through:
 
 ```
-settings.yaml / env SCION_SERVER_HUB_ID
+settings.yaml / env SCION_SERVER_HUB_HUBID
   → HubServerConfig.HubID
   → hub.ServerConfig.HubID
   → hub.Server.hubID (private) / .HubID() (public accessor)

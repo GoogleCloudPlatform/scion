@@ -481,6 +481,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
+// isSelfRequest reports whether the caller is the agent itself.
+func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	return ok && agentIdent.ID() == agent.ID
+}
+
 // brokerIDIfSet returns id when target is non-empty, else "".
 func brokerIDIfSet(target, id string) string {
 	if target == "" {
@@ -507,6 +517,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 		Dst:                dst,
 		WorkspaceModeError: workspaceModeErr,
 		CloneMode:          cloneMode,
+		SelfMove:           isSelfRequest(ctx, agent),
 		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
 	}
 	if workspaceModeErr != "" {
