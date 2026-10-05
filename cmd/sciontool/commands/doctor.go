@@ -574,7 +574,7 @@ func checkGCPTokenAcquisition(port int, failures *int) {
 }
 
 func checkGitHubToken(failures *int) {
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") != "true" {
+	if !hub.IsGitHubAppEnabled() {
 		return
 	}
 

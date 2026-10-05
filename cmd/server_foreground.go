@@ -1706,6 +1706,7 @@ func parseBoolEnv(key string) bool {
 	if v, ok := util.LookupBoolEnv(key); ok {
 		return v
 	}
+	// ok is false for both unset/empty and garbage; warn only on garbage.
 	if raw := os.Getenv(key); strings.TrimSpace(raw) != "" {
 		log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
 			"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, raw)
