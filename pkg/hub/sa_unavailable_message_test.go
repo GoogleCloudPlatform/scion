@@ -17,70 +17,123 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// ptone/scion#3335: `scion start --service-account <sa>` gives one response
-// whether the named account is unregistered or registered but not usable by
-// the caller, and its wording covers both causes.
+// ptone/scion#3335: `scion start --service-account <sa>` gives a uniform
+// response regardless of cause, and its wording covers both causes: the
+// account is not registered in this project, or the caller is not authorized
+// to use it. That both causes give the same response is pinned per surface in
+// sa_existence_oracle_test.go; this file pins the exact text.
 
-// TestAgentStart_UnusableAndUnregisteredSA_SameStatusAndBody names a
-// registered service account the caller may not use from this project, and
-// an unregistered one, on the agent create (start) path. The two responses
-// must match byte for byte, status included.
-func TestAgentStart_UnusableAndUnregisteredSA_SameStatusAndBody(t *testing.T) {
-	f := bypassAgentsSetup(t)
-	// Registered and verified, but scoped to another project, so this
-	// caller may not use it here.
-	registered := bypassAgentsCreateSA(t, f, f.other.ID, true)
-	got, err := f.store.GetGCPServiceAccount(t.Context(), registered.ID)
-	require.NoError(t, err, "fixture must persist the registered account")
-	require.Equal(t, registered.ID, got.ID)
+// wantSAUnavailableText is spelled out rather than read from
+// msgSANotAvailableInProject, so an edit to the const fails here.
+const wantSAUnavailableText = "GCP service account is not available; it is not registered in this project or you are not authorized to use it"
 
-	start := func(name, saID string) oracleProbe {
-		return probe(createAgentAsOwner(t, f, CreateAgentRequest{
-			Name: name,
-			GCPIdentity: &GCPIdentityAssignment{
-				MetadataMode:     store.GCPMetadataModeAssign,
-				ServiceAccountID: saID,
-			},
-		}))
-	}
-
-	unusable := start("sa-uniform-registered", registered.ID)
-	unregistered := start("sa-uniform-unregistered", uuid.New().String())
-
-	require.Equal(t, http.StatusBadRequest, unregistered.status, "body: %s", unregistered.body)
-	assert.Equal(t, unregistered.status, unusable.status, "status codes must match")
-	assert.Equal(t, unregistered.body, unusable.body, "response bodies must match byte for byte")
-}
-
-// TestAgentStart_SAUnavailableMessageNamesBothCauses pins the exact text and
-// that it reaches the response unchanged as a validation_error.
-func TestAgentStart_SAUnavailableMessageNamesBothCauses(t *testing.T) {
-	assert.Equal(t,
-		"Service account not available: it is not registered in this project, or you are not authorized to use it.",
-		msgSANotAvailableInProject)
-
-	f := bypassAgentsSetup(t)
-	rec := createAgentAsOwner(t, f, CreateAgentRequest{
-		Name: "sa-uniform-text",
-		GCPIdentity: &GCPIdentityAssignment{
-			MetadataMode:     store.GCPMetadataModeAssign,
-			ServiceAccountID: uuid.New().String(),
-		},
-	})
+func requireErrorText(t *testing.T, rec *httptest.ResponseRecorder, wantCode string) {
+	t.Helper()
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, ErrCodeValidationError, resp.Error.Code)
-	assert.Equal(t, msgSANotAvailableInProject, resp.Error.Message)
+	assert.Equal(t, wantCode, resp.Error.Code)
+	assert.Equal(t, wantSAUnavailableText, resp.Error.Message)
+}
+
+// TestSAUnavailableMessage_ExactTextOnAllThreeSurfaces pins the exact message
+// on agent create, agent PATCH and the project default setting. Create and
+// PATCH answer validation_error; the project default setting answers
+// invalid_request. The message text is the same on all three.
+func TestSAUnavailableMessage_ExactTextOnAllThreeSurfaces(t *testing.T) {
+	assert.Equal(t, wantSAUnavailableText, msgSANotAvailableInProject)
+
+	t.Run("agent create", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := createAgentAsOwner(t, f, CreateAgentRequest{
+			Name: "sa-text-create",
+			GCPIdentity: &GCPIdentityAssignment{
+				MetadataMode:     store.GCPMetadataModeAssign,
+				ServiceAccountID: uuid.New().String(),
+			},
+		})
+		requireErrorText(t, rec, ErrCodeValidationError)
+	})
+
+	t.Run("agent patch", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		a := pendingAgentForPatch(t, f, "sa-text-patch")
+		rec := patchAgentSAAsOwner(t, f, a.ID, uuid.New().String())
+		requireErrorText(t, rec, ErrCodeValidationError)
+	})
+
+	t.Run("project default setting", func(t *testing.T) {
+		srv, s := testServer(t)
+		project := createTestProjectForSettings(t, s)
+		rec := putProjectDefaultSA(t, srv, project.ID, uuid.New().String())
+		requireErrorText(t, rec, ErrCodeInvalidRequest)
+	})
+}
+
+func putProjectDefaultSA(t *testing.T, srv *Server, projectID, saID string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/settings",
+		hubclient.ProjectSettings{
+			DefaultGCPIdentityMode:             string(store.GCPMetadataModeAssign),
+			DefaultGCPIdentityServiceAccountID: saID,
+		})
+}
+
+// wrappedNotFoundSAStore answers every service account lookup with a wrapped
+// store.ErrNotFound, as a store layer that adds context to its errors would.
+type wrappedNotFoundSAStore struct {
+	store.Store
+}
+
+func (w *wrappedNotFoundSAStore) GetGCPServiceAccount(_ context.Context, id string) (*store.GCPServiceAccount, error) {
+	return nil, fmt.Errorf("get gcp service account %s: %w", id, store.ErrNotFound)
+}
+
+// TestProjectDefaultSA_WrappedNotFoundMatchesUnreachable checks that a wrapped
+// not-found from the store gets the same response on the project default
+// setting as an account registered in another project, and not a 404.
+func TestProjectDefaultSA_WrappedNotFoundMatchesUnreachable(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	elsewhere := &store.Project{
+		ID:   tid("sa-wrapped-other-project"),
+		Name: "Wrapped Other",
+		Slug: "sa-wrapped-other-project",
+	}
+	require.NoError(t, s.CreateProject(t.Context(), elsewhere))
+	unreachable := &store.GCPServiceAccount{
+		ID:        uuid.New().String(),
+		Scope:     store.ScopeProject,
+		ScopeID:   elsewhere.ID,
+		Email:     "sa-wrapped-elsewhere@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  true,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), unreachable))
+
+	other := probe(putProjectDefaultSA(t, srv, project.ID, unreachable.ID))
+
+	srv.store = &wrappedNotFoundSAStore{Store: s}
+	wrapped := probe(putProjectDefaultSA(t, srv, project.ID, uuid.New().String()))
+
+	assert.NotEqual(t, http.StatusNotFound, wrapped.status, "body: %s", wrapped.body)
+	require.Equal(t, http.StatusBadRequest, other.status, "body: %s", other.body)
+	requireIndistinguishable(t, wrapped, other)
 }

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -313,15 +314,17 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// enumerate other projects' service account IDs by watching which ones fail
 	// differently. "Does not exist" and "exists but is not yours" are one answer.
 	//
-	// The literal moved to msgSANotAvailableInProject — same string, no wire
-	// change here — because the agent create and PATCH paths had NOT followed
-	// this rule and now do. Three copies of a string whose entire value is that
-	// they match is three chances to stop matching.
+	// This site shares the msgSANotAvailableInProject literal with the agent
+	// create and PATCH paths, so all three give the same message text. Three
+	// copies of a string whose entire value is that they match is three chances
+	// to stop matching.
 	const notAvailable = msgSANotAvailableInProject
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, req.DefaultGCPIdentityServiceAccountID)
 	if err != nil {
-		if err == store.ErrNotFound {
+		// errors.Is, as on agent create and PATCH: a wrapped ErrNotFound must
+		// get the same answer as the not-reachable case below, not a 404.
+		if errors.Is(err, store.ErrNotFound) {
 			BadRequest(w, notAvailable)
 			return false
 		}

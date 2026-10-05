@@ -104,7 +104,7 @@ var tracer = otel.Tracer("scion-hub")
 //
 // The wording names both causes without saying which one applies, so the
 // caller knows to check registration and their own access (ptone/scion#3335).
-const msgSANotAvailableInProject = "Service account not available: it is not registered in this project, or you are not authorized to use it."
+const msgSANotAvailableInProject = "GCP service account is not available; it is not registered in this project or you are not authorized to use it"
 
 // parseLabelFilters parses label=key=value query parameters into a map and
 // validates the resulting labels against constraint rules.
