@@ -120,6 +120,11 @@ func DefaultProfile(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
 }
 
+// WorkspaceStorage applies equality check predicate on the "workspace_storage" field. It's identical to WorkspaceStorageEQ.
+func WorkspaceStorage(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldWorkspaceStorage, v))
+}
+
 // Endpoint applies equality check predicate on the "endpoint" field. It's identical to EndpointEQ.
 func Endpoint(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldEndpoint, v))
@@ -1033,6 +1038,81 @@ func DefaultProfileEqualFold(v string) predicate.RuntimeBroker {
 // DefaultProfileContainsFold applies the ContainsFold predicate on the "default_profile" field.
 func DefaultProfileContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldDefaultProfile, v))
+}
+
+// WorkspaceStorageEQ applies the EQ predicate on the "workspace_storage" field.
+func WorkspaceStorageEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageNEQ applies the NEQ predicate on the "workspace_storage" field.
+func WorkspaceStorageNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageIn applies the In predicate on the "workspace_storage" field.
+func WorkspaceStorageIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldWorkspaceStorage, vs...))
+}
+
+// WorkspaceStorageNotIn applies the NotIn predicate on the "workspace_storage" field.
+func WorkspaceStorageNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldWorkspaceStorage, vs...))
+}
+
+// WorkspaceStorageGT applies the GT predicate on the "workspace_storage" field.
+func WorkspaceStorageGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageGTE applies the GTE predicate on the "workspace_storage" field.
+func WorkspaceStorageGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageLT applies the LT predicate on the "workspace_storage" field.
+func WorkspaceStorageLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageLTE applies the LTE predicate on the "workspace_storage" field.
+func WorkspaceStorageLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageContains applies the Contains predicate on the "workspace_storage" field.
+func WorkspaceStorageContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageHasPrefix applies the HasPrefix predicate on the "workspace_storage" field.
+func WorkspaceStorageHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageHasSuffix applies the HasSuffix predicate on the "workspace_storage" field.
+func WorkspaceStorageHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageIsNil applies the IsNil predicate on the "workspace_storage" field.
+func WorkspaceStorageIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldWorkspaceStorage))
+}
+
+// WorkspaceStorageNotNil applies the NotNil predicate on the "workspace_storage" field.
+func WorkspaceStorageNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldWorkspaceStorage))
+}
+
+// WorkspaceStorageEqualFold applies the EqualFold predicate on the "workspace_storage" field.
+func WorkspaceStorageEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageContainsFold applies the ContainsFold predicate on the "workspace_storage" field.
+func WorkspaceStorageContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldWorkspaceStorage, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.

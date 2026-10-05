@@ -365,9 +365,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	baseSlug := req.Slug
 	if baseSlug == "" {
 		baseSlug = api.Slugify(req.Name)
+	} else if isReservedProjectSlug(baseSlug) {
+		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
 	}
 
-	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1334,6 +1337,26 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A provider path that is the broker's global directory is only valid
+	// for the global project. Checked before any project or provider write.
+	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
+		// A project created by this request is the global project only when
+		// it takes the reserved global slug, which only a register without a
+		// git remote can do (and only while no project holds it: the slug
+		// lookup above found none).
+		targetName, targetSlug := req.Name, ""
+		if normalizedRemote == "" {
+			targetSlug = api.Slugify(req.Name)
+		}
+		if project != nil {
+			targetName, targetSlug = project.Name, project.Slug
+		}
+		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
+			return
+		}
+	}
+
 	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker
 	// path's target and decide authorization for it BEFORE any project
 	// mutation below. Only the lookup and the authorization decision happen
@@ -1454,8 +1477,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			projectID = api.NewUUID()
 		}
 
+		// Only a register without a git remote (the CLI global-project
+		// flow) may take the reserved global slug.
 		baseSlug := api.Slugify(req.Name)
-		slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+		nextSlug := s.store.NextAvailableSlug
+		if normalizedRemote != "" {
+			nextSlug = s.nextAvailableUnreservedSlug
+		}
+		slug, err := nextSlug(ctx, baseSlug)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1586,15 +1615,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// block preceding "Create new project if not found".
 		broker = providedBroker
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -1617,7 +1639,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// filesystem; other brokers manage their own.
 		if localPath != "" && s.isEmbeddedBroker(broker.ID) {
 			scionDir := filepath.Join(localPath, ".scion")
-			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
 			}
@@ -1697,15 +1719,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		// The embedded path does not call authorizeBrokerProvide: the caller
 		// either created this broker (and owns it) or passed
 		// brokerRemintTargetAuthorized above (creator, or super-admin with an
@@ -2793,6 +2808,10 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		newSlug := api.Slugify(updates.Slug)
 		if newSlug == "" {
 			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
+			return
+		}
+		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
+			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
 			return
 		}
 		if newSlug != oldSlug {

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -103,4 +104,62 @@ func TestProviderLocalPath_RegisterOtherBrokerPathIsNotInitialized(t *testing.T)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	_, err := os.Stat(filepath.Join(dir, ".scion"))
 	assert.True(t, os.IsNotExist(err), "the hub must not initialize .scion for another broker, got %v", err)
+}
+
+// A provider-add without a path keeps the path stored for an existing
+// provider; a request with a path replaces it.
+func TestProviderLocalPath_EmptyPathKeepsStoredPath(t *testing.T) {
+	f := brokerAssocSetup(t, "localpath-keep")
+	stored := filepath.Join(t.TempDir(), "checkout", ".scion")
+
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID, LocalPath: stored})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	provider, err := f.store.GetProjectProvider(context.Background(), f.project.ID, f.ownBroker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stored, provider.LocalPath, "a request without a path keeps the stored path")
+
+	replaced := filepath.Join(t.TempDir(), "other", ".scion")
+	rec = doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID, LocalPath: replaced})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	provider, err = f.store.GetProjectProvider(context.Background(), f.project.ID, f.ownBroker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, replaced, provider.LocalPath, "a request with a path replaces the stored path")
+}
+
+// A provider-add without a path clears a stored path that is the broker's
+// global directory for a project other than the global project.
+func TestProviderLocalPath_EmptyPathClearsStoredGlobalDirPath(t *testing.T) {
+	f := brokerAssocSetup(t, "localpath-clear")
+	ctx := context.Background()
+	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: f.ownBroker.ID, BrokerName: f.ownBroker.Name,
+		LocalPath: brokerGlobalDir, Status: store.BrokerStatusOnline, LinkedBy: f.projectOwner.ID,
+	}))
+
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID})
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	provider, err := f.store.GetProjectProvider(ctx, f.project.ID, f.ownBroker.ID)
+	require.NoError(t, err)
+	assert.Empty(t, provider.LocalPath, "the stored global-directory path is cleared")
+}
+
+// A broker that is not yet a provider gets no path from a request without one.
+func TestProviderLocalPath_EmptyPathNewProviderHasNoPath(t *testing.T) {
+	f := brokerAssocSetup(t, "localpath-new-empty")
+
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID})
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	provider, err := f.store.GetProjectProvider(context.Background(), f.project.ID, f.ownBroker.ID)
+	require.NoError(t, err)
+	assert.Empty(t, provider.LocalPath)
 }

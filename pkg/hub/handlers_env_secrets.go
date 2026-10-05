@@ -2396,10 +2396,19 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Validate LocalPath before persisting — fail fast before touching the DB.
-	// LocalPath names a directory on the broker's host. Only the embedded
+	// LocalPath names a directory on the broker's host. Every broker's path
+	// passes the same syntax and global-directory checks. Only the embedded
 	// broker shares the hub's filesystem, so only for it does the hub check
 	// that the directory exists and initialize its .scion directory below.
-	// For any other broker the path is validated syntactically and stored.
+	// For any other broker the path is validated and stored.
+	//
+	// The global-directory check needs the project; a lookup failure fails
+	// the request rather than skipping the check.
+	target, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
 	var cleanPath string
 	embedded := s.isEmbeddedBroker(broker.ID)
 	if req.LocalPath != "" {
@@ -2414,6 +2423,10 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 				return
 			}
 		}
+		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
+			return
+		}
 		if embedded {
 			info, err := os.Stat(cleanPath)
 			if err != nil || !info.IsDir() {
@@ -2423,12 +2436,21 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
+	// A request without a path keeps the path stored for an existing
+	// provider, unless that path is the broker's global directory for a
+	// project other than the global project, which is cleared. A broker
+	// that is not yet a provider gets no path.
+	localPath := cleanPath
+	if localPath == "" {
+		localPath = s.registerProviderLocalPath(ctx, target, broker.ID, "", false)
+	}
+
 	// Create provider record
 	provider := &store.ProjectProvider{
 		ProjectID:  projectID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
-		LocalPath:  req.LocalPath,
+		LocalPath:  localPath,
 		Status:     broker.Status,
 		LinkedBy:   linkedBy,
 	}
@@ -2443,7 +2465,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	// the first agent starts. Other brokers manage their own filesystem.
 	if cleanPath != "" && embedded {
 		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",
 				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
 		}
