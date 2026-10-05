@@ -304,9 +304,10 @@ func TestColocatedBrokerRegisters(t *testing.T) {
 // postgres-only `if` around the operational-settings init in initHubServer.
 // It parses server_foreground.go and fails if initHubServer no longer calls
 // initOperationalSettingsWithRetry, or if that call sits inside any `if`
-// body/else or `switch` (the call may be the `if`'s own init statement, as
-// in `if err := call(); err != nil`). It is not a semantic check: an early
-// return before the call, or moving the call into a helper, is not seen.
+// body/else, `switch`/`select`, or `for`/`range` loop (the call may be the
+// `if`'s own init statement, as in `if err := call(); err != nil`). It is
+// not a semantic check: an early return or `goto` before the call, or
+// moving the call into a helper or closure, is not seen.
 func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
@@ -352,6 +353,9 @@ func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T)
 					cond.String(), fset.Position(a.Pos()))
 			case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
 				t.Errorf("initOperationalSettingsWithRetry is inside a switch/select (%s); settings init must run on every driver",
+					fset.Position(anc.Pos()))
+			case *ast.ForStmt, *ast.RangeStmt:
+				t.Errorf("initOperationalSettingsWithRetry is inside a loop (%s); settings init must run once, on every driver",
 					fset.Position(anc.Pos()))
 			}
 		}
