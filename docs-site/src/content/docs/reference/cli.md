@@ -135,7 +135,16 @@ the agent. With `--format json`, `details.started` is `false`,
 Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's
 phase becomes `stopped` and the next `start` runs a fresh session.
 
-**Usage:** `scion stop <agent-name>`
+In Hub mode, stopping an agent whose Runtime Broker is offline queues the stop: the CLI prints
+"stop queued via Hub", and the Runtime Broker applies the stop when it reconnects, unless a newer
+start or stop was recorded first. With `--rm`, a queued stop does not remove the agent; run
+`scion delete` once the Runtime Broker is back. Any warnings the Hub returns are printed.
+
+**Usage:** `scion stop <agent-name> [flags]`
+
+- **Flags:**
+    - `--rm`: Remove the agent after stopping.
+    - `-a, --all`: Stop all running agents in the current project.
 
 ### `scion suspend`
 
@@ -461,9 +470,20 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
+    - `--broker <name|id>`: Target another Runtime Broker for the new generation. Both Runtime Brokers must mount the same NFS export, so the workspace would move without being copied. Requires `--dry-run`: without it the CLI fails before contacting the Hub, because a real move is not supported yet.
+
+**Checking a move to another Runtime Broker.** `scion reincarnate <agent> --broker <name|id> --dry-run`
+reports whether the agent could move, and changes nothing. The Hub runs nine checks in this order:
+workspace mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the
+export, target profile, target health, access, agent-move capability, and capacity. The first failing
+check decides the answer; the CLI prints every check as passed, failed, or not evaluated. No Runtime
+Broker advertises the agent-move capability yet, so the capability check fails even when every
+earlier check passes. A target that is the agent's current Runtime Broker is a plain reincarnation
+dry run. A target you cannot see is reported as not found. If the CLI says the Hub does not support
+`--broker`, upgrade the Hub.
 
 :::note[Phase 1]
-This release supports only `--handoff-file`, `--handoff-template`, and `--dry-run`. Overrides such as a different image,
+This release supports only `--handoff-file`, `--handoff-template`, `--dry-run`, and `--broker` together with `--dry-run`. Overrides such as a different image,
 model, or harness config are not yet available.
 :::
 
