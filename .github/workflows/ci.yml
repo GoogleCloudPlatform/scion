@@ -91,6 +91,14 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    # Sized from data (ptone/scion#3183): over the 267 successful upstream
+    # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
+    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). 30m is ~2x the slowest
+    # success; worst case under the Run Tests watchdog below is ~26m (9.8m
+    # max pre-test steps + 15m deadline + 1m grace + Build Binary). Without a
+    # limit the job inherits GitHub's 360m default: two stalled Run Tests on
+    # 2026-10-05 ran 41m and 83m (78m silent) until cancelled by hand.
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -278,8 +286,88 @@ jobs:
           esac
           exit "$rc"
 
+      # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
+      # diagnostic only: no retries, and on a normal pass or fail the step
+      # exits with make test-fast's own exit code. If the tests are still
+      # running at the deadline (15m, ~3x the slowest successful Run Tests
+      # of 5.1m), it logs the process tree and every pipe fd with its owning
+      # PID, sends SIGQUIT to the Go test binaries (goroutine dumps), then to
+      # the whole tree, SIGKILLs what is left, and fails with exit 124.
+      # The step timeout is only a backstop in case the watchdog itself fails.
       - name: Run Tests
-        run: make test-fast
+        timeout-minutes: 18
+        run: |
+          deadline_secs=900   # 15m
+          grace_secs=30       # per escalation stage (QUIT binaries, QUIT tree)
+          test_cmd=(make test-fast)
+
+          # Own session, so the whole test tree can be signalled as one unit.
+          # A background child of a non-interactive shell is not a process-
+          # group leader, so setsid execs in place: the PID is also the SID.
+          # bash starts background jobs with SIGINT/SIGQUIT ignored (inherited
+          # across exec); env restores the defaults a foreground make had.
+          setsid env --default-signal=INT,QUIT "${test_cmd[@]}" &
+          test_pid=$!
+          # The deadline timer must never hold the step's output pipe open,
+          # which is the very failure it exists to diagnose, so it gets no
+          # stdout/stderr. It is killed as soon as the tests exit.
+          sleep "$deadline_secs" >/dev/null 2>&1 &
+          timer_pid=$!
+
+          # Signal everything in the test session (pgrep/pkill -s), matching
+          # how leftovers are found below.
+          forward() { pkill -"$1" -s "$test_pid" 2>/dev/null || true; }
+          trap 'forward TERM; kill "$timer_pid" 2>/dev/null || true; exit 143' TERM
+          trap 'forward INT; kill "$timer_pid" 2>/dev/null || true; exit 130' INT
+          trap 'kill "$timer_pid" 2>/dev/null || true' EXIT
+
+          set +e
+          wait -n -p done_pid "$test_pid" "$timer_pid"
+          rc=$?
+          set -e
+
+          if [ "$done_pid" = "$test_pid" ]; then
+            kill "$timer_pid" 2>/dev/null || true
+            wait "$timer_pid" 2>/dev/null || true
+            # The tests have exited. Anything still in their session is an
+            # orphan (and may hold this step's stdout); report it, then kill it.
+            leftovers=$(pgrep -s "$test_pid" || true)
+            if [ -n "$leftovers" ]; then
+              echo "::warning title=Run Tests left orphans::Processes left behind by make test-fast were killed after it exited (exit code $rc is unchanged): $(echo "$leftovers" | tr '\n' ' ')"
+              # shellcheck disable=SC2086 # word-splitting the PID list is intended
+              ps -o pid,ppid,pgid,sid,etime,args -p "$(echo $leftovers | tr ' ' ',')" || true
+              forward KILL
+            fi
+            exit "$rc"
+          fi
+
+          echo "===== hangwatch: make test-fast still running after ${deadline_secs}s; collecting diagnostics ====="
+          echo "----- hangwatch: process tree (ps -ef --forest) -----"
+          ps -ef --forest || true
+          echo "----- hangwatch: pipe fds, grouped by pipe (pipe pid fd comm); this step's stdout is $(readlink "/proc/$$/fd/1" 2>/dev/null) -----"
+          for fd in /proc/[0-9]*/fd/*; do
+            target=$(readlink "$fd" 2>/dev/null) || continue
+            case "$target" in pipe:*) ;; *) continue ;; esac
+            pid=${fd#/proc/}; pid=${pid%%/*}
+            printf '%s pid=%s fd=%s %s\n' "$target" "$pid" "${fd##*/}" "$(cat "/proc/$pid/comm" 2>/dev/null)"
+          done | sort -V || true
+          echo "----- hangwatch: SIGQUIT to Go test binaries (goroutine dumps follow) -----"
+          pgrep -a -s "$test_pid" -f '\.test( |$)' || echo "(no Go test binaries running)"
+          pkill -QUIT -s "$test_pid" -f '\.test( |$)' || true
+          for _ in $(seq "$grace_secs"); do kill -0 "$test_pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$test_pid" 2>/dev/null; then
+            echo "----- hangwatch: SIGQUIT to the whole test process tree -----"
+            pkill -QUIT -s "$test_pid" || true
+            for _ in $(seq "$grace_secs"); do pgrep -s "$test_pid" >/dev/null || break; sleep 1; done
+          fi
+          if pgrep -s "$test_pid" >/dev/null; then
+            echo "----- hangwatch: SIGKILL to what is left -----"
+            pgrep -a -s "$test_pid" || true
+            pkill -KILL -s "$test_pid" || true
+          fi
+          wait "$test_pid" 2>/dev/null || true
+          echo "::error title=Run Tests timed out::make test-fast was still running after ${deadline_secs}s (normal: ~5m) and was killed by the hang watchdog. Process tree, pipe holders and goroutine dumps are in the step log above. Not retried (ptone/scion#3183)."
+          exit 124
 
       - name: Build Binary
         run: make build
