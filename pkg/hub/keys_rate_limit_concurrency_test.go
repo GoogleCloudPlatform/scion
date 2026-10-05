@@ -114,6 +114,16 @@ func TestKeysAllowBoth_ConcurrentAdmissionWithinBudgets(t *testing.T) {
 	// bucket. The sub-second steps keep rate*step integral for both buckets.
 	steps := []time.Duration{0, time.Second, 2 * time.Second, 400 * time.Millisecond, time.Second, 600 * time.Millisecond, 0, 3 * time.Second}
 
+	// The exact per-phase target counts below hold only while the target is
+	// the binding bucket: the principals together must out-refill and
+	// out-burst it. Fail clearly if the agentkeys constants stop meeting that.
+	if numPrincipals*agentkeys.PrincipalProjectRateLimit <= agentkeys.TargetRateLimit ||
+		numPrincipals*agentkeys.PrincipalProjectBurst <= agentkeys.TargetBurst {
+		t.Fatalf("test assumes the target bucket binds: need %d*PrincipalProjectRateLimit (%d) > TargetRateLimit (%d) and %d*PrincipalProjectBurst (%d) > TargetBurst (%d); retune numPrincipals or steps",
+			numPrincipals, numPrincipals*agentkeys.PrincipalProjectRateLimit, agentkeys.TargetRateLimit,
+			numPrincipals, numPrincipals*agentkeys.PrincipalProjectBurst, agentkeys.TargetBurst)
+	}
+
 	for round := 0; round < 20; round++ {
 		clock := newKeysFakeClock()
 		principals := newKeysRateLimiterWithClock(agentkeys.PrincipalProjectRateLimit, agentkeys.PrincipalProjectBurst, clock.Now)
@@ -244,6 +254,10 @@ func TestKeysAllowBoth_ConcurrentAdmissionWithMovingClock(t *testing.T) {
 // still, exactly the target burst is admitted; after the clock moves by
 // 300ms, exactly the 3 refilled tokens are admitted. Every admitted
 // request is dispatched once, and no refused request is.
+//
+// This test covers route wiring and dispatch accounting; race detection in
+// admission lives in the TestKeysAllowBoth_Concurrent* tests, since HTTP
+// overhead largely serializes these requests.
 func TestExecuteAgentKeys_ConcurrentPrincipalsShareTargetBudget(t *testing.T) {
 	f, d, _, _ := newExecuteAgentKeysFixture(t)
 	clock := newKeysFakeClock()
