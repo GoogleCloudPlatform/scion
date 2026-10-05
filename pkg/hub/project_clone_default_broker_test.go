@@ -108,7 +108,7 @@ func TestProjectClone_DefaultClearedWhenNoProvider(t *testing.T) {
 	assertNoProvider(t, s, clone.ID, private.ID)
 }
 
-// The stored default is settled even when the write made while auto-linking
+// The stored default is settled even when the write issued while auto-linking
 // fails: the response and the store agree, and the stored default is a
 // provider of the clone or empty.
 func TestProjectClone_DefaultSettledWhenAutoLinkWriteFails(t *testing.T) {
@@ -120,7 +120,7 @@ func TestProjectClone_DefaultSettledWhenAutoLinkWriteFails(t *testing.T) {
 
 	clone := cloneWithDefault(t, srv, s, private.ID, "clone-default-write")
 
-	require.True(t, failing.failed.Load(), "the write made while auto-linking failed")
+	require.True(t, failing.failed.Load(), "the write issued while auto-linking failed")
 	if clone.DefaultRuntimeBrokerID != "" {
 		_, err := s.GetProjectProvider(context.Background(), clone.ID, clone.DefaultRuntimeBrokerID)
 		require.NoError(t, err, "the stored default is a provider of the clone")
