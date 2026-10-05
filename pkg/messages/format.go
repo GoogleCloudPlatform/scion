@@ -68,7 +68,7 @@ type deliveryMessage struct {
 // If the message has plain=true, only the raw msg text is returned.
 // The recipient and version fields are stripped before delivery.
 func FormatForDelivery(msg *StructuredMessage) string {
-	if msg.Plain || msg.Raw {
+	if msg.Plain {
 		return msg.Msg
 	}
 

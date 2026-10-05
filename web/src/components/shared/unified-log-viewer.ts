@@ -200,7 +200,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     }
 
     .log-scroller {
-      max-height: calc(100vh - 22rem);
+      max-height: calc(var(--scion-app-height, 100dvh) - 22rem);
       min-height: 400px;
       overflow-y: auto;
       font-family: var(--scion-font-mono, monospace);

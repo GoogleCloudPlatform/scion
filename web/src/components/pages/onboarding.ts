@@ -18,6 +18,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import type { HarnessConfig } from '../../shared/types.js';
 import '../shared/dir-browser.js';
 
@@ -1523,6 +1524,15 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to create project');
         return;
       }
+      const data = (await res.json().catch(() => null)) as {
+        project?: { id: string };
+        id?: string;
+      } | null;
+      const projectId = data?.project?.id || data?.id;
+      // A 200 names a project that already existed; only a new one changes membership.
+      if (projectId && res.status !== 200) {
+        dispatchMembershipChanged({ kind: 'project', id: projectId });
+      }
       this.currentStep = 6;
     } catch {
       this.error = 'Failed to connect to the server.';
@@ -1687,6 +1697,9 @@ export class ScionPageOnboarding extends LitElement {
         this.error = 'No project ID in response';
         return;
       }
+      // A new project exists from here, even if linking the directory fails.
+      // A 200 names a project that already existed.
+      if (projRes.status !== 200) dispatchMembershipChanged({ kind: 'project', id: projectId });
 
       const provRes = await apiFetch(`/api/v1/projects/${projectId}/providers`, {
         method: 'POST',

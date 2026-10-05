@@ -50,9 +50,9 @@ func (b *gkeSharedVolumeBackend) Resolve(in ResolveInput) (ResolvedWorkspace, er
 		return ResolvedWorkspace{}, fmt.Errorf("gkeSharedVolumeBackend.Resolve: volume_name is required")
 	}
 
-	subPathRoot := b.cfg.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
+	subPathRoot, err := config.ResolveSubPathRoot(b.cfg.SubPathRoot)
+	if err != nil {
+		return ResolvedWorkspace{}, fmt.Errorf("gkeSharedVolumeBackend.Resolve: %w", err)
 	}
 
 	workspaceRelPath := filepath.Join(subPathRoot, in.ProjectID, "workspace")

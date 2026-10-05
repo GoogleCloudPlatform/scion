@@ -302,10 +302,16 @@ func TestRS3_ProjectDeleteStaleOwnerIDDenied(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, staleOwnerID)
 
-	// Simulate stale OwnerID by updating the project record.
-	project, _ := s.GetProject(ctx, projectID)
-	project.OwnerID = staleOwnerID
-	_ = s.UpdateProject(ctx, project)
+	// Simulate a stale OwnerID with the dedicated owner writer. The general
+	// UpdateProject no longer writes OwnerID (ptone/scion#2597), so it cannot
+	// be used for this setup. Assert the precondition so the test cannot go
+	// vacuous if the setup stops taking effect.
+	require.NoError(t, s.SetProjectOwnerID(ctx, projectID, staleOwnerID))
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	require.Equal(t, staleOwnerID, project.OwnerID, "precondition: project.OwnerID names the stale user")
+	require.Empty(t, projectBindingsFor(t, s, projectID, staleOwnerID),
+		"precondition: the stale owner holds no project role bindings")
 
 	req := ProjectDeleteRequest{
 		ProjectID: projectID,

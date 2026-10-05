@@ -244,7 +244,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		if r.State == store.LaunchReportStateSucceeded {
 			applySucceededAgentInfo(upd, r)
 			upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonSucceeded)
-			updated, err := upd.Save(ctx)
+			updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, mapError(err)
 			}
@@ -253,7 +253,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// Non-terminal or failed: end the launch as running_observed. The
 		// broker does not clean up on `completed` (§3.8.2).
 		upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
-		updated, err := upd.Save(ctx)
+		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonRunningObserved, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
@@ -270,7 +270,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
-		updated, err := upd.Save(ctx)
+		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonFailed, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
@@ -308,7 +308,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
-		updated, err := upd.Save(ctx)
+		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonFailed, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
@@ -344,7 +344,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
-		updated, err := upd.Save(ctx)
+		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
@@ -372,7 +372,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
-		updated, err := upd.Save(ctx)
+		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonFailed, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}

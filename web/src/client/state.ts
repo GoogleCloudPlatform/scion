@@ -382,7 +382,12 @@ export type ViewScope =
   | { type: 'agent-detail'; projectId: string; agentId: string }
   | { type: 'brokers-list' }
   | { type: 'broker-detail'; brokerId: string }
-  | { type: 'chat'; spaceIds: string[]; userId: string };
+  | { type: 'chat'; spaceIds: string[]; userId: string }
+  /**
+   * Hub-wide agent feed. Carries agent events from every project the session
+   * may read and nothing else: no notifications, no chat, no broker events.
+   */
+  | { type: 'agent-feed' };
 
 /**
  * Resource a scope-level capability set was computed for.
@@ -644,6 +649,11 @@ export class StateManager extends EventTarget {
     }
   }
 
+  /** The signed-in user's id, or '' before it is known. */
+  getCurrentUserId(): string {
+    return this.currentUserId;
+  }
+
   /**
    * Record the signed-in user so scoped subscriptions can include the
    * per-user notification subject. Called by the app bootstrap once the
@@ -726,6 +736,9 @@ export class StateManager extends EventTarget {
    * the browser's 6-connection-per-origin HTTP/1.1 limit).
    */
   private subjectsForScope(scope: ViewScope): string[] {
+    // The agent feed is a dedicated connection for agent rows only; it must
+    // not duplicate the notification subscription the view connection holds.
+    if (scope.type === 'agent-feed') return ['project.*.agent.>'];
     const subs = ((): string[] => {
       switch (scope.type) {
         case 'dashboard':
@@ -772,6 +785,7 @@ export class StateManager extends EventTarget {
   private scopeEquals(a: ViewScope, b: ViewScope): boolean {
     if (a.type !== b.type) return false;
     if (a.type === 'dashboard' && b.type === 'dashboard') return true;
+    if (a.type === 'agent-feed' && b.type === 'agent-feed') return true;
     if (a.type === 'brokers-list' && b.type === 'brokers-list') return true;
     if (a.type === 'broker-detail' && b.type === 'broker-detail') return a.brokerId === b.brokerId;
     if (a.type === 'project' && b.type === 'project') return a.projectId === b.projectId;
@@ -1370,6 +1384,16 @@ export class StateManager extends EventTarget {
     if (token !== undefined) {
       this.endSeedEpoch(token);
     }
+  }
+
+  /**
+   * `agent` as `seedAgents` with `token` would apply the deltas recorded
+   * for it so far, without storing it: for showing REST rows read while
+   * the epoch is open. Returns `agent` itself when none were recorded.
+   */
+  withSeedEpochDeltas(token: SeedEpochToken, agent: Agent): Agent {
+    const recorded = this.seedEpochs.get(token)?.deltas.get(agent.id);
+    return recorded ? applyCompactedDelta(agent, recorded, agent.id) : agent;
   }
 
   /**

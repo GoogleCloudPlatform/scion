@@ -6,6 +6,7 @@ package handlers
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -17,6 +18,8 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestNewTelemetryHandler(t *testing.T) {
@@ -1197,5 +1200,78 @@ func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 				t.Errorf("did not expect %s metric when token counts are zero", m.Name)
 			}
 		}
+	}
+}
+
+// TestTelemetryHandler_ModelAttributeOnSpansAndLogs pins that hook spans
+// and log records carry a `model` attribute when, and only when, the event
+// payload named one (EventData.Model, ptone/scion#2242). Unlike the usage
+// metric label, they never fall back to SCION_MODEL or "unknown".
+func TestTelemetryHandler_ModelAttributeOnSpansAndLogs(t *testing.T) {
+	t.Setenv("SCION_MODEL", "configured-model")
+
+	cases := []struct {
+		name      string
+		model     string
+		wantModel string // "" means the attribute must be absent
+	}{
+		{"payload model", "provider/model-x", "provider/model-x"},
+		{"no payload model", "", ""},
+		{"whitespace payload model", "  ", ""},
+		{"long payload model is truncated", strings.Repeat("m", 200), strings.Repeat("m", telemetrycontract.MaxModelLabelBytes)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+			defer func() { _ = tp.Shutdown(context.Background()) }()
+			proc := &recordingProcessor{}
+			lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+			defer func() { _ = lp.Shutdown(context.Background()) }()
+
+			h := NewTelemetryHandler(tp, lp, nil)
+			for _, name := range []string{hooks.EventModelStart, hooks.EventModelEnd} {
+				if err := h.Handle(&hooks.Event{Name: name, Data: hooks.EventData{Model: tc.model}}); err != nil {
+					t.Fatalf("Handle(%s): %v", name, err)
+				}
+			}
+
+			spans := sr.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("ended spans = %d, want 1 (paired model-start/model-end)", len(spans))
+			}
+			var spanModel string
+			var spanHasModel bool
+			for _, kv := range spans[0].Attributes() {
+				if string(kv.Key) == telemetrycontract.ModelLabel {
+					spanModel, spanHasModel = kv.Value.AsString(), true
+				}
+			}
+			if tc.wantModel == "" && spanHasModel {
+				t.Errorf("span has model attribute %q, want none", spanModel)
+			}
+			if tc.wantModel != "" && spanModel != tc.wantModel {
+				t.Errorf("span model attribute = %q, want %q", spanModel, tc.wantModel)
+			}
+
+			records := proc.Records()
+			if len(records) != 2 {
+				t.Fatalf("log records = %d, want 2", len(records))
+			}
+			for i := range records {
+				found := map[string]string{}
+				records[i].WalkAttributes(func(kv attribute.KeyValue) bool {
+					found[string(kv.Key)] = kv.Value.AsString()
+					return true
+				})
+				got, ok := found[telemetrycontract.ModelLabel]
+				if tc.wantModel == "" && ok {
+					t.Errorf("log record %d has model attribute %q, want none", i, got)
+				}
+				if tc.wantModel != "" && got != tc.wantModel {
+					t.Errorf("log record %d model attribute = %q, want %q", i, got, tc.wantModel)
+				}
+			}
+		})
 	}
 }

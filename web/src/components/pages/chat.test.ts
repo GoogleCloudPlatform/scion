@@ -29,11 +29,13 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -59,6 +61,15 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 });
 
 let ScionPageChat: any;
+
+// A connected page retains the agent store's hub list, which opens the
+// store's feed; it never connects here.
+beforeEach(() => {
+  vi.stubGlobal('EventSource', FakeEventSource);
+  // Page-wide shared list loads: one test's DM list must not answer the next.
+  chatDMsLoad.invalidate();
+  chatSpacesLoad.invalidate();
+});
 
 describe('chat mention roster stability', () => {
   it('reuses agent props until the member roster or project changes', () => {
@@ -126,17 +137,97 @@ function clickMention(el: any, slug: string): void {
   el.handleMentionClick(new CustomEvent('mention-click', { detail: { slug } }));
 }
 
-/** Drive one touch gesture through the page's swipe handlers. */
-function swipe(el: any, opts: { dx: number; dy?: number; durationMs?: number }): void {
+/**
+ * Drive one touch gesture through the page's swipe handlers. `path` is the
+ * touch's composed path (what sits under the finger); the return value says
+ * whether the page cancelled the move.
+ */
+function swipe(
+  el: any,
+  opts: { dx: number; dy?: number; durationMs?: number; path?: EventTarget[] }
+): { moveCancelled: boolean } {
   const dy = opts.dy ?? 0;
   const start = 200;
   const now = Date.now();
   vi.setSystemTime(now);
+  let moveCancelled = false;
 
-  el.handleTouchStart({ touches: [{ clientX: start, clientY: 100 }] });
-  el.handleTouchMove({ touches: [{ clientX: start + opts.dx, clientY: 100 + dy }] });
+  el.handleTouchStart({
+    touches: [{ clientX: start, clientY: 100 }],
+    composedPath: () => opts.path ?? [],
+  });
+  el.handleTouchMove({
+    touches: [{ clientX: start + opts.dx, clientY: 100 + dy }],
+    cancelable: true,
+    preventDefault: () => {
+      moveCancelled = true;
+    },
+  });
   vi.setSystemTime(now + (opts.durationMs ?? 100));
   el.handleTouchEnd({ changedTouches: [{ clientX: start + opts.dx, clientY: 100 + dy }] });
+  return { moveCancelled };
+}
+
+/**
+ * Drive a two-finger pinch through the page's swipe handlers. The first
+ * finger lands alone (on `path`), the second lands `secondAfterMove` moves
+ * later (0 = both land together), both move sideways by `dx`, then the
+ * second lifts and the first keeps moving before it lifts too. Returns
+ * whether any move from the second finger landing on was cancelled (before
+ * that, it is still a one-finger drag).
+ */
+function pinch(
+  el: any,
+  opts: { dx: number; path?: EventTarget[]; secondAfterMove?: number }
+): { moveCancelled: boolean } {
+  const now = Date.now();
+  vi.setSystemTime(now);
+  let moveCancelled = false;
+  let pinching = false;
+  const path = () => opts.path ?? [];
+  const finger = (x: number) => ({ clientX: x, clientY: 100 });
+  const move = (touches: unknown[]) =>
+    el.handleTouchMove({
+      touches,
+      cancelable: true,
+      preventDefault: () => {
+        if (pinching) moveCancelled = true;
+      },
+    });
+  const together = (opts.secondAfterMove ?? 1) === 0;
+
+  pinching = together;
+  el.handleTouchStart({
+    touches: together ? [finger(200), finger(260)] : [finger(200)],
+    composedPath: path,
+  });
+  if (!together) {
+    for (let i = 1; i <= (opts.secondAfterMove ?? 1); i++) {
+      move([finger(200 + (opts.dx / 8) * i)]);
+    }
+    pinching = true;
+    el.handleTouchStart({ touches: [finger(200), finger(260)], composedPath: path });
+  }
+  for (let i = 1; i <= 8; i++) {
+    move([finger(200 + opts.dx * (i / 8)), finger(260 - opts.dx * (i / 8))]);
+  }
+  vi.setSystemTime(now + 100);
+  // The second finger lifts; the first is still down and keeps moving.
+  el.handleTouchEnd({ touches: [finger(200 + opts.dx)], changedTouches: [finger(260 - opts.dx)] });
+  move([finger(200 + opts.dx * 2)]);
+  el.handleTouchEnd({ touches: [], changedTouches: [finger(200 + opts.dx * 2)] });
+  return { moveCancelled };
+}
+
+/** A sideways scroller 500px wider than its box, scrolled to `scrollLeft`. */
+function wideScroller(scrollLeft: number): HTMLElement {
+  const el = document.createElement('pre');
+  el.style.overflowX = 'auto';
+  Object.defineProperty(el, 'scrollWidth', { value: 800 });
+  Object.defineProperty(el, 'clientWidth', { value: 300 });
+  Object.defineProperty(el, 'scrollLeft', { value: scrollLeft });
+  document.body.appendChild(el);
+  return el;
 }
 
 beforeAll(async () => {
@@ -422,6 +513,11 @@ describe('chat page — deep-linked thread header', () => {
 });
 
 describe('chat page — mobile swipe navigation', () => {
+  afterEach(() => {
+    // The scroller helpers attach their elements to measure them.
+    document.body.replaceChildren();
+  });
+
   // The element is never connected (see the file doc comment), so the
   // connectedCallback matchMedia listener that drives `isMobileLayout` in
   // real usage never runs — set it directly here, the same way `mobilePanel`
@@ -484,6 +580,83 @@ describe('chat page — mobile swipe navigation', () => {
 
     swipe(el, { dx: 120, dy: 200 });
 
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('leaves a drag to a sideways scroller that can still scroll that way', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // At its start: a leftward drag scrolls it, and is not a swipe.
+    const left = swipe(el, { dx: -120, path: [wideScroller(0)] });
+    expect(el.mobilePanel).toBe('center');
+    expect(left.moveCancelled, 'the scroller keeps the pan').toBe(false);
+
+    // Part-way along: the same holds for a rightward drag.
+    const right = swipe(el, { dx: 120, path: [wideScroller(200)] });
+    expect(el.mobilePanel).toBe('center');
+    expect(right.moveCancelled).toBe(false);
+  });
+
+  it('swipes panels from a sideways scroller already at its end, and keeps the pan from the browser', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // At its start a rightward drag has nothing to scroll: it is a panel
+    // swipe, and the move is cancelled so the browser cannot claim the pan
+    // as a history swipe.
+    const atStart = swipe(el, { dx: 120, path: [wideScroller(0)] });
+    expect(el.mobilePanel).toBe('left');
+    expect(atStart.moveCancelled).toBe(true);
+
+    el.mobilePanel = 'center';
+    const atEnd = swipe(el, { dx: -120, path: [wideScroller(500)] });
+    expect(el.mobilePanel).toBe('right');
+    expect(atEnd.moveCancelled).toBe(true);
+  });
+
+  it('never cancels a move with no sideways scroller under the touch', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+    expect(swipe(el, { dx: 120 }).moveCancelled).toBe(false);
+    expect(swipe(el, { dx: -120 }).moveCancelled).toBe(false);
+  });
+
+  it('leaves a pinch to the browser, even one starting on a scroller at its end', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // The first finger lands alone on a code block at its start and moves
+    // right (a move that would be cancelled for one finger), then a second
+    // finger lands: the pinch must never be cancelled, nor swipe panels.
+    expect(pinch(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // Both fingers landing together, on a scroller at its end.
+    expect(
+      pinch(el, { dx: -120, path: [wideScroller(500)], secondAfterMove: 0 }).moveCancelled
+    ).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // Away from any scroller.
+    expect(pinch(el, { dx: 120 }).moveCancelled).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // The next one-finger gesture swipes again.
+    expect(swipe(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(true);
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('never cancels a move on desktop viewports, even on a scroller at its end', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = false;
+    expect(swipe(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(false);
+    expect(swipe(el, { dx: -120, path: [wideScroller(500)] }).moveCancelled).toBe(false);
     expect(el.mobilePanel).toBe('center');
   });
 
@@ -588,34 +761,55 @@ describe('chat page — muted DMs raise no unread dot', () => {
     el.v2UnreadFromIds = ['agent-1', 'agent-2'];
     let resolveOld!: (response: Response) => void;
     vi.mocked(apiFetch)
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        dms: [{ peerId: 'agent-1', hasUnread: false }, { peerId: 'agent-2', hasUnread: true }],
-      })));
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveOld = resolve;
+          })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            dms: [
+              { peerId: 'agent-1', hasUnread: false },
+              { peerId: 'agent-2', hasUnread: true },
+            ],
+          })
+        )
+      );
     const oldRequest = el.loadUnreadDMPeers();
     await el.loadUnreadDMPeers();
     expect(el.v2UnreadFromIds).toEqual(['agent-2']);
-    resolveOld(new Response(JSON.stringify({
-      dms: [{ peerId: 'agent-1', hasUnread: true }, { peerId: 'agent-2', hasUnread: true }],
-    })));
+    resolveOld(
+      new Response(
+        JSON.stringify({
+          dms: [
+            { peerId: 'agent-1', hasUnread: true },
+            { peerId: 'agent-2', hasUnread: true },
+          ],
+        })
+      )
+    );
     await oldRequest;
     expect(el.v2UnreadFromIds).toEqual(['agent-2']);
   });
 
-  it.each([
-    'dm:agent:agent-1:user:user-me',
-    'dm:user:user-me:agent:agent-1',
-  ])('clears the acknowledged peer, not the selected conversation (%s)', (key) => {
-    const el = createPage();
-    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
-    el.v2Conversation = { peerId: 'agent-2' };
-    const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
-    el._handleReadStateUpdated(new CustomEvent('read-state-updated', {
-      detail: { conversationKey: key },
-    }));
-    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
-    expect(refresh).toHaveBeenCalledOnce();
-  });
+  it.each(['dm:agent:agent-1:user:user-me', 'dm:user:user-me:agent:agent-1'])(
+    'clears the acknowledged peer, not the selected conversation (%s)',
+    (key) => {
+      const el = createPage();
+      el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+      el.v2Conversation = { peerId: 'agent-2' };
+      const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+      el._handleReadStateUpdated(
+        new CustomEvent('read-state-updated', {
+          detail: { conversationKey: key },
+        })
+      );
+      expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+      expect(refresh).toHaveBeenCalledOnce();
+    }
+  );
 
   /** Answer GET /api/v1/chat/dms with the given entries. */
   function serveDMs(dms: Array<Record<string, unknown>>): void {
@@ -1106,7 +1300,15 @@ describe('chat page — late space lookups', () => {
   function createSpacePage(mobile: boolean): any {
     const el = createPage();
     el.isMobileLayout = mobile;
-    const rail = { expandSpace: vi.fn() };
+    const rail = {
+      expandSpace: vi.fn(),
+      // The real rail loads the list over the same endpoint; going through
+      // the mocked apiFetch keeps the held thread request in control.
+      threadsFor: vi.fn(async (projectId: string) => {
+        const res = await apiFetch(`/api/v1/chat/spaces/${projectId}/threads`);
+        return ((await res.json()) as { threads?: unknown[] }).threads ?? [];
+      }),
+    };
     Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     Object.defineProperty(el, 'shadowRoot', {
       get: () => ({
@@ -1203,6 +1405,34 @@ describe('chat page — late space lookups', () => {
   });
 });
 
+describe('chat page — rail reload after a message', () => {
+  it('asks the rail for spaces requested after the newest message of the burst', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = createPage();
+      const rail = { reload: vi.fn(() => Promise.resolve()) };
+      Object.defineProperty(el, 'shadowRoot', {
+        get: () => ({
+          querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null),
+        }),
+      });
+      const first = new CustomEvent('chat-message-received', { detail: {} });
+      vi.advanceTimersByTime(5);
+      const second = new CustomEvent('chat-message-received', { detail: {} });
+      el.handleChatMessage(first);
+      el.handleChatMessage(second);
+
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(rail.reload).toHaveBeenCalledTimes(1);
+      expect(rail.reload).toHaveBeenCalledWith({ startedAfter: second.timeStamp });
+      expect(second.timeStamp).toBeGreaterThan(first.timeStamp);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('chat page — late DM peer lookups', () => {
   async function flush(): Promise<void> {
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
@@ -1254,7 +1484,11 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     // The first parse and the rail-loaded re-parse each start a lookup.
+    // Back to back they would share one DM-list request; forget it in
+    // between so the second answers on its own, as it does once the shared
+    // list has aged out.
     el.parseV2Route();
+    chatDMsLoad.invalidate();
     el.parseV2Route();
     await flush();
     expect(releases).toHaveLength(2);
@@ -1269,6 +1503,28 @@ describe('chat page — late DM peer lookups', () => {
     await flush();
 
     expect(el.mobilePanel).toBe('left');
+  });
+
+  it('the first parse and the rail-loaded re-parse share one DM-list request and open the DM once', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    const titles: string[] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push(((e as CustomEvent).detail.segments as string[])[0])
+    );
+    el.parseV2Route();
+    el.parseV2Route();
+    await flush();
+    expect(releases).toHaveLength(1);
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me');
+    expect(el.mobilePanel).toBe('center');
+    // Opened by one lookup; the other found it already open and left it.
+    expect(titles.filter((t) => t === 'Coder One')).toHaveLength(1);
   });
 
   it('a lookup that returns after the route moved on opens nothing', async () => {
