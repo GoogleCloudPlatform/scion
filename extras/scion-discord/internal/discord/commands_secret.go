@@ -50,14 +50,7 @@ func (h *CommandHandler) HandleSecretSet(s *discordgo.Session, i *discordgo.Inte
 		h.respondModalError(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to check user mapping for secret set", "error", err)
-		h.respondModalError(s, i, "Something went wrong. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.respondModalError(s, i, "Please link your Discord account first with `/scion register`.")
+	if _, ok := requirePrincipal(ctx, h.store, h.log, discordUserID, func(msg string) { h.respondModalError(s, i, msg) }); !ok {
 		return
 	}
 
@@ -166,25 +159,13 @@ func (h *CommandHandler) HandleSecretModalSubmit(s *discordgo.Session, i *discor
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
-		return
-	}
-
-	if mapping.ScionEmail == "" {
-		h.followup(s, i, "Your account has no email associated. Please re-register with `/scion register`.")
-		return
-	}
-	onBehalfOf := "user:" + mapping.ScionEmail
 
 	// Call hub API to set the secret.
-	err = h.hubClient.SetSecret(ctx, key, value, "project", projectID, onBehalfOf)
+	err := h.hubClient.SetSecret(ctx, key, value, "project", projectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to set secret via hub", "error", err, "key", key, "project_id", projectID)
 		h.followup(s, i, fmt.Sprintf("Failed to set secret **%s**: %s", key, err))
@@ -202,19 +183,12 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 	defer cancel()
 
 	// Check user registration.
-	discordUserID := interactionUserID(i)
-	if discordUserID == "" {
+	if interactionUserID(i) == "" {
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -230,7 +204,7 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 		return
 	}
 
-	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID)
+	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list secrets", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to list secrets. Please try again later.")
@@ -270,19 +244,12 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 	defer cancel()
 
 	// Check user registration.
-	discordUserID := interactionUserID(i)
-	if discordUserID == "" {
+	if interactionUserID(i) == "" {
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -304,7 +271,7 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 
-	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID)
+	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to get secret", "error", err, "key", key, "project_id", link.ProjectID)
 		h.followup(s, i, fmt.Sprintf("Failed to get secret **%s**: %s", key, err))
@@ -340,14 +307,8 @@ func (h *CommandHandler) HandleSecretDelete(s *discordgo.Session, i *discordgo.I
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -368,12 +329,6 @@ func (h *CommandHandler) HandleSecretDelete(s *discordgo.Session, i *discordgo.I
 		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
 		return
 	}
-
-	if mapping.ScionEmail == "" {
-		h.followup(s, i, "Your account has no email associated. Please re-register with `/scion register`.")
-		return
-	}
-	onBehalfOf := "user:" + mapping.ScionEmail
 
 	err = h.hubClient.DeleteSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {

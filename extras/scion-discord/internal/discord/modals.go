@@ -112,8 +112,10 @@ func HandleModalSubmit(
 	if deliverInbound != nil {
 		discordUserID := interactionUserID(i)
 		sender := "discord:" + discordUserID
-		if mapping, mapErr := store.GetUserMapping(ctx, discordUserID); mapErr == nil && mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		if mapping, mapErr := store.GetUserMapping(ctx, discordUserID); mapErr == nil {
+			if principal := principalForMapping(mapping); principal != "" {
+				sender = principal
+			}
 		}
 
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)

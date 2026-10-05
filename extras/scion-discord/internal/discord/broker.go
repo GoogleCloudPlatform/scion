@@ -1316,8 +1316,14 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		// @all broadcast: fall through to legacy path below.
 	}
 
+	// Look up the sender's link once; it decides both the agent refresh and
+	// the sender identity below. A failed lookup deliberately gets the
+	// register prompt below, not the retry reply.
+	senderMapping := lookupUserMapping(ctx, store, b.log, m.Author.ID)
+
 	// Get project agents (with cache refresh) — only needed for legacy path.
-	agents := b.getProjectAgents(ctx, link.ProjectID)
+	// Without a linked sender, getProjectAgents uses the cache only.
+	agents := b.getProjectAgents(ctx, link.ProjectID, principalForMapping(senderMapping))
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1357,13 +1363,14 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	sender := "discord:" + m.Author.Username
 	senderID := m.Author.ID
 
-	mapping, err := store.GetUserMapping(ctx, senderID)
-	if err == nil && mapping != nil && mapping.ScionEmail != "" {
-		sender = "user:" + mapping.ScionEmail
-	} else if mapping == nil {
+	if senderMapping == nil {
 		b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
 		s.ChannelMessageSend(channelID, "Please use `/scion register` first to interact with agents.")
 		return
+	}
+	// A link without an email keeps the Discord username as the sender.
+	if senderMapping.ScionEmail != "" {
+		sender = principalForMapping(senderMapping)
 	}
 
 	// Classify mentions by position before stripping.
@@ -1991,7 +1998,11 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 // instead of being delivered to the mentioned agent. This is a known transient
 // gap, not addressed here — the centralized mention-routing design (Phase 4)
 // will replace this Discord-side resolution entirely.
-func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) []string {
+//
+// onBehalfOf is the message author's principal, sent with the hub refresh.
+// When it is empty, the cached list is returned (even if stale) and the hub
+// is not called.
+func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) []string {
 	b.mu.RLock()
 	store := b.store
 	hubClient := b.hubClient
@@ -2010,14 +2021,14 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) 
 		return cached.AgentSlugs
 	}
 
-	if hubClient == nil {
+	if hubClient == nil || onBehalfOf == "" {
 		if cached != nil {
 			return cached.AgentSlugs
 		}
 		return nil
 	}
 
-	agents, err := hubClient.ListAgents(ctx, projectID)
+	agents, err := hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
