@@ -20,13 +20,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
-	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Run-scoped Kubernetes deletes (ptone/scion#2550 P2).
@@ -226,11 +224,13 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 // A failure to read the pod fails the start (retryable) rather than
 // deleting without knowing whose pod holds the name.
 //
-// labels are the new run's labels. The Secret/SPC list is narrowed by their
-// scion.name and project ID (which Run copies onto every per-agent object)
-// so it does not read every agent's objects in the namespace; the object
-// name filter in deleteAgentSecretsBySelector still applies.
-func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string, labels map[string]string) error {
+// The Secret/SPC selection must stay a superset of every same-name object
+// of another run with no live pod: replaceExistingAgentObject refuses any
+// such object it meets later, so one skipped here would fail every retry
+// of the start. It is therefore selected by the run label and the object
+// name only, never by other labels (a project recreated under the same
+// name gets a new project ID but the same object names).
+func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string) error {
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	switch {
@@ -249,7 +249,9 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 		runtimeLog.Warn("Failed to delete stale per-agent object before start",
 			"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", runID, "error", err)
 	}
-	r.deleteAgentSecretsBySelector(ctx, namespace, podName, preCleanSelector(runID, labels), warn)
+	// Every per-agent object Run creates carries scion.agent (see
+	// createAgentSecret); "!=" also selects objects with no run label.
+	r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, warn)
 
 	if pod == nil {
 		return nil
@@ -287,21 +289,6 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	}
 }
 
-// preCleanSelector selects the per-agent objects pre-clean may remove: not
-// labelled with runID ("!=" also selects objects with no run label),
-// narrowed to the agent's scion.name and project ID when the labels carry
-// valid values. Every per-agent object Run creates carries scion.agent
-// (see createAgentSecret).
-func preCleanSelector(runID string, labels map[string]string) string {
-	sel := "scion.agent"
-	for _, key := range []string{"scion.name", projectkeys.LabelProjectID} {
-		if v := labels[key]; v != "" && len(k8svalidation.IsValidLabelValue(v)) == 0 {
-			sel += "," + key + "=" + v
-		}
-	}
-	return sel + "," + api.LabelRunID + "!=" + runID
-}
-
 // replaceExistingAgentObject makes room for a per-agent Secret or
 // SecretProviderClass whose create failed with AlreadyExists. kind is
 // api.ResourceKindSecret or api.ResourceKindSecretProviderClass.
@@ -314,7 +301,10 @@ func preCleanSelector(runID string, labels map[string]string) string {
 //   - labelled with another run: left alone, and an error wrapping
 //     ErrRunConflict is returned. Pre-clean already removed every stale
 //     object of another run, so one that exists now was created by a
-//     concurrent start.
+//     concurrent start. This holds only while pre-clean's selection covers
+//     every same-name object of another run with no live pod (see
+//     preCleanForRun); narrowing it by other labels would turn a stale
+//     object into a conflict on every retry.
 //
 // A delete that fails with Conflict means the object was recreated since
 // the list, also by a concurrent start: ErrRunConflict.

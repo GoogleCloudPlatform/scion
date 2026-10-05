@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -396,7 +395,7 @@ func TestK8sPreCleanForRun_RemovesStaleObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _, _, enf := newRunScopeRuntime(t)
 			rsSeedRun(t, rt, tc.labels, tc.phase, "old")
-			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
+			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
 				t.Fatalf("preCleanForRun: %v", err)
 			}
 			want := rsAllGone
@@ -418,7 +417,7 @@ func TestK8sPreCleanForRun_NoPod_RemovesOtherRunSecrets(t *testing.T) {
 	rsSeedSecret(t, rt, rsAuthSecret, "auth-legacy", rsLabels("", ""))
 	rsSeedSPC(t, rt, "spc-b", rsLabels(rsRunB, ""))
 
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
 		t.Fatalf("preCleanForRun: %v", err)
 	}
 	rsExpect(t, rt, rsAllGone)
@@ -432,7 +431,7 @@ func TestK8sPreCleanForRun_PodReadError_FailsClosed(t *testing.T) {
 	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, fmt.Errorf("simulated API failure")
 	})
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err == nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err == nil {
 		t.Fatal("preCleanForRun succeeded despite the pod read failure")
 	}
 	if n := enf.count(); n != 0 {
@@ -669,7 +668,7 @@ func TestK8sPreCleanForRun_TerminatingOtherRunPod_ForceDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed pod: %v", err)
 	}
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
 		t.Fatalf("preCleanForRun: %v", err)
 	}
 	if rsPod(t, rt) != nil {
@@ -686,7 +685,7 @@ func TestK8sPreCleanForRun_PodDeleteConflict_RunConflict(t *testing.T) {
 	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("precondition failed"))
 	})
-	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, ""))
+	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA)
 	if !errors.Is(err, ErrRunConflict) {
 		t.Fatalf("preCleanForRun error = %v, want ErrRunConflict", err)
 	}
@@ -713,50 +712,59 @@ func TestK8sCreate_AlreadyExistsReplaceConflict_RunConflict(t *testing.T) {
 	}
 }
 
-// The pre-clean Secret/SPC list is narrowed to the agent's scion.name and
-// project ID; the run filter stays.
-func TestK8sPreCleanForRun_SelectorNarrowedToAgentAndProject(t *testing.T) {
-	rt, cs, _, _ := newRunScopeRuntime(t)
-	var selectors []string
-	cs.PrependReactor("list", "secrets", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
-		selectors = append(selectors, action.(k8stesting.ListAction).GetListRestrictions().Labels.String())
-		return false, nil, nil
-	})
-	// Same object name, but labelled for another project: not selected.
-	rsSeedSecret(t, rt, rsAgentSecret, "sec-other-project", map[string]string{
-		"scion.agent": "true", "scion.name": "agent", "scion.project_id": "proj2", api.LabelRunID: rsRunB,
-	})
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
-		t.Fatalf("preCleanForRun: %v", err)
+// Regression (P2 review round 2, B1): stale run-labelled objects of the same
+// name but an old project ID (a project recreated under the same name) and
+// no pod are removed by pre-clean, and the start goes on to create its pod.
+// Skipping them would make every retry fail with ErrRunConflict.
+func TestK8sRun_PreClean_StaleOtherProjectRunObjects_Cleaned(t *testing.T) {
+	rt, cs, _, enf := newRunScopeRuntime(t)
+	stale := map[string]string{
+		"scion.agent": "true", "scion.name": "agent", "scion.project_id": "proj-old", api.LabelRunID: rsRunB,
 	}
-	if len(selectors) != 1 {
-		t.Fatalf("got %d secret lists, want 1", len(selectors))
+	rsSeedSecret(t, rt, rsAgentSecret, "sec-stale", stale)
+	rsSeedSecret(t, rt, rsAuthSecret, "auth-stale", stale)
+	rsSeedSPC(t, rt, "spc-stale", stale)
+	pod := runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(rsRunA))
+	if got := pod.Labels[api.LabelRunID]; got != rsRunA {
+		t.Errorf("new pod run label = %q, want %q", got, rsRunA)
 	}
-	for _, want := range []string{"scion.name=agent", "scion.project_id=proj1", api.LabelRunID + "!=" + rsRunA} {
-		if !strings.Contains(selectors[0], want) {
-			t.Errorf("selector %q lacks %q", selectors[0], want)
+	for _, name := range []string{rsAgentSecret, rsAuthSecret} {
+		s, err := cs.CoreV1().Secrets(rt.DefaultNamespace).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil || s.Labels[api.LabelRunID] != rsRunA {
+			t.Errorf("Secret %s not recreated for run A (err=%v)", name, err)
 		}
 	}
-	if !secretExists(t, rt, rt.DefaultNamespace, rsAgentSecret) {
-		t.Error("a Secret labelled for another project was deleted")
-	}
+	enf.assertAllConditional(t)
 }
 
-func TestPreCleanSelector(t *testing.T) {
-	cases := []struct {
-		name   string
-		labels map[string]string
-		want   string
-	}{
-		{"agent and project", rsLabels(rsRunA, ""), "scion.agent,scion.name=agent,scion.project_id=proj1,scion.run_id!=" + rsRunA},
-		{"no labels", nil, "scion.agent,scion.run_id!=" + rsRunA},
-		{"invalid value skipped", map[string]string{"scion.name": "bad value!"}, "scion.agent,scion.run_id!=" + rsRunA},
+// runUntilPodSubmittedLate drives Run until it submits its pod, failing
+// pod reads only after that (pre-clean's own pod read must succeed, unlike
+// failPodReadiness). Returns the submitted pod.
+func runUntilPodSubmittedLate(t *testing.T, rt *KubernetesRuntime, cs *k8sfake.Clientset, cfg RunConfig) *corev1.Pod {
+	t.Helper()
+	var mu sync.Mutex
+	var submitted *corev1.Pod
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if submitted != nil {
+			return true, nil, fmt.Errorf("simulated readiness failure")
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		submitted = action.(k8stesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy()
+		mu.Unlock()
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = rt.Run(ctx, cfg)
+	mu.Lock()
+	defer mu.Unlock()
+	if submitted == nil {
+		t.Fatal("Run did not submit a pod")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := preCleanSelector(rsRunA, tc.labels); got != tc.want {
-				t.Errorf("preCleanSelector = %q, want %q", got, tc.want)
-			}
-		})
-	}
+	return submitted
 }

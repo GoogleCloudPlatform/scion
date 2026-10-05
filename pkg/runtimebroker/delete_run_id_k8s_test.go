@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -157,6 +158,13 @@ func TestDeleteAgent_RuntimeRunMismatch_UndoesSoftDeleteMark(t *testing.T) {
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
+	// An agent soft-deleted before keeps its earlier deletedAt across
+	// restarts; the undo must bring that value back, not clear it.
+	prior := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if err := agent.UpdateAgentDeletedAt("dev", scionB, prior); err != nil {
+		t.Fatal(err)
+	}
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
@@ -165,8 +173,8 @@ func TestDeleteAgent_RuntimeRunMismatch_UndoesSoftDeleteMark(t *testing.T) {
 	if !ok {
 		t.Fatal("agent-info.json unreadable")
 	}
-	if st.Phase != "running" || !st.DeletedAt.IsZero() {
-		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	if st.Phase != "running" || !st.DeletedAt.Equal(prior) {
+		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v, want running and %v", st.Phase, st.DeletedAt, prior)
 	}
 	if !rt.stillPresent() {
 		t.Error("run-new's entry was deleted")
@@ -245,7 +253,7 @@ func TestDeleteRunRef(t *testing.T) {
 func TestCreateAgent_RunConflictIs409(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
-	mgr.startErr = fmt.Errorf("start: %w", runtime.ErrRunConflict)
+	mgr.startErr = identityRunConflict
 
 	body := `{"name": "new-agent", "config": {"template": "claude"}, "runId": "run-x"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -259,11 +267,110 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 	if !strings.Contains(w.Body.String(), ErrCodeConflict) {
 		t.Errorf("body %s lacks code %q", w.Body.String(), ErrCodeConflict)
 	}
+	assertNoRunConflictLeak(t, w.Body.String())
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, _ := classifyStartError(context.Background(), fmt.Errorf("start: %w", runtime.ErrRunConflict))
+	code, msg := classifyStartError(context.Background(), identityRunConflict)
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
+	}
+	assertNoRunConflictLeak(t, msg)
+}
+
+// Any other runtime failure after the soft-delete mark (nothing confirmed
+// deleted) also undoes the mark; the delete answers with a runtime error.
+func TestDeleteAgent_RuntimeFailure_UndoesSoftDeleteMark(t *testing.T) {
+	rt := newNameHeldRuntime("run-old")
+	rt.DeleteFunc = func(context.Context, runtime.RunRef) error { return fmt.Errorf("apiserver unavailable") }
+	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code < 500 {
+		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+	st, _ := agent.GetAgentDeleteState("dev", scionB)
+	if st.Phase != "running" || !st.DeletedAt.IsZero() {
+		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	}
+}
+
+// The undo changes nothing unless agent-info.json still shows the mark:
+// a phase a newer start wrote after the snapshot is kept.
+func TestRestoreAgentDeleteState_OnlyUndoesOwnMark(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	snap := agent.AgentDeleteState{Phase: "stopped"}
+
+	if err := agent.RestoreAgentDeleteState("dev", scionB, snap); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "running" {
+		t.Errorf("restore overwrote a newer phase: %q", st.Phase)
+	}
+
+	if err := agent.UpdateAgentConfig("dev", scionB, "deleted", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.RestoreAgentDeleteState("dev", scionB, snap); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "stopped" {
+		t.Errorf("restore did not undo the mark: %q", st.Phase)
+	}
+}
+
+// identityRunConflict is an ErrRunConflict wrapped the way the Kubernetes
+// runtime wraps it, carrying a namespace, an object name and a run ID that
+// must not reach HTTP clients.
+var identityRunConflict = fmt.Errorf("start: %w", fmt.Errorf("%w: secretproviderclass leakns/scion-agent-leakobj belongs to run %q",
+	runtime.ErrRunConflict, "run-leak-123"))
+
+func assertNoRunConflictLeak(t *testing.T, body string) {
+	t.Helper()
+	for _, s := range []string{"leakns", "leakobj", "run-leak-123"} {
+		if strings.Contains(body, s) {
+			t.Errorf("response body leaks %q: %s", s, body)
+		}
+	}
+	if !strings.Contains(body, runtime.ErrRunConflict.Error()) {
+		t.Errorf("response body lacks the fixed conflict text: %s", body)
+	}
+}
+
+func TestStartAndRestart_RunConflict_409NoLeak(t *testing.T) {
+	for _, path := range []string{"/api/v1/agents/test-agent-1/start", "/api/v1/agents/test-agent-1/restart"} {
+		t.Run(path, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = identityRunConflict
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"runId":"run-x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status %d, want 409: %s", w.Code, w.Body.String())
+			}
+			assertNoRunConflictLeak(t, w.Body.String())
+		})
+	}
+}
+
+// Restart maps a container name already in use to 409, as create and start
+// do.
+func TestRestart_NameInUse_409(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("start: %w", agent.ErrContainerNameInUse)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", strings.NewReader(`{"runId":"run-x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409: %s", w.Code, w.Body.String())
 	}
 }

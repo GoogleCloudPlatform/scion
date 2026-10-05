@@ -2340,9 +2340,14 @@ func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState
 }
 
 // RestoreAgentDeleteState writes st's Phase and DeletedAt back to
-// agent-info.json, undoing a soft-delete mark.
+// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
+// file still shows the mark (Phase "deleted"), so a phase a newer start has
+// written since the snapshot is kept.
 func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		if info.Phase != "deleted" {
+			return
+		}
 		info.Phase = st.Phase
 		info.DeletedAt = st.DeletedAt
 	})

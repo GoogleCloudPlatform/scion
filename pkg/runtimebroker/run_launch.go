@@ -507,10 +507,13 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {
-	case errors.Is(err, agent.ErrContainerNameInUse), errors.Is(err, scionrt.ErrRunConflict):
-		// ErrRunConflict: another live run holds the agent name, and the
-		// runtime deleted nothing of it (ptone/scion#2550).
+	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()
+	case errors.Is(err, scionrt.ErrRunConflict):
+		// Another live run holds the agent name, and the runtime deleted
+		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
+		// names the namespace, object and the other run's ID.
+		return "name_in_use", scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
 		// synchronous create or start returns, with the error naming the

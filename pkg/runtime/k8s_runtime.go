@@ -599,7 +599,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		return "", err
 	}
 	if runID := config.Labels[api.LabelRunID]; runID != "" {
-		if err := r.preCleanForRun(ctx, namespace, config.Name, runID, config.Labels); err != nil {
+		if err := r.preCleanForRun(ctx, namespace, config.Name, runID); err != nil {
 			return "", err
 		}
 	} else {
