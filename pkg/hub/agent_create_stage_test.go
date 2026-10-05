@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -37,6 +38,15 @@ type signErrStorage struct {
 
 func (signErrStorage) GenerateSignedURL(context.Context, string, storage.SignedURLOptions) (*storage.SignedURL, error) {
 	return nil, errors.New("injected signed URL fault")
+}
+
+// runIntentErrStore fails every run-intent write.
+type runIntentErrStore struct {
+	store.Store
+}
+
+func (runIntentErrStore) SwapRunIntent(context.Context, string, store.RunIntent) (store.RunIntent, time.Time, error) {
+	return "", time.Time{}, errors.New("injected run intent fault")
 }
 
 // useFailingManagedBackend swaps in a managed-agent backend whose create
@@ -89,6 +99,14 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 			setup:     func(t *testing.T, _ *Server) { useFailingManagedBackend(t) },
 			req:       CreateAgentRequest{Profile: ManagedAgentsProfile},
 			wantStage: createStageManaged,
+		},
+		{
+			name: "run intent",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				srv.store = runIntentErrStore{srv.store}
+			},
+			wantStage: createStageRunIntent,
 		},
 		{
 			name:      "dispatch with env gather",
