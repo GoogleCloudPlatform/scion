@@ -2893,6 +2893,10 @@ export class ScionChatThread extends LitElement {
     if (!anchor || anchor === this._usedRestoreAnchor) return null;
     if (anchor.conversationKey !== this.conversationKey) return null;
     this._usedRestoreAnchor = anchor;
+    // Until a real capture replaces it, the restore target is this thread's
+    // position: leaving while the restore is still loading (slow network)
+    // must hand it on rather than lose it.
+    this._scrollAnchor ??= { ...anchor };
     this.dispatchEvent(
       new CustomEvent<ChatScrollAnchor>('scroll-restore-consumed', { detail: anchor })
     );
@@ -2919,7 +2923,7 @@ export class ScionChatThread extends LitElement {
     await this.updateComplete;
     let msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(anchor.messageId);
+      await this.fetchAroundMessage(anchor.messageId, () => restoreSeq === this._restoreSeq);
       await this.updateComplete;
       msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     }
@@ -3325,7 +3329,15 @@ export class ScionChatThread extends LitElement {
     scheduleSettleWait();
   }
 
-  private async fetchAroundMessage(messageId: string): Promise<void> {
+  /**
+   * `isCurrent`, when given, is re-checked once the response arrives: a
+   * caller superseded in the meantime (a restore overtaken by a jump) must
+   * not replace the window that the newer request loaded.
+   */
+  private async fetchAroundMessage(
+    messageId: string,
+    isCurrent: () => boolean = () => true
+  ): Promise<void> {
     if (!this.conversationKey) return;
 
     const currentId = this.fetchId;
@@ -3339,7 +3351,7 @@ export class ScionChatThread extends LitElement {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
       );
-      if (currentId !== this.fetchId || !res.ok) return;
+      if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
 
       const data = (await res.json()) as {
         items?: Message[];
@@ -3352,7 +3364,7 @@ export class ScionChatThread extends LitElement {
         >;
         replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
       };
-      if (currentId !== this.fetchId) return;
+      if (currentId !== this.fetchId || !isCurrent()) return;
 
       const items = data.items ?? data.messages ?? [];
       this.messageMap.clear();

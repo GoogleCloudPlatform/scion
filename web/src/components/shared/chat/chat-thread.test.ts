@@ -6763,10 +6763,47 @@ describe('scion-chat-thread scroll position hand-over', () => {
     void el.scrollToMessageById('m2', false);
     scroller().scrollTop = 123;
     releaseAround();
-    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-old-1')).not.toBeNull());
     await new Promise((resolve) => setTimeout(resolve, 50));
+    await el.updateComplete;
     // The restore would have written 50 (old-1 at -50px).
     expect(scroller().scrollTop).not.toBe(50);
+    // Its late history window is dropped too, so it cannot replace the
+    // messages the jump is showing.
+    expect(el.shadowRoot?.getElementById('msg-old-1')).toBeNull();
+    expect(el.shadowRoot?.getElementById('msg-m2')).not.toBeNull();
+  });
+
+  it('hands on the restore target if the user leaves before it lands', async () => {
+    let releaseAround: () => void = () => {};
+    apiFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('around=old-1')) {
+        await new Promise<void>((resolve) => (releaseAround = resolve));
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve(
+            String(url).endsWith('/read')
+              ? {}
+              : { items: String(url).includes('around=old-1') ? [older, ...history] : history }
+          ),
+      } as unknown as Response;
+    });
+    const anchor = {
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'old-1',
+      offset: -50,
+    };
+    const { el } = await mountWith(anchor);
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('around=old-1'))).toBe(true)
+    );
+    // Slow network: the user switches to the dashboard now.
+    el.remove();
+    expect(el.scrollAnchor).toEqual(anchor);
+    releaseAround();
   });
 
   describe('holding the restored position against late layout shifts', () => {

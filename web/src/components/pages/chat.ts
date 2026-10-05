@@ -726,6 +726,9 @@ export class ScionPageChat extends LitElement {
    * DM, a deep link — opens normally.
    */
   private _pendingScrollRestore: ChatScrollAnchor | null = null;
+
+  /** The persistent "promoted to a thread" link toast, while it shows. */
+  private _promotedThreadToast: HTMLElement | null = null;
   /** The mounted switcher/palette element, if any — excluded from the modal guard's live query. */
   @query('scion-quick-palette') private _switcherEl?: Element;
   /** Whether the search panel is visible. */
@@ -1387,6 +1390,7 @@ export class ScionPageChat extends LitElement {
     window.removeEventListener('popstate', this._onPopState);
     this.removeEventListener(PAGE_TITLE_EVENT, this._onOwnPageTitle);
     this.handOverScrollPosition();
+    this.dismissPromotedThreadLinkToast();
     this._paletteDocumentsUnsubscribe?.();
     this._paletteDocumentsUnsubscribe = null;
     this._paletteAgentsRelease?.();
@@ -1490,6 +1494,7 @@ export class ScionPageChat extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
+    if (changedProperties.has('v2Conversation')) this.dismissPromotedThreadLinkToast();
     const pending = this._pendingScrollRestore;
     if (
       pending &&
@@ -2435,6 +2440,17 @@ export class ScionPageChat extends LitElement {
     if (rail) void rail.reload();
   }
 
+  /**
+   * Take down the promoted-DM link toast. It persists until dismissed, so
+   * the page removes it itself once it no longer applies: the user moved
+   * to another conversation, or this page is going away.
+   */
+  private dismissPromotedThreadLinkToast(): void {
+    const toast = this._promotedThreadToast;
+    this._promotedThreadToast = null;
+    toast?.remove();
+  }
+
   /** Whether the user has a draft in, or focus on, the open composer. */
   private isComposingInConversation(): boolean {
     const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
@@ -2457,6 +2473,9 @@ export class ScionPageChat extends LitElement {
     const path = slug
       ? `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topic.id)}`
       : `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
+    // One at a time: a newer promotion replaces any link still showing.
+    this.dismissPromotedThreadLinkToast();
+    document.querySelectorAll('.dm-promoted-toast').forEach((el) => el.remove());
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant: 'primary',
       closable: true,
@@ -2473,6 +2492,7 @@ export class ScionPageChat extends LitElement {
     link.textContent = `Open #${topic.name}`;
     link.addEventListener('click', () => (alert as unknown as { hide(): void }).hide?.());
     alert.append(icon, 'This conversation was promoted to a thread. ', link);
+    this._promotedThreadToast = alert;
     document.body.appendChild(alert);
     void (alert as unknown as { toast?(): Promise<void> }).toast?.();
   }

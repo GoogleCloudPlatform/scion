@@ -1829,6 +1829,28 @@ describe('chat page — thread and scroll position across mode switches', () => 
     expect(el.scrollRestoreFor('topic-1')).toBeNull();
   });
 
+  it('the rendered thread reporting it took the position clears it on the page', () => {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'topic-1',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'one',
+      defaultAgent: '',
+      isDM: false,
+      peerName: '',
+      peerId: '',
+      peerKind: 'user',
+    };
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    const thread = renderToFragment(el.renderV2Conversation()).querySelector(
+      'scion-chat-thread'
+    ) as HTMLElement & { restoreScrollAnchor: unknown };
+    expect(thread.restoreScrollAnchor).toBe(THREAD_ANCHOR);
+    thread.dispatchEvent(new CustomEvent('scroll-restore-consumed', { detail: THREAD_ANCHOR }));
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
   it("hands the open thread's live position to the next page", () => {
     const el = createPage();
     const live = { ...THREAD_ANCHOR, messageId: 'm7', offset: 3 };
@@ -1920,6 +1942,29 @@ describe('chat page — late conversation switches while composing', () => {
     expect(document.querySelector('.dm-promoted-toast b')).toBeNull();
     // It stays until dismissed: the user was busy typing.
     expect((document.querySelector('.dm-promoted-toast') as any).duration).toBe(Infinity);
+  });
+
+  it('a newer promotion replaces the link toast rather than stacking', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    el.handleDMPromoted(promoted());
+    expect(document.querySelectorAll('.dm-promoted-toast')).toHaveLength(1);
+  });
+
+  it('the link toast goes away once the user moves to another conversation', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    expect(document.querySelector('.dm-promoted-toast')).not.toBeNull();
+    el.v2Conversation = { conversationKey: 'topic-3', projectId: 'p1' };
+    el.willUpdate(new Map([['v2Conversation', null]]));
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it('the link toast goes away with the page', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    el.disconnectedCallback();
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
   });
 
   it("this page's own promotion still moves the user even with a draft", () => {
