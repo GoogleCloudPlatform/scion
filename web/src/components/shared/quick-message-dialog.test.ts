@@ -180,4 +180,35 @@ describe('scion-quick-message-dialog — Open agent DM', () => {
     const el = await mount();
     expect(dmButton(el)).toBeNull();
   });
+
+  it('uses the userId property and appears once the user is passed in', async () => {
+    currentUser.id = '';
+    const el = await mount();
+    expect(dmButton(el)).toBeNull();
+    el.userId = USER;
+    await el.updateComplete;
+    const nav = vi.fn();
+    document.addEventListener('nav-click', nav);
+    try {
+      dmButton(el)!.click();
+      expect((nav.mock.calls[0][0] as CustomEvent).detail).toEqual({ path: DM_PATH });
+    } finally {
+      document.removeEventListener('nav-click', nav);
+    }
+  });
+
+  it('prefers the userId property over the app-wide current user', async () => {
+    currentUser.id = '33333333-3333-3333-3333-333333333333';
+    const el = await mount();
+    el.userId = USER;
+    await el.updateComplete;
+    const nav = vi.fn();
+    document.addEventListener('nav-click', nav);
+    try {
+      dmButton(el)!.click();
+      expect((nav.mock.calls[0][0] as CustomEvent).detail).toEqual({ path: DM_PATH });
+    } finally {
+      document.removeEventListener('nav-click', nav);
+    }
+  });
 });

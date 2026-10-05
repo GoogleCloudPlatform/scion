@@ -46,6 +46,13 @@ export class ScionQuickMessageDialog extends LitElement {
   /** Optional project name for cross-project context (shown as "project / agent"). */
   @property({ type: String }) projectName = '';
 
+  /**
+   * The signed-in user's id, used to address the agent DM. Hosts that know
+   * it should pass it so the "Open agent DM" button appears as soon as the
+   * user loads; otherwise the app-wide current user is read on render.
+   */
+  @property({ type: String }) userId = '';
+
   /** Whether the dialog is open. */
   @property({ type: Boolean, reflect: true }) open = false;
 
@@ -116,7 +123,7 @@ export class ScionQuickMessageDialog extends LitElement {
    */
   private dmPath(): { key: string; path: string } | null {
     if (!isFeatureEnabled('web.native_chat')) return null;
-    const key = buildAgentDMKey(this.agentId, stateManager.getCurrentUserId());
+    const key = buildAgentDMKey(this.agentId, this.userId || stateManager.getCurrentUserId());
     if (!key) return null;
     const path = chatConversationPath({ conversationKey: key });
     return path ? { key, path } : null;
@@ -196,7 +203,7 @@ export class ScionQuickMessageDialog extends LitElement {
         ? `${this.projectName} / ${this.agentName}`
         : this.agentName;
     const label = displayName ? `Message ${displayName}` : 'Send Message';
-    const dm = this.open ? this.dmPath() : null;
+    const dm = this.dmPath();
 
     return html`
       <sl-dialog label=${label} ?open=${this.open} @sl-request-close=${this.close}>
