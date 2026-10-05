@@ -246,3 +246,56 @@ profiles:
 	assert.Equal(t, "nfs", rec.Backend)
 	assert.Equal(t, map[string]string{"gocache": "local"}, rec.Dirs)
 }
+
+// With an NFS workspace and per-dir backends, Start pre-creates the local
+// dirs on the workspace claim, where the pod mounts them, and not the dirs
+// served by shared_dir_storage nfs.
+func TestStartSharedDirStoragePerDir_NFSWorkspacePreCreatesLocalDirsOnClaim(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	wsMountRoot := filepath.Join(f.tmpDir, "ws-nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(wsMountRoot, "share-1"), 0o755))
+	sdMountRoot := filepath.Join(f.tmpDir, "sd-nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(sdMountRoot, "sd-share"), 0o755))
+	f.writeRawGlobalSettings(t, fmt.Sprintf(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+    shared_dir_storage_backends:
+      notes: nfs
+server:
+`+nfsWorkspaceStartYAML+`  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: %s
+      shares:
+        - id: sd-share
+          pv_name: sd-pv
+`, wsMountRoot, sdMountRoot))
+
+	var k8s sdsCapture
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &k8s)).Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-2530",
+			"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+		},
+		GitClone:   &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		SharedDirs: []api.SharedDir{{Name: "notes"}, {Name: "gocache"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, k8s.ran)
+	require.NotNil(t, k8s.cfg.SharedDirStorage)
+	assert.Equal(t, map[string]bool{"gocache": true}, k8s.cfg.SharedDirStorage.LocalDirs)
+
+	claimDirs := filepath.Join(wsMountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs")
+	info, statErr := os.Stat(filepath.Join(claimDirs, "gocache"))
+	require.NoError(t, statErr, "the local dir is pre-created on the workspace claim")
+	assert.True(t, info.IsDir())
+	_, statErr = os.Stat(filepath.Join(claimDirs, "notes"))
+	assert.True(t, os.IsNotExist(statErr), "the nfs dir is not created on the workspace claim")
+	_, statErr = os.Stat(filepath.Join(sdMountRoot, "sd-share", "projects", testNFSWorkspaceProjectID, "shared-dirs", "notes"))
+	assert.NoError(t, statErr, "the nfs dir is created on the shared-dir export")
+}

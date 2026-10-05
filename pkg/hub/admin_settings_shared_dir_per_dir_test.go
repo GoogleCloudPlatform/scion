@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -113,5 +114,97 @@ func TestPutServerConfigDB_SharedDirStorageBackends_NFSWithoutBlock(t *testing.T
 	}
 	if !strings.Contains(rr.Body.String(), "profiles.gke.shared_dir_storage_backends.notes") {
 		t.Errorf("422 body should name the key, got: %s", rr.Body.String())
+	}
+}
+
+// writeUnloadableGlobalSettings writes a global settings file that parses
+// as YAML but cannot be loaded as settings, so handlers cannot read the
+// current shared_dir_storage block.
+func writeUnloadableGlobalSettings(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "settings.yaml")
+	content := "schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: [1, 2]\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := config.LoadGlobalSettings(); err == nil {
+		t.Fatal("precondition: the global settings must fail to load")
+	}
+	return path
+}
+
+// File-mode PUT checks per-dir names and values even when the current
+// global settings cannot be loaded.
+func TestHandlePutServerConfig_SharedDirStorageBackends_NamesCheckedWithoutGlobalSettings(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"profiles":{"gke":{"runtime":"k8s","shared_dir_storage_backends":{"Bad_Name":"local"}}}}`: "profiles.gke.shared_dir_storage_backends.Bad_Name",
+		`{"runtimes":{"k8s":{"type":"kubernetes","shared_dir_storage_backends":{"notes":"ceph"}}}}`: "runtimes.k8s.shared_dir_storage_backends.notes",
+	} {
+		t.Run(key, func(t *testing.T) {
+			path := writeUnloadableGlobalSettings(t)
+			before, _ := os.ReadFile(path)
+			rr := httptest.NewRecorder()
+			(&Server{}).handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			after, _ := os.ReadFile(path)
+			if string(after) != string(before) {
+				t.Errorf("settings.yaml changed: %s", after)
+			}
+		})
+	}
+}
+
+// File-mode PUT still accepts a valid per-dir entry when the current
+// global settings cannot be loaded; the nfs block is checked at agent
+// start.
+func TestHandlePutServerConfig_SharedDirStorageBackends_ValidAcceptedWithoutGlobalSettings(t *testing.T) {
+	path := writeUnloadableGlobalSettings(t)
+	rr := httptest.NewRecorder()
+	(&Server{}).handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"profiles":{"gke":{"runtime":"k8s","shared_dir_storage_backends":{"notes":"nfs"}}}}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "notes: nfs") {
+		t.Errorf("settings.yaml should carry the entry, got: %s", data)
+	}
+}
+
+// DB-mode PUT rejects an invalid per-dir name through the settings schema,
+// even when the global settings cannot be loaded, and accepts a valid one.
+func TestPutServerConfigDB_SharedDirStorageBackends_NamesCheckedWithoutGlobalSettings(t *testing.T) {
+	writeUnloadableGlobalSettings(t)
+	srv, _, ops := newTestDBServer(t)
+	for _, name := range []string{"Bad_Name", "-lead", "trail-", "with.dot"} {
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backends": {"`+name+`": "local"}}}}`), ops)
+		if rr.Code < 400 || rr.Code >= 500 {
+			t.Errorf("%s: expected a 4xx, got %d: %s", name, rr.Code, rr.Body.String())
+		}
+		if got := ops.Snapshot().Profiles["gke"].SharedDirStorageBackends; len(got) != 0 {
+			t.Errorf("%s: nothing should be stored, got %v", name, got)
+		}
+	}
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backends": {"build-cache": "local"}}}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid name: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := ops.Snapshot().Profiles["gke"].SharedDirStorageBackends["build-cache"]; got != "local" {
+		t.Errorf("valid name: stored %q, want local", got)
 	}
 }

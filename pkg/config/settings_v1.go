@@ -383,6 +383,20 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	return out, true
 }
 
+// SharedDirNamePattern is the shared dir name rule of api.ValidateSharedDirs
+// as a regular expression, for the settings schemas.
+const SharedDirNamePattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+// ValidateSharedDirStorageBackendValues checks the parts of
+// shared_dir_storage_backend and shared_dir_storage_backends that do not
+// depend on server.shared_dir_storage: each single value is empty, "local"
+// or "nfs", and each per-dir entry is keyed by a valid shared dir name and
+// is "local" or "nfs". ValidateSharedDirStorageBackends checks these and
+// the nfs block. Results are sorted by path.
+func ValidateSharedDirStorageBackendValues(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, nil, false)
+}
+
 // mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
 // map selects nfs.
 func mapSelectsNFS(m map[string]string) bool {
@@ -404,6 +418,13 @@ func mapSelectsNFS(m map[string]string) bool {
 // checks configuration only; it never looks at the filesystem. Each
 // error's Path names the settings key. Results are sorted by path.
 func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, global, true)
+}
+
+// validateSharedDirStorageBackends implements
+// ValidateSharedDirStorageBackends, and ValidateSharedDirStorageBackendValues
+// when checkNFSBlock is false.
+func validateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig, checkNFSBlock bool) []ValidationError {
 	var errs []ValidationError
 	var check func(path, backend string)
 	checkDirs := func(prefix string, dirs map[string]string) {
@@ -425,6 +446,9 @@ func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profi
 		case "", "local":
 			return
 		case "nfs":
+			if !checkNFSBlock {
+				return
+			}
 			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
 			if global != nil {
 				cfg.NFS = global.NFS

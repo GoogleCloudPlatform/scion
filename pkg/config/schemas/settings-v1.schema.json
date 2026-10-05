@@ -376,6 +376,7 @@
         },
         "shared_dir_storage_backends": {
           "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
           "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
           "description": "Shared-dir storage backend per shared dir name, for agents whose profile uses this runtime entry. A dir not named here uses shared_dir_storage_backend. Any profile value, single or per dir, wins over this. Read from the global settings file only."
         },
@@ -873,6 +874,7 @@
         },
         "shared_dir_storage_backends": {
           "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
           "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
           "description": "Shared-dir storage backend per shared dir name, for agents using this profile. A dir not named here uses shared_dir_storage_backend. Wins over the runtime entry's values. Read from the global settings file only."
         },
