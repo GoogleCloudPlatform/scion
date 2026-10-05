@@ -260,6 +260,12 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// NoAuth disables auth credential propagation into the agent container
+	// (CLI --no-auth). Honoured by the Hub on the create path only; an
+	// existing agent that is resumed/restarted in place does not re-read it
+	// (ptone/scion#1855).
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// MessageMode specifies the initial message mode for the agent.
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
@@ -756,6 +762,10 @@ type OutboundMessageResult struct {
 	RecipientID string `json:"recipient_id"`
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in. It is
+	// empty on hubs that predate this field, and on paths that do not report
+	// it (for example, a send to another agent).
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
