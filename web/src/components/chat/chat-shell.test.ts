@@ -166,4 +166,42 @@ describe('chat shell text-entry state', () => {
     await new Promise((r) => requestAnimationFrame(r));
     expect(textEntry()).toBe(true);
   });
+
+  it('publishes the top bar height on a change only, synchronously', async () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      shell.remove();
+      document.body.appendChild(shell);
+      await shell.updateComplete;
+      await Promise.resolve();
+      const header = shell.shadowRoot!.querySelector('scion-header')!;
+      let height = 61;
+      header.getBoundingClientRect = () => ({ height }) as DOMRect;
+      const set = vi.spyOn(shell.style, 'setProperty');
+      const fire = (): void => callbacks.at(-1)!([], {} as ResizeObserver);
+      fire();
+      expect(shell.style.getPropertyValue('--scion-chat-top-bar-h')).toBe('61px');
+      fire();
+      fire();
+      expect(set).toHaveBeenCalledTimes(1);
+      height = 0; // hidden: keep the last visible height
+      fire();
+      expect(set).toHaveBeenCalledTimes(1);
+      height = 70;
+      fire();
+      expect(set).toHaveBeenCalledTimes(2);
+      expect(shell.style.getPropertyValue('--scion-chat-top-bar-h')).toBe('70px');
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
 });

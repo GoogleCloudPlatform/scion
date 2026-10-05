@@ -998,6 +998,13 @@ test.describe('the chat column fits the keyboard frame with a long draft', () =>
     });
 
     test('the send error re-checks its truncation on rotation', async ({ page }) => {
+      const loopErrors: string[] = [];
+      page.on('console', (m) => {
+        if (/ResizeObserver loop/i.test(m.text())) loopErrors.push(m.text());
+      });
+      page.on('pageerror', (e) => {
+        if (/ResizeObserver loop/i.test(e.message)) loopErrors.push(e.message);
+      });
       await page.setViewportSize({ width: 667, height: 375 });
       await openThread(page);
       const error = page.locator('scion-chat-thread .send-error');
@@ -1020,13 +1027,32 @@ test.describe('the chat column fits the keyboard frame with a long draft', () =>
         await thread.updateComplete;
       }, fitsLandscape);
       await expect(error).toHaveJSProperty('tagName', 'DIV');
+      const look = (): Promise<Record<string, string>> =>
+        error.evaluate((el) => {
+          const cs = getComputedStyle(el);
+          return {
+            appearance: cs.appearance,
+            background: cs.backgroundColor,
+            color: cs.color,
+            padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+            borderTop: `${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`,
+            borderBottom: cs.borderBottomWidth,
+            radius: cs.borderTopLeftRadius,
+            font: `${cs.fontSize} ${cs.fontWeight} ${cs.lineHeight} ${cs.fontFamily}`,
+            align: cs.textAlign,
+          };
+        });
+      const asDiv = await look();
       // Rotate to portrait: the line now cuts the text, so it is a button.
       await page.setViewportSize({ width: 320, height: 568 });
       await expect(error).toHaveJSProperty('tagName', 'BUTTON');
       await expect(error).toHaveAttribute('title', fitsLandscape);
+      // The button looks like the plain row: no native button styling.
+      expect(await look()).toEqual(asDiv);
       // And back: it fits again, so it is plain text.
       await page.setViewportSize({ width: 667, height: 375 });
       await expect(error).toHaveJSProperty('tagName', 'DIV');
+      expect(loopErrors, 'no ResizeObserver loop errors').toEqual([]);
     });
 
     test('the measured room is written once, not on every resize', async ({ page }) => {

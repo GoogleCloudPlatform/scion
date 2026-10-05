@@ -957,8 +957,14 @@ export class ScionChatThread extends LitElement {
       }
 
       /* The expandable form (phone or tablet, text cut): a button that
-         looks like the plain row. */
+         looks like the plain row. The native button look is switched off
+         explicitly (iOS also rounds buttons); the background, colour and
+         padding come from .send-error above, which as an author style
+         already beats the button's defaults. */
       button.send-error {
+        appearance: none;
+        -webkit-appearance: none;
+        border-radius: 0;
         display: block;
         width: 100%;
         box-sizing: border-box;
@@ -967,7 +973,7 @@ export class ScionChatThread extends LitElement {
         border-top: 1px solid var(--scion-danger-200, #fecaca);
         font: inherit;
         font-size: var(--chat-fs-base);
-        text-align: left;
+        text-align: start;
         cursor: pointer;
       }
 

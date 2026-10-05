@@ -221,11 +221,19 @@ export class ScionChatShell extends LitElement {
 
   /**
    * Publish the top bar's height while it is visible; a hidden bar
-   * measures 0, and the last visible height is kept.
+   * measures 0, and the last visible height is kept. The write is
+   * synchronous and only on a change: the property is read by script
+   * (composer-room.ts), not by any style that sizes the observed bar, so
+   * it cannot resize what is observed and cannot start a ResizeObserver
+   * loop, and deferring it would make that read a frame late.
    */
   private recordTopBarHeight(header: Element): void {
     const height = header.getBoundingClientRect().height;
-    if (height > 0) this.style.setProperty('--scion-chat-top-bar-h', `${height}px`);
+    if (height <= 0) return;
+    const value = `${height}px`;
+    if (this.style.getPropertyValue('--scion-chat-top-bar-h') !== value) {
+      this.style.setProperty('--scion-chat-top-bar-h', value);
+    }
   }
 
   override disconnectedCallback(): void {
