@@ -327,6 +327,11 @@ type ServerConfig struct {
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).
 	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
 	Workstation bool
+
+	// ConfigPath is the --config path the server was started with ("" for
+	// none). The workstation server-config PUT uses it to find the legacy
+	// server.yaml sources the config loader would read.
+	ConfigPath string
 	// DevUserConfig holds optional identity overrides for the development user.
 	DevUserConfig DevUserConfig
 
@@ -1064,7 +1069,13 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
-	config             ServerConfig
+	config ServerConfig
+	// startupHubName is the name resolved at startup (ServerConfig.HubName,
+	// from LoadGlobalConfig(serverConfigPath), else the hostname).
+	// ApplySnapshot returns to it when the configured hub_name is unset.
+	// See startupHubNameOrDefault. In file mode a name removed from
+	// settings.yaml therefore stays in use until restart (ptone/scion#3070).
+	startupHubName     string
 	store              store.Store
 	httpServer         *http.Server
 	mux                *http.ServeMux
@@ -1302,8 +1313,9 @@ type Server struct {
 	// User last-seen activity tracker (nil = disabled)
 	userActivity *UserActivityTracker
 
-	// operationalSettings manages Layer-1 settings from the DB in postgres mode.
-	// Nil (zero value) in file/SQLite mode (settings-db §3.7).
+	// operationalSettings manages Layer-1 settings from the DB on every DB
+	// driver (SQLite included, since #1432). Nil only when the hub has no
+	// DB-backed settings, e.g. tests that build a bare Server.
 	// Uses atomic.Pointer for safe concurrent access — Phase 4/5 will add
 	// request-path readers while Set is called during startup.
 	operationalSettings atomic.Pointer[OperationalSettings]
@@ -1537,6 +1549,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	// The startup-resolved hub name, which ApplySnapshot returns to when
+	// the configured hub_name is unset.
+	srv.startupHubName = cfg.HubName
 	srv.setStartClaimSettings(cfg.StartClaim)
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
@@ -2953,14 +2968,14 @@ func (s *Server) IsPostgres() bool {
 }
 
 // SetOperationalSettings attaches the OperationalSettings service to the
-// server. This is called during postgres-mode startup after seeding and
+// server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
 	s.operationalSettings.Store(ops)
 }
 
 // GetOperationalSettings returns the OperationalSettings service, or nil
-// in file/SQLite mode. Safe for concurrent use.
+// when the hub has no DB-backed settings. Safe for concurrent use.
 func (s *Server) GetOperationalSettings() *OperationalSettings {
 	return s.operationalSettings.Load()
 }

@@ -358,8 +358,8 @@ Or via environment variables:
 
 ```bash
 export SCION_SERVER_SECRETS_BACKEND=gcpsm
-export SCION_SERVER_SECRETS_GCP_PROJECT_ID=my-gcp-project
-export SCION_SERVER_SECRETS_GCP_CREDENTIALS=/path/to/service-account.json
+export SCION_SERVER_SECRETS_GCPPROJECTID=my-gcp-project
+export SCION_SERVER_SECRETS_GCPCREDENTIALS=/path/to/service-account.json
 ```
 
 #### User-Managed Replication Locations

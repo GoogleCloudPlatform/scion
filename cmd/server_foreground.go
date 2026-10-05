@@ -974,6 +974,12 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Reject an unknown server.mode (settings.yaml or SCION_SERVER_MODE)
+	// rather than silently treating it as workstation.
+	if err := config.ValidateServerMode(cfg.Mode); err != nil {
+		return nil, err
+	}
+
 	// Check if hosted mode is set in config
 	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
 		if cfg.Mode == "hosted" || cfg.Mode == "production" {
@@ -1667,6 +1673,20 @@ func resolveHubIDFromEnv() string {
 	return config.ResolveHubIDFromEnv()
 }
 
+// warnNonConformingHubName logs a warning when a configured hub_name does
+// not match the settings schema pattern. It is not fatal: the name still
+// loads, but the admin server-config API rejects such a value if an admin
+// tries to set it (an unchanged echo is accepted). It reports whether it
+// warned.
+func warnNonConformingHubName(name string) bool {
+	if name == "" || config.HubNameMatchesSchema(name) {
+		return false
+	}
+	slog.Warn("server.hub.hub_name does not match the settings schema pattern; it is used as is, but cannot be set to this value through the admin server-config API",
+		"hub_name", name, "pattern", config.HubNamePattern)
+	return true
+}
+
 // resolveHubNameFromEnv resolves the hub display name from environment variables,
 // falling back to os.Hostname(). This is used during early logging init before
 // the full config is loaded. SCION_SERVER_HUB_HUBNAME (the standard koanf-derived
@@ -1676,14 +1696,7 @@ func resolveHubNameFromEnv() string {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBNAME"); v != "" {
 		return v
 	}
-	if v := os.Getenv("SCION_HUB_NAME"); v != "" {
-		return v
-	}
-	h, err := os.Hostname()
-	if err != nil {
-		return "unknown"
-	}
-	return h
+	return config.ResolveHubNameOrDefault(os.Getenv("SCION_HUB_NAME"))
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
@@ -1851,6 +1864,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
 		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
 		Workstation:                  !hostedMode,
+		ConfigPath:                   serverConfigPath,
 		StartClaim: hub.StartClaimSettings{
 			LeaseTTL:              cfg.Hub.StartClaimLeaseTTL,
 			MaxDuration:           cfg.Hub.StartMaxDuration,
@@ -1985,6 +1999,7 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running
@@ -2217,6 +2232,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 
+	// Warn once (outside the settings retry loop below) about SCION_SERVER_*
+	// and SCION_SEED_* names that no loader maps to a setting, so a
+	// misspelled override is not silently ignored (ptone/scion#1081). Names
+	// only, never values.
+	config.WarnUnmatchedSettingsEnv(slog.Default(), os.Environ(), opsettings.IsLayer1Key)
+
 	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
 	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
 	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
@@ -2377,8 +2398,10 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 // startSettingsPropagation wires the event publisher into the OperationalSettings
 // service and starts the cross-replica propagation loop (design §3.6, Phase 4).
-// When OperationalSettings is nil (init failed) this is a no-op. On SQLite the
-// event publisher is nil, so StartPropagation itself short-circuits.
+// When OperationalSettings is nil (init failed) this is a no-op. It runs on
+// every driver: on SQLite the publisher is an in-process ChannelEventPublisher
+// (single replica), so propagation is effectively local self-apply plus the
+// poll backstop.
 func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub hub.EventPublisher) {
 	ops := hubSrv.GetOperationalSettings()
 	if ops == nil {
