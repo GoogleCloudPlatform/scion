@@ -61,6 +61,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
@@ -611,6 +612,11 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// TemplateName is the agent's template slug. The broker uses it for
+	// naming only (the scion.template label, SCION_TEMPLATE_NAME and
+	// agent-info.json), never to locate or load a template. A content hash
+	// is not a template name and is not sent.
+	TemplateName string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -645,6 +651,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
+		payload["templateName"] = extras.TemplateName
 	}
 }
 
@@ -1324,6 +1333,10 @@ type Server struct {
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
+
+	// lifecycleTxHooks holds the agent lifecycle transaction hooks
+	// (agent_lifecycle_tx.go). The zero value has no hooks and is ready to use.
+	lifecycleTxHooks agentLifecycleHooks
 
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.

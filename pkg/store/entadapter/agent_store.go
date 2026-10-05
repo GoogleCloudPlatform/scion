@@ -147,6 +147,9 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.SoftDeleteOpID != nil {
+		sa.SoftDeleteOpID = *a.SoftDeleteOpID
+	}
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
 	sa.DeletionFailedAt = copyTimePtr(a.DeletionFailedAt)
@@ -432,6 +435,26 @@ func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[stri
 	}
 
 	return result, nil
+}
+
+// SetAgentSoftDeleteOpID sets soft_delete_op_id, or clears it when opID is
+// empty. It is the column's only writer; it neither checks nor bumps
+// state_version.
+func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Agent.UpdateOneID(uid)
+	if opID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(opID)
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // UpdateAgent updates an existing agent using optimistic locking on
