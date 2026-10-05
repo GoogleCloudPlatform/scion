@@ -195,11 +195,16 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
 	}
 
 	pending, err := store.GetPendingAskUser(ctx, requestID)
-	if err != nil || pending == nil {
+	if err != nil {
+		// Keep the card so the user can try again.
+		h.log.Error("Failed to look up pending ask-user", "request_id", requestID, "error", err)
+		return h.respondWithMessage("An error occurred loading this request. Please try again."), nil
+	}
+	if pending == nil {
 		return h.respondWithUpdatedCard(activity, "This request has expired or was not found."), nil
 	}
 

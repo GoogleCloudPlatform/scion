@@ -17,6 +17,7 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -710,6 +711,42 @@ func TestCallbackHandler_SetupConfirm_FinalOutcomesReplaceCard(t *testing.T) {
 		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
 			"action": "setup_confirm", "project_slug": "my-project", "project_id": "proj-1",
 		}))
+		require.NoError(t, err)
+		assertReplacesCard(t, resp)
+	})
+}
+
+// pendingAskErrorStore fails every pending ask-user lookup.
+type pendingAskErrorStore struct {
+	Store
+}
+
+func (pendingAskErrorStore) GetPendingAskUser(context.Context, string) (*PendingAskUser, error) {
+	return nil, errors.New("database unavailable")
+}
+
+func TestCallbackHandler_AskInput_RetryableFailuresKeepCard(t *testing.T) {
+	data := map[string]string{"action": "ask_input", "request_id": "req-1"}
+
+	t.Run("store error", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, nil)
+		broker.store = pendingAskErrorStore{Store: broker.store}
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(data))
+		require.NoError(t, err)
+		assertKeepsCard(t, resp, "An error occurred loading this request. Please try again.")
+	})
+	t.Run("store not initialized", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, nil)
+		real := broker.store
+		broker.store = nil
+		t.Cleanup(func() { broker.store = real })
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(data))
+		require.NoError(t, err)
+		assertKeepsCard(t, resp, "Store not initialized.")
+	})
+	t.Run("unknown request replaces card", func(t *testing.T) {
+		broker, _ := testBrokerWithStore(t, nil)
+		resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(data))
 		require.NoError(t, err)
 		assertReplacesCard(t, resp)
 	})
