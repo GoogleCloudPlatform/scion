@@ -1080,3 +1080,38 @@ describe('scion-page-project-create — linked create and existing projects', ()
     expect(window.history.pushState).not.toHaveBeenCalled();
   });
 });
+
+describe('cloneUrlCredentialHint', () => {
+  let hint: (remote: string) => string | null;
+  beforeAll(async () => {
+    ({ cloneUrlCredentialHint: hint } = await import('./project-create.js'));
+  });
+
+  it.each([
+    'https://user:pass@github.com/org/repo',
+    'https://TOKEN@github.com/org/repo',
+    'http://user@internal.host/repo',
+    'user:pass@github.com/org/repo',
+    'TOKEN@github.com/org/repo',
+    'ssh://git:secret@github.com/org/repo',
+  ])('flags userinfo in %s', (url) => {
+    expect(hint(url)).toMatch(/username, password or token/);
+  });
+
+  it.each(['https://github.com/org/repo?access_token=x', 'https://github.com/org/repo#frag'])(
+    'flags query or fragment in %s',
+    (url) => {
+      expect(hint(url)).toMatch(/query string or fragment/);
+    },
+  );
+
+  it.each([
+    'https://github.com/org/repo',
+    'github.com/org/repo',
+    'git@github.com:org/repo.git',
+    'ssh://git@github.com/org/repo.git',
+    'https://github.com:8443/org/repo',
+  ])('accepts %s', (url) => {
+    expect(hint(url)).toBeNull();
+  });
+});

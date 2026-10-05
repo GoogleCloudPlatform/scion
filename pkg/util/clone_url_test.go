@@ -14,7 +14,10 @@
 
 package util
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNormalizeCloneURL(t *testing.T) {
 	tests := []struct {
@@ -32,6 +35,20 @@ func TestNormalizeCloneURL(t *testing.T) {
 		{"schemeless with .git", "github.com/org/repo.git", "https://github.com/org/repo.git"},
 		{"absolute path preserved", "/tmp/source-repo", "/tmp/source-repo"},
 		{"relative path preserved", "./repo", "./repo"},
+		{"https userinfo stripped", "https://user:pass@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https token-only userinfo stripped", "https://TOKEN@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"http login stripped", "http://deploy@internal.host/repo.git", "http://internal.host/repo.git"},
+		{"ssh password stripped, login kept", "ssh://git:pass@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"git scheme userinfo stripped", "git://user:pass@host/org/repo", "git://host/org/repo"},
+		{"schemeless userinfo stripped", "user:pass@github.com/org/repo", "https://github.com/org/repo.git"},
+		{"https query stripped", "https://github.com/org/repo.git?access_token=x", "https://github.com/org/repo.git"},
+		{"https fragment stripped", "https://github.com/org/repo.git#main", "https://github.com/org/repo.git"},
+		{"https userinfo and query stripped", "https://TOKEN@github.com/org/repo.git?x=1#y", "https://github.com/org/repo.git"},
+		{"ssh query stripped, login kept", "ssh://git@github.com/org/repo.git?x=1", "ssh://git@github.com/org/repo.git"},
+		{"scp query stripped", "git@github.com:org/repo.git?x=1", "git@github.com:org/repo.git"},
+		{"schemeless query stripped", "github.com/org/repo?access_token=x", "https://github.com/org/repo.git"},
+		{"schemeless fragment stripped", "github.com/org/repo#frag", "https://github.com/org/repo.git"},
+		{"local path with hash unchanged", "/tmp/repo#1", "/tmp/repo#1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -56,6 +73,81 @@ func TestResolveCloneURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ResolveCloneURL(tt.override, tt.remote); got != tt.want {
 				t.Fatalf("ResolveCloneURL(%q, %q) = %q, want %q", tt.override, tt.remote, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateCloneURLLabel(t *testing.T) {
+	tests := []struct {
+		name, input string
+		want        error
+	}{
+		{"empty", "", nil},
+		{"clean https", "https://github.com/org/repo.git", nil},
+		{"clean https with port", "https://git.example.com:8443/org/repo.git", nil},
+		{"clean http", "http://forgejo:3000/org/repo.git", nil},
+		{"schemeless", "github.com/org/repo", nil},
+		{"schemeless with port", "git.example.com:8443/org/repo", nil},
+		{"scp-style", "git@github.com:org/repo.git", nil},
+		{"scp-style custom login", "deploy@internal.host:team/project", nil},
+		{"ssh login", "ssh://git@github.com/org/repo.git", nil},
+		{"ssh custom login", "ssh://deploy@internal.host/team/project", nil},
+		{"git scheme", "git://172.17.0.1:9418/org/repo", nil},
+		{"absolute path", "/tmp/source-repo", nil},
+		{"relative path", "./repo", nil},
+		{"at sign in path", "https://github.com/org/repo@v1", nil},
+		{"https user and password", "https://user:pass@github.com/org/repo", ErrCloneURLUserinfo},
+		{"https token-only userinfo", "https://TOKEN@github.com/org/repo", ErrCloneURLUserinfo},
+		{"https empty password", "https://user:@github.com/org/repo", ErrCloneURLUserinfo},
+		{"http login only", "http://deploy@internal.host/repo", ErrCloneURLUserinfo},
+		{"uppercase scheme userinfo", "HTTPS://TOKEN@github.com/org/repo", ErrCloneURLUserinfo},
+		{"ssh with password", "ssh://git:pass@github.com/org/repo", ErrCloneURLUserinfo},
+		{"git scheme userinfo", "git://user@host/org/repo", ErrCloneURLUserinfo},
+		{"schemeless user and password", "user:pass@github.com/org/repo", ErrCloneURLUserinfo},
+		{"schemeless token-only", "TOKEN@github.com/org/repo", ErrCloneURLUserinfo},
+		{"scp-style with password", "git:pass@github.com:org/repo", ErrCloneURLUserinfo},
+		{"scp-style empty login", "@github.com:org/repo", ErrCloneURLUserinfo},
+		{"query token", "https://github.com/org/repo.git?access_token=x", ErrCloneURLQuery},
+		{"query on scp", "git@github.com:org/repo.git?x=1", ErrCloneURLQuery},
+		{"fragment", "https://github.com/org/repo.git#main", ErrCloneURLFragment},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateCloneURLLabel(tt.input)
+			if !errors.Is(got, tt.want) || (tt.want == nil && got != nil) {
+				t.Fatalf("ValidateCloneURLLabel(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeGitSourceURL(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{"empty", "", ""},
+		{"clean https", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"clean schemeless", "github.com/org/repo", "github.com/org/repo"},
+		{"scp-style login kept", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"scp-style custom login kept", "deploy@internal.host:team/project", "deploy@internal.host:team/project"},
+		{"ssh login kept", "ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"local path unchanged", "/tmp/repo#1", "/tmp/repo#1"},
+		{"https user and password", "https://user:pass@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https token-only", "https://TOKEN@github.com/org/repo", "https://github.com/org/repo"},
+		{"http login only", "http://deploy@internal.host/repo", "http://internal.host/repo"},
+		{"ssh password dropped, login kept", "ssh://git:pass@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"schemeless user and password", "user:pass@github.com/org/repo", "github.com/org/repo"},
+		{"schemeless token-only", "TOKEN@github.com/org/repo", "github.com/org/repo"},
+		{"query", "https://github.com/org/repo.git?access_token=x", "https://github.com/org/repo.git"},
+		{"fragment", "https://github.com/org/repo.git#main", "https://github.com/org/repo.git"},
+		{"scp query", "git@github.com:org/repo.git?x=1", "git@github.com:org/repo.git"},
+		{"userinfo, query and fragment", "https://TOKEN@github.com/org/repo?x=1#y", "https://github.com/org/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeGitSourceURL(tt.input); got != tt.want {
+				t.Fatalf("SanitizeGitSourceURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

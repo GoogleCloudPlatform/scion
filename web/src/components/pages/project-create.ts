@@ -32,6 +32,7 @@ import {
   displayGitRemote,
   normalizeGitRemote,
   sanitizeGitRemote,
+  stripGitURLCredentials,
   stripQueryAndFragment,
   trimRemote,
   validateGitRemote,
@@ -141,6 +142,35 @@ function templateDescription(t: ProjectTemplate): string {
     return `Git · ${GIT_WORKSPACE_MODE_LABELS[templateGitWorkspaceMode(t)].toLowerCase()}`;
   }
   return workspaceTypeLabel(type);
+}
+
+/**
+ * Client-side hint for the clone-url label the create form derives from the
+ * git remote: the hub accepts only plain repository URLs (no userinfo, query
+ * or fragment) and answers 400 otherwise. Returns a message to show, or null.
+ * An ssh:// or scp-style login (git@host:org/repo) is fine; the hub remains
+ * the authority.
+ */
+export function cloneUrlCredentialHint(remote: string): string | null {
+  const url = trimRemote(remote);
+  const advice =
+    ' Use a plain repository URL and configure clone authentication with project secrets or the GitHub App.';
+  if (/[?#]/.test(url)) {
+    return 'The repository URL must not include a query string or fragment.' + advice;
+  }
+  let hasUserinfo: boolean;
+  if (url.includes('://')) {
+    hasUserinfo = stripGitURLCredentials(url) !== url;
+  } else {
+    const authority = url.split('/')[0];
+    const at = authority.lastIndexOf('@');
+    const login = at >= 0 ? authority.slice(0, at) : '';
+    const host = at >= 0 ? authority.slice(at + 1) : '';
+    hasUserinfo = at >= 0 && !(login !== '' && !/[:@]/.test(login) && host.includes(':'));
+  }
+  return hasUserinfo
+    ? 'The repository URL must not include a username, password or token.' + advice
+    : null;
 }
 
 /** The template's clone URL, used as the git remote override placeholder. */
@@ -999,6 +1029,14 @@ export class ScionPageProjectCreate extends LitElement {
     if (this.mode === 'git' && !this.gitRemote.trim()) {
       this.error = 'Git remote URL is required for git-backed projects.';
       return;
+    }
+
+    if (this.mode === 'git') {
+      const hint = cloneUrlCredentialHint(this.gitRemote);
+      if (hint) {
+        this.error = hint;
+        return;
+      }
     }
 
     if (this.mode === 'linked') {

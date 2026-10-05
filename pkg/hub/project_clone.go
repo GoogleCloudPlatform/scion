@@ -1128,3 +1128,48 @@ func isGitSourceLabel(k string) bool {
 	}
 	return false
 }
+
+// validateCloneURLLabelValue checks the clone-url label in labels (if any)
+// and returns a user-facing message when it is not a plain repository URL,
+// or "" when it is acceptable. Every hub path that writes project labels from
+// a request calls it, so credentials, query strings and fragments never reach
+// the stored label. Clone authentication belongs in project secrets or the
+// GitHub App instead.
+func validateCloneURLLabelValue(labels map[string]string) string {
+	v, ok := labels[store.LabelCloneURL]
+	if !ok {
+		return ""
+	}
+	var problem string
+	switch err := util.ValidateCloneURLLabel(v); {
+	case err == nil:
+		return ""
+	case errors.Is(err, util.ErrCloneURLUserinfo):
+		problem = "remove the username, password or token from the URL"
+	case errors.Is(err, util.ErrCloneURLQuery):
+		problem = "remove the query string (?...) from the URL"
+	case errors.Is(err, util.ErrCloneURLFragment):
+		problem = "remove the fragment (#...) from the URL"
+	default:
+		problem = "use a plain repository URL"
+	}
+	return "Invalid " + store.LabelCloneURL + " label: " + problem +
+		". The label must be a plain repository URL; configure clone authentication with project secrets or the GitHub App instead"
+}
+
+// sanitizeSourceURLLabel rewrites the source-url label in labels (if any) to
+// its credential-, query- and fragment-free form, mirroring how the clone
+// path above sanitizes a git remote override before storing it. The label is
+// readable by project members, so it never keeps what was stripped. labels is
+// modified in place.
+func sanitizeSourceURLLabel(labels map[string]string) {
+	if v, ok := labels[store.LabelSourceURL]; ok {
+		labels[store.LabelSourceURL] = util.SanitizeGitSourceURL(v)
+	}
+}
+
+// cloneURLLabelErrorDetails is the details payload for a rejected clone-url
+// label. It names the field but never echoes the value.
+func cloneURLLabelErrorDetails() map[string]interface{} {
+	return map[string]interface{}{"field": "labels." + store.LabelCloneURL}
+}
