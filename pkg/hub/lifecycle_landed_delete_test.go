@@ -252,3 +252,56 @@ func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
 		}
 	}
 }
+
+// deleteOnUpdateStore hard-deletes the row inside the first UpdateAgent
+// after it is armed: for handleExistingAgent, the post-start agent update.
+type deleteOnUpdateStore struct {
+	store.Store
+	armed atomic.Bool
+}
+
+func (p *deleteOnUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if p.armed.CompareAndSwap(true, false) {
+		if err := p.DeleteAgent(ctx, a.ID); err != nil {
+			return err
+		}
+	}
+	return p.Store.UpdateAgent(ctx, a)
+}
+
+// A row hard-deleted between handleExistingAgent's re-read and its agent
+// update answers 409 delete_in_progress, not 200 (existingAgentGoneAfterLanding).
+func TestCreateExisting_DeleteWinsAfterReRead_HardDelete409(t *testing.T) {
+	branches := []struct {
+		name  string
+		phase state.Phase
+		body  map[string]interface{}
+	}{
+		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
+		{"start-created", state.PhaseCreated, nil},
+	}
+	for _, br := range branches {
+		t.Run(br.name, func(t *testing.T) {
+			f := handleExistingAgentAuthzSetup(t)
+			agent := f.agent(t, "cx-reread", string(br.phase))
+			client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
+			p := &deleteOnUpdateStore{Store: f.store}
+			f.srv.store = p // the dispatcher keeps the raw store
+			client.onLand = func() { p.armed.Store(true) }
+
+			req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID}
+			for k, v := range br.body {
+				req[k] = v
+			}
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
+			require.NotEmpty(t, client.lastStartExtras.RunID, "the start reached the broker: %s", rec.Body.String())
+			requireIntentDeleteInProgress(t, rec, agent.ID)
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, deletedWhileStartingMessage, body.Error.Message)
+			assert.Empty(t, client.deleteRuns, "the row was live when the dispatch checked it")
+		})
+	}
+}
