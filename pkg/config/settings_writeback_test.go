@@ -478,6 +478,9 @@ var structParityBases = []structParityBase{
 	{name: "alias-key-nested", file: "settings.yaml", content: "schema_version: \"1\"\nk: &k endpoint\nhub:\n  *k : https://own\n"},
 	{name: "alias-key-root", file: "settings.yaml", content: "schema_version: \"1\"\nk: &k hub\n*k :\n  endpoint: https://own\n"},
 	{name: "complex-key", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  ? [a, b]\n  : x\n  endpoint: https://own\n"},
+	{name: "binary-key-nested", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  !!binary ZW5kcG9pbnQ=: https://own\n"},
+	{name: "binary-key-root", file: "settings.yaml", content: "schema_version: \"1\"\n!!binary aHVi:\n  endpoint: https://own\n"},
+	{name: "tagged-str-key", file: "settings.yaml", content: "schema_version: \"1\"\nhub:\n  !!str endpoint: https://own\n"},
 }
 
 // runStructParity checks, for every key and a spread of values, that the
@@ -1002,8 +1005,10 @@ func TestUpdateVersionedSetting_RoundTripRefusal(t *testing.T) {
 // delete.
 func TestUpdateVersionedSetting_AliasKeys(t *testing.T) {
 	bases := map[string]string{
-		"nested": "schema_version: \"1\"\nk: &k endpoint\nhub:\n  *k : https://own\n",
-		"root":   "schema_version: \"1\"\nk: &k hub\n*k :\n  endpoint: https://own\n",
+		"nested":        "schema_version: \"1\"\nk: &k endpoint\nhub:\n  *k : https://own\n",
+		"root":          "schema_version: \"1\"\nk: &k hub\n*k :\n  endpoint: https://own\n",
+		"binary-nested": "schema_version: \"1\"\nhub:\n  !!binary ZW5kcG9pbnQ=: https://own\n",
+		"binary-root":   "schema_version: \"1\"\n!!binary aHVi:\n  endpoint: https://own\n",
 	}
 	for name, src := range bases {
 		t.Run(name+"/set", func(t *testing.T) {
@@ -1098,5 +1103,48 @@ func TestSplitLastPathElem(t *testing.T) {
 	} {
 		dir, base := splitLastPathElem(in)
 		assert.Equal(t, want, [2]string{dir, base}, in)
+	}
+}
+
+// TestNewSettingsFilePath_UnwritableDanglingYML checks that a dangling
+// settings.yml link that loops or points into a missing directory is
+// skipped (as the loaders skip it), so every writer creates settings.yaml
+// as before instead of failing.
+func TestNewSettingsFilePath_UnwritableDanglingYML(t *testing.T) {
+	layouts := map[string]func(t *testing.T, dir string){
+		"missing directory": func(t *testing.T, dir string) {
+			require.NoError(t, os.Symlink(filepath.Join("gone", "settings.yml"), filepath.Join(dir, "settings.yml")))
+		},
+		"loop": func(t *testing.T, dir string) {
+			require.NoError(t, os.Symlink("settings.yml", filepath.Join(dir, "settings.yml")))
+		},
+	}
+	writers := map[string]func(t *testing.T, dir string){
+		"SaveVersionedSettings": func(t *testing.T, dir string) {
+			require.NoError(t, SaveVersionedSettings(dir, &VersionedSettings{SchemaVersion: "1", ActiveProfile: "local"}))
+		},
+		"UpdateVersionedSetting": func(t *testing.T, dir string) {
+			require.NoError(t, UpdateVersionedSetting(dir, "active_profile", "local"))
+		},
+		"MigrateSettingsFile": func(t *testing.T, dir string) {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.json"),
+				[]byte(`{"active_profile":"local","harnesses":{"gemini":{"image":"example.com/gemini:latest","user":"scion"}}}`), 0644))
+			res, err := MigrateSettingsFile(dir, false)
+			require.NoError(t, err)
+			require.False(t, res.Skipped, res.SkipReason)
+		},
+	}
+	for layoutName, layout := range layouts {
+		for writerName, write := range writers {
+			t.Run(layoutName+"/"+writerName, func(t *testing.T) {
+				dir := t.TempDir()
+				layout(t, dir)
+				assert.Equal(t, filepath.Join(dir, "settings.yaml"), newSettingsFilePath(dir))
+				write(t, dir)
+				data, err := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+				require.NoError(t, err)
+				assert.Contains(t, string(data), "active_profile: local")
+			})
+		}
 	}
 }

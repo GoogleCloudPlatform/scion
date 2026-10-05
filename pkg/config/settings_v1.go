@@ -4035,10 +4035,12 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 // through the struct round-trip in updateVersionedSettingStruct, which saves back to the
 // same file name.
 //
-// Fallback cliff: if a node on the edited YAML path is an alias, carries an anchor or
-// is a mapping with a `<<` merge key, an in-place edit could change other keys or miss
-// merged ones. The whole file is then rewritten from the struct instead, which loses
-// comments and unknown keys and reorders keys (logged at debug level).
+// Fallback cliff: if a node on the edited YAML path is an alias, carries an anchor, or
+// is a mapping with a key the edit cannot match by name (a merge key, an alias key, a
+// non-scalar key or a key that decodes to other text; see hasYAMLOpaqueKey), an
+// in-place edit could change other keys or miss the decoded ones. The whole file is
+// then rewritten from the struct instead, which loses comments and unknown keys and
+// reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
@@ -4057,7 +4059,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 	}
 	err = updateVersionedSettingYAML(dir, settingsPath, edit)
 	if errors.Is(err, errYAMLEditThroughAlias) {
-		slog.Debug("settings: alias, anchor or merge key on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
+		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
 			"path", settingsPath, "key", key)
 		return updateVersionedSettingStruct(dir, key, value)
 	}
@@ -4245,8 +4247,10 @@ var encodeSettingsYAML = encodeYAMLDocument
 // newSettingsFilePath returns the YAML file a settings write in dir targets
 // when there is no readable settings file to write back to: settings.yaml if
 // anything exists at that name (a file, or a link, possibly dangling, which
-// the write follows), else a dangling settings.yml link (written through,
-// keeping the link), else settings.yaml.
+// the write follows), else a dangling settings.yml link whose target can be
+// created (written through, keeping the link), else settings.yaml. A .yml
+// link that loops or points into a missing directory is skipped, as the
+// loaders skip it.
 func newSettingsFilePath(dir string) string {
 	yamlPath := filepath.Join(dir, "settings.yaml")
 	if _, err := os.Lstat(yamlPath); err == nil {
@@ -4255,7 +4259,9 @@ func newSettingsFilePath(dir string) string {
 	ymlPath := filepath.Join(dir, "settings.yml")
 	if fi, err := os.Lstat(ymlPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if _, err := os.Stat(ymlPath); err != nil {
-			return ymlPath
+			if _, err := resolveSettingsWriteTarget(ymlPath); err == nil {
+				return ymlPath
+			}
 		}
 	}
 	return yamlPath
@@ -4388,7 +4394,8 @@ func physicalParentPath(p string) (string, error) {
 // UpdateVersionedSetting: it loads the single file at dir into a
 // VersionedSettings, sets the field and saves via saveVersionedSettingsInPlace.
 // That drops comments and unknown keys, so it is only used for JSON files
-// and YAML that cannot be edited in place (aliases, anchors). A YAML file is
+// and YAML that cannot be edited in place (an alias, an anchor, or a key the
+// edit cannot match by name; see hasYAMLOpaqueKey). A YAML file is
 // saved back to the same path (settings.yml stays settings.yml).
 func updateVersionedSettingStruct(dir string, key string, value string) error {
 	vs, err := LoadSingleFileVersioned(dir)

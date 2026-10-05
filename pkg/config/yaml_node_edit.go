@@ -53,8 +53,9 @@ func isYAMLShared(n *yaml.Node) bool {
 // hasYAMLOpaqueKey reports whether the mapping n has a key that findMapKey
 // cannot match by name the way the decoder does: a `<<` merge key (whose
 // merged keys a node edit cannot see or remove), an alias key (`*k :`,
-// whose Value is the anchor name, not the key it expands to), or any other
-// non-scalar key.
+// whose Value is the anchor name, not the key it expands to), any other
+// non-scalar key, or a scalar key that does not decode to its own text
+// (`!!binary ZW5kcG9pbnQ=` is `endpoint` to every loader).
 func hasYAMLOpaqueKey(n *yaml.Node) bool {
 	if n.Kind != yaml.MappingNode {
 		return false
@@ -67,6 +68,10 @@ func hasYAMLOpaqueKey(n *yaml.Node) bool {
 		// yaml.v3 resolves a plain `<<` to the !!merge tag, so the Value
 		// check is a defensive duplicate of the tag check.
 		if k.Tag == "!!merge" || (k.Value == "<<" && k.Style == 0) {
+			return true
+		}
+		var s string
+		if err := k.Decode(&s); err != nil || s != k.Value {
 			return true
 		}
 	}
