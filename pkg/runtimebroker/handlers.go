@@ -2150,6 +2150,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// RunID is the hub-minted identity of the run this start begins
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID                string                           `json:"runId,omitempty"`
+		TemplateName         string                           `json:"templateName,omitempty"` // naming only; never loaded
 		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
@@ -2279,6 +2280,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
+		TemplateName:             startReq.TemplateName,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -2748,6 +2750,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// RunID is the hub-minted identity of the run this restart starts
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID string `json:"runId,omitempty"`
+		// TemplateName mirrors the same field on the start path.
+		TemplateName string `json:"templateName,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 	}
@@ -2794,6 +2798,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
 		RunID:                    restartReq.RunID,
+		TemplateName:             restartReq.TemplateName,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})

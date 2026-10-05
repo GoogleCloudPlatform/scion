@@ -178,6 +178,9 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Check if hosted mode is set in config (settings.yaml server.mode).
 	// LoadServerMode() normalizes the legacy "production" value to "hosted".
+	if err := config.ValidateServerMode(config.LoadServerMode()); err != nil {
+		return err
+	}
 	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
 		if config.LoadServerMode() == "hosted" {
 			hostedMode = true

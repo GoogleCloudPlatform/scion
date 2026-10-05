@@ -54,6 +54,17 @@ func (p *createdRecordingPublisher) PublishAgentCreated(ctx context.Context, a *
 	p.deleteRecordingPublisher.PublishAgentCreated(ctx, a)
 }
 
+// PublishAgentRestored is the other created publisher (see EventPublisher).
+func (p *createdRecordingPublisher) PublishAgentRestored(ctx context.Context, a *store.Agent, restoredAt time.Time) {
+	p.mu.Lock()
+	p.events = append(p.events, recordedAgentEvent{
+		kind: "created", phase: a.Phase, activity: a.Activity,
+		deletion: store.ComputeAgentDeletion(a, time.Now()),
+	})
+	p.mu.Unlock()
+	p.deleteRecordingPublisher.PublishAgentRestored(ctx, a, restoredAt)
+}
+
 func recordCreatedEvents(t *testing.T, srv *Server) *createdRecordingPublisher {
 	t.Helper()
 	bus := NewChannelEventPublisher()

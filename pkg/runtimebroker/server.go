@@ -175,6 +175,12 @@ type ServerConfig struct {
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
 
+	// DefaultProfile is the broker's default (active) profile name from its
+	// settings (active_profile), reported to the hub on every heartbeat. A
+	// pointer to "" reports that the settings name no active profile; nil
+	// (settings failed to load) omits it, so the hub keeps its value.
+	DefaultProfile *string
+
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
@@ -296,6 +302,9 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// exportIDs reads (or creates) the export identity marker reported in
+	// the workspace storage descriptor.
+	exportIDs exportIDProbe
 	// NFS reconcile loop state (all unused when nfsMountReconciler is nil).
 	// nfsStartupReconcileDone is closed once the loop's first pass has
 	// finished; nfsReconcileStopped is closed when the loop exits.
