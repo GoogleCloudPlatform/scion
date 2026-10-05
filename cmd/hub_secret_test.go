@@ -162,51 +162,54 @@ func TestRunSecretList_WithResults(t *testing.T) {
 }
 
 func TestRunSecretList_Empty(t *testing.T) {
-	orig := saveSecretTestState()
-	defer orig.restore()
-
-	server := newSecretListMockServer(t, []map[string]interface{}{})
-	defer server.Close()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-
-	projectDir := setupSecretProject(t, tmpHome, server.URL)
-	projectPath = projectDir
-
-	secretOutputJSON = false
-	secretProjectScope = ""
-	secretBrokerScope = ""
-
-	err := runSecretList(hubSecretListCmd, nil)
-	assert.NoError(t, err)
-}
-
-func TestRunSecretList_JSON(t *testing.T) {
-	orig := saveSecretTestState()
-	defer orig.restore()
-
-	secrets := []map[string]interface{}{
-		{"key": "MY_SECRET", "type": "variable", "scope": "user", "version": 1, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+	tests := []struct {
+		name     string
+		format   string
+		jsonFlag bool
+	}{
+		{name: "table", format: ""},
+		{name: "format json", format: "json"},
+		{name: "json flag", jsonFlag: true},
 	}
 
-	server := newSecretListMockServer(t, secrets)
-	defer server.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := saveSecretTestState()
+			origFormat := outputFormat
+			t.Cleanup(func() {
+				orig.restore()
+				outputFormat = origFormat
+			})
 
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			server := newSecretListMockServer(t, []map[string]interface{}{})
+			t.Cleanup(server.Close)
 
-	projectDir := setupSecretProject(t, tmpHome, server.URL)
-	projectPath = projectDir
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			projectPath = setupSecretProject(t, tmpHome, server.URL)
 
-	secretOutputJSON = true
-	secretProjectScope = ""
-	secretBrokerScope = ""
+			outputFormat = tt.format
+			secretOutputJSON = tt.jsonFlag
+			secretProjectScope = ""
+			secretBrokerScope = ""
+			secretScope = ""
 
-	err := runSecretList(hubSecretListCmd, nil)
-	assert.NoError(t, err)
+			out := captureStdout(t, func() {
+				require.NoError(t, runSecretList(hubSecretListCmd, nil))
+			})
+
+			if tt.format == "" && !tt.jsonFlag {
+				assert.Equal(t, "No secrets found (scope: user)\n", out)
+				return
+			}
+
+			var got map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(out), &got), "output must be valid JSON: %q", out)
+			assert.JSONEq(t, `"user"`, string(got["scope"]))
+			assert.Equal(t, "[]", string(got["secrets"]), "empty list must encode as [], not null")
+		})
+	}
 }
 
 func TestResolveSecretScope_ScopeHub(t *testing.T) {
