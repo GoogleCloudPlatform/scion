@@ -908,6 +908,12 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 		}).Allowed
 		if !isResourceOwner && !isPlatformAdmin {
 			callerMembership, err := s.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userIdent.ID())
+			// Not being a member is a refusal below; any other store error
+			// is reported as such rather than as a 403.
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "")
+				return "", "", false
+			}
 			switch role {
 			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
 				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {

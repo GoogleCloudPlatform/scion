@@ -570,8 +570,8 @@ func TestAuthValidate(t *testing.T) {
 	}
 }
 
-// failingGetUserStore wraps a store and makes the by-ID user lookup fail
-// with a non-ErrNotFound error.
+// failingGetUserStore wraps a store and makes the by-ID user lookup return
+// no user and the given error (which may be nil).
 type failingGetUserStore struct {
 	store.Store
 	err error
@@ -655,6 +655,17 @@ func TestAuthValidate_UserRecordStatus(t *testing.T) {
 		code, _, body := validate(t, token)
 		assert.Equal(t, http.StatusServiceUnavailable, code, body)
 		assert.Contains(t, body, "store_error")
+	})
+
+	t.Run("nil user without error", func(t *testing.T) {
+		_, token := newUserToken(t, "validate-nil-user")
+		orig := srv.store
+		srv.store = &failingGetUserStore{Store: s, err: nil}
+		t.Cleanup(func() { srv.store = orig })
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "a token with no user record must not be valid: %s", body)
+		assert.Nil(t, resp.User)
 	})
 }
 

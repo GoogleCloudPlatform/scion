@@ -629,6 +629,47 @@ func TestCreateGroup_ParentID_ParentLookupError(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+// failingMembershipLookupStore fails GetGroupMembership for one group and
+// user with an error other than not-found.
+type failingMembershipLookupStore struct {
+	store.Store
+	groupID, userID string
+}
+
+var errMembershipLookup = errors.New("membership lookup unavailable")
+
+func (f *failingMembershipLookupStore) GetGroupMembership(ctx context.Context, groupID, memberType, memberID string) (*store.GroupMember, error) {
+	if groupID == f.groupID && memberType == store.GroupMemberTypeUser && memberID == f.userID {
+		return nil, errMembershipLookup
+	}
+	return f.Store.GetGroupMembership(ctx, groupID, memberType, memberID)
+}
+
+// TestCreateGroup_ParentID_MembershipLookupError: a store failure reading the
+// caller's membership of the parent is reported as a server error, not a
+// 403, and creates nothing. Adding a member to the parent behaves the same.
+func TestCreateGroup_ParentID_MembershipLookupError(t *testing.T) {
+	f := newParentGroupFixture(t, "cg-mlookup")
+	actor := f.newSystemRoleUser(t, "cg-mlookup-actor", []string{"group.create", "group.addMember"})
+	f.addMember(t, f.parent.ID, actor.ID, store.GroupMemberRoleAdmin)
+	before := f.listAllGroupIDs(t)
+	f.srv.store = &failingMembershipLookupStore{Store: f.store, groupID: f.parent.ID, userID: actor.ID}
+	t.Cleanup(func() { f.srv.store = f.store })
+
+	code, body := f.createChild(t, actor, "cg-mlookup-child", f.parent.ID)
+	assert.GreaterOrEqual(t, code, http.StatusInternalServerError, body)
+	assert.NotContains(t, body, errMembershipLookup.Error())
+
+	refCode, refBody := f.addSpareAsMember(t, actor)
+	assert.GreaterOrEqual(t, refCode, http.StatusInternalServerError, refBody)
+
+	f.srv.store = f.store
+	assert.ElementsMatch(t, before, f.listAllGroupIDs(t), "no group may be created")
+	f.assertNothingCreated(t, actor, "cg-mlookup-child")
+	_, err := f.store.GetGroupMembership(context.Background(), f.parent.ID, store.GroupMemberTypeGroup, f.spare.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the spare group must not be added to the parent")
+}
+
 // TestCreateGroup_ParentID_AgentCaller: an agent caller creating a group
 // under a parent is held to the same checks as an agent adding a group
 // member to that parent (agent tokens carry no group permissions, so both

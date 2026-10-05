@@ -601,6 +601,10 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "store_error",
 				"unable to verify user status", nil)
 			return
+		case u == nil:
+			// No user record and no error: treated as not found.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
 		case u.Status == store.UserStatusSuspended:
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
