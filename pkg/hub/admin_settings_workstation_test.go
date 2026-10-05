@@ -309,3 +309,52 @@ func TestWorkstation_OnboardingGcloudADC(t *testing.T) {
 		t.Error("onboarding status does not report the saved gcloud ADC choice")
 	}
 }
+
+// Break-glass: a workstation hub started in admin mode stays in maintenance
+// over a DB row that says otherwise, across later ops.Update re-applies; on
+// a hosted hub the row wins.
+func TestMaintenanceBreakGlass_ByMode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		workstation bool
+		wantEnabled bool
+	}{
+		{"workstation: startup admin mode wins", true, true},
+		{"hosted: DB row wins", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempSettingsHome(t)
+			srv, _, ops := newSQLiteHubInMode(t, tc.workstation, map[string]string{
+				"maintenance": `{"admin_mode":false,"maintenance_message":"from db"}`,
+			})
+			// As at startup with SCION_SERVER_ADMIN_MODE=true.
+			srv.config.AdminMode = true
+			srv.maintenance = NewMaintenanceState(true, "")
+			ApplyMaintenanceFromSnapshot(srv, ops.Snapshot()) // as initOperationalSettings does
+
+			if got := srv.maintenance.IsEnabled(); got != tc.wantEnabled {
+				t.Fatalf("after startup apply: enabled = %v, want %v", got, tc.wantEnabled)
+			}
+			unrelatedLifecycleUpdate(t, ops)
+			if got := srv.maintenance.IsEnabled(); got != tc.wantEnabled {
+				t.Errorf("after an unrelated ops.Update: enabled = %v, want %v", got, tc.wantEnabled)
+			}
+			if got := srv.maintenance.Message(); got != "from db" {
+				t.Errorf("message = %q, want the row's message", got)
+			}
+
+			rr := httptest.NewRecorder()
+			srv.handleAdminMaintenance(rr, adminRequest(http.MethodGet, "/api/v1/admin/maintenance", ""))
+			var got struct {
+				Enabled    bool `json:"enabled"`
+				BreakGlass bool `json:"break_glass"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Enabled != tc.wantEnabled || got.BreakGlass != tc.workstation {
+				t.Errorf("GET = %+v, want enabled=%v break_glass=%v", got, tc.wantEnabled, tc.workstation)
+			}
+		})
+	}
+}

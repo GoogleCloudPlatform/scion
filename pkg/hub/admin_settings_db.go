@@ -1886,10 +1886,16 @@ func mapKeys(m map[string]int64) []string {
 // Reports the maintenance row when one exists, else the live state.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
 	enabled, message := s.maintenanceBaseline(ops)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"enabled": enabled,
 		"message": maintenanceMessageOrDefault(message),
-	})
+	}
+	// break_glass: a workstation hub started in admin mode stays in
+	// maintenance whatever the DB row says.
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // maintenanceBaseline returns the maintenance state the DB-backed handlers
@@ -1899,12 +1905,15 @@ func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalS
 // it was set at startup from SCION_SERVER_ADMIN_MODE or settings.yaml, and
 // the empty snapshot would wrongly report, and a message-only PUT would
 // wrongly write, admin_mode=false.
+//
+// A workstation break-glass (maintenanceBreakGlass) keeps the live state
+// authoritative even with a row, since the row cannot turn it off.
 func (s *Server) maintenanceBaseline(ops *OperationalSettings) (enabled bool, message string) {
 	snap := ops.Snapshot()
-	if snap.HasMaintenanceRow || s.maintenance == nil {
-		return snap.AdminMode, snap.MaintenanceMessage
+	if s.maintenance != nil && (!snap.HasMaintenanceRow || s.maintenanceBreakGlass()) {
+		return s.maintenance.State()
 	}
-	return s.maintenance.State()
+	return snap.AdminMode, snap.MaintenanceMessage
 }
 
 // handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance
@@ -1975,11 +1984,16 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// The Update call already self-applies via ApplySnapshot + ApplyMaintenanceFromSnapshot,
-	// but read the final state from the server's MaintenanceState to reflect env overrides.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	// but read the final state from the server's MaintenanceState to reflect
+	// a workstation break-glass.
+	resp := map[string]interface{}{
 		"enabled": s.maintenance.IsEnabled(),
 		"message": s.maintenance.Message(),
-	})
+	}
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminServerConfigSchema handles GET /api/v1/admin/server-config/schema.

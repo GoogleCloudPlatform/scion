@@ -268,6 +268,48 @@ func TestInitOperationalSettings_SeedEnvReachesHubOnSQLite(t *testing.T) {
 	}
 }
 
+// TestInitOperationalSettings_MaintenanceBreakGlassByMode: a workstation hub
+// started in admin mode (SCION_SERVER_ADMIN_MODE=true / settings.yaml
+// admin_mode) stays in maintenance over a DB maintenance row that says
+// otherwise; a hosted hub follows the row (ptone/scion#1091 option C).
+func TestInitOperationalSettings_MaintenanceBreakGlassByMode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		workstation bool
+		want        bool
+	}{
+		{"workstation", true, true},
+		{"hosted", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			globalDir := filepath.Join(home, ".scion")
+			if err := os.MkdirAll(globalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "sqlite3"
+			st := newTestStore(t)
+			if _, err := st.UpsertHubSetting(ctx, "maintenance",
+				[]byte(`{"admin_mode":false}`), "admin@example.com", -1, "managed"); err != nil {
+				t.Fatal(err)
+			}
+			srv, err := hub.New(hub.ServerConfig{AdminMode: true, Workstation: tc.workstation}, st)
+			if err != nil {
+				t.Fatalf("hub.New: %v", err)
+			}
+			if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+				t.Fatalf("initOperationalSettings: %v", err)
+			}
+			if got := srv.GetMaintenanceState().IsEnabled(); got != tc.want {
+				t.Errorf("maintenance enabled after startup = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestColocatedBrokerRegisters pins the single condition shared by the early
 // ExpectEmbeddedBroker call and co-located registration in startRuntimeBroker.
 func TestColocatedBrokerRegisters(t *testing.T) {

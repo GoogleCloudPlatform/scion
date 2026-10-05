@@ -1351,7 +1351,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 }
 
 // ApplyMaintenanceFromSnapshot applies maintenance state from a DB-backed
-// (any driver) snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+// (any driver) snapshot.
 //
 // This function must be called ONLY on DB-backed paths (any driver) — the
 // file-mode reloadSettings must never touch MaintenanceState (it is
@@ -1359,19 +1359,37 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 //
 // Behavior:
 //   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState
-//     keeps its current value (which honors the env var set at startup).
-//   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
-//     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
-//
-// ApplyMaintenanceFromSnapshot applies the maintenance settings from the
-// snapshot to the server's maintenance state. In HA mode, maintenance must
-// be cluster-consistent — per-node env force-win is removed.
+//     keeps its current value (which honors the startup admin mode).
+//   - If snap.HasMaintenanceRow is true on a hosted hub: apply the DB values.
+//     Maintenance must be cluster-consistent, so there is no per-node
+//     override.
+//   - If snap.HasMaintenanceRow is true on a workstation hub whose startup
+//     admin mode is on (SCION_SERVER_ADMIN_MODE=true or settings.yaml
+//     admin_mode: true): the hub stays in maintenance — the break-glass wins
+//     over the row for the life of the process (ptone/scion#1091 option C).
+//     The row's message is still used when it has one.
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
 	}
 
+	if s.maintenanceBreakGlass() {
+		_, msg := s.maintenance.State()
+		if snap.MaintenanceMessage != "" {
+			msg = snap.MaintenanceMessage
+		}
+		s.maintenance.Set(true, msg)
+		return
+	}
 	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
+}
+
+// maintenanceBreakGlass reports whether a workstation hub was started in
+// admin mode (SCION_SERVER_ADMIN_MODE=true or settings.yaml admin_mode: true).
+// That startup state wins over a DB maintenance row; on hosted hubs the row
+// wins.
+func (s *Server) maintenanceBreakGlass() bool {
+	return s.workstation && s.config.AdminMode
 }
 
 // ProjectDefaultScratchpad returns whether the default scratchpad shared
