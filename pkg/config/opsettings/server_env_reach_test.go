@@ -214,10 +214,16 @@ func sampleEnvValues(e schemaEnvVarEntry) []string {
 	case "integer", "number":
 		return []string{"4243", "17"}
 	case "array":
-		if e.Items == "integer" {
+		switch e.Items {
+		case "integer":
 			return []string{"4243,17"}
+		case "number":
+			return []string{"1.5,2"}
+		case "boolean":
+			return []string{"true,false"}
+		default:
+			return []string{"envtest-a@example.com,envtest-b@example.com"}
 		}
-		return []string{"envtest-a@example.com,envtest-b@example.com"}
 	default:
 		// A duration-shaped value is also a valid plain string.
 		return []string{"17s", "http://envtest.example.com:4243"}
