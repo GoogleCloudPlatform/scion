@@ -35,6 +35,11 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
+import {
+  CHAT_STARTUP_REUSE_MS,
+  chatLoadClock,
+  chatSpacesLoad,
+} from '../../../client/chat-list-cache.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
 import { formatInstantWithZone } from '../../../utils/time.js';
@@ -60,6 +65,12 @@ export interface ChatSpace {
   emoji?: string;
   unreadCount: number;
   hasUnreadMention: boolean;
+  /**
+   * Newest visible-thread activity in the space, when the server sends it
+   * (omitted for a space with no threads). Lets activity sort order spaces
+   * without loading every space's thread list.
+   */
+  lastActivityAt?: string;
 }
 
 /** A thread within a space. */
@@ -291,6 +302,16 @@ function parseRailPrefs(payload: unknown): RailPrefs {
 /** Viewport width at or below which the chat panels are separate screens. */
 const MOBILE_BREAKPOINT_PX = 768;
 
+/**
+ * Concurrent background thread loads, for the spaces activity sort needs
+ * but the user cannot see. Low, so they stay behind the visible spaces and
+ * the conversation's own requests.
+ */
+const BACKGROUND_THREAD_LOADS = 2;
+
+/** Automatic retries of a failed thread load, per space and reload. */
+const THREAD_LOAD_AUTO_RETRIES = 1;
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
@@ -315,8 +336,19 @@ export class ScionChatSpaceRail extends LitElement {
   @property()
   currentUserId = '';
 
+  /**
+   * The space of the open thread, from the route ('' for a DM or nothing
+   * open). Its threads load first and it is expanded, before its thread
+   * list is known — the rail no longer loads every space's threads to find
+   * the selected one.
+   */
+  @property()
+  selectedProjectId = '';
+
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
+  /** Spaces whose thread list is being fetched (drives the per-space loading state). */
+  @state() private loadingThreads = new Set<string>();
   @state() private collapsedSpaces = new Set<string>();
   @state() private loading = true;
   @state() private prefs: RailPrefs = {
@@ -775,6 +807,28 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    /* Text for assistive technology only. */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* One space's thread list, still loading. */
+    .threads-loading {
+      display: flex;
+      justify-content: center;
+      padding: 0.5rem;
+      font-size: var(--chat-fs-md, 14px);
+      color: var(--scion-text-muted, #64748b);
+    }
+
     /* Filter + sort toolbar */
     .rail-toolbar {
       display: flex;
@@ -987,6 +1041,24 @@ export class ScionChatSpaceRail extends LitElement {
       this._collapseLoadedFor = this.currentUserId;
       this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     }
+    // Expanding a space is asking for its threads: one whose last load
+    // failed (and is out of automatic retries) tries again.
+    const wasCollapsed = _changedProperties.get('collapsedSpaces') as Set<string> | undefined;
+    if (wasCollapsed) {
+      for (const id of wasCollapsed) {
+        // A load already in flight (the header click's own) is not a retry.
+        if (this.collapsedSpaces.has(id) || this.threadsBySpace.has(id)) continue;
+        if (this.loadingThreads.has(id)) continue;
+        if (this._threadLoadFailures.has(id)) {
+          this._threadLoadFailures.delete(id);
+          this._threadLoadEpoch.delete(id);
+        }
+      }
+    }
+    // Start whatever thread loads the state now calls for: a space expanded
+    // or selected since the last render, or the next background load. Run
+    // here, before render, so the loading state lands in the same render.
+    this.syncThreadLoads();
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -995,6 +1067,9 @@ export class ScionChatSpaceRail extends LitElement {
         this.renderRoot.querySelector<HTMLElement>('.context-menu'),
         this.contextMenuPos
       );
+    }
+    if (changedProperties.has('selectedProjectId') && this.selectedProjectId) {
+      this.expandSpaceForSelectedKey();
     }
     if (changedProperties.has('selectedKey')) {
       if (this.selectedKey) {
@@ -1023,6 +1098,18 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** Expand the space that contains the currently selected thread. */
   private expandSpaceForSelectedKey(): void {
+    // The route names the space: expand it without waiting for its threads.
+    // Only once the space list has it, so a reload's "collapse brand-new
+    // spaces" pass cannot fold it straight back up.
+    const routed = this.selectedProjectId;
+    if (routed && this.spaces.some((s) => s.projectId === routed)) {
+      if (this.collapsedSpaces.has(routed)) {
+        const next = new Set(this.collapsedSpaces);
+        next.delete(routed);
+        this.collapsedSpaces = next;
+      }
+      return;
+    }
     for (const space of this.spaces) {
       const threads = this.threadsBySpace.get(space.projectId) || [];
       const hasThread = threads.some((t) => t.id === this.selectedKey);
@@ -1102,6 +1189,14 @@ export class ScionChatSpaceRail extends LitElement {
     }
     this._recentlyCreatedTimeouts.clear();
     this._recentlyCreatedTopicIds.clear();
+    // Nothing can show these lists now; stop the requests rather than let
+    // them run to completion for a detached rail.
+    for (const controller of this._threadAborts.values()) controller.abort();
+    this._threadAborts.clear();
+    this._threadLoads.clear();
+    this._threadLoadEpoch.clear();
+    this._pendingReadState.clear();
+    if (this.loadingThreads.size > 0) this.loadingThreads = new Set();
   }
 
   private _outsideClickHandler: ((e: Event) => void) | null = null;
@@ -1115,9 +1210,25 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  /** Reload all data (called externally when SSE events indicate changes). */
-  async reload(): Promise<void> {
-    await this.loadData();
+  /**
+   * Reload all data (called externally when SSE events indicate changes).
+   * `startedAfter` — when the triggering event was delivered, on the
+   * shared loads' clock — lets the spaces load share a request another
+   * owner (the tab-title counter) made after that event; by default only a
+   * request started after the call will do.
+   */
+  async reload(options: { startedAfter?: number } = {}): Promise<void> {
+    await this.loadData(options.startedAfter);
+  }
+
+  /**
+   * A space's thread list, loading it first if the rail has not. Lets the
+   * page pick a space's #general on a deep link without a second request
+   * for the list the rail is about to show.
+   */
+  async threadsFor(projectId: string): Promise<ChatSpaceThread[]> {
+    if (!this.threadsBySpace.has(projectId)) await this.ensureThreads(projectId);
+    return this.threadsBySpace.get(projectId) ?? [];
   }
 
   /** Returns the list of space project IDs for SSE subscription. */
@@ -1125,14 +1236,55 @@ export class ScionChatSpaceRail extends LitElement {
     return this.spaces.map((s) => s.projectId);
   }
 
-  private async loadData(): Promise<void> {
+  /**
+   * Load the spaces and preferences, coalescing overlapping calls: a call
+   * made while a load is running does not start a second, concurrent one —
+   * it queues exactly one trailing load (the running one may have read the
+   * server before whatever prompted the call) and shares its promise.
+   */
+  private loadData(startedAfter: number = chatLoadClock()): Promise<void> {
+    if (this._loadInFlight) {
+      this._reloadQueued = true;
+      // The trailing pass must answer every call it absorbs.
+      this._queuedStartedAfter = Math.max(this._queuedStartedAfter, startedAfter);
+      return this._loadInFlight;
+    }
+    const run = async (): Promise<void> => {
+      let after = startedAfter;
+      try {
+        do {
+          this._reloadQueued = false;
+          this._queuedStartedAfter = -Infinity;
+          await this.loadDataOnce(after);
+          after = this._queuedStartedAfter;
+        } while (this._reloadQueued && this.isConnected);
+      } finally {
+        this._loadInFlight = null;
+      }
+    };
+    this._loadInFlight = run();
+    return this._loadInFlight;
+  }
+
+  /** The running {@link loadData} pass, if any. */
+  private _loadInFlight: Promise<void> | null = null;
+  /** A {@link loadData} call arrived during the running pass; run once more after it. */
+  private _reloadQueued = false;
+  /** The newest `startedAfter` among the calls the trailing pass answers. */
+  private _queuedStartedAfter = -Infinity;
+
+  private async loadDataOnce(startedAfter: number): Promise<void> {
     // Only show the full-page spinner on the very first load. Subsequent
     // reloads (e.g. SSE-triggered) update data in-place without a flash.
-    if (!this._initialLoadDone) {
+    const initial = !this._initialLoadDone;
+    if (initial) {
       this.loading = true;
     }
     try {
-      const [spacesOk, prefsOk] = await Promise.all([this.loadSpaces(), this.loadPrefs()]);
+      const [spacesOk, prefsOk] = await Promise.all([
+        this.loadSpaces(initial, startedAfter),
+        this.loadPrefs(),
+      ]);
       // Pruning reads both this.spaces and this.prefs.threadGroups to decide
       // what's stale, so it must not run unless both loaded cleanly in this
       // pass — see pruneCollapsedGroups' doc comment for what goes wrong
@@ -1147,6 +1299,10 @@ export class ScionChatSpaceRail extends LitElement {
         this.maybeAutoExpandGroupForSelectedKey();
       }
     } finally {
+      // Names and rollup badges render now; thread lists follow per space
+      // (see syncThreadLoads), so a slow thread list no longer holds the
+      // whole rail behind a spinner.
+      this._listsReady = true;
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
       this.dispatchEvent(
@@ -1175,58 +1331,300 @@ export class ScionChatSpaceRail extends LitElement {
   /** Track known space IDs so we can collapse only truly new spaces on reload. */
   private _knownSpaceIds = new Set<string>();
 
-  /** Loads spaces; returns whether the load succeeded (used to gate pruning). */
-  private async loadSpaces(): Promise<boolean> {
-    try {
-      const res = await apiFetch('/api/v1/chat/spaces');
-      if (res.ok) {
-        const data = (await res.json()) as { spaces?: ChatSpace[] };
-        this.spaces = data.spaces || [];
-        const newSpaceIds = new Set(this.spaces.map((s) => s.projectId));
-        if (!this._initialLoadDone) {
-          // Collapse all spaces by default on first load — user expands explicitly
-          this.collapsedSpaces = new Set(newSpaceIds);
-          this._initialLoadDone = true;
-        } else {
-          // Preserve existing collapsed/expanded state on reload.
-          // Remove stale entries for spaces that no longer exist.
-          const updated = new Set([...this.collapsedSpaces].filter((id) => newSpaceIds.has(id)));
-          // Collapse any brand-new spaces the user hasn't seen yet.
-          for (const id of newSpaceIds) {
-            if (!this._knownSpaceIds.has(id)) {
-              updated.add(id);
-            }
-          }
-          this.collapsedSpaces = updated;
+  /**
+   * Loads spaces; returns whether the load succeeded (used to gate pruning).
+   * The first load shares the startup request the tab-title counter already
+   * made; a reload follows a change and only shares a request that started
+   * after `startedAfter` (see {@link reload}).
+   */
+  private async loadSpaces(initial: boolean, startedAfter: number): Promise<boolean> {
+    const loading = chatSpacesLoad.load(
+      initial ? { maxAgeMs: CHAT_STARTUP_REUSE_MS } : { startedAfter }
+    );
+    // When the request this answer comes from was sent (it may be shared).
+    const requestedAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
+    const data = await loading;
+    if (!data) return false;
+    this._spacesStartedAt = requestedAt;
+    this.spaces = (data.spaces ?? []) as ChatSpace[];
+    const newSpaceIds = new Set(this.spaces.map((s) => s.projectId));
+    if (!this._initialLoadDone) {
+      // Collapse all spaces by default on first load — user expands explicitly
+      this.collapsedSpaces = new Set(newSpaceIds);
+      this._initialLoadDone = true;
+    } else {
+      // Preserve existing collapsed/expanded state on reload.
+      // Remove stale entries for spaces that no longer exist.
+      const updated = new Set([...this.collapsedSpaces].filter((id) => newSpaceIds.has(id)));
+      // Collapse any brand-new spaces the user hasn't seen yet.
+      for (const id of newSpaceIds) {
+        if (!this._knownSpaceIds.has(id)) {
+          updated.add(id);
         }
-        this._knownSpaceIds = newSpaceIds;
-        // Load threads for each space
-        await Promise.all(this.spaces.map((s) => this.loadThreads(s.projectId)));
-        // Auto-expand the space containing the selected thread (deep-link on first load)
-        if (this.selectedKey) {
-          this.expandSpaceForSelectedKey();
-        }
-        return true;
       }
-      return false;
-    } catch {
-      // Silently fail
-      return false;
+      this.collapsedSpaces = updated;
+    }
+    this._knownSpaceIds = newSpaceIds;
+    // On a reload, every thread list loaded so far predates whatever
+    // prompted it: the ones on screen refetch on the next render, the rest
+    // when next expanded (see syncThreadLoads). Not on the first load — a
+    // list fetched before it (a space deep link asking `threadsFor` early)
+    // is as fresh as this response and is kept.
+    if (!initial) {
+      this._threadsEpoch++;
+      this._threadLoadFailures.clear();
+    }
+    // Expand the space holding the selected thread — the deep-link case on
+    // the first load, and on every reload too (as before lazy loading), so a
+    // reload keeps the open thread's space open.
+    if (this.selectedKey || this.selectedProjectId) {
+      this.expandSpaceForSelectedKey();
+    }
+    return true;
+  }
+
+  /** When the request behind the current spaces list was sent (`chatLoadClock`). */
+  private _spacesStartedAt = -Infinity;
+  /** Set once the first spaces/prefs pass has finished; thread loads wait for it. */
+  private _listsReady = false;
+  /** Bumped by every spaces load: a thread list fetched in an older epoch is stale. */
+  private _threadsEpoch = 0;
+  /** The {@link _threadsEpoch} in which each space's latest thread load started. */
+  private _threadLoadEpoch = new Map<string, number>();
+  /** In-flight thread loads, aborted when superseded or when the rail detaches. */
+  private _threadAborts = new Map<string, AbortController>();
+  /** The latest thread load per space (settled ones stay until replaced). */
+  private _threadLoads = new Map<string, Promise<void>>();
+
+  /**
+   * Spaces whose thread list is needed now: expanded ones, plus the one
+   * holding the open thread (it may be collapsed by the user and still
+   * need its threads for the unread filter and selection).
+   */
+  private visibleThreadSpaceIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const space of this.spaces) {
+      if (!this.collapsedSpaces.has(space.projectId)) ids.add(space.projectId);
+    }
+    if (this.selectedProjectId) ids.add(this.selectedProjectId);
+    return ids;
+  }
+
+  /**
+   * Whether space order needs every space's thread list: activity sort,
+   * with a server that does not report per-space activity. Then the
+   * remaining spaces load in the background, behind the visible ones.
+   */
+  private needsBackgroundThreadLoads(): boolean {
+    const mode = this.prefs.spaceSortMode;
+    if (mode === 'alpha' || mode === 'custom') return false;
+    return !this.spaces.some((s) => s.lastActivityAt !== undefined);
+  }
+
+  /**
+   * Whether the first round of background thread loads has finished (each
+   * listed space attempted, none still loading). Latches: later reloads
+   * refetch in the background too, and the rail keeps its activity order
+   * through them instead of falling back to the server's order each time.
+   */
+  private activityOrderSettled(): boolean {
+    if (this._activityOrderSettled) return true;
+    const pending =
+      this.loadingThreads.size > 0 ||
+      this.spaces.some(
+        (s) =>
+          this._knownSpaceIds.has(s.projectId) &&
+          (this._threadLoadEpoch.get(s.projectId) ?? -1) < this._threadsEpoch
+      );
+    if (!pending) this._activityOrderSettled = true;
+    return this._activityOrderSettled;
+  }
+
+  /** See {@link activityOrderSettled}. */
+  private _activityOrderSettled = false;
+
+  /**
+   * Start the thread loads the current state calls for. Visible spaces go
+   * first and all at once; with {@link needsBackgroundThreadLoads}, the rest
+   * follow at most {@link BACKGROUND_THREAD_LOADS} at a time — each finished
+   * load re-renders, which calls this again for the next one.
+   */
+  private syncThreadLoads(): void {
+    if (!this._listsReady || !this.isConnected) return;
+    // A space with a load in flight is left alone even if a reload made it
+    // stale: aborting it would let a busy hub (a reload every message
+    // burst, slower list responses) restart it forever, so it never lands.
+    // It lands, re-renders, and this runs again to fetch it once more.
+    const needsLoad = (id: string): boolean =>
+      !this.loadingThreads.has(id) && (this._threadLoadEpoch.get(id) ?? -1) < this._threadsEpoch;
+    // Only spaces the last spaces load returned: a thread list is fetched
+    // for a space the server listed, never for one that has since gone.
+    const known = this._knownSpaceIds;
+    const visible = this.visibleThreadSpaceIds();
+    for (const id of visible) {
+      if (known.has(id) && needsLoad(id)) void this.loadThreads(id);
+    }
+    if (!this.needsBackgroundThreadLoads()) return;
+    let running = [...this.loadingThreads].filter((id) => !visible.has(id)).length;
+    for (const space of this.spaces) {
+      if (running >= BACKGROUND_THREAD_LOADS) break;
+      const id = space.projectId;
+      if (visible.has(id) || !known.has(id) || !needsLoad(id)) continue;
+      void this.loadThreads(id);
+      running++;
     }
   }
 
-  private async loadThreads(projectId: string): Promise<void> {
-    try {
-      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`);
-      if (res.ok) {
-        const data = (await res.json()) as { threads?: ChatSpaceThread[] };
-        const newMap = new Map(this.threadsBySpace);
-        newMap.set(projectId, data.threads || []);
-        this.threadsBySpace = newMap;
-      }
-    } catch {
-      // Silently fail
+  /**
+   * Load one space's thread list. Supersedes (aborts) an earlier load of
+   * the same space — only explicit callers do that (creating a thread in an
+   * unloaded space); {@link syncThreadLoads} never starts a load for a space
+   * that has one in flight. Resolves when this load settles.
+   */
+  private loadThreads(projectId: string): Promise<void> {
+    this._threadAborts.get(projectId)?.abort();
+    const controller = new AbortController();
+    this._threadAborts.set(projectId, controller);
+    this._threadLoadEpoch.set(projectId, this._threadsEpoch);
+    const startedAt = chatLoadClock();
+    if (!this.loadingThreads.has(projectId)) {
+      this.loadingThreads = new Set(this.loadingThreads).add(projectId);
     }
+    const done = (): void => {
+      if (this._threadAborts.get(projectId) !== controller) return;
+      this._threadAborts.delete(projectId);
+      const next = new Set(this.loadingThreads);
+      next.delete(projectId);
+      this.loadingThreads = next;
+      if (next.size === 0) this.settlePendingReadState();
+    };
+    const fail = (): void => {
+      // Retry automatically once per epoch (the next render's sync picks it
+      // up); after that, only an explicit expand or header click, or the
+      // next reload, tries again — a hub that keeps failing is not polled.
+      const failures = (this._threadLoadFailures.get(projectId) ?? 0) + 1;
+      this._threadLoadFailures.set(projectId, failures);
+      if (failures <= THREAD_LOAD_AUTO_RETRIES) this._threadLoadEpoch.delete(projectId);
+    };
+    const load = (async (): Promise<void> => {
+      try {
+        const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          if (!controller.signal.aborted) fail();
+          return;
+        }
+        const data = (await res.json()) as { threads?: ChatSpaceThread[] };
+        if (controller.signal.aborted) return;
+        this._threadLoadFailures.delete(projectId);
+        const threads = data.threads || [];
+        const newMap = new Map(this.threadsBySpace);
+        newMap.set(projectId, threads);
+        this.threadsBySpace = newMap;
+        this.applyPendingReadState(projectId, threads, startedAt);
+        // A thread deep link without a routed space resolves here.
+        if (this.selectedKey && !this.selectedProjectId) this.expandSpaceForSelectedKey();
+      } catch {
+        // A network failure, or an abort (by detach or an explicit newer
+        // load), which is not a failure of this space.
+        if (!controller.signal.aborted) fail();
+      } finally {
+        done();
+      }
+    })();
+    this._threadLoads.set(projectId, load);
+    return load;
+  }
+
+  /** Consecutive failed thread loads per space, reset by a success or a reload. */
+  private _threadLoadFailures = new Map<string, number>();
+
+  /**
+   * Make sure a space's threads are loaded, and wait for that. Used where
+   * an action needs the list — opening #general from a collapsed space, a
+   * space deep link. A load already in flight is joined rather than
+   * restarted; with none and no list (never loaded, or the last attempt
+   * failed), this is an explicit request and loads regardless of retries.
+   */
+  private async ensureThreads(projectId: string): Promise<void> {
+    if (!this.loadingThreads.has(projectId)) {
+      const stale = (this._threadLoadEpoch.get(projectId) ?? -1) < this._threadsEpoch;
+      if (stale || !this.threadsBySpace.has(projectId)) void this.loadThreads(projectId);
+    }
+    // A load can be superseded while awaited; wait for whichever is current.
+    let pending = this._threadLoads.get(projectId);
+    while (pending) {
+      await pending;
+      const next = this._threadLoads.get(projectId);
+      if (next === pending) break;
+      pending = next;
+    }
+  }
+
+  /**
+   * Read-state changes (thread id → change and when it happened) for
+   * threads no loaded list held while some list was still loading — the
+   * usual case being the thread just opened, whose space list is still on
+   * its way when the thread view advances its read watermark.
+   */
+  private _pendingReadState = new Map<string, { kind: 'read' | 'unread'; at: number }>();
+
+  /**
+   * Apply pending read-state changes for threads in a list that just
+   * landed. A list requested before the change still shows the old state,
+   * so the change is applied to it the normal way (row and badge). A list
+   * requested after it already shows the new state; then only the space
+   * badge can be behind, if the spaces list predates the change too.
+   *
+   * `at` is when the read-state event arrived, after the read POST returned,
+   * so a spaces request sent while the POST was in flight counts as older
+   * even if the server already rolled the read in; the badge can then drop
+   * one too many (floored at zero). The window is narrow and main has the
+   * same race class.
+   */
+  private applyPendingReadState(
+    projectId: string,
+    threads: ChatSpaceThread[],
+    listStartedAt: number
+  ): void {
+    if (this._pendingReadState.size === 0) return;
+    let rollupStale = false;
+    for (const thread of threads) {
+      const pending = this._pendingReadState.get(thread.id);
+      if (!pending) continue;
+      this._pendingReadState.delete(thread.id);
+      const listIsOlder = listStartedAt < pending.at;
+      const rollupIsOlder = this._spacesStartedAt < pending.at;
+      if (listIsOlder && rollupIsOlder) {
+        // Both predate the change: apply it the normal way, row and badge.
+        if (pending.kind === 'read') this.markThreadRead(thread.id);
+        else this.markThreadUnread(thread.id);
+      } else if (listIsOlder) {
+        // The badge already reflects it; only the row is behind.
+        this.updateThread(
+          projectId,
+          thread.id,
+          pending.kind === 'read'
+            ? { hasUnread: false, hasUnreadMention: false }
+            : { hasUnread: true }
+        );
+      } else if (rollupIsOlder) {
+        rollupStale = true;
+      }
+    }
+    if (rollupStale) void this.reload();
+  }
+
+  /**
+   * Once nothing is loading, any pending change whose thread turned up in
+   * no list (its space failed to load, say) falls back to refreshing the
+   * rollup from the server.
+   */
+  private settlePendingReadState(): void {
+    if (this._pendingReadState.size === 0) return;
+    this._pendingReadState.clear();
+    if (this.spaces.some((s) => !this.threadsBySpace.has(s.projectId))) void this.reload();
   }
 
   /** Loads prefs; returns whether the load succeeded (used to gate pruning). */
@@ -1301,6 +1699,11 @@ export class ScionChatSpaceRail extends LitElement {
         break;
       case 'activity':
       default:
+        // Without per-space activity from the server, the order is derived
+        // from thread lists that load in the background. Keep the server's
+        // order until they have all landed once, rather than reshuffling
+        // the rail as each one arrives.
+        if (this.needsBackgroundThreadLoads() && !this.activityOrderSettled()) break;
         // activity sort: spaces with more recent activity first
         // We use the threads' lastActivityAt to derive this
         spaces.sort((a, b) => {
@@ -1988,7 +2391,11 @@ export class ScionChatSpaceRail extends LitElement {
 
   private getSpaceLastActivity(projectId: string): number {
     const threads = this.threadsBySpace.get(projectId) || [];
-    let maxTime = 0;
+    // The server's per-space figure covers threads not loaded yet; a loaded
+    // list can be newer (a local change since the spaces load), so take
+    // the later of the two.
+    const reported = this.spaces.find((s) => s.projectId === projectId)?.lastActivityAt;
+    let maxTime = reported ? new Date(reported).getTime() || 0 : 0;
     for (const t of threads) {
       if (t.lastActivityAt) {
         const time = new Date(t.lastActivityAt).getTime();
@@ -2101,11 +2508,24 @@ export class ScionChatSpaceRail extends LitElement {
     // see — there the expansion is all this does.
     this.expandSpace(space.projectId);
     if (this.isMobileViewport()) return;
+    void this.openDefaultThread(space.projectId);
+  }
 
-    const threads = this.threadsBySpace.get(space.projectId) || [];
+  /**
+   * Open a space's #general (or first) thread, loading its list first if
+   * the space was never expanded. Gives up if the user selected something
+   * else or collapsed the space while the list loaded.
+   */
+  private async openDefaultThread(projectId: string): Promise<void> {
+    const keyAtClick = this.selectedKey;
+    if (!this.threadsBySpace.has(projectId)) {
+      await this.ensureThreads(projectId);
+      if (this.selectedKey !== keyAtClick || this.collapsedSpaces.has(projectId)) return;
+    }
+    const threads = this.threadsBySpace.get(projectId) || [];
     const target = threads.find((t) => t.isGeneral) || threads[0];
     if (target) {
-      this.handleThreadClick(target, space.projectId);
+      this.handleThreadClick(target, projectId);
     }
   }
 
@@ -2178,6 +2598,30 @@ export class ScionChatSpaceRail extends LitElement {
       if (!target.muted) this.adjustSpaceUnread(projectId, -1);
       return;
     }
+    this.refreshRollupForUnloadedThread(threadId, 'read');
+  }
+
+  /**
+   * A read-state change for a thread no loaded list holds. Its space's list
+   * may simply not have loaded yet (lists load lazily), so the space badge
+   * cannot be adjusted locally. While lists are loading, the change waits
+   * for the one holding the thread (see `applyPendingReadState`); with none
+   * loading, the rollup is refreshed from the server (reloads coalesce).
+   * With every list loaded, the thread is in no space the rail shows and
+   * there is nothing to fix.
+   */
+  private refreshRollupForUnloadedThread(threadId: string, kind: 'read' | 'unread'): void {
+    for (const threads of this.threadsBySpace.values()) {
+      if (threads.some((t) => t.id === threadId)) return;
+    }
+    if (this.spaces.every((s) => this.threadsBySpace.has(s.projectId))) return;
+    if (this.loadingThreads.size > 0) {
+      // The list holding it is probably on its way (the thread just opened);
+      // apply the change when it lands instead of reloading the whole rail.
+      this._pendingReadState.set(threadId, { kind, at: chatLoadClock() });
+      return;
+    }
+    void this.reload();
   }
 
   /** Nudge a space's unread badge, floored at zero. */
@@ -2232,6 +2676,7 @@ export class ScionChatSpaceRail extends LitElement {
       if (!target.muted) this.adjustSpaceUnread(projectId, 1);
       return;
     }
+    this.refreshRollupForUnloadedThread(threadId, 'unread');
   }
 
   /**
@@ -2256,14 +2701,11 @@ export class ScionChatSpaceRail extends LitElement {
       // A refused request leaves every watermark where it was, so clearing the
       // dots here would show the space as read until the next reload (#1029).
       if (!res.ok) return;
-      // Update all threads in this space locally
-      const threads = this.threadsBySpace.get(projectId) || [];
-      const newMap = new Map(this.threadsBySpace);
-      newMap.set(
-        projectId,
+      // Update all threads in this space locally (if its list is loaded —
+      // the badge below is the space's own and always updates).
+      this.patchThreads(projectId, (threads) =>
         threads.map((t) => ({ ...t, hasUnread: false, hasUnreadMention: false }))
       );
-      this.threadsBySpace = newMap;
       this.spaces = this.spaces.map((s) =>
         s.projectId === projectId ? { ...s, unreadCount: 0, hasUnreadMention: false } : s
       );
@@ -2488,13 +2930,7 @@ export class ScionChatSpaceRail extends LitElement {
         return;
       }
       // Remove locally
-      const threads = this.threadsBySpace.get(projectId) || [];
-      const newMap = new Map(this.threadsBySpace);
-      newMap.set(
-        projectId,
-        threads.filter((t) => t.id !== thread.id)
-      );
-      this.threadsBySpace = newMap;
+      this.patchThreads(projectId, (threads) => threads.filter((t) => t.id !== thread.id));
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to delete thread', 'danger');
     }
@@ -2580,11 +3016,15 @@ export class ScionChatSpaceRail extends LitElement {
           defaultAgent: (data.defaultAgent as string) || '',
           lastActivityAt: (data.lastActivityAt as string) || new Date().toISOString(),
         };
-        // Optimistic local state update — no re-fetch needed
-        const threads = this.threadsBySpace.get(projectId) || [];
-        const newMap = new Map(this.threadsBySpace);
-        newMap.set(projectId, [...threads, newThread]);
-        this.threadsBySpace = newMap;
+        // Optimistic local state update — no re-fetch needed once the list
+        // is loaded. If it is not, appending would publish a one-thread list
+        // as the whole space; load it instead (superseding any older load,
+        // which may predate the new thread).
+        if (this.threadsBySpace.has(projectId)) {
+          this.patchThreads(projectId, (threads) => [...threads, newThread]);
+        } else {
+          void this.loadThreads(projectId);
+        }
         // Track this topic so the SSE reload is suppressed
         this._recentlyCreatedTopicIds.add(newThread.id);
         const timer = setTimeout(() => {
@@ -2614,12 +3054,25 @@ export class ScionChatSpaceRail extends LitElement {
     threadId: string,
     update: Partial<ChatSpaceThread>
   ): void {
-    const threads = this.threadsBySpace.get(projectId) || [];
-    const newMap = new Map(this.threadsBySpace);
-    newMap.set(
-      projectId,
+    this.patchThreads(projectId, (threads) =>
       threads.map((t) => (t.id === threadId ? { ...t, ...update } : t))
     );
+  }
+
+  /**
+   * Rewrite a space's loaded thread list. A space whose list has never
+   * loaded is left alone: writing a derived list there would make it look
+   * loaded — and empty — so expanding it would skip the fetch and find no
+   * #general to open.
+   */
+  private patchThreads(
+    projectId: string,
+    update: (threads: ChatSpaceThread[]) => ChatSpaceThread[]
+  ): void {
+    const threads = this.threadsBySpace.get(projectId);
+    if (!threads) return;
+    const newMap = new Map(this.threadsBySpace);
+    newMap.set(projectId, update(threads));
     this.threadsBySpace = newMap;
   }
 
@@ -2823,6 +3276,7 @@ export class ScionChatSpaceRail extends LitElement {
   /** The space containing the currently selected thread, if any. */
   private findProjectIdForSelectedThread(): string | null {
     if (!this.selectedKey) return null;
+    if (this.selectedProjectId) return this.selectedProjectId;
     for (const [projectId, threads] of this.threadsBySpace) {
       if (threads.some((t) => t.id === this.selectedKey)) return projectId;
     }
@@ -2952,20 +3406,25 @@ export class ScionChatSpaceRail extends LitElement {
             </sl-dropdown>
           </div>
         </div>
-        ${
-          !isCollapsed
-            ? html`
-                <div class="thread-list">
-                  ${
-                    this.creatingThread === space.projectId
-                      ? this.renderCreateThread(space.projectId)
-                      : nothing
-                  }
-                  ${this.renderThreadList(threads, space.projectId)}
-                </div>
-              `
-            : nothing
-        }
+        ${!isCollapsed
+          ? html`
+              <div
+                class="thread-list"
+                aria-busy=${this.loadingThreads.has(space.projectId) ? 'true' : 'false'}
+              >
+                ${this.creatingThread === space.projectId
+                  ? this.renderCreateThread(space.projectId)
+                  : nothing}
+                ${this.loadingThreads.has(space.projectId) &&
+                !this.threadsBySpace.has(space.projectId)
+                  ? html`<div class="threads-loading" role="status">
+                      <sl-spinner aria-hidden="true"></sl-spinner>
+                      <span class="sr-only">Loading threads for ${space.projectName}</span>
+                    </div>`
+                  : this.renderThreadList(threads, space.projectId)}
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }

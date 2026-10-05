@@ -168,7 +168,7 @@ _See also_: AccessConstraint, Group, RoleBinding
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
 
 ### User Access Token (UAT)
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes). Formerly known as a *Personal Access Token (PAT)*.
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
 
 ### Quota System
 An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.

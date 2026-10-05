@@ -181,6 +181,12 @@ scion.io/auto-expose-ports-enabled: "true"
 
 If set to `true`, the Hub automatically injects `SCION_AUTO_EXPOSE_PORTS=true` into the environment of any new agent container started under that Project, unless the agent configuration explicitly defines it otherwise (agent-level settings take precedence).
 
+### Precedence
+
+The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project or template value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
+
+In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project or template, or Hub default), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project, template, and Hub default values.
+
 ---
 
 ## Security & Network Isolation

@@ -883,6 +883,8 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 **Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, and public_url without sending every field.
 
+**Masked secrets**: `GET /api/v1/admin/server-config` masks secrets (OAuth client secrets, GitHub App keys, notification channel parameters, and other credentials). A PUT may send a masked placeholder back only inside a block that exactly matches the stored block once masked; the Hub then keeps the stored secret. The block is the structure the secret sits in (for example one OAuth provider, the GitHub App, or one notification channel). To change any field of such a block, send every secret in that block in clear. Any other placeholder is rejected with `400`, so it is never stored over a real value. The admin web UI leaves unedited masked blocks out of its saves.
+
 **Maintenance durability**: `PUT /api/v1/admin/maintenance` writes to the `maintenance` section in DB, making admin/maintenance mode durable across restarts and propagated to all replicas. `SCION_SERVER_ADMINMODE` env var still force-enables per node for break-glass access. In file/SQLite mode, maintenance changes are ephemeral (in-memory only, lost on restart). Use `SCION_SERVER_ADMINMODE=true` env var for persistent control.
 
 **Schema endpoint**: `GET /api/v1/admin/server-config/schema` returns JSON-schema fragments and koanf key paths per section for UI form generation and CLI validation.
