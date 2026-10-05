@@ -967,3 +967,67 @@ func TestValidateRunID(t *testing.T) {
 		}
 	}
 }
+
+// ErrRunConflict errors carry only the fixed ErrRunConflict text (no
+// namespace, object name or run ID) and still match errors.Is.
+func TestK8sRunScope_RunConflictErrorsCarryNoIdentity(t *testing.T) {
+	const ns = "leak-namespace"
+	leaks := []string{ns, rsAgent, rsRunA, rsRunB, "scion-agent-"}
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrRunConflict) {
+			t.Fatalf("error = %v, want ErrRunConflict", err)
+		}
+		if err.Error() != ErrRunConflict.Error() {
+			t.Errorf("error text %q, want the fixed %q", err.Error(), ErrRunConflict.Error())
+		}
+		for _, l := range leaks {
+			if strings.Contains(err.Error(), l) {
+				t.Errorf("error text %q carries %q", err.Error(), l)
+			}
+		}
+	}
+	conflict := func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: action.GetResource().Resource}, rsAgent, fmt.Errorf("precondition failed"))
+	}
+	seedPod := func(t *testing.T, rt *KubernetesRuntime, phase corev1.PodPhase) {
+		t.Helper()
+		if _, err := rt.Client.Clientset.CoreV1().Pods(ns).Create(context.Background(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: ns, UID: "pod-b", Labels: rsLabels(rsRunB, "")},
+			Status:     corev1.PodStatus{Phase: phase},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedSecret := func(t *testing.T, rt *KubernetesRuntime, run string) {
+		t.Helper()
+		if _, err := rt.Client.Clientset.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: rsAgentSecret, Namespace: ns, UID: "sec", Labels: rsLabels(run, "")},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("live pod of another run", func(t *testing.T) {
+		rt, _, _, _ := newRunScopeRuntime(t)
+		seedPod(t, rt, corev1.PodRunning)
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA))
+	})
+	t.Run("pre-clean pod delete conflict", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		seedPod(t, rt, corev1.PodSucceeded)
+		cs.PrependReactor("delete", "pods", conflict)
+		check(t, rt.preCleanForRun(context.Background(), ns, rsAgent, rsRunA))
+	})
+	t.Run("existing object of another run", func(t *testing.T) {
+		rt, _, _, _ := newRunScopeRuntime(t)
+		seedSecret(t, rt, rsRunB)
+		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+	})
+	t.Run("existing object delete conflict", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		seedSecret(t, rt, rsRunA)
+		cs.PrependReactor("delete", "secrets", conflict)
+		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
+	})
+}

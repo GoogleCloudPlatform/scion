@@ -90,6 +90,14 @@ type opaqueRunScopeError struct {
 func (e *opaqueRunScopeError) Error() string { return e.msg }
 func (e *opaqueRunScopeError) Unwrap() error { return e.cause }
 
+// runConflictError logs reason with the identifying details at Warn and
+// returns ErrRunConflict with only its fixed text, so errors.Is still
+// matches and no namespace, object name or run ID reaches a client.
+func runConflictError(reason string, logArgs ...any) error {
+	runtimeLog.Warn(reason, logArgs...)
+	return &opaqueRunScopeError{msg: ErrRunConflict.Error(), cause: ErrRunConflict}
+}
+
 // opaqueStartError logs msg with the identifying details and the cause,
 // and returns an error with only msg as its text.
 func opaqueStartError(msg string, cause error, logArgs ...any) error {
@@ -298,7 +306,8 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	}
 	if pod != nil {
 		if podRun := pod.Labels[api.LabelRunID]; podRun != "" && podRun != runID && k8sPodIsLive(pod) {
-			return fmt.Errorf("%w: pod %s/%s of run %q is %s", ErrRunConflict, namespace, podName, podRun, pod.Status.Phase)
+			return runConflictError("Start refused: a live pod of another run holds the agent name",
+				"pod", podName, "namespace", namespace, "run_id", runID, "pod_run_id", podRun, "phase", pod.Status.Phase)
 		}
 	}
 
@@ -337,7 +346,8 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	case err == nil, k8serrors.IsNotFound(err):
 		return nil
 	case k8serrors.IsConflict(err):
-		return fmt.Errorf("%w: pod %s/%s was recreated by another start", ErrRunConflict, namespace, podName)
+		return runConflictError("Start refused: the agent pod was recreated by another start",
+			"pod", podName, "namespace", namespace, "run_id", runID)
 	default:
 		// Fail the start (retryable) rather than go on to a pod create
 		// that would only report the old pod as still there; a Forbidden
@@ -414,13 +424,15 @@ func (r *KubernetesRuntime) replaceExistingAgentObject(ctx context.Context, kind
 
 	for _, obj := range found {
 		if !k8sRunMatches(obj.run, runID) {
-			return fmt.Errorf("%w: %s %s/%s belongs to run %q", ErrRunConflict, kind, namespace, name, obj.run)
+			return runConflictError("Start refused: an existing agent object belongs to another run",
+				"kind", kind, "name", name, "namespace", namespace, "run_id", runID, "object_run_id", obj.run)
 		}
 		err := del(metav1.DeleteOptions{Preconditions: k8sUIDPrecondition(obj.uid)})
 		switch {
 		case err == nil, k8serrors.IsNotFound(err):
 		case k8serrors.IsConflict(err):
-			return fmt.Errorf("%w: %s %s/%s was recreated by another start", ErrRunConflict, kind, namespace, name)
+			return runConflictError("Start refused: an existing agent object was recreated by another start",
+				"kind", kind, "name", name, "namespace", namespace, "run_id", runID)
 		default:
 			return opaqueStartError("failed to delete the existing agent "+kind, err, "name", name, "namespace", namespace, "run_id", runID)
 		}
