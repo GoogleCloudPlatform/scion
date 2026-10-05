@@ -483,7 +483,7 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // brokerLookupSwapStore wraps a store and runs onLookup, once, on the first
-// GetRuntimeBrokerByName call made by the registration service's own
+// GetRuntimeBrokerByName call issued by the registration service's own
 // lookup (its context carries the marker set by createBrokerRegistration).
 // The handler's authorization lookup carries no marker and reaches the
 // wrapped store, however many lookups either side performs.
