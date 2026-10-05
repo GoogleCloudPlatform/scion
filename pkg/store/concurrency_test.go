@@ -86,6 +86,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockBrokerQuotaReconcile,
 		LockReincarnationSweep,
 		LockConduitRegistryReap,
+		LockStartClaimReaper,
 		LockAgentLaunchDeadline,
 	}
 
@@ -167,6 +168,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockRecoveryAuthz", LockRecoveryAuthz},
 		{"LockReincarnationSweep", LockReincarnationSweep},
 		{"LockConduitRegistryReap", LockConduitRegistryReap},
+		{"LockStartClaimReaper", LockStartClaimReaper},
 		// Per-object class IDs (different range, but must not collide
 		// with singletons or each other).
 		{"LockWorkspaceProvision", LockWorkspaceProvision},
