@@ -29,7 +29,8 @@ import (
 // Creates a new broker registration with join token.
 // Requires an authenticated user holding broker.create, presenting an
 // interactive session or a dev credential (see authorizeBrokerCreate);
-// broker on-behalf-of credentials are not admitted. This route is
+// broker on-behalf-of credentials are not admitted. Turning on auto-provide
+// additionally requires broker.auto_provide. This route is
 // classified RouteBrokerHMAC in route_metadata.go, so the permission check
 // happens in-handler rather than at the route guard.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +127,18 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Turning auto-provide on offers the broker to every project on the
+	// hub, so it needs broker.auto_provide in addition to registration.
+	// Keeping an existing auto-provide setting, or turning it off, needs
+	// nothing extra.
+	// ptone/scion#2107: a preserveSettings request writes no settings and
+	// joins this condition as "&& !req.PreserveSettings".
+	if req.AutoProvide && (existingBroker == nil || !existingBroker.AutoProvide) {
+		if !s.authorizeBrokerAutoProvide(w, r) {
+			return
+		}
+	}
+
 	// Create the broker registration. Pin the mutation to what was just
 	// authorized above, so a lookup race between the authorization check
 	// and this call cannot redirect it onto a broker the caller was not
@@ -193,6 +206,21 @@ func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) b
 		return false
 	}
 	return s.authorize(w, r, resource, ActionCreate)
+}
+
+// authorizeBrokerAutoProvide reports whether the caller may turn on a
+// broker's auto-provide setting, which offers the broker to every project
+// on the hub. The caller must present an admitted user credential (see
+// requireUserCredentialKind) and hold broker.auto_provide (granted to
+// super-admins). broker.auto_provide has no user access token selector, so
+// a user access token is denied by its ceiling. Writes 401/403 and returns
+// false when the caller is not allowed.
+func (s *Server) authorizeBrokerAutoProvide(w http.ResponseWriter, r *http.Request) bool {
+	resource := Resource{Type: "broker"}
+	if !s.requireUserCredentialKind(w, r, resource, ActionAutoProvide, true) {
+		return false
+	}
+	return s.authorize(w, r, resource, ActionAutoProvide)
 }
 
 // brokerUserCredentialKindAdmitted reports whether the request credential

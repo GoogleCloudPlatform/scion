@@ -90,6 +90,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// broker.* — user-owned hub resource, not project-contained.
 	"broker.create": false, "broker.read": false, "broker.update": false,
 	"broker.delete": false, "broker.list": false, "broker.dispatch": false,
+	"broker.auto_provide": false,
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope: create
 	// has no existing SA yet, list is the hub collection view, and mint (a

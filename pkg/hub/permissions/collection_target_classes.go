@@ -136,11 +136,12 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"policy.create": {TargetClassKindHubResource}, "policy.read": {},
 	"policy.update": {}, "policy.delete": {}, "policy.list": {TargetClassKindHubResource},
 
-	// broker.* — create/list are CapabilityScope; everything else
+	// broker.* — create/list/auto_provide are CapabilityScope; everything else
 	// (including dispatch, which targets an existing broker) does not.
 	"broker.create": {TargetClassKindHubResource}, "broker.read": {},
 	"broker.update": {}, "broker.delete": {},
 	"broker.list": {TargetClassKindHubResource}, "broker.dispatch": {},
+	"broker.auto_provide": {TargetClassKindHubResource},
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope, hub-wide.
 	// assign is CapabilityResource, confirmed against its actual

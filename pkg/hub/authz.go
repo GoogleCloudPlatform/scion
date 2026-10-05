@@ -74,6 +74,10 @@ const (
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
 
+	// ActionAutoProvide gates turning on a broker's auto-provide setting
+	// (broker.auto_provide).
+	ActionAutoProvide Action = "auto_provide"
+
 	// ActionDeliver and ActionUse distinguish launch-time material delivery
 	// from an agent's own runtime retrieval or token-mint request. Neither
 	// is listed in isReadOnlyOperation: a material decision always runs the

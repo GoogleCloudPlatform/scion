@@ -130,7 +130,7 @@ Examples:
   # Force re-registration even if already registered
   scion runtime-broker register --force
 
-  # Register with auto-provide enabled
+  # Register with auto-provide enabled (requires broker.auto_provide)
   scion runtime-broker register --auto-provide`,
 	RunE: runBrokerRegister,
 }
@@ -343,7 +343,7 @@ func init() {
 
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
-	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
+	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects (requires the broker.auto_provide permission, held by super-admins)")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
@@ -542,6 +542,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
 		if err != nil {
+			if brokerAutoProvide && apiclient.IsForbiddenError(err) {
+				return fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
+			}
 			return fmt.Errorf("failed to create broker registration: %w", err)
 		}
 
