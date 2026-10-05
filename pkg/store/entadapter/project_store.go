@@ -468,6 +468,19 @@ func (s *ProjectStore) DeleteProject(ctx context.Context, id string) error {
 
 // ListProjects returns projects matching the filter criteria.
 func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, true)
+}
+
+// ListProjectSummaries returns the projects ListProjects would return for
+// the same filter and options, without populateProjectComputed's
+// per-project queries.
+func (s *ProjectStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, false)
+}
+
+// listProjects implements ListProjects and ListProjectSummaries; computed
+// selects whether each row is enriched by populateProjectComputed.
+func (s *ProjectStore) listProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions, computed bool) (*store.ListResult[store.Project], error) {
 	query := s.client.Project.Query()
 
 	// Membership / ownership filtering mirrors the SQLite precedence:
@@ -610,8 +623,10 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	items := make([]store.Project, 0, len(rows))
 	for _, p := range rows {
 		sp := entProjectToStore(p)
-		if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
-			return nil, err
+		if computed {
+			if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
+				return nil, err
+			}
 		}
 		items = append(items, *sp)
 	}

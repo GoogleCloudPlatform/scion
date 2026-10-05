@@ -155,21 +155,88 @@ func TestBrokerQuota_SoftDeleteReleasesThenReconcileNoUnderflow(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// Restart of a STOPPED agent
-// on a full broker must be refused with 429 before any start dispatch.
-func TestBrokerQuota_RestartAtCapRejected_NoDispatch(t *testing.T) {
-	srv, s := testServer(t)
-	disp := &quotaLifecycleDispatcher{}
-	srv.SetDispatcher(disp)
-	setBrokerAgentCeiling(t, s, 1)
-	broker, project := newQuotaTestBrokerAndProject(t, s, "bq-restart")
-	held := newQuotaTestAgent(t, s, broker, project, "bq-restart-held", state.PhaseRunning)
-	reserveBrokerSlot(t, s, broker, held.ID)
-	cand := newQuotaTestAgent(t, s, broker, project, "bq-restart-cand", state.PhaseStopped)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+cand.ID+"/restart", nil)
-	assertBrokerQuotaExceeded(t, rec)
-	assert.EqualValues(t, 0, disp.startCount.Load(), "restart at cap must not dispatch a start")
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+// ptone/scion#2010: a restart on a full broker is refused with 429 before
+// either leg is dispatched. For an agent that does not hold a reservation
+// (a stopped agent, or a running agent left without one) that means no stop,
+// no start, the phase unchanged and no run intent recorded.
+func TestBrokerQuota_RestartAtCapRejected_NoStopNoStart(t *testing.T) {
+	for _, phase := range []state.Phase{state.PhaseStopped, state.PhaseRunning} {
+		t.Run(string(phase), func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &quotaLifecycleDispatcher{}
+			srv.SetDispatcher(disp)
+			setBrokerAgentCeiling(t, s, 1)
+			sfx := "bq-restart-" + string(phase)
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			held := newQuotaTestAgent(t, s, broker, project, sfx+"-held", state.PhaseRunning)
+			reserveBrokerSlot(t, s, broker, held.ID)
+			cand := newQuotaTestAgent(t, s, broker, project, sfx+"-cand", phase)
+			before, err := s.GetAgent(context.Background(), cand.ID)
+			require.NoError(t, err)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+cand.ID+"/restart", nil)
+			assertBrokerQuotaExceeded(t, rec)
+			assert.EqualValues(t, 0, disp.stopCount.Load(), "restart at cap must not dispatch the stop leg")
+			assert.EqualValues(t, 0, disp.startCount.Load(), "restart at cap must not dispatch a start")
+			assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+			assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, cand.ID))
+
+			got, err := s.GetAgent(context.Background(), cand.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(phase), got.Phase, "phase unchanged")
+			assert.Equal(t, before.RunIntent, got.RunIntent, "run intent unchanged")
+			assert.Equal(t, before.RunIntentAt, got.RunIntentAt, "run intent not rewritten")
+		})
+	}
+}
+
+// runtimeUnavailableStopDispatcher answers the stop leg with the broker's
+// runtime_unavailable 503, which ends a restart before its start leg.
+type runtimeUnavailableStopDispatcher struct {
+	quotaLifecycleDispatcher
+}
+
+func (d *runtimeUnavailableStopDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	d.stopCount.Add(1)
+	return runtimeUnavailableErr()
+}
+
+// ptone/scion#2010: the restart reserves before its stop leg, so when the
+// stop leg ends the restart early (runtime_unavailable) the reservation the
+// restart created is rolled back, and one the agent already held is kept.
+func TestBrokerQuota_RestartStopLegErrorRollsBackReservation(t *testing.T) {
+	for _, tc := range []struct {
+		phase    state.Phase
+		reserved bool
+	}{{state.PhaseStopped, false}, {state.PhaseRunning, true}} {
+		t.Run(string(tc.phase), func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &runtimeUnavailableStopDispatcher{}
+			srv.SetDispatcher(disp)
+			setBrokerAgentCeiling(t, s, 2)
+			sfx := "bq-restart-stoperr-" + string(tc.phase)
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			a := newQuotaTestAgent(t, s, broker, project, sfx, tc.phase)
+			if tc.reserved {
+				reserveBrokerSlot(t, s, broker, a.ID)
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			assert.EqualValues(t, 1, disp.stopCount.Load())
+			assert.EqualValues(t, 0, disp.startCount.Load())
+			assert.Equal(t, tc.reserved, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID),
+				"only a reservation the restart created is rolled back")
+			want := int64(0)
+			if tc.reserved {
+				want = 1
+			}
+			assert.EqualValues(t, want, brokerReservationCount(t, s, broker.ID))
+			got, err := s.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.phase), got.Phase, "the phase is restored")
+		})
+	}
 }
 
 // Restart with a free slot succeeds and
