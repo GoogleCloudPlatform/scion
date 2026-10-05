@@ -54,6 +54,8 @@ const apiFetch = vi.fn();
 
 const navigateToMock = vi.fn();
 
+const extractApiErrorMock = vi.fn((_res: unknown, _fallback: string) => Promise.resolve('error'));
+
 vi.mock('../../../client/main.js', () => ({
   get navigateTo() {
     return navigateToMock;
@@ -65,7 +67,7 @@ vi.mock('../../../client/main.js', () => ({
 
 vi.mock('../../../client/api.js', () => ({
   apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
-  extractApiError: () => Promise.resolve('error'),
+  extractApiError: (res: unknown, fallback: string) => extractApiErrorMock(res, fallback),
 }));
 
 await import('./chat-thread.js');
@@ -7046,6 +7048,37 @@ describe('scion-chat-thread work finishing after a conversation switch', () => {
     expect(startStream).not.toHaveBeenCalled();
     expect(internals.loading).toBe(true);
     expect(consumed).not.toHaveBeenCalled();
+  });
+
+  it('a stale initial load error is not shown on the next conversation', async () => {
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    // The next conversation's own history stays pending.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    await switchConversation(el);
+
+    releaseError('stale failure');
+    await flush();
+
+    expect((el as unknown as { error: string | null }).error).toBeNull();
+  });
+
+  it('an initial load error in the same conversation is shown', async () => {
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() => expect((el as unknown as { error: string | null }).error).toBe('error'));
   });
 
   it('a stale older page does not shift the new conversation’s scroll position', async () => {

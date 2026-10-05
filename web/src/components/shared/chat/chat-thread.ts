@@ -1673,7 +1673,10 @@ export class ScionChatThread extends LitElement {
       // Fetch own read watermark for the unread divider.
       await this.fetchOwnReadState();
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to load messages';
+      // An error read after a switch belongs to the conversation left.
+      if (loadId === this.fetchId) {
+        this.error = err instanceof Error ? err.message : 'Failed to load messages';
+      }
     } finally {
       // The loading flag, the restore anchor, the scroll target and the
       // watermark timer all belong to the conversation now on screen.
