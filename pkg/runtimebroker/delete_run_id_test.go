@@ -144,9 +144,9 @@ func TestDeleteAgent_RunIDWithLegacyUnlabelledContainer_Deletes(t *testing.T) {
 	}
 }
 
-// A file-only agent (no runtime entry at all) is deleted as before when a
-// runId is sent: there is no other run's entry to protect. (The window
-// where a newer run has files but no container yet is ptone/scion#2675.)
+// A file-only agent (no runtime entry at all) whose files record no run
+// (legacy) is deleted as before when a runId is sent. Files recorded as a
+// newer run's are kept (ptone/scion#2675, delete_run_files_test.go).
 func TestDeleteAgent_RunIDFileOnlyAgent_DeletesFiles(t *testing.T) {
 	mgr := &filteringMockManager{}
 	srv, home := newScopeTestServer(t, mgr)
