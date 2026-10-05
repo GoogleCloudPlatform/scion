@@ -43,9 +43,14 @@ import (
 // (ApplySnapshot). Writing them to settings.yaml would not help either: the
 // DB-built snapshot never carries them. Until that is fixed they are rejected
 // in every mode rather than silently dropped.
+//
+// server.federation is the same case: the request type has a federation
+// block under server, which classifies as the Layer-1 federation section,
+// but only the top-level federation field is mapped.
 var dbUnwrittenLayer1Paths = [][]string{
 	{"default_max_agent_role"},
 	{"default_agent_role"},
+	{"server", "federation"},
 }
 
 // dbFileOnlyRequestPaths lists ServerConfigUpdateRequest JSON paths that
@@ -59,7 +64,6 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "scheduler"},
 	{"server", "oidc_login"},
 	{"server", "oidc"},
-	{"server", "federation"},
 	{"server", "hub", "agent_endpoint"},
 	{"server", "hub", "gcp_iam_check_mode"},
 	{"server", "hub", "gcp_iam_deny_unknown_policy"},

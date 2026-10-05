@@ -23,14 +23,18 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -173,12 +177,15 @@ func TestWorkstation_PutServerConfig_MixedSplit(t *testing.T) {
 			t.Errorf("reload.applied = %v, want %q", resp.Reload.Applied, want)
 		}
 	}
-	wantRestart := []string{"active_profile", "server.broker", "server.hub.port"}
+	// server.broker.enabled was already true: unchanged, so neither written
+	// nor reported.
+	wantRestart := []string{"active_profile", "server.broker.port", "server.hub.port"}
 	if !reflect.DeepEqual(resp.Reload.RequiresRestart, wantRestart) {
 		t.Errorf("reload.requires_restart = %v, want %v", resp.Reload.RequiresRestart, wantRestart)
 	}
-	if !containsString(resp.FileKeys, "auto_inject_gcloud_adc") || !containsString(resp.FileKeys, "server.log_level") {
-		t.Errorf("file_keys = %v, want the file-routed keys", resp.FileKeys)
+	wantFile := []string{"active_profile", "auto_inject_gcloud_adc", "server.broker.port", "server.hub.port", "server.log_level"}
+	if !reflect.DeepEqual(resp.FileKeys, wantFile) {
+		t.Errorf("file_keys = %v, want %v", resp.FileKeys, wantFile)
 	}
 	noTempSettingsFiles(t, settingsPath)
 }
@@ -198,11 +205,213 @@ func TestWorkstation_PutServerConfig_Layer0Only(t *testing.T) {
 	if got := yamlAt(readYAMLMap(t, settingsPath), "server", "database", "driver"); got != "postgres" {
 		t.Errorf("settings.yaml server.database.driver = %v, want postgres", got)
 	}
-	if !reflect.DeepEqual(resp.Reload.RequiresRestart, []string{"server.database"}) {
-		t.Errorf("requires_restart = %v, want [server.database]", resp.Reload.RequiresRestart)
+	if want := []string{"server.database.driver", "server.database.url"}; !reflect.DeepEqual(resp.Reload.RequiresRestart, want) {
+		t.Errorf("requires_restart = %v, want %v", resp.Reload.RequiresRestart, want)
 	}
 	if after := hubSettingRevisions(t, st); !reflect.DeepEqual(after, rowsBefore) {
 		t.Errorf("a Layer-0-only PUT must not write the DB:\nbefore: %v\nafter:  %v", rowsBefore, after)
+	}
+}
+
+const workstationClearFixture = `# workstation settings
+schema_version: "1"
+server:
+  log_format: json
+  auth:
+    dev_mode: true
+  broker:
+    enabled: true # co-located broker
+    port: 9810
+    broker_id: b-123
+    broker_token: tok-secret
+  message_broker:
+    enabled: true
+    type: inprocess
+  storage:
+    provider: gcs
+    bucket: my-bucket
+`
+
+// Review r2 finding 1: on a workstation hub an explicit false, "" or zero
+// in the body clears the value (omitempty fields lose the key); leaves the
+// body does not carry are kept. Each row also checks the response names the
+// changed leaves.
+func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		absent   [][]string
+		want     map[string]interface{}
+		fileKeys []string
+	}{
+		{
+			name:     "dev_mode false",
+			body:     `{"server":{"auth":{"dev_mode":false}}}`,
+			absent:   [][]string{{"server", "auth", "dev_mode"}},
+			fileKeys: []string{"server.auth.dev_mode"},
+		},
+		{
+			name:     "message_broker disabled",
+			body:     `{"server":{"message_broker":{"enabled":false}}}`,
+			absent:   [][]string{{"server", "message_broker", "enabled"}},
+			want:     map[string]interface{}{"server.message_broker.type": "inprocess"},
+			fileKeys: []string{"server.message_broker.enabled"},
+		},
+		{
+			// What the admin page sends when the switch is turned off.
+			name:     "UI message_broker switch-off",
+			body:     `{"server":{"message_broker":{"enabled":false,"type":"inprocess"}}}`,
+			absent:   [][]string{{"server", "message_broker", "enabled"}},
+			fileKeys: []string{"server.message_broker.enabled"},
+		},
+		{
+			name:     "log_format cleared",
+			body:     `{"server":{"log_format":""}}`,
+			absent:   [][]string{{"server", "log_format"}},
+			fileKeys: []string{"server.log_format"},
+		},
+		{
+			name:   "broker disabled with a new port; hub-owned identity survives",
+			body:   `{"server":{"broker":{"enabled":false,"port":9800}}}`,
+			absent: [][]string{{"server", "broker", "enabled"}},
+			want: map[string]interface{}{
+				"server.broker.port":         9800,
+				"server.broker.broker_id":    "b-123",
+				"server.broker.broker_token": "tok-secret",
+			},
+			fileKeys: []string{"server.broker.enabled", "server.broker.port"},
+		},
+		{
+			name:     "storage provider changed, bucket kept when not sent",
+			body:     `{"server":{"storage":{"provider":"local"}}}`,
+			want:     map[string]interface{}{"server.storage.provider": "local", "server.storage.bucket": "my-bucket"},
+			fileKeys: []string{"server.storage.provider"},
+		},
+		{
+			name:     "storage bucket cleared explicitly",
+			body:     `{"server":{"storage":{"provider":"local","bucket":""}}}`,
+			absent:   [][]string{{"server", "storage", "bucket"}},
+			want:     map[string]interface{}{"server.storage.provider": "local"},
+			fileKeys: []string{"server.storage.bucket", "server.storage.provider"},
+		},
+		{
+			name:     "null removes a block",
+			body:     `{"server":{"storage":null}}`,
+			absent:   [][]string{{"server", "storage"}},
+			fileKeys: []string{"server.storage"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			settingsPath := tempSettingsHome(t)
+			if err := os.WriteFile(settingsPath, []byte(workstationClearFixture), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			srv, _, _ := newSQLiteHubInMode(t, true, nil)
+			rr := putServerConfig(t, srv, tc.body)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+			resp := decodePut(t, rr)
+			if !reflect.DeepEqual(resp.FileKeys, tc.fileKeys) {
+				t.Errorf("file_keys = %v, want %v", resp.FileKeys, tc.fileKeys)
+			}
+			m := readYAMLMap(t, settingsPath)
+			for _, p := range tc.absent {
+				if v := yamlAt(m, p...); v != nil {
+					t.Errorf("%s = %v, want it removed", strings.Join(p, "."), v)
+				}
+			}
+			for k, want := range tc.want {
+				if got := yamlAt(m, strings.Split(k, ".")...); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s = %v, want %v", k, got, want)
+				}
+			}
+			if data := readFileString(t, settingsPath); !strings.Contains(data, "# workstation settings") {
+				t.Errorf("comments must survive the edit:\n%s", data)
+			}
+		})
+	}
+}
+
+// Review r2 N2: a pure echo of the GET body writes nothing and reports
+// nothing as requires_restart.
+func TestWorkstation_PutServerConfig_EchoWritesNothing(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	getRR := httptest.NewRecorder()
+	srv.handleAdminServerConfig(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+	before := readFileString(t, settingsPath)
+	fi, _ := os.Stat(settingsPath)
+
+	rr := putServerConfig(t, srv, getRR.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("echo: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := decodePut(t, rr)
+	if len(resp.Reload.RequiresRestart) != 0 || len(resp.FileKeys) != 0 {
+		t.Errorf("echo reported requires_restart=%v file_keys=%v, want none", resp.Reload.RequiresRestart, resp.FileKeys)
+	}
+	fi2, _ := os.Stat(settingsPath)
+	if after := readFileString(t, settingsPath); after != before || !fi2.ModTime().Equal(fi.ModTime()) {
+		t.Errorf("echo rewrote settings.yaml:\n%s", after)
+	}
+}
+
+// Review r2 N1: a broker-token write (config.UpdateSetting, as broker
+// registration does) racing a workstation PUT must not lose either update,
+// and the lock order must not deadlock against the DB writes or the
+// workstation-settings PATCH.
+func TestWorkstation_PutServerConfig_ConcurrentSettingsWriters(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	globalDir := filepath.Dir(settingsPath)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10; i++ {
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func(i int) {
+				defer wg.Done()
+				rr := putServerConfig(t, srv, fmt.Sprintf(`{"quotas":{"enforce_broker_quotas":%v},"server":{"hub":{"port":%d}}}`, i%2 == 0, 9000+i))
+				if rr.Code != http.StatusOK {
+					t.Errorf("PUT %d: %d %s", i, rr.Code, rr.Body.String())
+				}
+			}(i)
+			go func(i int) {
+				defer wg.Done()
+				if err := config.UpdateSetting(globalDir, "hub.brokerToken", fmt.Sprintf("tok-%d", i), true); err != nil {
+					t.Errorf("UpdateSetting %d: %v", i, err)
+				}
+			}(i)
+			go func(i int) {
+				defer wg.Done()
+				rr := httptest.NewRecorder()
+				srv.handleWorkstationSettings(rr, adminRequest(http.MethodPatch, "/api/v1/system/workstation-settings",
+					fmt.Sprintf(`{"auto_inject_gcloud_adc":%v}`, i%2 == 0)))
+				if rr.Code != http.StatusOK {
+					t.Errorf("PATCH %d: %d %s", i, rr.Code, rr.Body.String())
+				}
+			}(i)
+			wg.Wait()
+			m := readYAMLMap(t, settingsPath)
+			if got := yamlAt(m, "server", "hub", "port"); got != 9000+i {
+				t.Errorf("round %d: server.hub.port = %v, want %d (PUT lost)", i, got, 9000+i)
+			}
+			if got := yamlAt(m, "server", "broker", "broker_token"); got != fmt.Sprintf("tok-%d", i) {
+				t.Errorf("round %d: broker_token = %v, want tok-%d (token write lost)", i, got, i)
+			}
+			if got := yamlAt(m, "auto_inject_gcloud_adc"); (got == true) != (i%2 == 0) {
+				t.Errorf("round %d: auto_inject_gcloud_adc = %v (PATCH lost)", i, got)
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("concurrent settings writers deadlocked")
 	}
 }
 
@@ -356,5 +565,31 @@ func TestMaintenanceBreakGlass_ByMode(t *testing.T) {
 				t.Errorf("GET = %+v, want enabled=%v break_glass=%v", got, tc.wantEnabled, tc.workstation)
 			}
 		})
+	}
+}
+
+// Review r2 finding 2: the workstation UI now sends buildLayer1Payload's
+// explicit empties for Layer-1 fields; the DB must clear them, and none of
+// them may leak into settings.yaml.
+func TestWorkstation_PutServerConfig_ClearsLayer1Values(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, st, _ := newSQLiteHubInMode(t, true, map[string]string{
+		"access":    `{"admin_emails":["seed-admin@example.com"],"authorized_domains":["example.com"]}`,
+		"endpoints": `{"public_url":"https://hub.example.com"}`,
+	})
+	before := readFileString(t, settingsPath)
+
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"public_url":""},"auth":{"authorized_domains":[]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, doc := hubSettingDocMap(t, st, "access"); doc["authorized_domains"] != nil && len(doc["authorized_domains"].([]interface{})) != 0 {
+		t.Errorf("access.authorized_domains = %v, want cleared", doc["authorized_domains"])
+	}
+	if _, doc := hubSettingDocMap(t, st, "endpoints"); doc["public_url"] != nil && doc["public_url"] != "" {
+		t.Errorf("endpoints.public_url = %v, want cleared", doc["public_url"])
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("Layer-1 clears must not touch settings.yaml:\n%s", after)
 	}
 }
