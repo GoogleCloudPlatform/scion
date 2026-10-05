@@ -784,12 +784,6 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			HTTPStatus: 400,
 		}
 	}
-	// Project members groups cannot be granted roles. Checked before the
-	// transaction: the marker annotations cannot be changed through the API.
-	if isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
-		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
-	}
-
 	// Governance check.
 	decision := svc.checkGovernance(ctx, req, roleDef.Name)
 	if !decision.Allowed {
@@ -808,6 +802,14 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if !delDecision.Allowed {
 			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
 		}
+	}
+
+	// Project members groups cannot be granted roles. Checked after the
+	// actor is authorized (so the refusal is only visible to callers who may
+	// manage this project) and before the transaction: the marker
+	// annotations cannot be changed through the API.
+	if isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
 	}
 
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the

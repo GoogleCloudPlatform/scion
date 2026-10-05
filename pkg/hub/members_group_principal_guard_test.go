@@ -248,6 +248,32 @@ func TestMembersGroupPrincipalGuard_AdminRoleBindingRefused(t *testing.T) {
 	}
 }
 
+// POST /admin/role-bindings with a built-in project role is authorized by the
+// membership service. An actor with no role on the project gets the ordinary
+// 403 for a members-group principal, not the members-group refusal, and the
+// body does not name the group.
+func TestMembersGroupPrincipalGuard_AdminRoleBindingUnauthorizedActor(t *testing.T) {
+	for kind := range markerKeys() {
+		t.Run(kind, func(t *testing.T) {
+			f := setupMembersGroupGuardFixture(t)
+			g := f.markedGroups()[kind]
+			require.Empty(t, f.srv.membershipService.projectEffectiveRole(context.Background(), f.creator.ID, f.y.ID),
+				"the actor must hold no role on Y")
+			rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, "/api/v1/admin/role-bindings",
+				map[string]interface{}{
+					"principalType": "group", "principalId": g.Slug,
+					"roleDefinitionId": projectRoleDef(t, f.s, store.ProjectRoleAdmin).ID,
+					"scopeType":        store.RoleScopeProject, "scopeId": f.y.ID,
+				})
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			_, details := errorBody(t, rec)
+			assert.NotContains(t, details, "groupId", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), g.ID, "the body must not name the group")
+			requireNoGroupBindings(t, f.s, g.ID)
+		})
+	}
+}
+
 // POST /groups/{G}/members nesting a members group, by ID and by slug.
 func TestMembersGroupPrincipalGuard_NestedGroupRefused(t *testing.T) {
 	for kind := range markerKeys() {
