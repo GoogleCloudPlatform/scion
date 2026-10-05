@@ -282,8 +282,10 @@ func TestLastOwner_NoUsableOwner_RemoveGhostKeepsExpired(t *testing.T) {
 
 // N3 of review r1: I2 counts owner bindings of any principal. A group
 // owner binding that is the project's last owner binding cannot be removed.
-// The store refuses new non-user owner bindings (ErrDirectUserOnly), so the
-// binding is inserted with raw SQL, as a legacy row would exist.
+// No code path writes a non-user owner binding: CreateRoleBinding has refused
+// one (ErrDirectUserOnly) since GoogleCloudPlatform/scion#1435. The binding is
+// therefore inserted with raw SQL, standing for a direct database write, and
+// the test guards the any-principal floor as defence in depth.
 func TestLastOwner_LastGroupOwnerBindingKept(t *testing.T) {
 	srv, s, projectID, hubAdmin := newNoOwnerProject(t)
 	ctx := context.Background()
