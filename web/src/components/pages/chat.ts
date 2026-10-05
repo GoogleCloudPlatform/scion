@@ -2561,14 +2561,14 @@ export class ScionPageChat extends LitElement {
     // earlier lookup's own push changes it without the user doing anything.
     const startSeq = this._userNavSeq;
     const superseded = (): boolean =>
-      opts.fromRoute
+      opts?.fromRoute
         ? !this.routeNamesDMPeer(peerId) ||
           (!!this.v2Conversation?.isDM && this.v2Conversation.peerId === peerId)
         : this._userNavSeq !== startSeq;
     // A DM the user opened gets its own URL, as openDM gives it when the key
     // is known; otherwise the next re-parse of the old route would close it.
     const pushIfOpenedByUser = (dmKey: string): void => {
-      if (!opts.fromRoute) this.pushDMPath(dmKey);
+      if (!opts?.fromRoute) this.pushDMPath(dmKey);
     };
 
     // 1. Try to find an existing DM via the DM list API (no user ID needed).
@@ -2578,7 +2578,7 @@ export class ScionPageChat extends LitElement {
       // it falls through to the steps below, which build the key without
       // the list. A DM the user opens fetches afresh: it may be brand new.
       const body = await chatDMsLoad.load(
-        opts.fromRoute ? { maxAgeMs: CHAT_STARTUP_REUSE_MS } : {}
+        opts?.fromRoute ? { maxAgeMs: CHAT_STARTUP_REUSE_MS } : {}
       );
       if (body) {
         const data = body as {
