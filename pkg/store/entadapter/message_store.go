@@ -292,21 +292,23 @@ func encodeListCursor(created time.Time, id, binding string) string {
 }
 
 func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
+	// Every failure wraps store.ErrInvalidInput: a malformed or mismatched
+	// cursor is caller error, which the hub maps to HTTP 400 rather than 500.
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
 	}
 	parts := strings.SplitN(string(raw), ",", 3)
 	if len(parts) < 2 || (binding == "" && len(parts) != 2) || (binding != "" && (len(parts) != 3 || parts[2] != binding)) {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("cursor does not match this list")
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: cursor does not match this list", store.ErrInvalidInput)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse timestamp: %w", err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidInput, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
 	}
 	return ts, id, nil
 }
