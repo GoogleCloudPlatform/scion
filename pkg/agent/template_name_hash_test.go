@@ -417,7 +417,7 @@ profiles:
 			}); err != nil {
 				t.Fatalf("named-template Start: %v", err)
 			}
-			if captured.UnixUsername == "localuser" || captured.NoAuthMessage == "from-local-template" {
+			if captured.UnixUsername != "globaluser" || captured.NoAuthMessage == "from-local-template" {
 				t.Errorf("named-template start used the local %q template's harness-config (user %q, no-auth message %q)", "web-dev", captured.UnixUsername, captured.NoAuthMessage)
 			}
 
