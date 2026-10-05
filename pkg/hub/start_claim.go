@@ -73,6 +73,10 @@ func startOutcomeOf(err error) startOutcome {
 	}
 	var incomplete *AgentCreateIncompleteError
 	var tokenErr *agentTokenIssueError
+	// errStartClaimLost is listed as released, but a lost claim is never
+	// settled by its holder (finish writes nothing once lost), so the
+	// classification only reaches callers, which treat the start as possibly
+	// running.
 	var stillMissing *ErrEnvStillMissing
 	var quotaErr *startQuotaError
 	if errors.Is(err, errStartedStatusWrite) {
@@ -254,8 +258,9 @@ func (r *startClaimRun) renewLoop() {
 			return
 		}
 		if r.ctx.Err() != nil {
-			// The start deadline passed (or the claim was cancelled): stop
-			// renewing. A dispatch that ignores its context keeps running,
+			// The start deadline passed: the run context is detached from
+			// the triggering request, so only the deadline, a loss
+			// (markLost) or finish cancels it. Stop renewing. A dispatch that ignores its context keeps running,
 			// but the lease lapses and the reaper makes the claim
 			// unconfirmed.
 			r.markLost("start deadline passed")
@@ -496,7 +501,14 @@ func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim
 	defer cancel()
 	stop, err := s.store.ClaimAgentStop(stopCtx, agent.ID, s.instanceID, *cur.RunIntentAt, s.startClaimSettings().LeaseTTL)
 	if err != nil {
-		return // a newer start or stop since: nothing to compensate
+		var held *store.ClaimHeldError
+		if !errors.Is(err, store.ErrClaimPredicate) && !errors.As(err, &held) {
+			// The claim could not be read or written. The agent is left to
+			// the hub's backstop, which stops an agent the broker reports
+			// running with run intent stopped and no claim.
+			slog.Warn("Compensating stop skipped: its claim could not be taken; the backstop stop applies", "agent_id", agent.ID, "error", err)
+		}
+		return // otherwise a newer start or stop since: nothing to compensate
 	}
 	defer func() {
 		if _, err := s.store.ReleaseAgentStart(bg, agent.ID, stop.ID, s.instanceID); err != nil {

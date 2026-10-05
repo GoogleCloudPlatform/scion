@@ -865,3 +865,29 @@ func TestStartClaim_AbandonedDeleteDoesNotRefuse(t *testing.T) {
 	_, err = s.ClaimAgentStart(ctx, a.ID, "hub", store.StartClaimUser, "", testClaimTTL)
 	require.NoError(t, err, "a delete whose lease expired does not hold the row")
 }
+
+func TestStartClaim_ConvertUnconfirmedToStop(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-convert")
+	c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "docker", testClaimTTL)
+	require.NoError(t, err)
+	_, err = s.ConvertUnconfirmedToStop(ctx, a.ID, c.ID, "reaper", testClaimTTL)
+	require.ErrorIs(t, err, store.ErrClaimPredicate, "a live claim is not converted")
+	_, err = s.MarkStartUnconfirmed(ctx, a.ID, c.ID, "hub-1", time.Hour)
+	require.NoError(t, err)
+	_, err = s.ConvertUnconfirmedToStop(ctx, a.ID, "other", "reaper", testClaimTTL)
+	require.ErrorIs(t, err, store.ErrClaimPredicate, "a different claim is not converted")
+
+	stop, err := s.ConvertUnconfirmedToStop(ctx, a.ID, c.ID, "reaper", testClaimTTL)
+	require.NoError(t, err)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stop.ID, got.StartClaimID)
+	assert.Equal(t, store.StartClaimStop, got.StartClaimKind)
+	assert.Equal(t, store.StartClaimLive, got.StartClaimState)
+	assert.Equal(t, "docker", got.StartClaimTarget, "the expected target is kept for the observations")
+	_, err = s.ClaimAgentStart(ctx, a.ID, "user", store.StartClaimUser, "", testClaimTTL)
+	var held *store.ClaimHeldError
+	require.ErrorAs(t, err, &held, "no start can claim the agent while the stop runs")
+}

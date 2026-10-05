@@ -615,6 +615,13 @@ type AgentStore interface {
 	// excludeOwner (this process's own owner value) is never demoted.
 	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
 
+	// ConvertUnconfirmedToStop replaces the unconfirmed claim claimID with a
+	// live stop-kind claim owned by owner, with a lease of ttl, when the agent
+	// has no active launch. It is taken before the hub stops a container an
+	// unconfirmed start left running, so no start can claim the agent while
+	// that stop is applied. ErrClaimPredicate when the claim changed.
+	ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (StartClaim, error)
+
 	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
 	// agent has no active launch.
 	ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (released bool, err error)

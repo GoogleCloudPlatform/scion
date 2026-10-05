@@ -202,9 +202,9 @@ func reaperTarget(a *store.Agent, view *reaperBrokerView) string {
 // stopUnconfirmedStart stops, with normal grace, a container an unconfirmed
 // start left running past its hold. It does not change run intent. The stop
 // is sent from its own goroutine, so one slow broker does not age the rest
-// of the tick, and only after re-reading the agent: the same unconfirmed
-// claim (claimID) must still be held, so a stop never reaches a newer
-// start's container once that claim was released.
+// of the tick, and only after the same unconfirmed claim (claimID) is
+// swapped for a stop-kind claim under the row lock: a stop never reaches a
+// newer start's container, and no start can begin while the stop runs.
 func (s *Server) stopUnconfirmedStart(ctx context.Context, agentID, claimID string) {
 	if last, ok := s.claimStops.Load(agentID); ok && time.Since(last.(time.Time)) < unconfirmedStopInterval {
 		return
@@ -217,8 +217,23 @@ func (s *Server) stopUnconfirmedStart(ctx context.Context, agentID, claimID stri
 	go func() {
 		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
+		// Swap the unconfirmed claim for a live stop-kind claim first: only
+		// while the same unconfirmed claim is held (a released or newer claim
+		// refuses it), and no start can claim the agent until the stop is
+		// applied. The stop claim then stays held, unconfirmed, until an
+		// inventory shows the container gone, like the claim it replaced.
+		cfg := s.startClaimSettings()
+		stop, err := s.store.ConvertUnconfirmedToStop(stopCtx, agentID, claimID, s.instanceID, cfg.LeaseTTL)
+		if err != nil {
+			return
+		}
+		defer func() {
+			if _, err := s.store.MarkStartUnconfirmed(context.WithoutCancel(stopCtx), agentID, stop.ID, s.instanceID, cfg.Holds().For(store.StartClaimStop)); err != nil {
+				slog.Warn("Start claim reaper: keeping the stop claim failed; the reaper will settle it", "agent_id", agentID, "error", err)
+			}
+		}()
 		cur, err := s.store.GetAgent(stopCtx, agentID)
-		if err != nil || cur.StartClaimID != claimID || cur.StartClaimState != store.StartClaimUnconfirmed {
+		if err != nil {
 			return
 		}
 		slog.Info("Start claim reaper: stopping a container an unconfirmed start left running past its hold", "agent_id", agentID)
