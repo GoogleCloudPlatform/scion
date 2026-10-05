@@ -812,7 +812,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// names are updated, and only when their stored Attach differs.
 	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || len(heartbeat.ProfileAttach) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
-			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
 		} else {
 			changed := false
@@ -829,7 +829,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			if changed {
 				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
 						"broker_id", id, "error", err)
 				}
 			}

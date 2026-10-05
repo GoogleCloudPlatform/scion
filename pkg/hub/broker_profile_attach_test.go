@@ -41,15 +41,16 @@ func TestBrokerHeartbeat_ProfileAttachRefresh(t *testing.T) {
 		Profiles: []store.BrokerProfile{
 			{Name: "local", Type: "docker", Available: true, Attach: boolPtr(true)},
 			{Name: "remote", Type: "kubernetes", Available: true},
-			{Name: "sandbox", Type: "cloudrun", Available: true, Attach: boolPtr(false)},
+			{Name: "sandbox", Type: "cloudrun", Available: true, Attach: boolPtr(true)},
+			{Name: "spare", Type: "docker", Available: true},
 		},
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
 
 	// local flips to false, remote goes from unknown (nil) to true, sandbox
-	// is not reported and keeps its value, and an unregistered profile
-	// name is ignored.
+	// (true) and spare (nil) are not reported and keep their values, and an
+	// unregistered profile name is ignored.
 	rec := doRequest(t, srv, http.MethodPost, path, brokerHeartbeatRequest{
 		Status: "online",
 		ProfileAttach: []brokerProfileAttach{
@@ -64,7 +65,8 @@ func TestBrokerHeartbeat_ProfileAttachRefresh(t *testing.T) {
 	want := []store.BrokerProfile{
 		{Name: "local", Type: "docker", Available: true, Attach: boolPtr(false)},
 		{Name: "remote", Type: "kubernetes", Available: true, Attach: boolPtr(true)},
-		{Name: "sandbox", Type: "cloudrun", Available: true, Attach: boolPtr(false)},
+		{Name: "sandbox", Type: "cloudrun", Available: true, Attach: boolPtr(true)},
+		{Name: "spare", Type: "docker", Available: true},
 	}
 	assert.Equal(t, want, got.Profiles, "a heartbeat refreshes the reported profiles' attach state")
 
@@ -77,6 +79,45 @@ func TestBrokerHeartbeat_ProfileAttachRefresh(t *testing.T) {
 	got, err = s.GetRuntimeBroker(ctx, broker.ID)
 	require.NoError(t, err)
 	assert.Equal(t, want, got.Profiles, "a heartbeat without profileAttach leaves the stored profiles unchanged")
+}
+
+// A heartbeat repeating the stored profile attach state causes no broker
+// write: the handler persists the row only when something changed.
+func TestBrokerHeartbeat_ProfileAttachUnchangedNoWrite(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-profile-attach-nowrite"),
+		Name:   "Profile Attach No Write Broker",
+		Slug:   "profile-attach-nowrite-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "local", Type: "docker", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	counting := &countingBrokerLoadStore{Store: s}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
+	hb := brokerHeartbeatRequest{
+		Status:        "online",
+		ProfileAttach: []brokerProfileAttach{{Name: "local", Attach: true}},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, path, hb)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, counting.updateRuntimeBrokerCalls,
+		"the first heartbeat changes local from nil to true and writes the row")
+
+	rec = doRequest(t, srv, http.MethodPost, path, hb)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, counting.updateRuntimeBrokerCalls,
+		"a heartbeat repeating the stored state must not write the row")
 }
 
 // applyProfileAttach reports a change only when a stored value differs, so
