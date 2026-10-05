@@ -453,10 +453,8 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 				"result_nil", result == nil,
 				"project_id", link.ProjectID,
 				"default_agent", agentSlug)
-			if s.client != nil {
-				s.client.PostEphemeral(channelID, userID,
-					slackapi.MsgOptionText("Message delivery could not be confirmed — the service may be temporarily unavailable.", false))
-			}
+			_, _ = s.client.PostEphemeral(channelID, userID,
+				slackapi.MsgOptionText("Message delivery could not be confirmed — the service may be temporarily unavailable.", false))
 		}
 		return
 	}

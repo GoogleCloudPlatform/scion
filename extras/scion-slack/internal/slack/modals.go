@@ -119,8 +119,10 @@ func HandleAskModalSubmit(
 		}
 
 		if he := deliverInbound(topic, msg); he != nil {
+			// The request stays open so the user can answer again.
 			log.Error("Failed to deliver ask-user modal response",
 				"request_id", requestID, "error", he)
+			postEphemeral(client, pending.ChannelID, userID, he.userFacingMessage())
 			return
 		}
 	}

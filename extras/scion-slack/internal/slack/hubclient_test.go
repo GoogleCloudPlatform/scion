@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -122,4 +123,19 @@ func TestHubClient_ListUserProjects_RequestWithLinkedUser(t *testing.T) {
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
 	assert.Contains(t, reqs[0].SignedHeaders, "x-scion-on-behalf-of")
 	assert.Empty(t, reqs[0].RawQuery, "the user's projects come from the linked user, not a query filter")
+}
+
+func TestHubClient_ListAgents_DeniedReturnsHubError(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.on("GET", "/api/v1/projects/proj-1/agents", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"Insufficient permissions","details":{"resource_type":"agent","denied_action":"list"}}}`)
+
+	_, err := hub.client().ListAgents(context.Background(), "proj-1", "user:alice@example.com")
+	require.Error(t, err)
+	var he *hubError
+	require.True(t, errors.As(err, &he), "error should wrap a hubError: %v", err)
+	assert.Equal(t, http.StatusForbidden, he.StatusCode)
+	assert.Equal(t, "forbidden", he.Code)
+	assert.Equal(t, "agent", he.ResourceType)
+	assert.Equal(t, "list", he.DeniedAction)
 }

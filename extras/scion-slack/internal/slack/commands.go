@@ -718,7 +718,9 @@ func handleAskOption(
 		}
 
 		if he := deliverInbound(topic, msg); he != nil {
+			// The request stays open so the user can answer again.
 			log.Error("Failed to deliver ask-user option response", "request_id", requestID, "error", he)
+			postEphemeral(client, pending.ChannelID, callback.User.ID, he.userFacingMessage())
 			return
 		}
 	}
