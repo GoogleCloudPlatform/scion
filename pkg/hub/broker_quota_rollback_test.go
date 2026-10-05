@@ -324,7 +324,7 @@ func TestBrokerQuota_RestartHoldsReservationAcrossLegs(t *testing.T) {
 
 // ptone/scion#1978, ptone/scion#2710: a restart of a stopped agent whose
 // stop leg fails aborts before the start leg, so it must not leave a
-// reservation behind.
+// reservation behind or the agent marked starting.
 func TestBrokerQuota_RestartStoppedAgentStopLegFailsLeavesNoReservation(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetDispatcher(&failingStopStartDispatcher{})
@@ -337,6 +337,10 @@ func TestBrokerQuota_RestartStoppedAgentStopLegFailsLeavesNoReservation(t *testi
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID),
 		"an aborted restart must not leave a reservation behind")
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+	got, err := s.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase,
+		"an aborted restart must leave a stopped agent stopped, not starting")
 }
 
 // assertCreateExistingAgentFailedStartReleases puts an agent into the state

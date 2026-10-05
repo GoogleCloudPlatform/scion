@@ -717,10 +717,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// The old instance may still be running (for example,
 					// the broker could not reach or resolve it), and a
 					// start now could leave two instances. Abort before
-					// the start leg; the agent row keeps its pre-restart
-					// phase and reservation.
+					// the start leg. The rollback restores the pre-restart
+					// phase and undoes only a reservation this call made,
+					// so a running agent keeps the slot it already held.
 					slog.Warn("Restart: stop dispatch failed, not starting",
 						"agent_id", id, "error", stopErr)
+					sd.rollback(ctx)
 					writeRestartStopFailed(w, stopErr)
 					return
 				}
