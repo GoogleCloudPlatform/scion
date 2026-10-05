@@ -20,11 +20,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Run-scoped Kubernetes deletes (ptone/scion#2550 P2).
@@ -55,6 +57,13 @@ func k8sRunMatches(objRun, runID string) bool {
 // k8sPodIsLive reports whether pod is Pending or Running and is not already
 // being deleted. A live pod of another run must not be removed to make room
 // for a new run.
+//
+// Phase Unknown (the node stopped reporting) counts as not live, as the
+// name-based pre-clean has always treated it: such a pod is force-deleted.
+// On a partitioned node its container may keep running beside the new
+// pod's until the node returns. Counting Unknown as live would instead
+// block every start of the agent until node-lifecycle garbage collection
+// removes the pod, which can take many minutes.
 func k8sPodIsLive(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil {
 		return false
@@ -216,7 +225,12 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 //
 // A failure to read the pod fails the start (retryable) rather than
 // deleting without knowing whose pod holds the name.
-func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string) error {
+//
+// labels are the new run's labels. The Secret/SPC list is narrowed by their
+// scion.name and project ID (which Run copies onto every per-agent object)
+// so it does not read every agent's objects in the namespace; the object
+// name filter in deleteAgentSecretsBySelector still applies.
+func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string, labels map[string]string) error {
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	switch {
@@ -235,16 +249,26 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 		runtimeLog.Warn("Failed to delete stale per-agent object before start",
 			"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", runID, "error", err)
 	}
-	// Every per-agent object Run creates carries scion.agent (see
-	// createAgentSecret); "!=" also selects objects with no run label.
-	r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, warn)
+	r.deleteAgentSecretsBySelector(ctx, namespace, podName, preCleanSelector(runID, labels), warn)
 
 	if pod == nil {
 		return nil
 	}
-	// ptone/scion#2956 (NFS agent home) deletes an NFS-home pod gracefully
-	// and waits for it to stop; combine its podDeleteOptions(pod) and wait
-	// with this UID precondition when the two are merged.
+	// MERGE NOTE (ptone/scion#2956, NFS agent home): this pre-clean replaces
+	// cleanupStalePod for every run-labelled start, so 2956's NFS-home
+	// branch of cleanupStalePod must be ported here, or two pods can write
+	// to one home. For an NFS-home pod (isNFSHomePod) it must:
+	//   1. take the home start lock, as cleanupStalePod's caller does;
+	//   2. delete the old pod gracefully (podDeleteOptions(pod)), keeping
+	//      this UID precondition, and wait for it to stop
+	//      (waitForPodTermination);
+	//   3. delete the Secrets/SPC only after the pod has stopped (above,
+	//      they are deleted first);
+	//   4. wait for a pod that is already terminating rather than
+	//      force-delete it.
+	// A pod read error already fails the start, as 2956 requires.
+	// Whichever of ptone/scion#3100 and ptone/scion#2956 lands second does
+	// the port.
 	gracePeriod := int64(0)
 	err = pods.Delete(ctx, podName, metav1.DeleteOptions{
 		GracePeriodSeconds: &gracePeriod,
@@ -261,6 +285,21 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 		runtimeLog.Debug("Failed to clean up stale pod", "pod", podName, "namespace", namespace, "error", err)
 		return nil
 	}
+}
+
+// preCleanSelector selects the per-agent objects pre-clean may remove: not
+// labelled with runID ("!=" also selects objects with no run label),
+// narrowed to the agent's scion.name and project ID when the labels carry
+// valid values. Every per-agent object Run creates carries scion.agent
+// (see createAgentSecret).
+func preCleanSelector(runID string, labels map[string]string) string {
+	sel := "scion.agent"
+	for _, key := range []string{"scion.name", projectkeys.LabelProjectID} {
+		if v := labels[key]; v != "" && len(k8svalidation.IsValidLabelValue(v)) == 0 {
+			sel += "," + key + "=" + v
+		}
+	}
+	return sel + "," + api.LabelRunID + "!=" + runID
 }
 
 // replaceExistingAgentObject makes room for a per-agent Secret or

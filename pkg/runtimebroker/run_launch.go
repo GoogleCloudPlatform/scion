@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -506,7 +507,9 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {
-	case errors.Is(err, agent.ErrContainerNameInUse):
+	case errors.Is(err, agent.ErrContainerNameInUse), errors.Is(err, scionrt.ErrRunConflict):
+		// ErrRunConflict: another live run holds the agent name, and the
+		// runtime deleted nothing of it (ptone/scion#2550).
 		return "name_in_use", err.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a

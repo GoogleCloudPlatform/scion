@@ -16,9 +16,12 @@ package runtimebroker
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -36,12 +39,30 @@ import (
 // the agent name, and Delete honours RunRef the way KubernetesRuntime does
 // (exact run or unlabelled legacy entry matches; another run returns
 // ErrRunMismatch and deletes nothing).
+//
+// Stop does nothing by default: these tests model Stop as it is after
+// ptone/scion#3076, which passes the RunRef to Stop so that Kubernetes Stop
+// (a Delete) gets the same run check. withStopByName models upstream main
+// today, where AgentManager.deleteResolved calls Stop(id) before Delete and
+// Kubernetes Stop deletes by name.
 type nameHeldRuntime struct {
 	runtime.MockRuntime
 	mu      sync.Mutex
 	holder  string // run label of the entry holding the name; "" = legacy
 	present bool
 	deletes []runtime.RunRef
+}
+
+// withStopByName makes Stop remove whatever entry holds the name, as
+// Kubernetes Stop does before ptone/scion#3076.
+func (r *nameHeldRuntime) withStopByName() *nameHeldRuntime {
+	r.StopFunc = func(context.Context, string) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.present = false
+		return nil
+	}
+	return r
 }
 
 func newNameHeldRuntime(holderRun string) *nameHeldRuntime {
@@ -107,6 +128,51 @@ func TestDeleteAgent_RuntimeRunMismatch_404LeavesNewRun(t *testing.T) {
 	assertUntouched(t, scionB, "dev", infoB)
 }
 
+// Upstream main today: deleteResolved's Stop(id) runs before the run-aware
+// Delete, and Kubernetes Stop deletes by name, so a stale delete still
+// removes the newer run's entry. P2 closes this only together with
+// ptone/scion#3076.
+// TODO(ptone/scion#3076): once Stop takes a RunRef, this entry must
+// survive; flip the assertion (or drop this test for the one above).
+func TestDeleteAgent_RuntimeRunMismatch_StopByNameStillRemovesNewRun(t *testing.T) {
+	rt := newNameHeldRuntime("run-new").withStopByName()
+	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	_ = doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old")
+	if rt.stillPresent() {
+		t.Error("Stop no longer deletes by name: ptone/scion#3076 has landed; update this test")
+	}
+}
+
+// A soft delete that loses the race: the mark written before the runtime
+// call is undone when the runtime reports a run mismatch, so the newer
+// run's agent-info.json keeps its phase and has no deletedAt.
+func TestDeleteAgent_RuntimeRunMismatch_UndoesSoftDeleteMark(t *testing.T) {
+	rt := newNameHeldRuntime("run-new")
+	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	st, ok := agent.GetAgentDeleteState("dev", scionB)
+	if !ok {
+		t.Fatal("agent-info.json unreadable")
+	}
+	if st.Phase != "running" || !st.DeletedAt.IsZero() {
+		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	}
+	if !rt.stillPresent() {
+		t.Error("run-new's entry was deleted")
+	}
+}
+
 // A legacy (unlabelled) entry is listed for a delete naming run-old, but by
 // delete time the name is held by run-new. The broker passes the requested
 // run (deleteRunRef) so the runtime can refuse, rather than an empty run,
@@ -170,5 +236,34 @@ func TestDeleteRunRef(t *testing.T) {
 				t.Errorf("deleteRunRef = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A start the runtime refused because another live run holds the name
+// (runtime.ErrRunConflict) is a 409 conflict on create, and name_in_use on
+// an async launch, not a runtime error.
+func TestCreateAgent_RunConflictIs409(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = fmt.Errorf("start: %w", runtime.ErrRunConflict)
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}, "runId": "run-x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), ErrCodeConflict) {
+		t.Errorf("body %s lacks code %q", w.Body.String(), ErrCodeConflict)
+	}
+}
+
+func TestClassifyStartError_RunConflict(t *testing.T) {
+	code, _ := classifyStartError(context.Background(), fmt.Errorf("start: %w", runtime.ErrRunConflict))
+	if code != "name_in_use" {
+		t.Fatalf("code = %q, want name_in_use", code)
 	}
 }

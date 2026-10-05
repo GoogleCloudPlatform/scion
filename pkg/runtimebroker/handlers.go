@@ -1323,7 +1323,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		span.SetStatus(codes.Error, err.Error())
 		switch {
-		case errors.Is(err, agent.ErrContainerNameInUse):
+		case errors.Is(err, agent.ErrContainerNameInUse), errors.Is(err, scionrt.ErrRunConflict):
 			Conflict(w, err.Error())
 		case notFoundErr:
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
@@ -1931,8 +1931,13 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		}
 	}
 
-	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
+	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup.
+	// The state before the mark is kept so a runtime run mismatch below can
+	// undo it.
+	var preMark agent.AgentDeleteState
+	var preMarkOK bool
 	if softDelete && projectPath != "" {
+		preMark, preMarkOK = agent.GetAgentDeleteState(target.name, projectPath)
 		deletedAtStr := query.Get("deletedAt")
 		if err := agent.UpdateAgentConfig(target.name, projectPath, "deleted", "", ""); err != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
@@ -1955,8 +1960,15 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		// delete (the entry was replaced after resolveDeleteTarget listed
 		// it) and deleted nothing. Answer as for errDeleteTargetRunMismatch:
 		// 404, with no file or leftover-object cleanup, since those now
-		// belong to the newer run.
+		// belong to the newer run. A soft-delete mark written above is
+		// undone, since agent-info.json now describes the newer run.
 		span.SetStatus(codes.Error, err.Error())
+		if preMarkOK {
+			if rerr := agent.RestoreAgentDeleteState(target.name, projectPath, preMark); rerr != nil {
+				s.agentLifecycleLog.Warn("Agent delete: could not undo the soft-delete mark after a run mismatch",
+					"agent_id", id, "project_id", projectID, "run_id", runID, "error", rerr)
+			}
+		}
 		s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
 			"agent_id", id, "project_id", projectID, "run_id", runID, "error", err)
 		NotFound(w, "Agent")
@@ -2310,7 +2322,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		switch {
-		case errors.Is(err, agent.ErrContainerNameInUse):
+		case errors.Is(err, agent.ErrContainerNameInUse), errors.Is(err, scionrt.ErrRunConflict):
+			// ErrRunConflict: another live run holds the agent name, and
+			// the runtime deleted nothing of it (ptone/scion#2550).
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, details)
@@ -2813,6 +2827,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, details)
+			return
+		}
+		if errors.Is(err, scionrt.ErrRunConflict) {
+			// Another live run holds the agent name, and the runtime
+			// deleted nothing of it (ptone/scion#2550).
+			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {

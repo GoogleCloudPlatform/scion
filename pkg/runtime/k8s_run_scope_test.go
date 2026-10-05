@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -248,6 +249,10 @@ func TestK8sDeleteRun_OtherRun_LeavesEverythingAndReportsMismatch(t *testing.T) 
 func TestK8sDeleteRun_PodRecreatedBetweenGetAndDelete_Survives(t *testing.T) {
 	rt, cs, _, _ := newRunScopeRuntime(t)
 	rsSeedPod(t, rt, "pod-a", rsLabels(rsRunA, "start-a"), corev1.PodRunning)
+	// Run B's objects, already in place when its pod replaces run A's.
+	rsSeedSecret(t, rt, rsAgentSecret, "sec-b", rsLabels(rsRunB, "start-b"))
+	rsSeedSecret(t, rt, rsAuthSecret, "auth-b", rsLabels(rsRunB, "start-b"))
+	rsSeedSPC(t, rt, "spc-b", rsLabels(rsRunB, "start-b"))
 
 	podGVR := corev1.SchemeGroupVersion.WithResource("pods")
 	var once sync.Once
@@ -278,6 +283,7 @@ func TestK8sDeleteRun_PodRecreatedBetweenGetAndDelete_Survives(t *testing.T) {
 	if p == nil || p.UID != "pod-b" {
 		t.Fatalf("the recreated pod was deleted (pod now %+v)", p)
 	}
+	rsExpect(t, rt, rsAllPresent)
 }
 
 // A legacy pod (created before run IDs, carrying only scion.start_id) is
@@ -390,7 +396,7 @@ func TestK8sPreCleanForRun_RemovesStaleObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _, _, enf := newRunScopeRuntime(t)
 			rsSeedRun(t, rt, tc.labels, tc.phase, "old")
-			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
+			if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
 				t.Fatalf("preCleanForRun: %v", err)
 			}
 			want := rsAllGone
@@ -412,7 +418,7 @@ func TestK8sPreCleanForRun_NoPod_RemovesOtherRunSecrets(t *testing.T) {
 	rsSeedSecret(t, rt, rsAuthSecret, "auth-legacy", rsLabels("", ""))
 	rsSeedSPC(t, rt, "spc-b", rsLabels(rsRunB, ""))
 
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err != nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
 		t.Fatalf("preCleanForRun: %v", err)
 	}
 	rsExpect(t, rt, rsAllGone)
@@ -426,7 +432,7 @@ func TestK8sPreCleanForRun_PodReadError_FailsClosed(t *testing.T) {
 	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, fmt.Errorf("simulated API failure")
 	})
-	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA); err == nil {
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err == nil {
 		t.Fatal("preCleanForRun succeeded despite the pod read failure")
 	}
 	if n := enf.count(); n != 0 {
@@ -648,4 +654,109 @@ func TestK8sDeleteRun_LegacyPodWithoutStartID_LeavesRunLabelledSecrets(t *testin
 	}
 	rsExpect(t, rt, rsState{agentSecret: true})
 	enf.assertAllConditional(t)
+}
+
+// A terminating pod of another run is not live: pre-clean force-deletes it,
+// with a UID precondition (today's behaviour for a terminating pod).
+func TestK8sPreCleanForRun_TerminatingOtherRunPod_ForceDeleted(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	now := metav1.Now()
+	_, err := rt.Client.Clientset.CoreV1().Pods(rt.DefaultNamespace).Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: rt.DefaultNamespace, UID: "pod-b",
+			Labels: rsLabels(rsRunB, "start-b"), DeletionTimestamp: &now, Finalizers: []string{"example.com/hold"}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
+		t.Fatalf("preCleanForRun: %v", err)
+	}
+	if rsPod(t, rt) != nil {
+		t.Error("terminating pod of another run was not deleted")
+	}
+	enf.assertAllConditional(t)
+}
+
+// A pre-clean pod delete that fails its UID precondition (the pod was
+// recreated by a concurrent start) fails the start with ErrRunConflict.
+func TestK8sPreCleanForRun_PodDeleteConflict_RunConflict(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	rsSeedPod(t, rt, "pod-b", rsLabels(rsRunB, "start-b"), corev1.PodSucceeded)
+	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("precondition failed"))
+	})
+	err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, ""))
+	if !errors.Is(err, ErrRunConflict) {
+		t.Fatalf("preCleanForRun error = %v, want ErrRunConflict", err)
+	}
+}
+
+// An AlreadyExists replace whose delete fails its UID precondition (the
+// object was recreated by a concurrent start) fails with ErrRunConflict,
+// on all three create sites.
+func TestK8sCreate_AlreadyExistsReplaceConflict_RunConflict(t *testing.T) {
+	conflict := func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: action.GetResource().Resource}, "x", fmt.Errorf("precondition failed"))
+	}
+	for _, site := range rsCreateSites() {
+		t.Run(site.name, func(t *testing.T) {
+			rt, cs, dyn, _ := newRunScopeRuntime(t)
+			site.seed(t, rt, "uid-old", rsLabels(rsRunA, "old-start"))
+			cs.PrependReactor("delete", "secrets", conflict)
+			dyn.PrependReactor("delete", "secretproviderclasses", conflict)
+			err := site.create(rt, rsLabels(rsRunA, "new-start"))
+			if !errors.Is(err, ErrRunConflict) {
+				t.Fatalf("create error = %v, want ErrRunConflict", err)
+			}
+		})
+	}
+}
+
+// The pre-clean Secret/SPC list is narrowed to the agent's scion.name and
+// project ID; the run filter stays.
+func TestK8sPreCleanForRun_SelectorNarrowedToAgentAndProject(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	var selectors []string
+	cs.PrependReactor("list", "secrets", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		selectors = append(selectors, action.(k8stesting.ListAction).GetListRestrictions().Labels.String())
+		return false, nil, nil
+	})
+	// Same object name, but labelled for another project: not selected.
+	rsSeedSecret(t, rt, rsAgentSecret, "sec-other-project", map[string]string{
+		"scion.agent": "true", "scion.name": "agent", "scion.project_id": "proj2", api.LabelRunID: rsRunB,
+	})
+	if err := rt.preCleanForRun(context.Background(), rt.DefaultNamespace, rsAgent, rsRunA, rsLabels(rsRunA, "")); err != nil {
+		t.Fatalf("preCleanForRun: %v", err)
+	}
+	if len(selectors) != 1 {
+		t.Fatalf("got %d secret lists, want 1", len(selectors))
+	}
+	for _, want := range []string{"scion.name=agent", "scion.project_id=proj1", api.LabelRunID + "!=" + rsRunA} {
+		if !strings.Contains(selectors[0], want) {
+			t.Errorf("selector %q lacks %q", selectors[0], want)
+		}
+	}
+	if !secretExists(t, rt, rt.DefaultNamespace, rsAgentSecret) {
+		t.Error("a Secret labelled for another project was deleted")
+	}
+}
+
+func TestPreCleanSelector(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{"agent and project", rsLabels(rsRunA, ""), "scion.agent,scion.name=agent,scion.project_id=proj1,scion.run_id!=" + rsRunA},
+		{"no labels", nil, "scion.agent,scion.run_id!=" + rsRunA},
+		{"invalid value skipped", map[string]string{"scion.name": "bad value!"}, "scion.agent,scion.run_id!=" + rsRunA},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preCleanSelector(rsRunA, tc.labels); got != tc.want {
+				t.Errorf("preCleanSelector = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

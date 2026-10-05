@@ -2322,6 +2322,32 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 	})
 }
 
+// AgentDeleteState is the part of agent-info.json a soft delete marks
+// (Phase and DeletedAt), captured so the mark can be undone.
+type AgentDeleteState struct {
+	Phase     string
+	DeletedAt time.Time
+}
+
+// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
+// ok is false when the file cannot be read.
+func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		return AgentDeleteState{}, false
+	}
+	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
+}
+
+// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
+// agent-info.json, undoing a soft-delete mark.
+func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.Phase = st.Phase
+		info.DeletedAt = st.DeletedAt
+	})
+}
+
 // UpdateAgentDeletedAt writes the deletedAt timestamp to agent-info.json.
 func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.Time) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
