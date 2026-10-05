@@ -102,6 +102,12 @@ message Welcome {
   uint32 lifetime_hint_s = 6;
   // Every grant verification key still within not_after.
   repeated GrantKey grant_keys = 7;
+  // The endpoint_incarnation the hub ADMITTED the session with: the agent's
+  // launch id, "gen-<N>" under the interim fallback (the Hello presented
+  // none), or the broker's incarnation; empty for users. Grants are minted
+  // against this value, so a target MUST verify grants against it, never
+  // against the value it presented or local configuration.
+  string endpoint_incarnation = 8;
 }
 
 message GrantKey {

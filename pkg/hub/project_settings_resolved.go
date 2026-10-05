@@ -59,7 +59,7 @@ import (
 // hub has no default for this" and "this build could not determine it". The
 // distinction is real in this codebase and is not hypothetical:
 //
-//   - In file/SQLite mode there is no OperationalSettings at all, so no
+//   - On a hub with no OperationalSettings at all, no
 //     agent_defaults document can be read. Every key backed by that section is
 //     genuinely UNKNOWN, not absent.
 //   - Six of the eight opsettings.AgentDefaultsSettings fields are non-pointer
@@ -629,7 +629,7 @@ func isJSONNull(raw json.RawMessage) bool {
 func (s *Server) hubAgentDefaultsDoc() (map[string]json.RawMessage, bool) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
-		// File/SQLite mode: the agent_defaults section does not exist as a
+		// No OperationalSettings: the agent_defaults section does not exist as a
 		// document here. A missing hint must never fail the request.
 		return nil, false
 	}

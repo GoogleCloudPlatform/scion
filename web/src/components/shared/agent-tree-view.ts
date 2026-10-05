@@ -44,8 +44,8 @@ import {
   isTerminalAvailable,
 } from '../../shared/types.js';
 import {
+  agentStatusBadge,
   getStateDisplay,
-  stateLabel,
   type StatusVariant,
 } from '../../shared/agent-state-display.js';
 import {
@@ -64,7 +64,6 @@ import {
   type PositionedEdge,
   type PositionedUser,
 } from '../../shared/lineage.js';
-import type { StatusType } from './status-badge.js';
 import './status-badge.js';
 import { DeletionLeaseController } from './deletion-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
@@ -1461,11 +1460,7 @@ export class ScionAgentTreeView extends LitElement {
             : nothing}
           <span class="name">${agent.name}</span>
           <span class="badges">
-            <scion-status-badge
-              status=${status as StatusType}
-              label=${stateLabel(status)}
-              size="small"
-            ></scion-status-badge>
+            ${agentStatusBadge(agent, { status, size: 'small' })}
             <scion-deletion-badge
               .deletion=${this.deletionLease.view(agent)}
               size="small"

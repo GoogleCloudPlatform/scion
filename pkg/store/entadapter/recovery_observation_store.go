@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -128,7 +129,14 @@ func (s *AgentStore) RecordRecoveryObservations(ctx context.Context, brokerID st
 		}
 	}
 
+	// Upsert in a fixed (sorted) order, so concurrent writers lock the rows
+	// in the same order on Postgres.
+	sorted := make([]string, 0, len(complete))
 	for t := range complete {
+		sorted = append(sorted, t)
+	}
+	sort.Strings(sorted)
+	for _, t := range sorted {
 		if err := ltx.client.BrokerTargetInventory.Create().
 			SetBrokerID(brokerID).
 			SetTarget(t).
