@@ -425,6 +425,10 @@ func TestDeleteAgent_StaleRunAfterRecreate_RealFiles(t *testing.T) {
 		{"no container (file-only)", false, http.StatusNotFound, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// util skips worktree pruning when SCION_HOST_UID is set (inside
+			// an agent container); clear it so the host behaviour is tested
+			// wherever this runs.
+			t.Setenv("SCION_HOST_UID", "")
 			var entries []api.AgentInfo
 			var deleted []string
 			srv, home := newRealFilesServer(t, labelFilterRuntime(&entries, &deleted))
@@ -465,16 +469,15 @@ func TestDeleteAgent_StaleRunAfterRecreate_RealFiles(t *testing.T) {
 			if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 				t.Errorf("the current run's delete left the agent dir (stat err %v)", err)
 			}
-			// Pre-existing behaviour, unchanged here and pinned so a change
-			// is visible: for an in-repo worktree-mode agent the delete
-			// removes the worktree directory but keeps the branch (even
-			// with removeBranch), and the worktree stays registered until
-			// `git worktree prune`.
-			if !branchExists(t, repo, "dev") {
-				t.Error("the current run's delete removed the branch (behaviour changed)")
+			// Pinned: the host behaviour (SCION_HOST_UID unset, cleared
+			// above). The delete prunes the worktree record and, with
+			// removeBranch, deletes the branch. Inside an agent container
+			// util skips the prune, so both would stay.
+			if branchExists(t, repo, "dev") {
+				t.Error("the current run's delete with removeBranch kept the branch")
 			}
-			if !worktreeRegistered(t, repo, worktree) {
-				t.Error("the current run's delete unregistered the worktree (behaviour changed)")
+			if worktreeRegistered(t, repo, worktree) {
+				t.Error("the current run's delete left the worktree registered")
 			}
 		})
 	}
