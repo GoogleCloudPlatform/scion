@@ -88,7 +88,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Guard against phase regressions and auto-correct phase from activity.
-	if status.Phase != "" || status.Activity != "" {
+	// The guards run whenever the update touches a field they own —
+	// Phase/Activity/Message/ExitCode/ExitReason — so a message-only or
+	// exit-only POST is subject to the same reincarnation-sticky Guard 0b as
+	// a phase report (ptone/scion#2267). Fields the guards never touch
+	// (heartbeat, tool name, task summary, limits, ...) skip the extra read.
+	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -128,6 +133,28 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
+		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
+		// `scion reincarnate` migration) has blanked the report and nothing
+		// is left to persist, skip the store write and tell the caller the
+		// report was not applied, so a dropped report is distinguishable from
+		// an accepted one. 200 (not an error) keeps `sciontool status`
+		// succeeding; it ignores the body today.
+		//
+		// Partial apply: if the report also carries fields those guards do
+		// not own (heartbeat, toolName, taskSummary, limits, metadata, ...),
+		// those are still written and the response is {"applied":true} even
+		// though the guarded fields were dropped.
+		//
+		// Best effort: {"applied":true} means "not guarded when the handler
+		// read the agent". A delete or reincarnation claimed between that
+		// read and the write can make it inaccurate. The persisted state is
+		// still correct for a delete (the store repeats Guard 0c inside the
+		// UpdateAgentStatus transaction); Guard 0b has no store-side twin.
+		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
+			return
+		}
 		// Reconcile the max_agents_per_broker reservation against the phase
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
@@ -151,7 +178,68 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
+}
+
+// statusUpdateResult.Reason values for a status report dropped because a
+// guard owns the agent's status.
+const (
+	// statusUpdateReasonDeleteInProgress: a delete holds the agent, or the
+	// row is soft-deleted (Guard 0c).
+	statusUpdateReasonDeleteInProgress = "delete_in_progress"
+	// statusUpdateReasonReincarnationInFlight: a reincarnation owns the
+	// agent (Guard 0b).
+	statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+)
+
+// statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
+// that blanks every guarded field (Phase/Activity/Message/ExitCode/
+// ExitReason) of agent's status reports, or "" when none does. It mirrors
+// guardAgentPhaseTransition's order: Guard 0c (delete) takes precedence
+// over Guard 0b (reincarnation), and both run before Guard 0 (suspended).
+// Guard 0 blanks only Phase/Activity, so it never yields a no-op on its
+// own and has no reason here.
+func statusGuardNoopReason(agent *store.Agent) string {
+	switch {
+	case deletionActive(agent) || !agent.DeletedAt.IsZero():
+		return statusUpdateReasonDeleteInProgress
+	case reincarnationInFlight(agent):
+		return statusUpdateReasonReincarnationInFlight
+	}
+	return ""
+}
+
+// statusUpdateResult is the response body of POST /agents/{id}/status.
+// Applied is false when the hub accepted the request but persisted nothing
+// (see Reason).
+type statusUpdateResult struct {
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// statusUpdateTouchesGuardedFields reports whether the update sets any field
+// guardAgentPhaseTransition may blank or rewrite. The internal ClearExit
+// and ClearMessageIf (json:"-") are never set on a decoded status POST, so
+// they do not trigger the guards here; statusUpdateIsEmpty still counts
+// them.
+func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
+	return su.Phase != "" || su.Activity != "" || su.Message != "" ||
+		su.ExitCode != nil || su.ExitReason != ""
+}
+
+// statusUpdateIsEmpty reports whether the update carries nothing for the
+// store to persist (beyond the Updated/LastSeen bump every write does).
+// Every field counts, including the internal json:"-" ones a decoded status
+// POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants,
+// IfPhase): erring towards "not empty" only means the store write runs.
+// TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
+func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
+	return !statusUpdateTouchesGuardedFields(su) &&
+		su.ToolName == "" && su.ConnectionState == "" && su.ContainerStatus == "" &&
+		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
+		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
+		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
+		!su.ClearTerminalRemnants && su.IfPhase == ""
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
@@ -187,6 +275,28 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 		return
 	}
 
+	// Guard 0b: a `scion reincarnate` migration in flight is sticky like a
+	// delete — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
+	// Message for the agent until it completes or fails, so an async
+	// sciontool /status POST from the OLD container racing the migration
+	// (e.g. a crash report from the generation the worker is in the middle of
+	// tearing down and replacing) must not surface as the agent's live status.
+	// ContainerStatus, heartbeat and the other non-status fields are not
+	// owned by the worker (reincarnationStepUpdate never writes them), so
+	// they are left as reported (partial apply; see updateAgentStatus). It
+	// runs before Guard 0 (suspended) because it blanks a
+	// superset of Guard 0's fields: a suspended agent with a reincarnation
+	// pending (the worker has not yet written its first step) must have a
+	// message- or exit-only report dropped too (ptone/scion#2267).
+	if reincarnationInFlight(agent) {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
+		return
+	}
+
 	// Guard 0: suspended is sticky against async status updates. When an agent
 	// is suspended, its container is being torn down, and the dying container's
 	// async sciontool /status POST (e.g. phase=stopped, activity=crashed) must
@@ -197,24 +307,6 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""
-		return
-	}
-
-	// Guard 0b: a `scion reincarnate` migration in flight is sticky the same
-	// way — the reincarnation worker owns Phase/Activity/ExitCode/ExitReason/
-	// Message for the agent until it completes or fails, so an async
-	// sciontool /status POST from the OLD container racing the migration
-	// (e.g. a crash report from the generation the worker is in the middle of
-	// tearing down and replacing) must not surface as the agent's live status.
-	// ContainerStatus and the Heartbeat/LastSeen bump are not status's
-	// concern here (this endpoint does not set them), so nothing further
-	// needs blanking.
-	if reincarnationInFlight(agent) {
-		status.Phase = ""
-		status.Activity = ""
-		status.ExitCode = nil
-		status.ExitReason = ""
-		status.Message = ""
 		return
 	}
 
@@ -452,6 +544,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If a dispatcher is available, dispatch the operation to the runtime broker
 	dispatcher := s.GetDispatcher()
 
+	// sd holds the broker slot across a start or restart's start leg
+	// (beginStartDispatch); the final status write below settles it.
+	var sd *startDispatch
+
 	switch action {
 	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
@@ -482,8 +578,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// up front rather than after the container is already running
 			// (ptone/scion#1963). Idempotent: a no-op when the agent already
 			// holds an active reservation (e.g. start called again on an
-			// already-running agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			// already-running agent). An uncounted agent is marked starting
+			// for the dispatch, so the quota reconcile keeps the slot
+			// (ptone/scion#2014).
+			var ok bool
+			sd, ok = s.beginStartDispatchHTTP(ctx, w, agent)
 			if !ok {
 				return
 			}
@@ -491,11 +590,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// start is still a start the user asked for (pod recovery
 			// design, run intent semantics).
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				sd.rollback(ctx)
 				writeRunIntentError(w, err, agent.ID)
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
+			if dispatchErr == nil {
+				// The container is up: the final status write below
+				// moves the row off starting.
+				sd.settle()
+			}
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -504,10 +608,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if dispatchErr != nil {
 				// Roll back a reservation this call took speculatively, so a
 				// failed start doesn't strand one with no container behind
-				// it. A reservation that already existed (start on a
-				// running agent) is kept: that agent is still counted
-				// (ptone/scion#1978).
-				s.rollbackBrokerQuota(ctx, agent, reserved)
+				// it, and restore the phase. A reservation that already
+				// existed (start on a running agent) is kept: that agent is
+				// still counted (ptone/scion#1978).
+				sd.rollback(ctx)
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
@@ -559,18 +663,39 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
-		// A restart leaves the agent running: record that before the stop leg.
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, agent.ID)
-			return
-		}
-		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
+		if hasBroker {
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
 				return
 			}
+			// Check the broker cap before the run intent write and the
+			// stop leg (ptone/scion#2010): a restart refused at the cap
+			// must leave the agent as it was, with its container up and
+			// its run intent untouched, not stopped and then answered
+			// with 429. The reservation is held across both legs
+			// (ptone/scion#1978): releasing it after the stop leg and
+			// re-reserving before the start leg would let another start
+			// take the slot in between. This reserve is a no-op for an
+			// agent that already holds one, and applies the cap to an
+			// agent that does not (for example, a stopped agent), which
+			// is also marked starting until the start leg settles, so the
+			// quota reconcile keeps the slot (ptone/scion#2014).
+			var ok bool
+			sd, ok = s.beginStartDispatchHTTP(ctx, w, agent)
+			if !ok {
+				return
+			}
+		}
+		// A restart leaves the agent running: record that before the stop leg.
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			sd.rollback(ctx)
+			writeRunIntentError(w, err, agent.ID)
+			return
+		}
+		if hasBroker {
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
 			// The broker already answers a stop of an exited or absent
@@ -584,6 +709,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
 				slog.Warn("Restart: agent's runtime not available on broker, not starting",
 					"agent_id", id, "runtime", agent.Runtime)
+				sd.rollback(ctx)
 				return
 			}
 			if stopErr != nil {
@@ -604,18 +730,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", id, "error", stopErr)
 				stopErr = nil
 			}
-			// The broker reservation is held across the restart
-			// (ptone/scion#1978). Releasing it after the stop leg and
-			// re-reserving before the start leg would let another start
-			// take the slot in between. This reserve is a no-op for an
-			// agent that already holds one, and applies the cap to an
-			// agent that does not (for example, a stopped agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
-			if !ok {
-				return
-			}
+			// The dying container's own status report (phase stopped)
+			// may have released the slot during the stop leg; the restart
+			// held it throughout, so put it back without the cap check.
+			sd.reassertReservation(ctx)
 			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
+			if dispatchErr == nil {
+				// The container is up: the final status write below
+				// moves the row off starting.
+				sd.settle()
+			}
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -627,20 +752,24 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// (ptone/scion#2550, round 5 N3). The delete engine
 					// owns the row now: leave its phase and the
 					// reservation it held to the engine, and undo only a
-					// reservation this call created.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
+					// reservation this call created. The phase restore
+					// is conditional on the row still reading starting,
+					// so it leaves the engine's phase alone.
+					sd.rollback(ctx)
 				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
 					// release the slot and record the stopped state as an
 					// explicit stop would, so the agent does not keep
 					// showing its pre-restart phase until the next
 					// heartbeat.
+					sd.settle()
 					s.releaseBrokerQuota(ctx, agent)
 					s.recordRestartStopped(ctx, agent.ID)
 				} else {
 					// The container may still be running: keep a
-					// reservation this call did not create.
-					s.rollbackBrokerQuota(ctx, agent, reserved)
+					// reservation this call did not create, and
+					// restore the phase.
+					sd.rollback(ctx)
 				}
 			}
 		}
@@ -706,6 +835,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			statusUpdate.ContainerStatus = agent.ContainerStatus
 		}
 		statusUpdate.ClearExit = true
+		// A new generation: clear the prior one's message and stalled
+		// marker too, whatever the row reads now (beginStartDispatch wrote
+		// starting, or a restart's stop leg ran, and a heartbeat guarded
+		// mid-dispatch may have stored the old container's exit message).
+		// A start on an agent that was already running is not a new
+		// generation and keeps its live status.
+		statusUpdate.ClearTerminalRemnants = action == api.AgentActionRestart || sd.wroteStarting()
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -715,7 +851,20 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// A successful start/stop/restart clears a failed delete marker
 	// (design ptone/scion#2483 §2.1); publish and respond from the stored
 	// row, which a racing delete claim may have kept off newPhase.
-	s.settleLifecycleWrite(ctx, agent, newPhase)
+	reloaded := s.settleLifecycleWrite(ctx, agent, newPhase)
+	// A stopped report about the old container (its own status POST still
+	// in flight, or a heartbeat handled by another replica) can land after
+	// the restart's post-stop re-assert and release the slot during the
+	// start leg. Re-assert once more now that the final write landed, if the
+	// reloaded row is counted and no delete holds it (skipped when the
+	// reload failed: the gate would decide on stale columns). A report after
+	// this point heals itself: the next running heartbeat re-reserves on
+	// stopped -> running (best-effort, with the cap check; at the cap the
+	// hourly backfill records it).
+	if action == api.AgentActionRestart && sd != nil && reloaded &&
+		isBrokerQuotaCountedPhase(agent.Phase) && agent.DeletedAt.IsZero() && !deletionActive(agent) {
+		s.reassertBrokerReservation(ctx, agent)
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent

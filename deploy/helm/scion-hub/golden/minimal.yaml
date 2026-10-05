@@ -78,6 +78,10 @@ stringData:
     server:
       auth:
         mode: proxy
+        proxy:
+          iap:
+            audience: /projects/123456789012/locations/us-central1/services/probe-ci-minimal
+          provider: iap
       broker:
         auto_provide: true
         host: 127.0.0.1
@@ -271,7 +275,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-minimal"
         checksum/env-config: 576ca82a75226a5ff18c57d4eaf8120674b3a3dd8bc0d19a62351952fdc40c3e
-        checksum/settings: ead7e65985cdb00400ae17974efad6e94b78af5e2794cebbaa56fc8d27838a47
+        checksum/settings: e643bc0b720cd201004529a1bbf1ae2731fe0499eff1c7ab3b5e114978ad4504
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:
