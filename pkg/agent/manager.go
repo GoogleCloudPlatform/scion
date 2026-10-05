@@ -90,22 +90,12 @@ type Manager interface {
 	// collision when agents share the same slug.
 	Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error
 
-	// MessageRaw sends literal bytes to an agent's tmux session via send-keys
-	// with no trailing Enter keypresses, allowing control sequences like
-	// arrow keys and Escape to be used directly.
-	// projectID scopes delivery to a specific project.
-	//
-	// Deprecated: MessageRaw is the primitive behind the legacy message-raw
-	// path (pending Phase 4 removal per .design/agent-keys-contract.md). It
-	// performs no "agent_id" identity binding. New callers must use SendKeys.
-	MessageRaw(ctx context.Context, agentID, projectID string, keys string) error
-
 	// SendKeys sends the exact byte-for-byte keys string to an agent's tmux
 	// session via one generated "send-keys ... -- <keys>" command, delivered
 	// on stdin to "tmux source-file -" (requires tmux ≥ 3.1) — the frozen
 	// primitive for the dedicated broker /keys route
-	// (.design/agent-keys-contract.md §4.3, §2.3). Unlike MessageRaw, it
-	// binds to the resolved container's "agent_id" label: it resolves the
+	// (.design/agent-keys-contract.md §4.3, §2.3). It binds to the
+	// resolved container's "agent_id" label: it resolves the
 	// target by (projectID, agentSlug), verifies the resolved container's
 	// "agent_id" label equals expectedAgentID, and executes on that same
 	// resolved container, all within this one call — see
@@ -145,7 +135,7 @@ type AgentManager struct {
 
 	// injectionLocks holds one *injectionMutex per resolved container ID,
 	// lazily created by injectionLock. It serializes tmux injection
-	// (message paste/interrupt, MessageRaw, and SendKeys) for the same
+	// (message paste/interrupt and SendKeys) for the same
 	// target so their byte sequences cannot interleave — see
 	// injectionLock's doc comment. Entries are never removed: each one is a
 	// small, fixed-size mutex, not a store of message content, so retaining
@@ -534,53 +524,6 @@ func (m *AgentManager) RuntimeName() string {
 	return m.Runtime.Name()
 }
 
-// MessageRaw sends literal bytes to an agent's tmux session via send-keys
-// with no trailing Enter keypresses. This bypasses the paste buffer and
-// debounce buffer, sending directly via tmux send-keys so that control
-// sequences (arrow keys, Escape, etc.) are interpreted by the terminal.
-func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if projectID != "" {
-		filter["scion.project_id"] = projectID
-	}
-	agents, err := m.List(ctx, filter)
-	if err != nil {
-		return err
-	}
-
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		if matchesAgentID(a, agentID) {
-			agent = &a
-			break
-		}
-	}
-
-	if agent == nil {
-		return errNoRunningContainer(agentID)
-	}
-
-	// Serialize against a concurrent SendKeys call (or a concurrent
-	// deliverImmediate call) for the same resolved container, so their tmux
-	// byte sequences cannot interleave — see injectionLock's doc comment.
-	// MessageRaw is the legacy raw-message primitive (pending Phase 4
-	// removal per .design/agent-keys-contract.md); it did not take this
-	// lock previously, so raw keys delivered through it could interleave
-	// with a buffered paste or interrupt for the same agent.
-	lock := m.injectionLock(agent.ContainerID)
-	if err := lock.Lock(ctx); err != nil {
-		return fmt.Errorf("failed to acquire injection lock for agent '%s': %w", agent.Name, err)
-	}
-	defer lock.Unlock()
-
-	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "--", keys}
-	if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
-		return fmt.Errorf("failed to send raw keys to agent '%s': %w", agent.Name, err)
-	}
-
-	return nil
-}
-
 // keysTarget is the tmux target every injection primitive in this file
 // addresses — the single window every agent harness runs in.
 const keysTarget = "scion:0"
@@ -665,7 +608,7 @@ func (im *injectionMutex) Unlock() {
 //
 // Serialization guarantee, stated precisely because it is easy to overstate:
 // this lock only orders concurrent calls into this one AgentManager's
-// deliverImmediate/MessageRaw/SendKeys for the same resolved container. It
+// deliverImmediate/SendKeys for the same resolved container. It
 // says nothing about, and must not be relied on to order, interactive PTY
 // input (a separate code path entirely, pkg/runtimebroker/pty_handlers.go)
 // or a separate local CLI process's own manager instance (which has its own,
@@ -910,7 +853,7 @@ func (s keysScope) empty() bool {
 // that floor and returns ErrKeysUnsupported for a resolved container whose
 // tmux is provably older.
 //
-// Unlike MessageRaw, SendKeys performs the "agent_id" container-label
+// SendKeys performs the "agent_id" container-label
 // identity check described in agentkeys.BrokerRequest's doc comment
 // atomically with resolution: exactly one List-then-match resolves exactly
 // one container (resolveKeysTarget), that container's own "agent_id" label

@@ -24,6 +24,8 @@ type Tx struct {
 	AgentCredential *AgentCredentialClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
 	AgentIdentityKey *AgentIdentityKeyClient
+	// AgentRecovery is the client for interacting with the AgentRecovery builders.
+	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
@@ -40,6 +42,8 @@ type Tx struct {
 	BrokerSecret *BrokerSecretClient
 	// BrokerSetting is the client for interacting with the BrokerSetting builders.
 	BrokerSetting *BrokerSettingClient
+	// BrokerTargetInventory is the client for interacting with the BrokerTargetInventory builders.
+	BrokerTargetInventory *BrokerTargetInventoryClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
@@ -285,6 +289,7 @@ func (tx *Tx) init() {
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
 	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
+	tx.AgentRecovery = NewAgentRecoveryClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
@@ -293,6 +298,7 @@ func (tx *Tx) init() {
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
+	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
 	tx.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(tx.config)
 	tx.ConduitSession = NewConduitSessionClient(tx.config)

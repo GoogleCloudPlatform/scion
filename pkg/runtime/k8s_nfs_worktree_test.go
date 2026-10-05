@@ -57,14 +57,16 @@ func TestBuildPod_NFSWorktree_MountsAndEnv(t *testing.T) {
 	ic := pod.Spec.InitContainers[0]
 	assert.Equal(t, []corev1.VolumeMount{
 		{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"},
+		{Name: "workspace", MountPath: "/scion-provision", SubPath: "projects/proj-123/provision"},
 	}, ic.VolumeMounts)
 	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
 	for name, want := range map[string]string{
-		"SCION_WORKSPACE_MODE": "worktree-per-agent",
-		"SCION_AGENT_SLUG":     "agent-1",
-		"SCION_AGENT_BRANCH":   "agent-one",
-		"SCION_PROJECT_ID":     "proj-123",
-		"SCION_CLONE_URL":      "https://github.com/example/repo.git",
+		"SCION_PROVISION_STATE_DIR": "/scion-provision",
+		"SCION_WORKSPACE_MODE":      "worktree-per-agent",
+		"SCION_AGENT_SLUG":          "agent-1",
+		"SCION_AGENT_BRANCH":        "agent-one",
+		"SCION_PROJECT_ID":          "proj-123",
+		"SCION_CLONE_URL":           "https://github.com/example/repo.git",
 	} {
 		got, ok := envValue(ic.Env, name)
 		assert.True(t, ok, "init env %s missing", name)

@@ -213,6 +213,11 @@ type HTTPAgentDispatcher struct {
 	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
+
+	// dispatchExperimentsProvider returns the enabled hub experiments that
+	// change broker behaviour, read on every create, start and restart
+	// dispatch. Nil provider = none sent.
+	dispatchExperimentsProvider func() []string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -369,6 +374,21 @@ func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.A
 // so a settings change reaches an agent at its next start.
 func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
 	d.autoExposePortsDefaultProvider = fn
+}
+
+// SetDispatchExperimentsProvider registers the accessor for the enabled
+// hub experiments sent to brokers with each create, start and restart
+// dispatch, so an admin toggle applies at the agent's next dispatch.
+func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
+	d.dispatchExperimentsProvider = fn
+}
+
+// dispatchExperiments returns the enabled dispatch experiments, or nil.
+func (d *HTTPAgentDispatcher) dispatchExperiments() []string {
+	if d.dispatchExperimentsProvider == nil {
+		return nil
+	}
+	return d.dispatchExperimentsProvider()
 }
 
 // autoExposePortsDefault returns the hub auto-expose default, or nil when no
@@ -755,7 +775,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.hubAgentDefaultsProvider != nil {
 			hubDefaults = d.hubAgentDefaultsProvider()
 		}
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), d.dispatchExperiments())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -1105,10 +1125,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
 			}
+			req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -1173,6 +1199,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
+	// The global project also sends its slug alongside a provider path.
 	if agent.ProjectID == "" {
 		return projectDispatchInfo{}, nil
 	}
@@ -1212,6 +1239,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
+	} else if isGlobalHubProject(project.Slug) {
+		// The global project's slug travels with its provider path so the
+		// broker can tell the global project apart from another project
+		// whose path points at the broker's global directory. The broker
+		// keeps resolving the project from the path.
+		info.projectSlug = globalProjectSlug
 	}
 	return info, nil
 }
@@ -3004,10 +3037,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -3185,7 +3221,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3317,7 +3353,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3431,50 +3467,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	return err
 }
 
-// ErrRawDispatchRefused is returned by DispatchAgentMessage when the
-// message being dispatched carries Raw == true. This is a documented
-// contract invariant every AgentDispatcher.DispatchAgentMessage
-// implementation must uphold (today exactly this one production
-// implementation exists, per contract §6.1(a)); nothing in the Go type
-// system enforces it on a future second implementation, so a reviewer
-// adding one must apply the same check at its own chokepoint.
-//
-// From task 2.3 onward (contract .design/agent-keys-contract.md §6.1 "(a)
-// Dispatch-layer backstop"), legacy raw keystroke delivery through the
-// message/broadcast/DM dispatch path is refused unconditionally at this
-// chokepoint -- zero broker calls, never mgr.MessageRaw -- regardless of
-// which call site reached it (direct dispatch, dispatchWithBrokerRetry, or
-// any broker-proxy-published message). A correctly operating Hub never
-// produces a Raw==true structuredMsg at this layer: the message-handler
-// bridge (task 2.3, agent_keys_message_bridge.go) and ptone/scion#2218's
-// (task 0.2's) ingress guards both intercept raw before persistence or
-// dispatch on every production ingress. Reaching this point therefore
-// signals an implementation defect in one of those layers, not a normal
-// caller error (contract's AK-55).
-//
-// This layer cannot undo a persisted store.Message row or an already-
-// published SSE/observer event: on every call site, those side effects (if
-// any) already happened before dispatch runs. Returning this error is
-// deliberately just an ordinary dispatch error to the caller -- every
-// existing caller already marks a persisted row failed through its own
-// existing failure path (e.g. ExecuteAgentDM's markFailed) and returns a
-// generic, non-keys-specific failure to any synchronous caller -- so this
-// chokepoint requires no new error-handling code path anywhere else.
-var ErrRawDispatchRefused = errors.New("agent dispatch: raw message delivery refused (post-2.3 backstop)")
-
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	// A nil agent has no broker to deliver to; reject it before the raw
-	// backstop log below dereferences agent.ID.
-	if agent == nil {
-		return requireRuntimeBrokerAssigned(agent)
-	}
-	if structuredMsg != nil && structuredMsg.Raw {
-		slog.Error("agent dispatch: raw message delivery refused at the backstop",
-			"agent_id", agent.ID, "defect", "raw_reached_dispatch_layer")
-		return ErrRawDispatchRefused
-	}
-
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}

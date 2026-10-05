@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -316,8 +317,13 @@ func (s *ProjectStore) NextAvailableSlug(ctx context.Context, baseSlug string) (
 	}
 }
 
-// UpdateProject updates an existing project.
+// UpdateProject updates an existing project. It never writes owner_id:
+// SetProjectOwnerID is the only writer of that column (ptone/scion#2597).
+// p.OwnerID is ignored on input and refreshed from the stored row on success.
 func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) error {
+	if p == nil {
+		return fmt.Errorf("UpdateProject: nil project: %w", store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(p.ID)
 	if err != nil {
 		return err
@@ -325,8 +331,7 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 
 	update := s.client.Project.UpdateOneID(uid).
 		SetName(p.Name).
-		SetSlug(p.Slug).
-		SetOwnerID(p.OwnerID)
+		SetSlug(p.Slug)
 
 	if p.GitRemote != "" {
 		update.SetGitRemote(p.GitRemote)
@@ -379,6 +384,9 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 		return mapError(err)
 	}
 	p.Updated = updated.Updated
+	// owner_id is not written here, so report the stored value rather than
+	// leaving the caller holding a possibly stale owner.
+	p.OwnerID = updated.OwnerID
 	return nil
 }
 
@@ -740,6 +748,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -767,6 +776,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
 		SetDefaultProfile(b.DefaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -868,6 +878,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
 			SetDefaultProfile(b.DefaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -972,6 +983,10 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
 	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	// broker_target_inventory has no FK to runtime_brokers either.
+	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)

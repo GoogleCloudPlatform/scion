@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -232,8 +233,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
+			// Cross-broker agent move is not implemented by this broker.
+			AgentMove: false,
 		},
-		Profiles: s.buildInfoProfiles(runtimeType),
+		Profiles:         s.buildInfoProfiles(runtimeType),
+		WorkspaceStorage: s.workspaceStorageDescriptor(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -756,6 +760,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A global slug sent with a path marks the hub's global project; the
+	// path resolves the project.
+	var hubGlobalProject bool
+	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -1035,6 +1044,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ProjectPath:        req.ProjectPath,
 		ProjectSlug:        req.ProjectSlug,
 		ProjectID:          req.ProjectID,
+		HubGlobalProject:   hubGlobalProject,
 		Config:             req.Config,
 		InlineConfig:       req.InlineConfig,
 		SharedDirs:         req.SharedDirs,
@@ -2166,6 +2176,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// project's .scion directory as the container recorded it, not a
 	// project root, so buildStartContext is told where it came from.
 	startProjectPath := startReq.ProjectPath
+	var startHubGlobalProject bool
+	startReq.ProjectSlug, startHubGlobalProject = splitHubGlobalSlug(startReq.ProjectPath, startReq.ProjectSlug)
 	var startProjectPathFromContainer bool
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
 		m, err := s.lookupAgentMatch(ctx, id, projectID)
@@ -2200,6 +2212,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectPath:              startProjectPath,
 		ProjectPathFromContainer: startProjectPathFromContainer,
 		ProjectSlug:              startReq.ProjectSlug,
+		HubGlobalProject:         startHubGlobalProject,
 		Config:                   cfg,
 		InlineConfig:             startReq.InlineConfig,
 		HubEndpoint:              startReq.HubEndpoint,
@@ -2285,11 +2298,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			"agent_id", id, "error", err)
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
-		// the run the runtime holds now.
+		// the run the runtime holds now. Start can also re-provision the
+		// agent, so a required skill reference that cannot be resolved gets
+		// the same typed response as on create, with those details added.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		var skillErr *agent.SkillResolutionError
+		switch {
+		case errors.Is(err, agent.ErrContainerNameInUse):
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
-		} else {
+		case errors.As(err, &skillErr):
+			skillResolutionFailedWithDetails(w, skillErr, details)
+		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
 		return
@@ -2339,8 +2358,11 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		return
 	}
 
-	// Merge inline config over existing
+	// Merge inline config over existing. MergeScionConfig appends skills, and
+	// the Hub sends the agent's full skill list on every start and restart,
+	// so collapse references that name the same skill and destination.
 	merged := config.MergeScionConfig(&existing, inlineConfig)
+	merged.Skills = dedupeSkillReferences(merged.Skills)
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -2356,6 +2378,37 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		s.agentLifecycleLog.Debug("applyInlineConfigUpdate: applied inline config update",
 			"agent", agentName, "maxTurns", inlineConfig.MaxTurns, "maxModelCalls", inlineConfig.MaxModelCalls)
 	}
+}
+
+// dedupeSkillReferences keeps only the final occurrence of each skill
+// reference key (URI plus As) and drops earlier ones, preserving the relative
+// order of the references that remain. The Hub resolver and the provision
+// step's required-skill check collapse references that share a URI
+// last-wins, taking As, Scope and Optional from the last one. The last
+// reference for a URI is always the final occurrence of its own key, so it
+// survives and stays last among that URI's references, and on that path the
+// installed result is unchanged. Resolvers that resolve each reference on
+// its own (gcp-skill://, and gh:// when the Hub is unavailable) install the
+// same files under the same name; the surviving entry carries the latest
+// Scope and Optional, matching the Hub path. References with the same URI
+// but different As are kept as separate entries, because the dedupe does not
+// merge different install names (the per-reference resolvers install both).
+func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
+	if len(refs) < 2 {
+		return refs
+	}
+	type key struct{ uri, as string }
+	last := make(map[key]int, len(refs))
+	for i, ref := range refs {
+		last[key{ref.URI, ref.As}] = i
+	}
+	out := make([]api.SkillReference, 0, len(last))
+	for i, ref := range refs {
+		if last[key{ref.URI, ref.As}] == i {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 // isContainerStopTolerable returns true if the error from stopping a container
@@ -2786,6 +2839,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
+		// Start can re-provision the agent: a required skill reference that
+		// cannot be resolved gets the same typed response as on start, and
+		// is checked before the "not found" text match so a skill cause
+		// is not reported as a missing agent.
+		var skillErr *agent.SkillResolutionError
+		if errors.As(err, &skillErr) {
+			skillResolutionFailedWithDetails(w, skillErr, details)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return
@@ -2816,8 +2878,36 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.id", id))
 
+	if r.Body == nil {
+		BadRequest(w, "Invalid request body: empty request body")
+		return
+	}
+	// No byte cap here, matching the previous behaviour: this route is
+	// Hub-only and HMAC-authenticated, and the Hub forwards a rebuilt
+	// request in which the message text can appear several times (msg plus
+	// the rendered delivery_text, nested and top level), so a cap tied to
+	// the Hub's public ingress limit would refuse ordinary messages.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// Raw keystroke delivery through messages has been removed. A request
+	// that still carries structured_message.raw (any value, any case) is
+	// refused before decoding, so it can never be delivered as an ordinary
+	// message and never reaches the agent manager.
+	if messages.HasRetiredRawField(body, "structured_message") {
+		span.SetStatus(codes.Error, messages.RawInputRemovedCode)
+		writeError(w, http.StatusUnprocessableEntity, messages.RawInputRemovedCode,
+			messages.RawInputRemovedMessage, map[string]interface{}{
+				"ingress":     "broker_message",
+				"replacement": "POST /api/v1/agents/{id}/keys",
+			})
+		return
+	}
+
 	var req MessageRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
@@ -2847,60 +2937,43 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
-	// Raw messages bypass the paste buffer and debounce, sending literal
-	// bytes via tmux send-keys with no trailing Enter keypresses.
-	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
-	if isRaw {
-		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				span.SetStatus(codes.Error, err.Error())
-				NotFound(w, "Agent")
-				return
-			}
-			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
+	msgCtx := ctx
+	if !req.Interrupt && req.MessageID != "" {
+		// Non-interrupt messages are buffered and delivered after this
+		// handler has already answered 200. Register a callback so a
+		// later delivery failure is reported back to the hub, which
+		// then marks the message failed instead of "dispatched" (#1820).
+		failure := hubclient.MessageFailure{
+			MessageID: req.MessageID,
+			AgentID:   id,
+			ProjectID: projectID,
+		}
+		if failure.ProjectID == "" {
+			failure.ProjectID = req.ProjectID
+		}
+		connName := r.Header.Get("X-Scion-Hub-Connection")
+		msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
+			f := failure
+			f.Reason = "broker delivery failed: " + deliveryErr.Error()
+			go s.reportMessageFailure(connName, f)
+		})
+	}
+	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			span.SetStatus(codes.Error, err.Error())
+			NotFound(w, "Agent")
 			return
 		}
-	} else {
-		msgCtx := ctx
-		if !req.Interrupt && req.MessageID != "" {
-			// Non-interrupt messages are buffered and delivered after this
-			// handler has already answered 200. Register a callback so a
-			// later delivery failure is reported back to the hub, which
-			// then marks the message failed instead of "dispatched" (#1820).
-			failure := hubclient.MessageFailure{
-				MessageID: req.MessageID,
-				AgentID:   id,
-				ProjectID: projectID,
-			}
-			if failure.ProjectID == "" {
-				failure.ProjectID = req.ProjectID
-			}
-			connName := r.Header.Get("X-Scion-Hub-Connection")
-			msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
-				f := failure
-				f.Reason = "broker delivery failed: " + deliveryErr.Error()
-				go s.reportMessageFailure(connName, f)
-			})
-		}
-		if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				span.SetStatus(codes.Error, err.Error())
-				NotFound(w, "Agent")
-				return
-			}
-			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
-			return
-		}
+		s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
+		return
 	}
 
 	// Log message acceptance. Non-interrupt messages are buffered with a
 	// debounce delay before actual tmux delivery, so we log "accepted"
 	// rather than "delivered". Interrupt messages bypass the buffer and
-	// are delivered immediately. Raw messages are always delivered immediately.
+	// are delivered immediately.
 	logMsg := "message accepted (buffered)"
-	if isRaw {
-		logMsg = "message delivered (raw, unbuffered)"
-	} else if req.Interrupt {
+	if req.Interrupt {
 		logMsg = "message delivered (interrupt, unbuffered)"
 	}
 	logAttrs := []any{"agent_id", id}
@@ -2923,7 +2996,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 // injection route (POST /api/v1/agents/{id}/keys), frozen by
 // .design/agent-keys-contract.md §4. Per decision 1 (Option B), it shares no
 // code with sendMessage above: it never constructs or logs a
-// StructuredMessage, never calls mgr.Message/mgr.MessageRaw, and its
+// StructuredMessage, never calls mgr.Message, and its
 // delivery never goes through the message debounce buffer — only the
 // dedicated mgr.SendKeys primitive.
 //

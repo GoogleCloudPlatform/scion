@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from '../client/api.js';
+import { ACCESS_DENIED_UNREADABLE_REASON } from '../client/api.js';
 import { formatAccessDenied, showAccessDeniedToast, _resetDedupState } from './access-denied.js';
 
 /**
@@ -96,6 +97,12 @@ describe('formatAccessDenied', () => {
     const detail: AccessDeniedDetail = { reason: 'Access denied' };
     const result = formatAccessDenied(detail);
     expect(result.primary).toBe('Access denied');
+    expect(result.secondary).toBeUndefined();
+  });
+
+  it('shows the friendly sentence for an unreadable (aborted) 403 body (ptone/scion#2583)', () => {
+    const result = formatAccessDenied({ reason: ACCESS_DENIED_UNREADABLE_REASON });
+    expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBeUndefined();
   });
 

@@ -24,6 +24,7 @@
  */
 
 import type { AccessDeniedDetail } from '../client/api.js';
+import { ACCESS_DENIED_UNREADABLE_REASON } from '../client/api.js';
 import { showToast } from './toast.js';
 
 /** Human-friendly labels for machine-readable action codes. */
@@ -66,7 +67,12 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
   // Primary: prefer the backend message when it is not the generic
   // "Insufficient permissions" (which adds no information). Custom
   // messages from authorizeMsg carry real user-facing guidance.
-  const isGeneric = !detail.reason || detail.reason === 'Insufficient permissions';
+  // ACCESS_DENIED_UNREADABLE_REASON marks a 403 whose body was never read
+  // (request aborted mid-read), so it carries no server guidance either.
+  const isGeneric =
+    !detail.reason ||
+    detail.reason === 'Insufficient permissions' ||
+    detail.reason === ACCESS_DENIED_UNREADABLE_REASON;
 
   const primary = isGeneric ? "You don't have permission to perform this action." : detail.reason!;
 
