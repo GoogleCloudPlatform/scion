@@ -532,6 +532,8 @@ type homeMountRules struct {
 	mount     corev1.VolumeMount // the agent container's home mount
 	agentDir  string             // <root>/<pid>/agents/<slug> on the export
 	agentsDir string             // <root>/<pid>/agents on the export
+	root      string             // the subpath root on the export
+	project   string             // <root>/<pid> on the export
 	forbidden map[string]bool    // export paths no container may mount
 	// provisionMount, when set, is the exact mount of the agent directory
 	// the clone-per-agent workspace provisioning init container uses.
@@ -551,6 +553,7 @@ func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRea
 	}
 	return homeMountRules{
 		home: home, mount: mount, agentDir: agentDir, agentsDir: filepath.Join(project, "agents"),
+		root: hs.SubPathRoot, project: project,
 		forbidden: forbidden, provisionMount: provisionMount,
 	}, nil
 }
@@ -560,7 +563,8 @@ func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRea
 //     on the agent container;
 //   - no container mounts the home volume at the export root, the subpath
 //     root, the project directory or its agents directory;
-//   - no container mounts another agent's directory or anything in it;
+//   - no container mounts another project's directory, or another agent's
+//     directory, or anything in them;
 //   - only the home-leaf init container mounts the agent directory, and,
 //     for a clone-per-agent workspace on the same claim, the workspace
 //     provisioning init container with exactly the mount buildPod gives
@@ -583,6 +587,9 @@ func checkHomeMounts(pod *corev1.Pod, rules homeMountRules) error {
 			sub := path.Clean(vm.SubPath)
 			if vm.SubPath == "" || rules.forbidden[sub] {
 				return fmt.Errorf("container %q mounts the home volume %q at export path %q; with home storage %q that path is not mounted", container, vm.Name, vm.SubPath, HomeStorageNFS)
+			}
+			if strings.HasPrefix(sub, rules.root+"/") && sub != rules.project && !strings.HasPrefix(sub, rules.project+"/") {
+				return fmt.Errorf("container %q mounts %q of the home volume, which belongs to another project", container, vm.SubPath)
 			}
 			if rest, ok := strings.CutPrefix(sub, rules.agentsDir+"/"); ok && rules.agentsDir+"/"+strings.SplitN(rest, "/", 2)[0] != rules.agentDir {
 				return fmt.Errorf("container %q mounts %q of the home volume, which belongs to another agent", container, vm.SubPath)

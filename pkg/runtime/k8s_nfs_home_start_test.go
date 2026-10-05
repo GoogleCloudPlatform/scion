@@ -309,27 +309,31 @@ func TestCheckHomeMounts(t *testing.T) {
 		return corev1.VolumeMount{Name: k8sHomeVolume, MountPath: "/mnt", SubPath: sub}
 	}
 	for name, p := range map[string]*corev1.Pod{
-		"another volume at the home":  pod([]corev1.VolumeMount{homeMount, {Name: "gcs-vol-0", MountPath: "/home/scion"}}),
-		"another volume in the home":  pod([]corev1.VolumeMount{homeMount, {Name: "gcs-vol-0", MountPath: "/home/scion/cache"}}),
-		"unclean path in the home":    pod([]corev1.VolumeMount{homeMount, {Name: "v", MountPath: "/home/scion/./x/.."}}),
-		"home volume with other path": pod([]corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: home, SubPath: "other"}}),
-		"home mounted twice":          pod([]corev1.VolumeMount{homeMount, homeMount}),
-		"home missing":                pod([]corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}}),
-		"init container in the home":  pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{{Name: "w", MountPath: "/home/scion/.ssh"}}}),
-		"init container at the home":  pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{homeMount}}),
-		"home mount on a sidecar":     withSidecar,
-		"home volume at export root":  pod([]corev1.VolumeMount{homeMount, homeVol("")}),
-		"home volume at slash":        pod([]corev1.VolumeMount{homeMount, homeVol("/")}),
-		"home volume at subpath root": pod([]corev1.VolumeMount{homeMount, homeVol("p")}),
-		"home volume at project":      pod([]corev1.VolumeMount{homeMount, homeVol("p/x")}),
-		"home volume at agents":       pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/")}),
-		"agent dir on the agent":      pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/a")}),
-		"agent dir on another init":   pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/a")}}),
-		"export root on an init":      pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("")}}),
-		"provision with another path": pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sWorkspaceProvisionContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/other", SubPath: "p/x/agents/a"}}}),
-		"another agent's dir":         pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b")}),
-		"another agent's home":        pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b/home-" + testHomeAgentID)}),
-		"another agent's dir on leaf": pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/b")}}),
+		"another volume at the home":      pod([]corev1.VolumeMount{homeMount, {Name: "gcs-vol-0", MountPath: "/home/scion"}}),
+		"another volume in the home":      pod([]corev1.VolumeMount{homeMount, {Name: "gcs-vol-0", MountPath: "/home/scion/cache"}}),
+		"unclean path in the home":        pod([]corev1.VolumeMount{homeMount, {Name: "v", MountPath: "/home/scion/./x/.."}}),
+		"home volume with other path":     pod([]corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: home, SubPath: "other"}}),
+		"home mounted twice":              pod([]corev1.VolumeMount{homeMount, homeMount}),
+		"home missing":                    pod([]corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}}),
+		"init container in the home":      pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{{Name: "w", MountPath: "/home/scion/.ssh"}}}),
+		"init container at the home":      pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{homeMount}}),
+		"home mount on a sidecar":         withSidecar,
+		"home volume at export root":      pod([]corev1.VolumeMount{homeMount, homeVol("")}),
+		"home volume at slash":            pod([]corev1.VolumeMount{homeMount, homeVol("/")}),
+		"home volume at subpath root":     pod([]corev1.VolumeMount{homeMount, homeVol("p")}),
+		"home volume at project":          pod([]corev1.VolumeMount{homeMount, homeVol("p/x")}),
+		"home volume at agents":           pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/")}),
+		"agent dir on the agent":          pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/a")}),
+		"agent dir on another init":       pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/a")}}),
+		"export root on an init":          pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("")}}),
+		"provision with another path":     pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sWorkspaceProvisionContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/other", SubPath: "p/x/agents/a"}}}),
+		"another agent's dir":             pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b")}),
+		"another agent's home":            pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b/home-" + testHomeAgentID)}),
+		"another agent's dir on leaf":     pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/b")}}),
+		"sibling slug extending this one": pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/ab")}),
+		"sibling slug's home":             pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/ab/home-" + testHomeAgentID)}),
+		"another project":                 pod([]corev1.VolumeMount{homeMount, homeVol("p/y")}),
+		"another project's agent":         pod([]corev1.VolumeMount{homeMount, homeVol("p/y/agents/a")}),
 	} {
 		if err := checkHomeMounts(p, rules); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -1202,7 +1206,7 @@ func TestCheckHomeMounts_SharedModeAndNestedRoot(t *testing.T) {
 	if err := checkHomeMounts(pod(provision), rules); err == nil {
 		t.Error("shared mode: the provisioning container mounting the agent directory was accepted")
 	}
-	for _, sub := range []string{"a", "a/b", "a/b/x", "a/b/x/agents", "a/b/x/agents/other"} {
+	for _, sub := range []string{"a", "a/b", "a/b/x", "a/b/x/agents", "a/b/x/agents/other", "a/b/x/agents/sx", "a/b/y", "a/b/y/agents/s"} {
 		c := corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/mnt", SubPath: sub}}}
 		if err := checkHomeMounts(pod(c), rules); err == nil {
 			t.Errorf("subPath %q accepted", sub)
