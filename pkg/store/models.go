@@ -154,6 +154,9 @@ type Agent struct {
 	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
 
 	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
 	// held. Internal bookkeeping, untagged like the launch columns.

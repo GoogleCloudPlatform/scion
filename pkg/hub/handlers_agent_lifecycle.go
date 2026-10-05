@@ -498,6 +498,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
+			} else if errors.Is(dispatchErr, errStartedStatusWrite) {
+				// The start succeeded; only its status write failed. The
+				// handler's own status write below runs and answers as
+				// before if it fails too.
+				dispatchErr = nil
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
@@ -613,9 +618,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
+			} else if errors.Is(dispatchErr, errStartedStatusWrite) {
+				// The start leg succeeded; only its status write failed:
+				// keep the reservation and let the write below run.
+				dispatchErr = nil
 			}
 			if dispatchErr != nil {
-				if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
+				if errors.Is(dispatchErr, errStartClaimLost) {
+					// The claim was lost while the start leg ran (a stop
+					// superseded it): the container may be up, so the
+					// reservation is kept and no stopped state is recorded.
+				} else if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
 					// owns the row now: leave its phase and the

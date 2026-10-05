@@ -349,7 +349,7 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 		outcome = startHandedOff
 	}
 	run.finish(outcome)
-	if err == nil {
+	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.compensatingStop(ctx, agent, run.claim)
 	}
 	if run.isLost() {
@@ -459,7 +459,13 @@ func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (
 	if err != nil {
 		return nil, &startQuotaError{err: err}
 	}
-	return func() { s.rollbackBrokerQuota(ctx, agent, created) }, nil
+	return func() {
+		// The run context may already be done (a lost claim, the start
+		// deadline): release on a detached, bounded context.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		s.rollbackBrokerQuota(rctx, agent, created)
+	}, nil
 }
 
 // writeStartQuotaError writes the answer for a start refused by broker
@@ -533,7 +539,7 @@ var startClaimHolderNames = map[store.StartClaimKind]string{
 	store.StartClaimCreate:      "agent creation",
 	store.StartClaimRecovery:    "automatic recovery",
 	store.StartClaimReincarnate: "a reincarnation",
-	store.StartClaimStop:        "a queued stop",
+	store.StartClaimStop:        "a stop",
 }
 
 // expectedClaimRelease estimates when a held claim ends: the end of the
@@ -564,6 +570,13 @@ func (s *Server) writeStartInProgress(w http.ResponseWriter, err error) bool {
 	}
 	msg := fmt.Sprintf("A start is already in progress for this agent (%s, since %s). It will finish or be released by %s; run scion stop to cancel it.",
 		holder, held.Since.UTC().Format("15:04"), release.UTC().Format("15:04"))
+	if held.Kind == store.StartClaimStop {
+		// A queued stop being applied, or the reaper stopping a container an
+		// unconfirmed start left running: released once the broker reports
+		// the agent stopped (kept while the broker is offline).
+		msg = fmt.Sprintf("A stop is in progress for this agent (since %s). It is released when the broker reports the agent stopped; start it again then.",
+			held.Since.UTC().Format("15:04"))
+	}
 	writeError(w, http.StatusConflict, ErrCodeStartInProgress, msg, map[string]interface{}{
 		"holderKind":      string(held.Kind),
 		"state":           string(held.State),

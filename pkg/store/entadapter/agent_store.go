@@ -162,6 +162,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIntentAt
 		sa.RunIntentAt = &t
 	}
+	sa.RunIntentMarkedAt = copyTimePtr(a.RunIntentMarkedAt)
 	if a.StartClaimID != nil {
 		sa.StartClaimID = *a.StartClaimID
 	}

@@ -370,3 +370,148 @@ func TestStartClaimWiring_StatusWrittenUnderClaimAndLifecycleOpHeld(t *testing.T
 	assert.True(t, opActive, "the lifecycle op is held during the dispatch")
 	assert.Equal(t, "running", getAgent(t, f.s, a.ID).Phase)
 }
+
+// An agent whose stopped intent was written by earlier code (here the boot
+// backfill, which never sets the marker) is logged, not stopped, by the
+// backstop; one written by claim-aware code is stopped.
+func TestStartClaimWiring_BackstopLeavesLegacyStoppedIntent(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	ctx := context.Background()
+	legacy := f.addAgent("legacy", "error", "") // backfill: not running -> stopped
+	_, err := f.s.BackfillRunIntent(ctx)
+	require.NoError(t, err)
+	got := getAgent(t, f.s, legacy.ID)
+	require.Equal(t, store.RunIntentStopped, got.RunIntent)
+	require.False(t, got.RunIntentWrittenWithClaims())
+
+	f.heartbeat(completeInventory(), legacy.Slug)
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(0), d.stops.Load(), "a running agent with an older stopped intent is not stopped")
+
+	_, err = f.s.SetRunIntent(ctx, legacy.ID, store.RunIntentStopped) // a claim-aware stop
+	require.NoError(t, err)
+	f.srv.intentStops.Delete(legacy.ID)
+	f.heartbeat(completeInventory(), legacy.Slug)
+	require.Eventually(t, func() bool { return d.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+}
+
+// failRunningStatusStore fails the started-status write.
+type failRunningStatusStore struct {
+	store.Store
+	agentID string
+}
+
+func (s failRunningStatusStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if id == s.agentID && u.ClearExit {
+		return errors.New("database is locked")
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// A restart whose start leg succeeded but whose status write failed is not
+// a failed restart: the reservation is kept and no stopped state is
+// recorded.
+func TestStartClaimWiring_RestartStatusWriteFailureIsNotAFailedStart(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("restarting-live", "running", "working")
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	code, _ := lifecycle(t, f, a.ID, "restart")
+	assert.NotEqual(t, http.StatusBadGateway, code, "not answered as a failed dispatch")
+	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "the running agent keeps its reservation")
+	assert.NotEqual(t, "stopped", getAgent(t, f.s, a.ID).Phase, "no stopped state is recorded for a started container")
+}
+
+// A start whose claim is lost before dispatch rolls back the reservation it
+// made, although its run context is cancelled by then.
+func TestStartClaimWiring_FenceFailureRollsBackCapacity(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	f.srv.startClaimTestHook = func(r *startClaimRun) { r.fenceAt = time.Now().Add(-time.Second) }
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		t.Fatal("dispatched past the fence")
+		return nil
+	}
+	err = f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser})
+	require.ErrorIs(t, err, errStartClaimLost)
+	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+	require.NoError(t, err)
+	assert.False(t, has, "the reservation made for the abandoned start is released")
+}
+
+// A failed start keeps a reservation the agent already held.
+func TestStartClaimWiring_FailedStartKeepsPreheldCapacity(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+	require.NoError(t, err)
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		return fmt.Errorf("x: %w", errStartRequestNotSent)
+	}
+	require.Error(t, f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser}))
+	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "a reservation the agent held before the start is kept")
+}
+
+// A start refused by a stop-kind claim says a stop is in progress.
+func TestStartClaimWiring_StopHolderMessage(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	at, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	_, err = f.s.ClaimAgentStop(ctx, a.ID, "drain-hub", at, time.Minute)
+	require.NoError(t, err)
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusConflict, code)
+	e, _ := body["error"].(map[string]interface{})
+	assert.Contains(t, e["message"], "A stop is in progress")
+}
+
+// wakeStatusSpyStore records whether the wake's running write happened
+// while the claim was held.
+type wakeStatusSpyStore struct {
+	store.Store
+	t         *testing.T
+	agentID   string
+	claimHeld *bool
+}
+
+func (s wakeStatusSpyStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if id == s.agentID && u.Phase == "running" {
+		cur, err := s.GetAgent(ctx, id)
+		require.NoError(s.t, err)
+		*s.claimHeld = cur.StartClaimID != ""
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// The wake writes running after readiness while its claim is held.
+func TestStartClaimWiring_WakeRunningWrittenUnderClaim(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	a := f.addAgent("waker", "suspended", "")
+	var claimHeld bool
+	f.srv.store = wakeStatusSpyStore{Store: f.s, t: t, agentID: a.ID, claimHeld: &claimHeld}
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		go func() { // the agent reports activity: ready
+			time.Sleep(50 * time.Millisecond)
+			_ = f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Activity: "thinking"})
+		}()
+		return nil
+	}
+	res, dmErr := f.srv.wakeAgentForDM(context.Background(), getAgent(t, f.s, a.ID))
+	require.Nil(t, dmErr)
+	require.Equal(t, WakeResumed, res.Outcome)
+	assert.True(t, claimHeld, "running is written before the wake's claim is released")
+}

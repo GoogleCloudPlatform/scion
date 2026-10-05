@@ -361,6 +361,14 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_intent_at").
 			Optional().
 			Nillable(),
+		// run_intent_marked_at is set to run_intent_at by every intent write
+		// of code that maintains start claims, and by no other code. When the
+		// two differ, the intent was last written by earlier code (or the
+		// boot backfill), which could leave intent stopped on an agent that is
+		// meant to run; the hub's backstop does not stop such an agent.
+		field.Time("run_intent_marked_at").
+			Optional().
+			Nillable(),
 
 		// --- Start claim ---
 		// An owned, leased claim taken before any start is dispatched, so at

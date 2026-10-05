@@ -172,7 +172,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"RunID": true,
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
-	"RunIntent": true, "RunIntentAt": true,
+	"RunIntent": true, "RunIntentAt": true, "RunIntentMarkedAt": true,
 	// Start claim columns are written only through the start-claim store
 	// methods (never by CreateAgent/UpdateAgent).
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,

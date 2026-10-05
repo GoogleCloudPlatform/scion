@@ -153,6 +153,23 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			s.publishAgentStatusFresh(ctx, agent)
 			// Wait for the agent to report its first activity (readiness signal).
 			readyErr = s.waitForAgentReady(ctx, agent.ID, 30*time.Second)
+			if readyErr != nil {
+				return nil
+			}
+			// Agent is ready — transition to 'running', still under the
+			// claim, so a stop or start recorded meanwhile is never painted
+			// over.
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}); err != nil {
+				s.messageLog.Error("wake: failed to update agent phase to running",
+					"agent_id", agent.ID, "error", err)
+				statusErr = &AgentDMError{
+					Code:       ErrCodeInternalError,
+					Message:    "failed to update agent status after readiness",
+					HTTPStatus: http.StatusInternalServerError,
+				}
+				return nil
+			}
+			agent.Phase = string(state.PhaseRunning)
 			return nil
 		}})
 		if err != nil {
@@ -176,8 +193,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				// Another start holds the agent's claim: it is already
 				// starting. The message is kept (deferred) and the sender
 				// gets no error.
-				s.messageLog.Info("wake: agent already starting; message deferred",
+				s.messageLog.Info("wake: another start or a stop holds the agent; message deferred",
 					"agent_id", agent.ID, "holder", string(held.Kind))
+				agent.StartClaimKind = held.Kind // for the delivery note
 				return &WakeResult{Outcome: WakeDeferred}, nil
 			}
 			// A delete claimed the row after the start gate passed: the
@@ -239,18 +257,8 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		}
 
 		// Agent is ready — transition to 'running'.
-		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
-		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
-			s.messageLog.Error("wake: failed to update agent phase to running",
-				"agent_id", agent.ID, "error", err)
-			return nil, &AgentDMError{
-				Code:       ErrCodeInternalError,
-				Message:    "failed to update agent status after readiness",
-				HTTPStatus: http.StatusInternalServerError,
-			}
-		}
-		agent.Phase = string(state.PhaseRunning)
-		// Publish from a re-read: a delete that claimed the row meanwhile
+		// The running write ran under the claim (above); publish from a
+		// re-read: a delete that claimed the row meanwhile
 		// must not be painted over (design ptone/scion#2483 note F).
 		s.publishAgentStatusFresh(ctx, agent)
 
@@ -336,6 +344,9 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 func deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
+	}
+	if agent.StartClaimKind == store.StartClaimStop {
+		return "a stop is in progress for the agent"
 	}
 	return "agent is already starting"
 }

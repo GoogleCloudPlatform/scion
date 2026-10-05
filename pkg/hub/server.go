@@ -4641,8 +4641,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		var held *store.ClaimHeldError
 		if errors.As(err, &held) {
 			// The agent is already being started by the claim holder: the
-			// event is deferred, not failed.
-			slog.Info("Scheduler: agent already starting; event deferred",
+			// event is skipped (not retried), not failed.
+			slog.Info("Scheduler: agent already starting; event skipped",
 				"eventID", evt.ID, "agent_id", agent.ID, "holder", string(held.Kind))
 			return nil
 		}
