@@ -116,7 +116,20 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 			agent.Activity = *upd.activity
 		}
 		if upd.appliedConfig != nil {
-			agent.AppliedConfig = upd.appliedConfig
+			// Store a copy, never the caller's pointer (ptone/scion#1907):
+			// the returned agent is handed to the dispatcher, whose
+			// applyBrokerResponse writes the broker's echo onto
+			// agent.AppliedConfig in place. Aliasing the caller's struct
+			// would let that echo leak into it silently; the worker instead
+			// takes the echo explicitly with copyBrokerEcho. A shallow copy
+			// is enough: the dispatcher only assigns top-level string fields
+			// (applyBrokerAgentConfig, forgetRuntimeTarget). Its one map
+			// write, the resolved-env merge into Env, is skipped on
+			// reprovision and is not on the start path. The copy still
+			// shares Env, InlineConfig and the other reference fields with
+			// the caller, so nothing here may mutate those in place.
+			cfg := *upd.appliedConfig
+			agent.AppliedConfig = &cfg
 		}
 		if upd.generation != nil {
 			agent.Generation = *upd.generation
@@ -136,6 +149,30 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		return agent, nil
 	}
 	return nil, lastErr
+}
+
+// copyBrokerEcho copies the fields a broker answer writes onto the
+// dispatched agent's AppliedConfig (applyBrokerAgentConfig: HarnessConfig,
+// HarnessAuth, Profile and, when includeImage is set, Image) from src to dst.
+// Like applyBrokerAgentConfig, an empty src field leaves dst unchanged. src
+// starts as a copy of dst (updateReincarnationStep), so a field the broker
+// did not echo still holds dst's own value. A nil src or dst is a no-op.
+func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
+	if dst == nil || src == nil {
+		return
+	}
+	if src.HarnessConfig != "" {
+		dst.HarnessConfig = src.HarnessConfig
+	}
+	if src.HarnessAuth != "" {
+		dst.HarnessAuth = src.HarnessAuth
+	}
+	if src.Profile != "" {
+		dst.Profile = src.Profile
+	}
+	if includeImage && src.Image != "" {
+		dst.Image = src.Image
+	}
 }
 
 // reincarnateStrPtr is a small helper for populating
@@ -528,16 +565,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// The provisioning step's write left agent.AppliedConfig pointing at
-	// fresh, so fresh is the object DispatchAgentReprovision mutated with the
-	// broker's echo (applyBrokerResponse): image, HarnessConfig, HarnessAuth
-	// and Profile. The starting step's write below passes appliedConfig:
-	// fresh, which persists every echoed field, the same as create. This copy
-	// is therefore a self-assignment; it is kept only to leave behaviour
-	// untouched.
-	if agent.AppliedConfig != nil && agent.AppliedConfig.Image != "" {
-		fresh.Image = agent.AppliedConfig.Image
-	}
+	// Take the reprovision echo (HarnessConfig, HarnessAuth, Profile) into
+	// fresh, so the starting step's write below persists it, the same as
+	// create. The echoed image is deliberately NOT taken: the broker's
+	// provision-only response reports the rendered config's image
+	// (runtimebroker handlers.go, agentResp.Image = cfg.Image), before the
+	// start-time resolution in pkg/agent/run.go applies the broker
+	// profile's image_registry rewrite (or keeps a bare name when a local
+	// image exists). fresh.Image keeps buildFreshAppliedConfig's value,
+	// already rewritten to the dispatcher's registry, until the start echo
+	// below supplies the image the runtime actually resolved. If the start
+	// fails, failReincarnation leaves the row as the starting step wrote
+	// it, so the row keeps that qualified image and not the unqualified
+	// echo.
+	copyBrokerEcho(fresh, agent.AppliedConfig, false)
 
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)
 	if err != nil {
@@ -554,8 +595,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// now holds gen N+1; a failure from here on must NOT restore `previous`,
 	// since that would make the store claim gen N while the disk (and any
 	// container the start call did manage to create) is gen N+1.
-	// appliedConfig: fresh persists every field the broker echoed back on
-	// reprovision (see above).
+	// appliedConfig: fresh persists the fields taken from the reprovision
+	// echo (see above).
 	//
 	// This write sets phase to "starting" before the DispatchAgentStart call
 	// below, so that call's own priorPhase capture sees "starting" rather
@@ -580,6 +621,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, "start failed: "+err.Error(), nil)
 		return
 	}
+	// Take the start echo, image included: this is the runtime-resolved
+	// image. The record's NewAppliedConfig and the completion write below
+	// both persist fresh.
+	copyBrokerEcho(fresh, agent.AppliedConfig, true)
 
 	// Step: complete. Design §3.4 Amendment A6: CAS the record to
 	// completed FIRST. Only the winner may write the agent row — otherwise a
@@ -639,8 +684,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// though gen N+1 is what is actually running.
 	//
 	// appliedConfig: fresh makes the row end with exactly the config recorded
-	// in rec.NewAppliedConfig above, including anything the start response
-	// echoed back after the starting step's write.
+	// in rec.NewAppliedConfig above, including the start echo copyBrokerEcho
+	// took after the starting step's write.
 	//
 	// clearMessageIfEquals (design Amendment A26.8): clears the in-flight
 	// "migrating to generation N" message set at the stopping step, but only

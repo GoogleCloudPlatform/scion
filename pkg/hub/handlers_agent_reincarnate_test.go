@@ -71,6 +71,13 @@ type reincarnateTestDispatcher struct {
 	// imageRegistry is the registry the fake reports through ImageRegistry(),
 	// as the HTTP dispatcher reports the registry it rewrites images to.
 	imageRegistry string
+
+	// reprovisionEcho and startEcho, when set, run on a successful dispatch
+	// against the dispatched agent's AppliedConfig, simulating the broker
+	// echo applyBrokerAgentConfig writes in place (HarnessConfig,
+	// HarnessAuth, Image, Profile).
+	reprovisionEcho func(cfg *store.AgentAppliedConfig)
+	startEcho       func(cfg *store.AgentAppliedConfig)
 }
 
 func (d *reincarnateTestDispatcher) ImageRegistry() string {
@@ -94,9 +101,13 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	d.reprovisionCalls++
 	err := d.reprovisionErr
 	image := d.reprovisionImage
+	echo := d.reprovisionEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
+	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
 	}
 	return err
 }
@@ -107,9 +118,13 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent 
 	d.lastStartResume = &resume
 	err := d.startErr
 	image := d.startImage
+	echo := d.startEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
+	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
 	}
 	return err
 }
@@ -1240,16 +1255,17 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 }
 
 // TestReincarnateAgent_WorkerPersistsBrokerEchoedImage is the worker-side
-// half of design §3.4 Amendment A11 item 1: when the broker's reprovision
-// response echoes back a resolved image different from what the hub planned
-// (e.g. the broker's own search path resolved something the hub could not
-// predict), the worker must persist that image on the agent's live
-// AppliedConfig rather than losing it once the "starting" step re-derives the
-// agent's phase. This is a regression test for the pointer-aliasing bug where
-// a step write omitting appliedConfig silently discarded the broker's echo.
+// half of design §3.4 Amendment A11 item 1: when the broker echoes back a
+// resolved image different from what the hub planned (e.g. the broker's own
+// search path resolved something the hub could not predict), the worker must
+// persist that image on the agent's live AppliedConfig. Since
+// ptone/scion#1907 the persisted image is the START echo (the runtime-
+// resolved image); the reprovision echo's image is the rendered,
+// not-yet-qualified value and is not taken.
 func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -1268,7 +1284,7 @@ func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "broker-resolved-image:v9", final.AppliedConfig.Image,
-		"the broker-echoed image must survive the starting step's write, not be lost to a stale re-read")
+		"the start-echoed image must be persisted at completion")
 }
 
 // createImageHarnessConfig stores a global harness config whose only
@@ -1346,10 +1362,12 @@ func TestReincarnateAgent_InlineImageBeatsHarnessConfig(t *testing.T) {
 
 // TestReincarnateAgent_RecordCarriesBrokerEchoedImage proves the reincarnation
 // record's NewAppliedConfig carries the image the broker echoed back from
-// reprovision, the same image the agent row ends up with.
+// start (ptone/scion#1907: not the reprovision echo's unqualified image), the
+// same image the agent row ends up with.
 func TestReincarnateAgent_RecordCarriesBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1577,6 +1595,120 @@ func TestReincarnateAgent_RowImageMatchesRecordAfterStartEcho(t *testing.T) {
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "ghcr.io/test-org/start-echo:v2", r.NewAppliedConfig.Image)
 	assert.Equal(t, r.NewAppliedConfig.Image, final.AppliedConfig.Image, "the row must end with the image the record holds")
+}
+
+// TestUpdateReincarnationStep_StoresCopyOfAppliedConfig covers
+// ptone/scion#1907: the step write stores a copy of the caller's applied
+// config, so neither side can change the other through a shared pointer:
+// not the caller mutating its struct after the write, and not the
+// dispatcher writing the broker echo onto the returned agent.
+func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	cfg := &store.AgentAppliedConfig{Image: "ghcr.io/test-org/fresh:v2", HarnessAuth: "api-key", Profile: "fresh-profile"}
+	written, err := srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+		appliedConfig:      cfg,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	require.NotNil(t, written.AppliedConfig)
+	assert.NotSame(t, cfg, written.AppliedConfig, "the step must not store the caller's pointer")
+
+	cfg.Image = "mutated-by-caller:v1"
+	cfg.Profile = "mutated-by-caller"
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", written.AppliedConfig.Image, "the in-memory agent must not see the caller's later mutation")
+	assert.Equal(t, "fresh-profile", written.AppliedConfig.Profile)
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", stored.AppliedConfig.Image, "the stored row must not see the caller's later mutation")
+
+	written.AppliedConfig.HarnessAuth = "echoed-by-broker"
+	assert.Equal(t, "api-key", cfg.HarnessAuth, "an echo written onto the returned agent must not leak into the caller's struct")
+}
+
+// TestCopyBrokerEcho covers the helper the worker takes broker echoes with:
+// non-empty fields win, empty fields leave dst alone, and the image is only
+// taken when asked.
+func TestCopyBrokerEcho(t *testing.T) {
+	dst := &store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "auth", Profile: "p", Model: "m"}
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "bare:v1", HarnessAuth: "echoed-auth", Model: "ignored"}, false)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "echoed-auth", Profile: "p", Model: "m"}, *dst)
+
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", Profile: "echoed-p"}, true)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", Profile: "echoed-p", Model: "m"}, *dst)
+
+	copyBrokerEcho(nil, dst, true)
+	copyBrokerEcho(dst, nil, true)
+}
+
+// TestReincarnateAgent_StartFailureKeepsQualifiedImage covers
+// ptone/scion#1907: the reprovision echo carries the rendered config's
+// unqualified image. When the start then fails, the row keeps the
+// registry-qualified image buildFreshAppliedConfig resolved, while the
+// reprovision's other echoed fields are still persisted.
+func TestReincarnateAgent_StartFailureKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	disp.reprovisionEcho = func(cfg *store.AgentAppliedConfig) { cfg.HarnessAuth = "reprovision-echoed-auth" }
+	disp.startErr = fmt.Errorf("broker refused start")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image,
+		"a failed start must leave the qualified image, not the reprovision echo's unqualified one")
+	assert.Equal(t, "reprovision-echoed-auth", final.AppliedConfig.HarnessAuth,
+		"the reprovision echo's other fields are persisted by the starting step")
+}
+
+// TestReincarnateAgent_StartEchoPersistedAtCompletion covers
+// ptone/scion#1907: every field the start response echoes is persisted on
+// the row and the record at completion. The worker takes the echo
+// explicitly, so this fails if that copy is removed (there is no pointer
+// aliasing left to carry it).
+func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "ghcr.io/test-org/start-echo:v3"
+		cfg.HarnessConfig = "start-echo-hc"
+		cfg.HarnessAuth = "start-echo-auth"
+		cfg.Profile = "start-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"row": final.AppliedConfig, "record": r.NewAppliedConfig} {
+		require.NotNil(t, cfg, name)
+		assert.Equal(t, "ghcr.io/test-org/start-echo:v3", cfg.Image, name)
+		assert.Equal(t, "start-echo-hc", cfg.HarnessConfig, name)
+		assert.Equal(t, "start-echo-auth", cfg.HarnessAuth, name)
+		assert.Equal(t, "start-echo-profile", cfg.Profile, name)
+	}
 }
 
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
