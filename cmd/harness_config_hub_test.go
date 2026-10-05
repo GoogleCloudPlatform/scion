@@ -427,3 +427,27 @@ func TestSyncHarnessConfigToHub_DropsStaleTransientDirectoryFromHub(t *testing.T
 	require.Equal(t, 0, calls.uploadRequests)
 	require.Equal(t, []string{"config.yaml"}, finalizedPaths(t, &calls))
 }
+
+// TestSyncHarnessConfigToHub_RefusesEmptyLocalDirectory verifies that sync
+// refuses a directory with no syncable files (only transient ones here) with
+// a clear error, before making any Hub call.
+func TestSyncHarnessConfigToHub_RefusesEmptyLocalDirectory(t *testing.T) {
+	localPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(localPath, "config.yaml.bak.20261003T193320Z"), []byte("old\n"), 0644))
+
+	hubCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	err = syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no files to sync")
+	require.Equal(t, 0, hubCalls, "sync must not call the Hub for an empty directory")
+}

@@ -624,6 +624,11 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		return fmt.Errorf("failed to scan harness-config files: %w", err)
 	}
 	fmt.Printf("Found %d files\n", len(files))
+	// Sync mirrors the local directory, so an empty one would mean deleting
+	// every file from the Hub record, which the Hub rejects. Refuse up front.
+	if len(files) == 0 {
+		return fmt.Errorf("no files to sync in %s (backup and temp files are excluded); a harness-config needs at least one file", localPath)
+	}
 
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
 	for i, f := range files {
