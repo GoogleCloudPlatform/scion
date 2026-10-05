@@ -1270,21 +1270,21 @@ canon_block() {
 # row is a hub gate this step has not seen.
 # One audience arm: the malformed-audience arm was dropped because every
 # chart proxy shape renders an audience, so the hub never asked for one and the
-# two arms were identical. TestHelmChartIAPAudiencePattern covers the format gate.
+# two arms were identical, so _arm is fixed at well-formed rather than looped.
+# TestHelmChartIAPAudiencePattern covers the format gate.
 for _golden in settings.yaml settings-oauth.yaml; do
-  for _arm in well-formed; do
-    canon_block "$_golden" "$_arm" >"$WORK/canon-${_golden}-${_arm}.txt"
-    [[ -s "$WORK/canon-${_golden}-${_arm}.txt" ]] || meta_failure "hack/ha-gates.txt has no CANON block for ${_golden} [audience ${_arm}]. Either the arm header changed or the extraction is reading the wrong block; the assertion below would compare against nothing."
-    _keys="$(grep -c '^KEY ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
-    _prose="$(grep -c '^PROSE ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
-    _sess="$(grep -c '^PROSE .*durable session/signing secret' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
-    if [[ "$_keys" -eq 0 && "$_prose" -eq 1 && "$_sess" -eq 1 ]]; then
-      pass "the walk over ${_golden} [audience ${_arm}] stops at the session secret alone"
-    else
-      fail "the walk over ${_golden} [audience ${_arm}] records ${_keys} settings-key gates and ${_prose} prose gates (${_sess} of them the session secret); the chart renders every settings key the preflight reads, so only the session secret should remain:"
-      cat "$WORK/canon-${_golden}-${_arm}.txt"
-    fi
-  done
+  _arm=well-formed
+  canon_block "$_golden" "$_arm" >"$WORK/canon-${_golden}-${_arm}.txt"
+  [[ -s "$WORK/canon-${_golden}-${_arm}.txt" ]] || meta_failure "hack/ha-gates.txt has no CANON block for ${_golden} [audience ${_arm}]. Either the arm header changed or the extraction is reading the wrong block; the assertion below would compare against nothing."
+  _keys="$(grep -c '^KEY ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  _prose="$(grep -c '^PROSE ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  _sess="$(grep -c '^PROSE .*durable session/signing secret' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  if [[ "$_keys" -eq 0 && "$_prose" -eq 1 && "$_sess" -eq 1 ]]; then
+    pass "the walk over ${_golden} [audience ${_arm}] stops at the session secret alone"
+  else
+    fail "the walk over ${_golden} [audience ${_arm}] records ${_keys} settings-key gates and ${_prose} prose gates (${_sess} of them the session secret); the chart renders every settings key the preflight reads, so only the session secret should remain:"
+    cat "$WORK/canon-${_golden}-${_arm}.txt"
+  fi
 done
 
 render_notes "$WORK/notes-ack.txt" -f "$CHART_DIR/ci/values-settings.yaml"
