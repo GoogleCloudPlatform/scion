@@ -148,4 +148,22 @@ describe('seedChatDraft', () => {
       vi.useRealTimers();
     }
   });
+
+  it('writes retyped text after a send cleared the saved draft', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = await mountComposer();
+      typeInto(el, 'again');
+      vi.advanceTimersByTime(600);
+      el.handleSend();
+      expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBeNull();
+      // Retype the same text and unmount before the debounced save fires:
+      // the flush must not treat it as already persisted.
+      typeInto(el, 'again');
+      el.remove();
+      expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBe('again');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
