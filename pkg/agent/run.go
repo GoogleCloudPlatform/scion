@@ -184,6 +184,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
+	// Record this run as the owner of an already provisioned agent's files
+	// (provision-only, a restart, a resume) as soon as the previous run's
+	// container is gone (ptone/scion#2675). From here on the hub keeps this
+	// run even if the start fails, so the files must name it too, or a
+	// delete for this run would leave them behind. A fresh provision below
+	// records it as it writes agent-info.json; without agent-info.json this
+	// is a no-op.
+	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+			"agent", opts.Name, "run_id", opts.RunID, "error", err)
+	}
+
 	// If resuming, verify the agent exists before proceeding. Probe both
 	// worktree and shared-workspace layouts since this runs before the
 	// sharedWorkspace flag is folded into context.
@@ -233,13 +245,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
-	}
-	// An agent provisioned earlier (provision-only, a restart, a resume)
-	// was not provisioned by this start: record this run as the owner of
-	// its files now, before the container exists (ptone/scion#2675). A
-	// fresh provision above already wrote it.
-	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
-		util.Debugf("Start: failed to record run ID in agent-info.json for %s: %v", opts.Name, err)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or

@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -122,6 +124,122 @@ func TestStart_RecordsRunIDBeforeContainer(t *testing.T) {
 			}
 			if got := GetSavedRunID("tz-agent", projectScionDir); got != labelled {
 				t.Errorf("recorded run after Start = %q, want %q", got, labelled)
+			}
+		})
+	}
+}
+
+// A start that fails after removing the previous run's container still
+// records its run (ptone/scion#2675 review B1): the hub keeps that run once
+// the broker has acted, so its delete must find files that name it, not the
+// previous run (which would leave them behind with a 404). The failure here
+// is an unreadable scion-agent.json, after the pre-clean.
+func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
+		[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var deleted []string
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{
+				Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped",
+				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-1"},
+			}}, nil
+		},
+		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+			deleted = append(deleted, ref.ID)
+			return nil
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+			t.Error("Start reached runtime.Run despite the unreadable config")
+			return "", nil
+		},
+	}
+	_, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+	})
+	if err == nil {
+		t.Fatal("Start succeeded with an unreadable scion-agent.json")
+	}
+	if len(deleted) != 1 || deleted[0] != "cid-run-1" {
+		t.Fatalf("pre-clean deletes = %v, want the previous run's cid-run-1", deleted)
+	}
+	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-2" {
+		t.Errorf("recorded run after the failed start = %q, want run-2 (the run the hub keeps)", got)
+	}
+}
+
+// The pre-clean failing leaves the previous run recorded: the start returns
+// before acting, and the hub swaps back to the run that still exists.
+func TestStart_PreCleanFailureKeepsPreviousRun(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
+		[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped"}}, nil
+		},
+		DeleteFunc: func(context.Context, runtime.RunRef) error { return errors.New("runtime unavailable") },
+	}
+	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+	}); err == nil {
+		t.Fatal("Start succeeded although the pre-clean failed")
+	}
+	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-1" {
+		t.Errorf("recorded run = %q, want run-1 kept", got)
+	}
+}
+
+// A provision-only create (review N3) reusing a same-named predecessor's
+// files records a provision owner in place of the predecessor's run, so
+// the predecessor's late delete (naming its run) leaves them alone. A
+// provision that is not a create (no FreshProvision) keeps the recorded run.
+func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fresh   bool
+		entries []api.AgentInfo
+		listErr bool
+	}{
+		{"provision-only create", true, nil, false},
+		{"provision of an existing agent", false, nil, false},
+		{"create while a runtime entry holds the name", true, []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-ghost", RunID: "run-ghost"}}, false},
+		{"create when the runtime cannot be listed", true, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir, agentDir := startTZFixture(t, "", `""`)
+			if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
+				[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-ghost"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rt := &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+				if tc.listErr {
+					return nil, errors.New("runtime unavailable")
+				}
+				return tc.entries, nil
+			}}
+			if _, err := NewManager(rt).Provision(context.Background(), api.StartOptions{
+				Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, FreshProvision: tc.fresh,
+			}); err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			got := GetSavedRunID("tz-agent", projectScionDir)
+			if !tc.fresh || tc.entries != nil || tc.listErr {
+				if got != "run-ghost" {
+					t.Errorf("recorded = %q, want run-ghost kept", got)
+				}
+				return
+			}
+			if got == "run-ghost" || !strings.HasPrefix(got, ProvisionOwnerPrefix) {
+				t.Errorf("recorded = %q, want a %q owner in place of the predecessor's run", got, ProvisionOwnerPrefix)
 			}
 		})
 	}
