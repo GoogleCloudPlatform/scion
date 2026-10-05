@@ -59,6 +59,12 @@ var dbUnwrittenLayer1Paths = [][]string{
 // them.
 var dbFileOnlyRequestPaths = [][]string{
 	{"auto_inject_gcloud_adc"},
+	// Layer-0 but not mapped by extractKoanfKeysFromRequest today. Error
+	// precedence does not depend on this entry (hostedBootstrapChanges
+	// classifies by the registry, so a hosted PUT is layer0_rejected either
+	// way). MERGE NOTE: when the kr-nfshome stack lands it maps this key;
+	// TestDBUnpersistedRequestPaths_CoverUnmappedFields then fails and this
+	// one line must be removed. Nothing else needs to change.
 	{"server", "shared_dir_storage"},
 	{"server", "maintenance"},
 	{"server", "scheduler"},

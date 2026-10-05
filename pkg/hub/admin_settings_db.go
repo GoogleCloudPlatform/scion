@@ -994,7 +994,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
-		fileTxn, err = prepareSettingsFileTxn(workstationFileEdits(&req, fileLeaves))
+		fileTxn, err = prepareSettingsFileTxn(func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
+			return workstationFileEdits(&req, fileLeaves, gc, typed)
+		})
 		if err != nil {
 			slog.Error("PUT server-config: failed to prepare settings.yaml edit", "error", err)
 			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
@@ -1006,6 +1008,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		defer fileTxn.abort() // no-op after commit
+		// A sent value the staged file does not carry (so it would not take
+		// effect) is rejected rather than reported as saved.
+		bad, err := unreflectedFileLeaves(&req, fileLeaves, fileTxn.staged.Result())
+		if err != nil {
+			fileTxn.abort()
+			slog.Error("PUT server-config: failed to check staged settings", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+		if len(bad) > 0 {
+			fileTxn.abort()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":   "unsaved_keys_rejected",
+				"message": "These settings would not take effect as sent; nothing was saved.",
+				"keys":    bad,
+			})
+			return
+		}
 	}
 
 	// Write sections in sorted order for deterministic partial-apply and CAS

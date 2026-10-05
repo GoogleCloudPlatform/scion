@@ -62,12 +62,14 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // layer0Editable reports whether this hub accepts Layer-0 / file-only
@@ -201,13 +203,21 @@ func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSet
 	}
 	var leaves []classified
 	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
-		if l.path[0] == "expected_revisions" || underUnpersistedList(l.path) {
+		if l.path[0] == "expected_revisions" {
 			continue
 		}
+		// Error-code precedence follows the registry classification, not
+		// the unpersisted lists: a Layer-0 leaf is layer0_rejected whether
+		// or not extractKoanfKeysFromRequest maps it (server.shared_dir_storage
+		// is Layer-0 but unmapped today; a later mapping must not change the
+		// code). Unclassified leaves under the lists are left to
+		// rejectUnpersistedKeys.
 		_, l0, u := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)})
 		switch {
 		case len(l0) > 0:
 			leaves = append(leaves, classified{l, true})
+		case underUnpersistedList(l.path):
+			continue
 		case len(u) > 0:
 			leaves = append(leaves, classified{l, false})
 		}
@@ -405,55 +415,164 @@ func (s *Server) hubOwnedBrokerChanges(ctx context.Context, ops *OperationalSett
 
 // workstationFileEdits turns file leaves into settings.yaml edits, taking
 // each value from the decoded request (masked secrets already restored).
+// Every leaf is written exactly as sent; only an explicit null deletes. The
+// effective-settings comparison in config.PrepareEffectiveSettingsPathEdits
+// then drops edits that change nothing (an empty value where the key is
+// already absent, a default the form filled in), so no zero/default
+// heuristics are needed here.
 //
-//   - An explicit null removes the key. A null on server.broker removes the
-//     block's fields except the hub-owned broker_id/broker_token.
-//   - An explicit zero ("", false, 0, []) of an omitempty field is written so
-//     the loaded result equals what was sent: the key is removed when its
-//     parent block exists (absent and zero load the same there), else the
-//     zero value is written, which creates the block (an absent
-//     server.hub.cors block means "CORS on", cors: {enabled: false} means
-//     off). See config.SettingsPathEdit.ZeroOmitempty.
-//   - Hub-owned broker leaves are never written (only echoes reach here).
+//   - A null on a key that is, or contains, a hub-owned path (server,
+//     server.broker, ...) deletes everything under it except the hub-owned
+//     broker_id/broker_token.
+//   - Hub-owned broker leaves themselves are never written (only echoes
+//     reach here; changes were rejected).
 //   - schema_version "1" is the value GET reports for a file without the
 //     key, so it is not written as an edit; the editor adds it when needed.
-func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf) []config.SettingsPathEdit {
+//   - Creating a server.hub.cors / server.broker.cors block without an
+//     explicit enabled also writes enabled with its current effective value:
+//     inside the block a missing enabled means "off", while a missing block
+//     means "on", so creating the block must not silently turn CORS off.
+func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, origEffective *config.GlobalConfig, origTyped *config.VersionedSettings) []config.SettingsPathEdit {
 	root := reflect.ValueOf(req).Elem()
 	edits := make([]config.SettingsPathEdit, 0, len(leaves))
+	sent := map[string]bool{}
+	for _, l := range leaves {
+		sent[strings.Join(l.path, ".")] = true
+	}
 	for _, l := range leaves {
 		if isHubOwnedBrokerPath(l.path) {
 			continue
 		}
 		if l.null {
-			if strings.Join(l.path, ".") == "server.broker" {
-				for name := range jsonFieldInfos(reflect.TypeOf(config.V1BrokerConfig{})) {
-					p := []string{"server", "broker", name}
-					if !isHubOwnedBrokerPath(p) {
-						edits = append(edits, config.SettingsPathEdit{Path: p, Delete: true})
-					}
+			var keep [][]string
+			for _, owned := range hubOwnedBrokerPaths {
+				if len(owned) > len(l.path) && pathHasPrefixPath(owned, l.path) {
+					keep = append(keep, owned[len(l.path):])
 				}
-				continue
 			}
-			edits = append(edits, config.SettingsPathEdit{Path: l.path, Delete: true})
+			edits = append(edits, config.SettingsPathEdit{Path: l.path, Delete: true, Keep: keep})
 			continue
 		}
 		fv, ok := fieldByIndexPath(root, l.index)
 		if !ok {
 			continue
 		}
-		if len(l.path) == 1 && l.path[0] == "schema_version" && fv.Kind() == reflect.Pointer && !fv.IsNil() && fv.Elem().String() == "1" {
-			continue
-		}
-		if l.omitempty && isEmptyJSONValue(fv) {
-			// A nil pointer can only come from a null, handled above; a
-			// non-pointer empty value is the type's zero value.
-			edits = append(edits, config.SettingsPathEdit{Path: l.path, Value: fv.Interface(), ZeroOmitempty: true})
+		if isSchemaVersionEcho(l.path, fv) {
 			continue
 		}
 		edits = append(edits, config.SettingsPathEdit{Path: l.path, Value: fv.Interface()})
 	}
+	// CORS block creation keeps the current enabled value.
+	for _, c := range []struct {
+		block   []string
+		exists  bool
+		current bool
+	}{
+		{[]string{"server", "hub", "cors"}, origTyped != nil && origTyped.Server != nil && origTyped.Server.Hub != nil && origTyped.Server.Hub.CORS != nil, origEffective != nil && origEffective.Hub.CORSEnabled},
+		{[]string{"server", "broker", "cors"}, origTyped != nil && origTyped.Server != nil && origTyped.Server.Broker != nil && origTyped.Server.Broker.CORS != nil, origEffective != nil && origEffective.RuntimeBroker.CORSEnabled},
+	} {
+		if c.exists {
+			continue
+		}
+		creates := false
+		for _, e := range edits {
+			if !e.Delete && len(e.Path) > len(c.block) && pathHasPrefixPath(e.Path, c.block) {
+				creates = true
+			}
+		}
+		enabledPath := append(append([]string{}, c.block...), "enabled")
+		if creates && !sent[strings.Join(enabledPath, ".")] {
+			edits = append(edits, config.SettingsPathEdit{Path: enabledPath, Value: c.current})
+		}
+	}
 	sort.Slice(edits, func(i, j int) bool { return strings.Join(edits[i].Path, ".") < strings.Join(edits[j].Path, ".") })
 	return edits
+}
+
+// isSchemaVersionEcho reports schema_version "1", the value GET reports for
+// a file without the key; it is never written as an edit.
+func isSchemaVersionEcho(path []string, v reflect.Value) bool {
+	return len(path) == 1 && path[0] == "schema_version" && v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().String() == "1"
+}
+
+// unreflectedFileLeaves returns the sent, non-null file leaves whose value
+// in the staged settings file is not what was sent (compared on the typed
+// decode, where an absent key and the zero value are the same). Those edits
+// would be reported as saved without taking effect, so the PUT rejects them.
+func unreflectedFileLeaves(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, staged []byte) ([]string, error) {
+	var vs config.VersionedSettings
+	if err := yamlv3.Unmarshal(staged, &vs); err != nil {
+		return nil, err
+	}
+	reqRoot := reflect.ValueOf(req).Elem()
+	vsRoot := reflect.ValueOf(&vs).Elem()
+	var bad []string
+	for _, l := range leaves {
+		if l.null || isHubOwnedBrokerPath(l.path) {
+			continue
+		}
+		sentV, ok := fieldByIndexPath(reqRoot, l.index)
+		if !ok || isSchemaVersionEcho(l.path, sentV) {
+			continue
+		}
+		gotV, found := valueAtJSONPath(vsRoot, l.path)
+		if !found {
+			continue // not a VersionedSettings path (cannot check)
+		}
+		if !jsonValuesEquivalent(sentV, gotV) {
+			bad = append(bad, strings.Join(l.path, "."))
+		}
+	}
+	sort.Strings(bad)
+	return bad, nil
+}
+
+// valueAtJSONPath walks v by JSON field names. A nil pointer on the way
+// yields the zero value of the remaining field type.
+func valueAtJSONPath(v reflect.Value, path []string) (reflect.Value, bool) {
+	for _, name := range path {
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v = reflect.New(v.Type().Elem()).Elem()
+			} else {
+				v = v.Elem()
+			}
+		}
+		if v.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+		fi, ok := jsonFieldInfos(v.Type())[name]
+		if !ok {
+			return reflect.Value{}, false
+		}
+		f, ok := fieldByIndexPath(v, fi.index)
+		if !ok {
+			f = reflect.New(fi.typ).Elem()
+		}
+		v = f
+	}
+	return v, true
+}
+
+// jsonValuesEquivalent compares two values the way the settings loaders see
+// them: through JSON, with null, absent and empty values the same.
+func jsonValuesEquivalent(a, b reflect.Value) bool {
+	norm := func(v reflect.Value) interface{} {
+		if !v.IsValid() {
+			return nil
+		}
+		data, err := json.Marshal(v.Interface())
+		if err != nil {
+			return nil
+		}
+		var out interface{}
+		_ = json.Unmarshal(data, &out)
+		if isZeroJSON(out) {
+			return nil
+		}
+		return out
+	}
+	return reflect.DeepEqual(norm(a), norm(b))
 }
 
 // fieldByIndexPath is v.FieldByIndex that reports a nil pointer on the way
@@ -553,15 +672,34 @@ type settingsFileTxn struct {
 	staged *config.StagedSettingsEdit
 }
 
-// prepareSettingsFileTxn takes the settings-file lock and prepares edits to
-// the global settings file. On error the lock is released.
-func prepareSettingsFileTxn(edits []config.SettingsPathEdit) (*settingsFileTxn, error) {
+// prepareSettingsFileTxn takes the settings-file lock, reads the global
+// settings file, builds the edits from it (build gets the current server
+// config and typed decode) and prepares them, keeping only the edits that
+// change the effective settings. On error the lock is released.
+func prepareSettingsFileTxn(build func(*config.GlobalConfig, *config.VersionedSettings) []config.SettingsPathEdit) (*settingsFileTxn, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, err
 	}
 	unlock := config.LockSettingsFile()
-	staged, err := config.PrepareSettingsPathEdits(globalDir, edits)
+	var orig []byte
+	if p := config.GetSettingsPath(globalDir); p != "" {
+		if orig, err = os.ReadFile(p); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
+	eff, err := config.SettingsFileEffective(orig)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	var typed config.VersionedSettings
+	if err := yamlv3.Unmarshal(orig, &typed); err != nil {
+		unlock()
+		return nil, err
+	}
+	staged, err := config.PrepareEffectiveSettingsPathEdits(globalDir, build(eff.Server, &typed))
 	if err != nil {
 		unlock()
 		return nil, err

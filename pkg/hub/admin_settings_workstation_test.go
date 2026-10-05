@@ -325,7 +325,7 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 				"server.broker.broker_id":    "b-123",
 				"server.broker.broker_token": "tok-secret",
 			},
-			fileKeys: []string{"server.broker.enabled", "server.broker.port"},
+			fileKeys: []string{"server.broker"},
 		},
 		{
 			name:     "explicit zero under an existing block is a no-op when already absent",
@@ -350,9 +350,11 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 				t.Errorf("file_keys = %v, want %v", resp.FileKeys, tc.fileKeys)
 			}
 			m := readYAMLMap(t, settingsPath)
+			// "absent" rows: the value is cleared, written as its zero value
+			// (only null removes a key).
 			for _, p := range tc.absent {
-				if v := yamlAt(m, p...); v != nil {
-					t.Errorf("%s = %v, want it removed", strings.Join(p, "."), v)
+				if v := yamlAt(m, p...); v != nil && v != false && v != "" && v != 0 {
+					t.Errorf("%s = %v, want it cleared", strings.Join(p, "."), v)
 				}
 			}
 			for k, want := range tc.want {
@@ -767,13 +769,16 @@ func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 // (the masked token included) but not change or clear them.
 func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		body   string
-		status int
+		body    string
+		status  int
+		changes bool // the body clears other keys; the identity must survive
 	}{
-		{`{"server":{"broker":{"broker_token":""}}}`, http.StatusUnprocessableEntity},
-		{`{"server":{"broker":{"broker_id":"other"}}}`, http.StatusUnprocessableEntity},
-		{`{"server":{"broker":{"broker_token":null}}}`, http.StatusUnprocessableEntity},
-		{`{"server":{"broker":{"broker_token":"********","broker_id":"b-123"}}}`, http.StatusOK},
+		{`{"server":{"broker":{"broker_token":""}}}`, http.StatusUnprocessableEntity, false},
+		{`{"server":{"broker":{"broker_id":"other"}}}`, http.StatusUnprocessableEntity, false},
+		{`{"server":{"broker":{"broker_token":null}}}`, http.StatusUnprocessableEntity, false},
+		{`{"server":{"broker":{"broker_token":"********","broker_id":"b-123"}}}`, http.StatusOK, false},
+		{`{"server":null}`, http.StatusOK, true},
+		{`{"server":{"broker":null}}`, http.StatusOK, true},
 	} {
 		t.Run(tc.body, func(t *testing.T) {
 			settingsPath := workstationHome(t)
@@ -787,6 +792,13 @@ func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
 				if code, keys := rejectedKeys(t, rr); code != "hub_owned_keys_rejected" || len(keys) == 0 {
 					t.Errorf("got %q %v, want hub_owned_keys_rejected naming the key", code, keys)
 				}
+			}
+			if tc.changes {
+				m := readYAMLMap(t, settingsPath)
+				if yamlAt(m, "server", "broker", "broker_id") != "b-123" || yamlAt(m, "server", "broker", "broker_token") != "tok-secret" {
+					t.Errorf("broker identity lost:\n%s", readFileString(t, settingsPath))
+				}
+				return
 			}
 			if after := readFileString(t, settingsPath); after != before {
 				t.Errorf("settings.yaml changed:\n%s", after)
@@ -911,5 +923,82 @@ func TestSystemStructWriters_KeepConcurrentTokenWrite(t *testing.T) {
 		if got := yamlAt(m, "image_registry"); got != fmt.Sprintf("reg-%d", i) {
 			t.Fatalf("round %d: image_registry = %v (lost)", i, got)
 		}
+	}
+}
+
+// On a hosted hub a Layer-0 leaf is layer0_rejected whether or not the key
+// is mapped by extractKoanfKeysFromRequest (server.shared_dir_storage is
+// unmapped until the kr-nfshome stack lands); an echo is still ignored.
+func TestHosted_PutServerConfig_SharedDirStorageIsLayer0(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, false, nil)
+	rr := putServerConfig(t, srv, `{"server":{"shared_dir_storage":{"backend":"nfs"}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.shared_dir_storage.backend"}) {
+		t.Errorf("got %q %v, want layer0_rejected [server.shared_dir_storage.backend]", code, keys)
+	}
+	if rr := putServerConfig(t, srv, `{"server":{"shared_dir_storage":{"backend":"local"}}}`); rr.Code != http.StatusOK {
+		t.Errorf("echo: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Review r4 finding 2: a null on server keeps the hub-owned broker
+// identity and clears everything else.
+func TestWorkstation_PutServerConfig_ServerNullKeepsBrokerIdentity(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	rr := putServerConfig(t, srv, `{"server":null}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	m := readYAMLMap(t, settingsPath)
+	if got := yamlAt(m, "server", "broker", "broker_id"); got != "b-123" {
+		t.Errorf("broker_id = %v, want kept", got)
+	}
+	if got := yamlAt(m, "server", "broker", "broker_token"); got != "tok-secret" {
+		t.Errorf("broker_token = %v, want kept", got)
+	}
+	if got := yamlAt(m, "server", "hub"); got != nil {
+		t.Errorf("server.hub = %v, want cleared", got)
+	}
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gc.RuntimeBroker.BrokerID != "b-123" {
+		t.Errorf("loaded broker ID = %q, want b-123", gc.RuntimeBroker.BrokerID)
+	}
+}
+
+// Review r4 finding 1 (server side): the zero-valued Layer-0 leaves the old
+// UI sent from an untouched form, against a minimal workstation file, write
+// nothing and report no restart. (active_profile/workspace_path "" and
+// auto_provide:false are real changes; the UI no longer sends unchanged
+// fields, see admin-server-config.ts.)
+func TestWorkstation_PutServerConfig_UntouchedFormZerosWriteNothing(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	minimal := "schema_version: \"1\"\nserver:\n  broker:\n    broker_id: b-1\n    broker_token: tok-1\n"
+	if err := os.WriteFile(settingsPath, []byte(minimal), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	body := `{"server":{"hub":{"port":0},"database":{"driver":"","url":""},"auth":{"dev_token":""},
+		"storage":{"bucket":"","local_path":""},"secrets":{"gcp_project_id":"","gcp_replication_locations":[]},
+		"message_broker":{"enabled":false,"type":""},"log_format":"","log_level":""}}`
+	rr := putServerConfig(t, srv, body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := decodePut(t, rr)
+	if len(resp.FileKeys) != 0 || len(resp.Reload.RequiresRestart) != 0 {
+		t.Errorf("file_keys=%v requires_restart=%v, want none", resp.FileKeys, resp.Reload.RequiresRestart)
+	}
+	if after := readFileString(t, settingsPath); after != minimal {
+		t.Errorf("settings.yaml changed:\n%s", after)
 	}
 }
