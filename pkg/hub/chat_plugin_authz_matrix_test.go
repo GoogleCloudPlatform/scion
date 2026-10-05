@@ -316,6 +316,11 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.Contains(t, chatMatrixListIDs(t, w, "templates"), tid("chat-matrix-template"))
 		})
+		t.Run("request with a linked outsider does not return the project template", func(t *testing.T) {
+			w := env.do(t, http.MethodGet, path, env.outsiderEmail, nil)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.NotContains(t, chatMatrixListIDs(t, w, "templates"), tid("chat-matrix-template"))
+		})
 	})
 
 	t.Run("project secrets", func(t *testing.T) {
@@ -358,8 +363,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			{"get", http.MethodGet, getPath, nil},
 			{"put", http.MethodPut, putPath, putBody},
 		}
-		// Secret denials currently carry no resource_type / denied_action
-		// details, so clients can only show a generic permission message.
+		// Pins the current response shape for secret denials.
 		for _, c := range calls {
 			t.Run(c.name+" without the linked user is denied", func(t *testing.T) {
 				w := env.do(t, c.method, c.path, noUser, c.body)
