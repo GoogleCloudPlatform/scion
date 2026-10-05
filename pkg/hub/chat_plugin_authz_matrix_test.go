@@ -332,23 +332,21 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		getPath := "/api/v1/secrets/CHAT_MATRIX_KEY?" + scopeQuery
 		listPath := "/api/v1/secrets?" + scopeQuery
 
-		// The linked owner writes, reads and lists in that order.
-		t.Run("put with the linked owner stores the secret", func(t *testing.T) {
+		t.Run("put, get and list with the linked owner", func(t *testing.T) {
+			// One subtest, so it does not depend on another subtest's put.
 			w := env.do(t, http.MethodPut, putPath, env.ownerEmail, putBody)
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-			var resp SetSecretResponse
-			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), w.Body.String())
-			assert.True(t, resp.Created, w.Body.String())
-		})
-		t.Run("get with the linked owner returns the secret", func(t *testing.T) {
-			w := env.do(t, http.MethodGet, getPath, env.ownerEmail, nil)
+			var putResp SetSecretResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &putResp), w.Body.String())
+			assert.True(t, putResp.Created, w.Body.String())
+
+			w = env.do(t, http.MethodGet, getPath, env.ownerEmail, nil)
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			var got store.Secret
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), w.Body.String())
 			assert.Equal(t, "CHAT_MATRIX_KEY", got.Key)
-		})
-		t.Run("list with the linked owner includes the secret", func(t *testing.T) {
-			w := env.do(t, http.MethodGet, listPath, env.ownerEmail, nil)
+
+			w = env.do(t, http.MethodGet, listPath, env.ownerEmail, nil)
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.Contains(t, chatMatrixSecretKeys(t, w), "CHAT_MATRIX_KEY")
 		})
