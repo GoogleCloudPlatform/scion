@@ -148,7 +148,7 @@ Each harness integrates with `sciontool`'s telemetry pipeline differently depend
 When a harness provisioner configures native telemetry, the variables that control it are reserved: `CLAUDE_CODE_ENABLE_TELEMETRY`, `GEMINI_TELEMETRY_*`, `COPILOT_OTEL_*`, `GROK_TELEMETRY_*`, `GROK_EXTERNAL_OTEL`, and `OTEL_*`. If the runtime environment (for example, Project or Broker env on the Hub) sets any of them to a value other than the one the provisioner generated, the agent fails to start with a `native telemetry policy conflict` error naming the key.
 :::
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` into all agent containers to enable harness-aware telemetry attribution.
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion injects `SCION_HARNESS` into every agent container, and `SCION_MODEL` when the agent's configuration names a model, to enable harness-aware telemetry attribution (see [Native Metrics Pipeline](/scion/hosted/single-node/metrics/#native-metrics-pipeline) for how a missing model is labelled).
 
 ## Agent Logs
 

@@ -974,22 +974,20 @@ func assertLabelKeys(t *testing.T, labels map[string]string, want ...string) {
 	}
 }
 
-// TestTruncateUTF8DoesNotSplitRune pins that truncating a model name to the
-// 128-byte label limit must never cut a multi-byte rune in half, which would
-// produce an invalid UTF-8 label value.
-func TestTruncateUTF8DoesNotSplitRune(t *testing.T) {
+// TestModelLabelTruncationDoesNotSplitRune pins that the deriver's model
+// label resolution (telemetrycontract.ResolveModelLabel) truncates to the
+// 128-byte label limit without ever cutting a multi-byte rune in half,
+// which would produce an invalid UTF-8 label value.
+func TestModelLabelTruncationDoesNotSplitRune(t *testing.T) {
 	// Each "é" is 2 bytes; 64 of them is exactly 128 bytes, so appending one
 	// more forces a cut that would otherwise land mid-rune.
 	s := strings.Repeat("é", 65)
-	got := truncateUTF8(s, 128)
+	got := telemetrycontract.ResolveModelLabel(s, "")
 	if !utf8.ValidString(got) {
-		t.Fatalf("truncateUTF8(%d runes, 128) = %q, not valid UTF-8", 65, got)
-	}
-	if len(got) > 128 {
-		t.Fatalf("truncateUTF8 result is %d bytes, want <= 128", len(got))
+		t.Fatalf("ResolveModelLabel(%d runes) = %q, not valid UTF-8", 65, got)
 	}
 	if len(got) != 128 {
-		t.Fatalf("truncateUTF8 result is %d bytes, want exactly 128 (64 whole runes)", len(got))
+		t.Fatalf("ResolveModelLabel result is %d bytes, want exactly 128 (64 whole runes)", len(got))
 	}
 }
 

@@ -191,6 +191,10 @@ func applyFieldPath(data map[string]interface{}, field, path string, ed *hooks.E
 		if v := resolveFieldPath(data, path); v != "" {
 			ed.Error = v
 		}
+	case "model":
+		if v := resolveFieldPath(data, path); v != "" {
+			ed.Model = v
+		}
 	case "file_path":
 		if v := resolveFieldPath(data, path); v != "" {
 			ed.FilePath = v
