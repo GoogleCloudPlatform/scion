@@ -94,12 +94,13 @@ func TestSeedMaintenanceOperations_PartialAndRepeated(t *testing.T) {
 	assert.Equal(t, store.MaintenanceStatusCompleted, after.Status, "existing row's state must be preserved")
 }
 
-// TestSeedMaintenanceOperations_ConcurrentOnEmptyStore: seeders that start
-// together on an empty store (hub replicas booting at once) all succeed and
-// every key ends up exactly once. On SQLite the test client serializes
-// writes; on Postgres (make test-launch-store-postgres) the seeders really
-// race into ON CONFLICT (key) DO NOTHING with fewer RETURNING rows than
-// builders.
+// TestSeedMaintenanceOperations_ConcurrentOnEmptyStore: seeders that run at
+// the same time on an empty store all succeed and every key ends up exactly
+// once. In production Migrate's advisory lock serializes seeding on Postgres;
+// this calls SeedMaintenanceOperations directly, outside that lock. On SQLite
+// the test client serializes writes; on Postgres (make
+// test-launch-store-postgres) the seeders really race into ON CONFLICT (key)
+// DO NOTHING with fewer RETURNING rows than builders.
 func TestSeedMaintenanceOperations_ConcurrentOnEmptyStore(t *testing.T) {
 	s := newTestMaintenanceStore(t)
 	ctx := context.Background()
