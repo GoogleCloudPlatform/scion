@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -565,4 +566,220 @@ func TestDelegationAdoptionRefusesDevUserWithoutDevLocalAuthority(t *testing.T) 
 	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", devUser, devCred, withFingerprint(body, p))
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Empty(t, f.adoptionRecords(t))
+}
+
+// A hop denied only because its provenance version is not understood keeps
+// the ceiling_unrecorded denial but carries no adoption details: adoption
+// does not address that hop.
+func TestUnknownProvenanceVersionDenialCarriesNoAdoptionDetails(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-v2")
+	ctx := context.Background()
+	orig := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, orig.ID))
+	v2 := *orig
+	v2.ID = ""
+	v2.Active = true
+	v2.AuthorityProvenance = store.AuthorityProvenance{
+		ProvenanceVersion:    2,
+		SourcePrincipalKind:  orig.DelegatorType,
+		SourcePrincipalID:    orig.DelegatorID,
+		SourceCredentialKind: store.SourceCredentialSession,
+	}
+	v2.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
+	require.NoError(t, f.store.CreateDelegationEdge(ctx, &v2))
+
+	token := f.agentToken(t, f.legacy.ID)
+	rec := f.createAsParent(t, token, f.assignBody("adopt-v2-c"))
+	assertSAGateDenied(t, rec)
+	apiErr := decodeTargetAPIError(t, rec)
+	assert.Equal(t, saAssignGenericForbiddenMsg, apiErr.Message)
+	assert.NotContains(t, apiErr.Details, "deny_cause")
+	assert.NotContains(t, apiErr.Details, "remediation")
+	assert.NotContains(t, apiErr.Details, "remediation_path")
+	assert.Equal(t, "gcp_service_account", apiErr.Details["resource_type"])
+
+}
+
+func TestDecisionAdoptionDetailsCause(t *testing.T) {
+	assert.Equal(t, DenyCauseCeilingUnrecorded, Decision{DenyCause: DenyCauseCeilingUnrecorded, adoptionRemediable: true}.adoptionDetailsCause())
+	assert.Empty(t, Decision{DenyCause: DenyCauseCeilingUnrecorded}.adoptionDetailsCause(), "unknown provenance version")
+	assert.Empty(t, Decision{DenyCause: DenyCauseCeilingEffectExceeded, adoptionRemediable: true}.adoptionDetailsCause())
+	assert.Empty(t, Decision{}.adoptionDetailsCause())
+}
+
+// legacyRecords returns the adoption records of the fixture's legacy agent.
+func (f *legacyFixture) legacyRecords(t *testing.T) []*store.DelegationAdoption {
+	t.Helper()
+	var out []*store.DelegationAdoption
+	for _, r := range f.adoptionRecords(t) {
+		if r.DelegateID == f.legacy.ID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (f *legacyFixture) adoptionStatus(t *testing.T, admin *store.User) delegationAdoptionStatusResponse {
+	t.Helper()
+	rec := doRequestAsUser(t, f.srv, admin, http.MethodGet, delegationAdoptionPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var status delegationAdoptionStatusResponse
+	decodeJSONBody(t, rec, &status)
+	return status
+}
+
+// Before the boot snapshot exists, the status view says so explicitly.
+func TestDelegationAdoptionStatusReportsMissingSnapshot(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-nosnap")
+	admin := adoptionAdmin(t, f.store, "adopt-nosnap-admin")
+	ctx := context.Background()
+	for _, section := range []string{delegationadoption.MarkerSection, delegationadoption.CohortSection} {
+		require.NoError(t, f.store.DeleteHubSetting(ctx, section))
+	}
+	status := f.adoptionStatus(t, admin)
+	assert.False(t, status.SnapshotTaken)
+	assert.Nil(t, status.Cohort)
+	assert.Nil(t, status.Marker)
+	rec := doRequestAsUser(t, f.srv, admin, http.MethodGet, delegationAdoptionPath, nil)
+	assert.Contains(t, rec.Body.String(), `"snapshotTaken":false`)
+
+	runBootAdoption(t, f.store)
+	status = f.adoptionStatus(t, admin)
+	assert.True(t, status.SnapshotTaken)
+	require.NotNil(t, status.Cohort)
+	assert.NotEmpty(t, status.Cohort.CohortID)
+}
+
+// A revert's fingerprint binds the confirmed original edge: a commit that
+// confirms a different original than its preview did is stale.
+func TestDelegationAdoptionRevertFingerprintBindsConfirmedOriginal(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-bind")
+	admin := adoptionAdmin(t, f.store, "adopt-bind-admin")
+	ctx := context.Background()
+	orig := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, orig.ID))
+	dup := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.legacy.ID, f.proj.ID)
+	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, dup))
+	repaired := delegationadoption.AdoptedEdge(orig, compatIDs(t, AgentRoleFull, false), delegationadoption.Actor{})
+	require.NoError(t, f.store.CreateDelegationEdge(ctx, repaired))
+	runBootAdoption(t, f.store)
+	rec := f.recordFor(t, f.legacy.ID)
+	require.Empty(t, rec.OriginalEdgeID)
+
+	body := map[string]interface{}{"operation": "revert", "recordIds": []string{rec.ID},
+		"confirmOriginalEdgeIds": map[string]string{rec.ID: orig.ID}}
+	p := f.adoptionPreview(t, admin, body)
+	require.Equal(t, delegationadoption.RevertOutcomeRevert, p.Reverts[0].Outcome)
+	require.Equal(t, orig.ID, p.Reverts[0].OriginalEdgeID)
+
+	// The commit confirms the other matching row under the preview's
+	// fingerprint.
+	swapped := withFingerprint(body, p)
+	swapped["confirmOriginalEdgeIds"] = map[string]string{rec.ID: dup}
+	resp := f.adoptionCommit(t, admin, swapped)
+	require.Equal(t, http.StatusConflict, resp.Code, resp.Body.String())
+	assert.Equal(t, ErrCodeStaleAuthorizationPreview, decodeTargetAPIError(t, resp).Code)
+	assert.Equal(t, repaired.ID, activeEdgesFor(t, f.store, f.legacy.ID)[0].ID, "nothing is reverted")
+
+	// The matching commit succeeds.
+	resp = f.adoptionCommit(t, admin, withFingerprint(body, p))
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	assert.Equal(t, orig.ID, activeEdgesFor(t, f.store, f.legacy.ID)[0].ID)
+}
+
+// A commit whose plan writes more hops than the cap is refused with 422 and
+// writes nothing.
+func TestDelegationAdoptionCommitRefusesPlanOverCap(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-cap")
+	admin := adoptionAdmin(t, f.store, "adopt-cap-admin")
+	// The fixture's legacy agent plus delegationAdoptionMaxHops more.
+	for i := 0; i < delegationAdoptionMaxHops; i++ {
+		f.seedLegacyAgent(t, fmt.Sprintf("adopt-cap-%03d", i), nil, AgentRoleFull)
+	}
+	body := map[string]interface{}{"operation": "adopt", "scope": map[string]interface{}{"projectId": f.proj.ID}}
+	p := f.adoptionPreview(t, admin, body)
+	require.Equal(t, delegationAdoptionMaxHops+1, p.Writes)
+	assert.True(t, p.ExceedsCap)
+
+	rec := f.adoptionCommit(t, admin, withFingerprint(body, p))
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "narrow the scope")
+	assert.Empty(t, f.adoptionRecords(t))
+	assert.Equal(t, store.EffectCeilingUnrecorded, activeEdgesFor(t, f.store, f.legacy.ID)[0].Kind)
+}
+
+// A revert records who reverted and keeps the adopter: actor_* and
+// after_summary are not overwritten.
+func TestDelegationAdoptionRevertKeepsAdopter(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-keep")
+	adopter := adoptionAdmin(t, f.store, "adopt-keep-adopter")
+	reverter := adoptionAdmin(t, f.store, "adopt-keep-reverter")
+	original := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	body := adoptBody(f.legacy.ID)
+	p := f.adoptionPreview(t, adopter, body)
+	require.Equal(t, http.StatusOK, f.adoptionCommit(t, adopter, withFingerprint(body, p)).Code)
+	adopted := f.recordFor(t, f.legacy.ID)
+	require.Equal(t, adopter.ID, adopted.ActorID)
+	adoptedSummary := adopted.AfterSummary
+	require.NotEmpty(t, adoptedSummary)
+
+	rbody := map[string]interface{}{"operation": "revert", "recordIds": []string{adopted.ID}}
+	rp := f.adoptionPreview(t, reverter, rbody)
+	require.Equal(t, http.StatusOK, f.adoptionCommit(t, reverter, withFingerprint(rbody, rp)).Code)
+
+	got, err := f.store.GetDelegationAdoption(context.Background(), adopted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationAdoptionReverted, got.Status)
+	assert.Equal(t, store.DelegationPrincipalUser, got.ActorKind)
+	assert.Equal(t, adopter.ID, got.ActorID, "the adopter is kept")
+	assert.Equal(t, adoptedSummary, got.AfterSummary, "the adopted edge summary is kept")
+	assert.Equal(t, store.DelegationPrincipalUser, got.RevertedByKind)
+	assert.Equal(t, reverter.ID, got.RevertedByID)
+	assert.Contains(t, got.RevertSummary, original.ID)
+	require.NotNil(t, got.RevertedAt)
+}
+
+// When an admin adoption and a later boot record both point at one edge,
+// reverting through either record reverts the edge once and marks both.
+func TestDelegationAdoptionRevertCoversRecordsOnTheSameEdge(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-pair")
+	admin := adoptionAdmin(t, f.store, "adopt-pair-admin")
+	original := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	body := adoptBody(f.legacy.ID)
+	p := f.adoptionPreview(t, admin, body)
+	require.Equal(t, http.StatusOK, f.adoptionCommit(t, admin, withFingerprint(body, p)).Code)
+	runBootAdoption(t, f.store)
+
+	recs := f.legacyRecords(t)
+	require.Len(t, recs, 2)
+	edge := recs[0].AdoptedEdgeID
+	require.NotEmpty(t, edge)
+	require.Equal(t, edge, recs[1].AdoptedEdgeID, "both records point at the adopted edge")
+	var adopted, recognized *store.DelegationAdoption
+	for _, r := range recs {
+		switch r.Status {
+		case store.DelegationAdoptionAdopted:
+			adopted = r
+		case store.DelegationAdoptionRecognized:
+			recognized = r
+		}
+	}
+	require.NotNil(t, adopted)
+	require.NotNil(t, recognized)
+
+	rbody := map[string]interface{}{"operation": "revert", "recordIds": []string{recognized.ID, adopted.ID}}
+	rp := f.adoptionPreview(t, admin, rbody)
+	require.Len(t, rp.Reverts, 1)
+	assert.Zero(t, rp.Refused)
+	assert.Equal(t, 1, rp.Writes)
+	resp := f.adoptionCommit(t, admin, withFingerprint(rbody, rp))
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	for _, r := range f.legacyRecords(t) {
+		assert.Equal(t, store.DelegationAdoptionReverted, r.Status, r.ID)
+		assert.Equal(t, original.ID, r.OriginalEdgeID)
+	}
+	e := activeEdgesFor(t, f.store, f.legacy.ID)
+	require.Len(t, e, 1)
+	assert.Equal(t, original.ID, e[0].ID)
+	assert.Len(t, f.adoptionAudits(t, mutationTypeDelegationAdoptionRevert), 1, "the edge is reverted once")
 }

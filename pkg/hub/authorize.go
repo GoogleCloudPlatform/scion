@@ -179,7 +179,7 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
-		writeForbiddenStructuredDenialCause(w, msg, resource.Type, action, decision.DeniedBy, decision.DenyCause)
+		writeForbiddenStructuredDenialCause(w, msg, resource.Type, action, decision.DeniedBy, decision.adoptionDetailsCause())
 		return false
 	}
 	return true
@@ -336,7 +336,7 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 	decision := s.agentCreateDecision(ctx, identity, projectID)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
-		writeForbiddenDenialCause(w, agentCreateDenyMessage, decision.DeniedBy, decision.DenyCause)
+		writeForbiddenDenialCause(w, agentCreateDenyMessage, decision.DeniedBy, decision.adoptionDetailsCause())
 		return false
 	}
 	return true
@@ -371,7 +371,8 @@ type agentTargetDenial struct {
 	reason string
 	// deniedBy is the decision stage that denied, when attributed.
 	deniedBy DeniedBy
-	// cause is the decision's DenyCause, when classified.
+	// cause is the decision's adoptionDetailsCause: ceiling_unrecorded when
+	// delegation-provenance adoption can address the denial, else empty.
 	cause DenyCause
 }
 
@@ -440,7 +441,7 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 			message:  agentTargetDenyMessage,
 			reason:   decision.Reason,
 			deniedBy: decision.DeniedBy,
-			cause:    decision.DenyCause,
+			cause:    decision.adoptionDetailsCause(),
 		}
 	}
 	return nil

@@ -49,6 +49,18 @@ func (c *CompositeStore) adoptionLog() *slog.Logger {
 //
 // A write failure does not fail the boot: unadopted hops keep their current
 // denial, and the summary and the admin status view report them.
+//
+// Stop on the first failing hop: the loop does not skip a hop whose write
+// fails and continue. Hops run top-down and a descendant needs its parent
+// recorded, so continuing past a failure would mostly record
+// ancestor-not-adopted skips. The trade-off is that a write error that
+// repeats on every boot leaves every later pending hop pending, and they
+// are never adopted automatically; the summary log and the admin status
+// view report them, and an admin commit can adopt them.
+//
+// If planning or the snapshot write fails on the first boot, no snapshot
+// exists while the hub serves, and the next boot's snapshot includes rows
+// written in between (see Migrate).
 func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) error {
 	log := c.adoptionLog()
 	if s, err := c.GetHubSetting(ctx, delegationadoption.MarkerSection); err == nil {
@@ -62,7 +74,7 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 		return err
 	}
 
-	cohortID, err := c.ensureAdoptionSnapshot(ctx)
+	cohortID, fresh, err := c.ensureAdoptionSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("delegation provenance adoption snapshot: %w", err)
 	}
@@ -83,6 +95,7 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 				break
 			}
 		}
+		// A write error stops the loop (see the trade-off above).
 		if aerr := c.adoptOneHop(ctx, rec); aerr != nil {
 			log.Error("delegation provenance adoption: hop write failed; remaining hops left pending",
 				"delegate_id", rec.DelegateID, "error", aerr)
@@ -95,9 +108,16 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 	if err != nil {
 		return err
 	}
-	notInCohort, err := c.adoptionNotInCohort(ctx, cohortID)
-	if err != nil {
-		log.Warn("delegation provenance adoption: could not count unrecorded hops outside the cohort", "error", err)
+	// A snapshot taken by this run examined every live chain moments ago,
+	// so the full plan is not built a second time to count hops outside
+	// it; rows another replica writes meanwhile surface in the admin
+	// status view. A resumed run counts them.
+	notInCohort := 0
+	if !fresh {
+		notInCohort, err = c.adoptionNotInCohort(ctx, cohortID)
+		if err != nil {
+			log.Warn("delegation provenance adoption: could not count unrecorded hops outside the cohort", "error", err)
+		}
 	}
 	c.logAdoptionSummary(cohortID, counts, notInCohort)
 
@@ -123,23 +143,23 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 
 // ensureAdoptionSnapshot returns the cohort ID of the existing snapshot, or
 // takes the snapshot: every examined hop's record and the header, written
-// in one transaction.
-func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, error) {
+// in one transaction. fresh reports that this call took the snapshot.
+func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (cohortID string, fresh bool, err error) {
 	if s, err := c.GetHubSetting(ctx, delegationadoption.CohortSection); err == nil {
 		var h delegationadoption.Header
 		if jerr := json.Unmarshal(s.Value, &h); jerr != nil || h.CohortID == "" {
-			return "", fmt.Errorf("cohort header is unreadable")
+			return "", false, fmt.Errorf("cohort header is unreadable")
 		}
-		return h.CohortID, nil
+		return h.CohortID, false, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
-		return "", err
+		return "", false, err
 	}
 
 	plan, err := delegationadoption.Build(ctx, c, delegationadoption.Scope{})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	cohortID := uuid.NewString()
+	cohortID = uuid.NewString()
 	records := delegationadoption.SnapshotRecords(plan, cohortID, store.DelegationAdoptionOriginBoot)
 	counts := map[string]int{}
 	for _, r := range records {
@@ -152,20 +172,20 @@ func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, er
 		Counts:        counts,
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	// One ent transaction for the records and the header row.
 	// UpsertHubSetting opens its own transaction, so the header is created
 	// directly on the transaction's client.
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
-		return "", fmt.Errorf("begin transaction: %w", err)
+		return "", false, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	txStore := newTxCompositeStore(tx)
 	for _, r := range records {
 		if err := txStore.CreateDelegationAdoption(ctx, r); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	if _, err := tx.HubSetting.Create().
@@ -175,12 +195,12 @@ func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, er
 		SetUpdatedBy("migration").
 		SetOrigin(hubsetting.OriginSeeded).
 		Save(ctx); err != nil {
-		return "", mapError(err)
+		return "", false, mapError(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit snapshot: %w", err)
+		return "", false, fmt.Errorf("commit snapshot: %w", err)
 	}
-	return cohortID, nil
+	return cohortID, true, nil
 }
 
 // adoptOneHop applies one pending record in its own transaction and writes

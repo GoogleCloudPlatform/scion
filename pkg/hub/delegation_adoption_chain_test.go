@@ -203,7 +203,7 @@ func TestFullyAdoptedChainAllowsAssign(t *testing.T) {
 	assert.Equal(t, f.sa.ID, gc.AppliedConfig.GCPIdentity.ServiceAccountID)
 }
 
-func TestPartiallyAdoptedChainStillDeniesAssign(t *testing.T) {
+func TestPartiallyAdoptedChainDeniesAssign(t *testing.T) {
 	// Only the upper hop adopted: the lower hop is unrecorded.
 	f := newLegacyFixture(t, "adopt-part-a")
 	c := f.seedLegacyAgent(t, "adopt-part-a-c", f.legacy, AgentRoleFull)

@@ -292,8 +292,9 @@ type saAssignDenial struct {
 	kind         saAssignDenialKind
 	msg          string
 	resourceType string
-	// cause is the Layer 1 decision's DenyCause. A ceiling_unrecorded cause
-	// adds the delegation-provenance adoption details; msg is unchanged.
+	// cause is the Layer 1 decision's adoptionDetailsCause. A
+	// ceiling_unrecorded cause adds the delegation-provenance adoption
+	// details; msg is unchanged.
 	cause DenyCause
 }
 
@@ -408,7 +409,7 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
 			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type,
-			cause: decision.DenyCause}
+			cause: decision.adoptionDetailsCause()}
 	}
 
 	// Layer 2: GCP actAs.

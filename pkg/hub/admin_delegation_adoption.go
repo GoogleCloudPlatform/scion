@@ -188,6 +188,11 @@ func (s *Server) handleDelegationAdoption(w http.ResponseWriter, r *http.Request
 	}
 	resp.Marker = s.readAdoptionHeader(ctx, delegationadoption.MarkerSection)
 	resp.Cohort = s.readAdoptionHeader(ctx, delegationadoption.CohortSection)
+	// The boot snapshot can be deferred: when planning or the snapshot
+	// write fails on the first boot, the hub serves with no snapshot and
+	// the next boot takes it. snapshotTaken reports that state explicitly
+	// rather than leaving it to a null cohort header.
+	resp.SnapshotTaken = resp.Cohort != nil
 
 	all, _, err := s.store.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{ScopeID: q.Get("projectId")})
 	if err != nil {
@@ -250,6 +255,9 @@ func (s *Server) readAdoptionHeader(ctx context.Context, section string) *delega
 }
 
 type delegationAdoptionStatusResponse struct {
+	// SnapshotTaken is false until the boot cohort snapshot exists; Cohort
+	// is null in that state.
+	SnapshotTaken    bool                        `json:"snapshotTaken"`
 	Marker           *delegationadoption.Header  `json:"marker"`
 	Cohort           *delegationadoption.Header  `json:"cohort"`
 	Counts           map[string]int              `json:"counts"`
@@ -628,24 +636,33 @@ func (s *Server) commitAdoption(ctx context.Context, tx store.Store, plan *deleg
 	return out, nil
 }
 
+// commitAdoptionRevert reverts each hop and marks its record, and the
+// records the hop covers, reverted. The reverting admin is written to the
+// reverted_by fields and the reactivated original's summary to
+// revert_summary; actor_* and after_summary keep the adopter and the
+// adopted edge's summary.
 func (s *Server) commitAdoptionRevert(ctx context.Context, tx store.Store, plan *delegationadoption.RevertPlan, actor delegationAdoptionActor, requestID string) ([]*store.DelegationAdoption, error) {
 	var out []*store.DelegationAdoption
 	for _, h := range plan.Hops {
-		rec := h.Record()
-		res, err := delegationadoption.ApplyRevert(ctx, tx, h, rec.ID)
+		res, err := delegationadoption.ApplyRevert(ctx, tx, h, h.RecordID)
 		if err != nil {
 			return nil, err
 		}
 		if res.Status != store.DelegationAdoptionReverted {
 			return nil, errAdoptionStalePlan
 		}
-		rec.Status = store.DelegationAdoptionReverted
-		rec.OriginalEdgeID = h.OriginalEdgeID
-		rec.AfterSummary = res.AfterSummary
-		rec.ActorKind = store.DelegationPrincipalUser
-		rec.ActorID = actor.UserID
-		if err := tx.UpdateDelegationAdoption(ctx, rec); err != nil {
-			return nil, err
+		now := time.Now().UTC()
+		for _, rec := range h.Records() {
+			rec.Status = store.DelegationAdoptionReverted
+			rec.OriginalEdgeID = h.OriginalEdgeID
+			rec.RevertedByKind = store.DelegationPrincipalUser
+			rec.RevertedByID = actor.UserID
+			rec.RevertSummary = res.AfterSummary
+			rec.RevertedAt = &now
+			if err := tx.UpdateDelegationAdoption(ctx, rec); err != nil {
+				return nil, err
+			}
+			out = append(out, rec)
 		}
 		if err := s.writeAdoptionAudit(ctx, tx, &store.MutationAuditRecord{
 			MutationType:       mutationTypeDelegationAdoptionRevert,
@@ -659,7 +676,6 @@ func (s *Server) commitAdoptionRevert(ctx context.Context, tx store.Store, plan 
 		}); err != nil {
 			return nil, err
 		}
-		out = append(out, rec)
 	}
 	return out, nil
 }

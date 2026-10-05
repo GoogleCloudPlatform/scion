@@ -360,7 +360,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(c, edge, permissionID)
+				a.logUnrecordedHop(ctx, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -388,7 +388,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(c, edge, permissionID)
+				a.logUnrecordedHop(ctx, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -404,14 +404,45 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	}
 }
 
-// logUnrecordedHop logs, server-side only, the delegate whose hop denied with
-// ceiling_unrecorded, so an admin can correlate the denial with the
-// delegation-adoption status view. Nothing here reaches the caller.
-func (a *AuthzService) logUnrecordedHop(cause DenyCause, edge *store.DelegationEdge, permissionID string) {
-	if cause != DenyCauseCeilingUnrecorded || a.logger == nil {
+// unrecordedHopNoteKey is the context key of an unrecordedHopNote.
+type unrecordedHopNoteKey struct{}
+
+// unrecordedHopNote receives, from a chain walk, whether a
+// ceiling_unrecorded denial came from a hop that delegation-provenance
+// adoption can address: an unrecorded row (provenance version 0). A hop
+// denied only because its provenance version is not understood is not
+// adoptable. The note is descriptive: it selects response details and is
+// never read by an authorization decision.
+type unrecordedHopNote struct {
+	adoptable bool
+}
+
+func contextWithUnrecordedHopNote(ctx context.Context, note *unrecordedHopNote) context.Context {
+	return context.WithValue(ctx, unrecordedHopNoteKey{}, note)
+}
+
+// logUnrecordedHop logs at Debug, server-side only, the delegate whose hop
+// denied with ceiling_unrecorded, so an admin can correlate the denial with
+// the delegation-adoption status view, and fills the context's
+// unrecordedHopNote. Nothing here reaches the caller.
+func (a *AuthzService) logUnrecordedHop(ctx context.Context, cause DenyCause, edge *store.DelegationEdge, permissionID string) {
+	if cause != DenyCauseCeilingUnrecorded {
 		return
 	}
-	a.logger.Info("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
+	adoptable := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
+	if note, ok := ctx.Value(unrecordedHopNoteKey{}).(*unrecordedHopNote); ok && note != nil {
+		note.adoptable = adoptable
+	}
+	if a.logger == nil {
+		return
+	}
+	if !adoptable {
+		a.logger.Debug("delegation ceiling: hop with an unsupported provenance version denied a permission that requires recorded provenance",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+			"provenance_version", edge.ProvenanceVersion)
+		return
+	}
+	a.logger.Debug("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
 		"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
 		"remediation_path", delegationAdoptionPath)
 }
