@@ -34,6 +34,7 @@ import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, replaceRoute } from '../../client/main.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -65,6 +66,9 @@ let ScionPageChat: any;
 // store's feed; it never connects here.
 beforeEach(() => {
   vi.stubGlobal('EventSource', FakeEventSource);
+  // Page-wide shared list loads: one test's DM list must not answer the next.
+  chatDMsLoad.invalidate();
+  chatSpacesLoad.invalidate();
 });
 
 describe('chat mention roster stability', () => {
@@ -1296,7 +1300,15 @@ describe('chat page — late space lookups', () => {
   function createSpacePage(mobile: boolean): any {
     const el = createPage();
     el.isMobileLayout = mobile;
-    const rail = { expandSpace: vi.fn() };
+    const rail = {
+      expandSpace: vi.fn(),
+      // The real rail loads the list over the same endpoint; going through
+      // the mocked apiFetch keeps the held thread request in control.
+      threadsFor: vi.fn(async (projectId: string) => {
+        const res = await apiFetch(`/api/v1/chat/spaces/${projectId}/threads`);
+        return ((await res.json()) as { threads?: unknown[] }).threads ?? [];
+      }),
+    };
     Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     Object.defineProperty(el, 'shadowRoot', {
       get: () => ({
@@ -1393,6 +1405,34 @@ describe('chat page — late space lookups', () => {
   });
 });
 
+describe('chat page — rail reload after a message', () => {
+  it('asks the rail for spaces requested after the newest message of the burst', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = createPage();
+      const rail = { reload: vi.fn(() => Promise.resolve()) };
+      Object.defineProperty(el, 'shadowRoot', {
+        get: () => ({
+          querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null),
+        }),
+      });
+      const first = new CustomEvent('chat-message-received', { detail: {} });
+      vi.advanceTimersByTime(5);
+      const second = new CustomEvent('chat-message-received', { detail: {} });
+      el.handleChatMessage(first);
+      el.handleChatMessage(second);
+
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(rail.reload).toHaveBeenCalledTimes(1);
+      expect(rail.reload).toHaveBeenCalledWith({ startedAfter: second.timeStamp });
+      expect(second.timeStamp).toBeGreaterThan(first.timeStamp);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('chat page — late DM peer lookups', () => {
   async function flush(): Promise<void> {
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
@@ -1444,7 +1484,11 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     // The first parse and the rail-loaded re-parse each start a lookup.
+    // Back to back they would share one DM-list request; forget it in
+    // between so the second answers on its own, as it does once the shared
+    // list has aged out.
     el.parseV2Route();
+    chatDMsLoad.invalidate();
     el.parseV2Route();
     await flush();
     expect(releases).toHaveLength(2);
@@ -1459,6 +1503,28 @@ describe('chat page — late DM peer lookups', () => {
     await flush();
 
     expect(el.mobilePanel).toBe('left');
+  });
+
+  it('the first parse and the rail-loaded re-parse share one DM-list request and open the DM once', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    const titles: string[] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push(((e as CustomEvent).detail.segments as string[])[0])
+    );
+    el.parseV2Route();
+    el.parseV2Route();
+    await flush();
+    expect(releases).toHaveLength(1);
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me');
+    expect(el.mobilePanel).toBe('center');
+    // Opened by one lookup; the other found it already open and left it.
+    expect(titles.filter((t) => t === 'Coder One')).toHaveLength(1);
   });
 
   it('a lookup that returns after the route moved on opens nothing', async () => {

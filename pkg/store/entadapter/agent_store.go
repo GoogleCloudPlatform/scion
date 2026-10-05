@@ -1389,6 +1389,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 
+	if su.IfPhase != "" && current.Phase != su.IfPhase {
+		return store.ErrPhaseMismatch
+	}
+
 	now := time.Now()
 
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
@@ -1405,6 +1409,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.Message = ""
 		su.ClearExit = false
 		su.ClearMessageIf = ""
+		su.ClearTerminalRemnants = false
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1450,7 +1455,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// being terminal so routine running→running heartbeats (which carry their own
 	// sticky-stalled rules in the broker handler) are left untouched. An explicit
 	// message in the same update (su.Message != "") wins and is set below.
-	if su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error") {
+	// ClearTerminalRemnants applies the same clear whatever the current phase
+	// (a lifecycle start's final write; see store.AgentStatusUpdate).
+	if su.ClearTerminalRemnants || (su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error")) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}

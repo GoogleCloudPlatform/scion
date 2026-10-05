@@ -1135,7 +1135,11 @@ func (s *Server) handleExistingAgent(
 		// re-reserve (with the cap check) before dispatch, same as create
 		// (ptone/scion#1963). Idempotent, and rejects with the same
 		// quota-exceeded response create uses if the broker is at capacity.
-		ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+		// The agent is marked starting for the dispatch so the quota
+		// reconcile keeps the slot (ptone/scion#2014); beginStartDispatch
+		// requires the lifecycle op.
+		defer s.beginLifecycleOp(existingAgent.ID)()
+		sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 		if !ok {
 			return existingAgentErrored
 		}
@@ -1144,12 +1148,12 @@ func (s *Server) handleExistingAgent(
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			sd.rollback(ctx)
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			sd.rollback(ctx)
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1179,9 +1183,15 @@ func (s *Server) handleExistingAgent(
 		// pod actually stopping, which describes the old pod, not this one.
 		existingAgent.ExitReason = ""
 		existingAgent.ExitCode = nil
+		// The row read starting during the dispatch (beginStartDispatch),
+		// so clear the rest of the prior generation's remnants here, as
+		// ClearTerminalRemnants does for a status write.
+		existingAgent.Message = ""
+		existingAgent.StalledFromActivity = ""
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
+		sd.settle()
 
 		if req.Notify {
 			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1235,18 +1245,22 @@ func (s *Server) handleExistingAgent(
 			}
 			// A stopped or errored agent's reservation was released when it
 			// stopped/crashed; re-reserve (with the cap check) before
-			// dispatch, same as create (ptone/scion#1963).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+			// dispatch, same as create (ptone/scion#1963), and mark it
+			// starting for the dispatch so the quota reconcile keeps the
+			// slot (ptone/scion#2014); beginStartDispatch requires the
+			// lifecycle op.
+			defer s.beginLifecycleOp(existingAgent.ID)()
+			sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 			if !ok {
 				return existingAgentErrored
 			}
 			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				sd.rollback(ctx)
 				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				sd.rollback(ctx)
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
@@ -1275,9 +1289,15 @@ func (s *Server) handleExistingAgent(
 			// pod, not this one.
 			existingAgent.ExitReason = ""
 			existingAgent.ExitCode = nil
+			// The row read starting during the dispatch (beginStartDispatch),
+			// so clear the rest of the prior generation's remnants here, as
+			// ClearTerminalRemnants does for a status write.
+			existingAgent.Message = ""
+			existingAgent.StalledFromActivity = ""
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
+			sd.settle()
 
 			if req.Notify {
 				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)

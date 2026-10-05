@@ -47,7 +47,6 @@ import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
 import {
   GRAPH_PALETTE_AVAILABILITY_EVENT,
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
@@ -897,10 +896,11 @@ export class ScionHeader extends LitElement {
 
   // =========================================================================
   // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, the terminal view's agents-only "Jump to
-  // agent" palette on /terminals, or a graph view's "Jump to agent" palette
+  // switcher on a chat route, or a graph view's "Jump to agent" palette
   // while one is on screen. One button, one render path, shared by every
-  // host -- see renderPaletteButton's own doc comment.
+  // host -- see renderPaletteButton's own doc comment. The terminal view
+  // has none here: its "Jump to agent" button is a labelled footer in its
+  // Open terminals column (TerminalWorkspaceRoot.buildRailFooter).
   // =========================================================================
 
   /**
@@ -921,14 +921,11 @@ export class ScionHeader extends LitElement {
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
     const isChat = this.isChatView();
-    const isTerminal = this.isTerminalView();
-    const isGraph = !isChat && !isTerminal && this.graphPaletteAvailable;
-    if (!isChat && !isTerminal && !isGraph) return nothing;
+    const isGraph = !isChat && !this.isTerminalView() && this.graphPaletteAvailable;
+    if (!isChat && !isGraph) return nothing;
     const openRequestEvent = isChat
       ? CHAT_PALETTE_OPEN_REQUEST_EVENT
-      : isTerminal
-        ? TERMINAL_PALETTE_OPEN_REQUEST_EVENT
-        : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
+      : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();

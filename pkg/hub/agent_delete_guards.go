@@ -321,14 +321,17 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 //
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
-// fails, a falls back to the requested phase (the pre-guard behaviour).
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
+// fails, a falls back to the requested phase (the pre-guard behaviour) and
+// reloaded is false.
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
+		return false
 	}
+	return true
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent
