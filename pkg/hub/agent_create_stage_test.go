@@ -125,6 +125,12 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 			disp:      &createAgentDispatcher{envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}},
 			wantStage: createStageMissingEnv,
 		},
+		{
+			name:      "provision",
+			disp:      &skillFailDispatcher{provisionErr: brokerSkillError(http.StatusNotFound, "not_found", "")},
+			req:       CreateAgentRequest{ProvisionOnly: true},
+			wantStage: createStageProvision,
+		},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

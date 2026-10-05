@@ -133,6 +133,7 @@ const (
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
+	createStageProvision         = "provision"
 )
 
 // createCompensation is the input of compensateAgentCreate.
