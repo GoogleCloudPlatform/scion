@@ -616,8 +616,14 @@ func TestHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T) {
 // shuts down while a request is queued.
 func TestHandleRequest_UnregistersOnEveryExitPath(t *testing.T) {
 	release := make(chan struct{})
+	blockStarted := make(chan struct{}, 1)
+	var okRuns atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ok" {
+			okRuns.Add(1)
+		}
 		if r.URL.Path == "/block" {
+			blockStarted <- struct{}{}
 			select {
 			case <-r.Context().Done():
 			case <-release:
@@ -642,17 +648,25 @@ func TestHandleRequest_UnregistersOnEveryExitPath(t *testing.T) {
 		t.Fatalf("after normal completion: tracked cancels = %d, want 0", got)
 	}
 
-	// Cancelled mid-handler, with a second request queued behind it and
-	// cancelled while queued.
+	// Cancelled mid-handler: wait until it holds the only slot.
 	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "run-1", Method: "GET", Path: "/block"})
+	select {
+	case <-blockStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking handler never started")
+	}
+	// Cancelled while queued: run-1 holds the only slot, so queued-2 cannot
+	// obtain it before its cancel.
 	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-2", Method: "GET", Path: "/ok"})
 	if got := cancelCount(client); got != 2 {
 		t.Fatalf("tracked cancels while running/queued = %d, want 2", got)
 	}
-	time.Sleep(50 * time.Millisecond)
 	feed(t, client, wsprotocol.NewCancelMessage("queued-2"))
 	feed(t, client, wsprotocol.NewCancelMessage("run-1"))
 	waitWG(t, client)
+	if got := okRuns.Load(); got != 1 {
+		t.Fatalf("/ok handler ran %d times, want 1 (queued-2 must not run)", got)
+	}
 	if got := cancelCount(client); got != 0 {
 		t.Fatalf("after cancels: tracked cancels = %d, want 0", got)
 	}
@@ -755,15 +769,32 @@ func TestHandleMessage_NotBlockedByRunningHandler(t *testing.T) {
 	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "busy", Method: "GET", Path: "/x"})
 	<-started
 
-	loopDone := make(chan struct{})
+	// Feed from a helper goroutine (so a block can be detected by timeout)
+	// and report errors back over a channel: t.Fatal must not be called
+	// outside the test goroutine.
+	loopDone := make(chan error, 1)
 	go func() {
-		feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "next", Method: "GET", Path: "/x"})
-		feed(t, client, wsprotocol.NewCancelMessage("next"))
-		feed(t, client, wsprotocol.NewCancelMessage("unknown"))
-		close(loopDone)
+		for _, v := range []any{
+			wsprotocol.RequestEnvelope{Type: "request", RequestID: "next", Method: "GET", Path: "/x"},
+			wsprotocol.NewCancelMessage("next"),
+			wsprotocol.NewCancelMessage("unknown"),
+		} {
+			data, err := json.Marshal(v)
+			if err == nil {
+				err = client.handleMessage(data)
+			}
+			if err != nil {
+				loopDone <- err
+				return
+			}
+		}
+		loopDone <- nil
 	}()
 	select {
-	case <-loopDone:
+	case err := <-loopDone:
+		if err != nil {
+			t.Fatalf("handleMessage: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("read loop blocked behind a running handler")
 	}

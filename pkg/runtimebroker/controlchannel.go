@@ -591,10 +591,11 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 	return nil
 }
 
-// dispatchRequest registers req's cancel and runs it. handleRequest uses
-// trackRequest and runRequest directly so registration happens on the read
-// loop; this wrapper is for callers that dispatch a single request
-// themselves. The caller must have called c.wg.Add(1).
+// dispatchRequest registers req's cancel and runs it. It is used only by
+// tests, which call it directly without going through the read loop; when
+// run as a goroutine its registration is therefore asynchronous, unlike
+// handleRequest's, which registers on the read loop before starting
+// runRequest. The caller must have called c.wg.Add(1).
 func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req wsprotocol.RequestEnvelope) {
 	ctx, done := c.trackRequest(req.RequestID)
 	c.runRequest(ctx, done, conn, req)
@@ -738,9 +739,11 @@ type requestCancel struct {
 // for unregisterCancel.
 //
 // RequestIDs are unique in practice (the Hub generates a UUID per request).
-// If one is reused while an earlier request with the same ID is still
-// tracked, the new entry replaces the old one and a cancel for that ID
-// cancels both requests, so neither becomes uncancellable.
+// Handling of a reused ID is best-effort: if one is reused while an earlier
+// request with the same ID is still tracked, the new entry replaces the old
+// one and, while it remains, a cancel for that ID cancels both requests. If
+// the later request finishes first, its unregister removes the ID, and the
+// earlier request can no longer be cancelled by a cancel frame.
 //
 // cancelMu guards only the map: it is never held while calling a handler or
 // a CancelFunc, so the read loop cannot block on a running handler here.
@@ -768,7 +771,9 @@ func (c *ControlChannelClient) registerCancel(requestID string, cancel context.C
 // unregisterCancel removes entry once its request has finished
 // (successfully, with an error, or via cancellation, whether it ran or was
 // cancelled while queued), so handleCancel can no longer find it. It leaves
-// a newer registration for the same RequestID in place.
+// a newer registration for the same RequestID in place. If entry is the
+// newer registration, removing it also drops the earlier request's only
+// route to handleCancel (see registerCancel).
 func (c *ControlChannelClient) unregisterCancel(requestID string, entry *requestCancel) {
 	c.cancelMu.Lock()
 	if c.cancels[requestID] == entry {
