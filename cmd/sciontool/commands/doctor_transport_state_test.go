@@ -498,3 +498,208 @@ func TestCheckAuthentication_UnparseableLocationFixedMessage(t *testing.T) {
 		t.Errorf("raw Location printed:\n%s", out)
 	}
 }
+
+// Proxy mode, no transport token received yet (dispatch-time mint failed):
+// doctor reports the missing credential instead of "none".
+func TestCheckTransportAuth_ProxyModeNoneReceivedFails(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	// Doctor run with a different HOME (e.g. exec'd as root) still names
+	// the scion user's file.
+	t.Setenv("HOME", t.TempDir())
+	scionPath := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+
+	out, diag := runCheckTransportAuth(t)
+
+	if !diag.transportMissing || !diag.transportConfigured {
+		t.Fatalf("expected a missing transport credential, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Transport Auth: hub-provided token (awaiting first token)",
+		"Mode: iap (header: Proxy-Authorization)",
+		"[FAIL] Transport credential: none received yet",
+		"no file at " + scionPath + ")",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Transport Auth: none") {
+		t.Errorf("proxy mode must not be reported as no transport auth:\n%s", out)
+	}
+}
+
+// Proxy mode, the token arrived later through the file: doctor shows the
+// file-backed source in effect with its expiry, never the value.
+func TestCheckTransportAuth_ProxyModeLateFileInUse(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	fileTok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	path := writeDoctorTransportFile(t, home, fileTok)
+
+	out, diag := runCheckTransportAuth(t)
+
+	if diag.transportFailed() {
+		t.Fatalf("expected no transport failure, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Transport Auth: hub-provided token",
+		"[ OK ] Transport credential in use: refreshed file " + path,
+		"env  (SCION_TRANSPORT_TOKEN): not set in this process",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	assertNoTokenValues(t, out, fileTok)
+}
+
+// Proxy mode, the token arrived later in the scion user's file, and doctor
+// runs with a different HOME (e.g. exec'd as root): the file is reported
+// through the file-backed source, not as missing.
+func TestCheckTransportAuth_ProxyModeLateFileOtherHome(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	fileTok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	path := writeDoctorTransportFile(t, home, fileTok)
+	t.Setenv("HOME", t.TempDir())
+
+	out, diag := runCheckTransportAuth(t)
+
+	if diag.transportFailed() || diag.transportMissing {
+		t.Fatalf("expected no transport failure, diag=%+v\n%s", diag, out)
+	}
+	if !diag.transportConfigured {
+		t.Fatalf("expected transport configured, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Transport Auth: hub-provided token",
+		"[ OK ] Transport credential in use: refreshed file " + path,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"none received yet", "awaiting first token"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output must not contain %q:\n%s", bad, out)
+		}
+	}
+	assertNoTokenValues(t, out, fileTok)
+}
+
+// guardedTransportLayouts place a valid transport token at
+// <home>/.scion/transport-token in ways the guarded reader refuses.
+func guardedTransportLayouts() map[string]func(t *testing.T, home, tok string) {
+	return map[string]func(t *testing.T, home, tok string){
+		"symlinked .scion": func(t *testing.T, home, tok string) {
+			elsewhere := t.TempDir()
+			writeDoctorTransportFile(t, elsewhere, tok)
+			if err := os.Symlink(filepath.Join(elsewhere, ".scion"), filepath.Join(home, ".scion")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"hardlinked file": func(t *testing.T, home, tok string) {
+			other := filepath.Join(t.TempDir(), "other")
+			if err := os.WriteFile(other, []byte(tok), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(other, filepath.Join(home, ".scion", transportauth.TransportTokenFileName)); err != nil {
+				t.Skipf("hardlink not supported: %v", err)
+			}
+		},
+	}
+}
+
+// runGuardedTransportCase builds the layout, applies env, runs the doctor
+// transport check, and asserts the file is not reported as in use and the
+// returned source never yields its content.
+func runGuardedTransportCase(t *testing.T, setup func(t *testing.T, home, tok string), env func(t *testing.T, home string)) {
+	t.Helper()
+	home := isolateDoctorTransport(t)
+	tok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	setup(t, home, tok)
+	env(t, home)
+
+	var diag doctorDiag
+	var src transportauth.TokenSource
+	out := captureStdout(t, func() { src = checkTransportAuth(&diag) })
+
+	if strings.Contains(out, "Transport credential in use") {
+		t.Errorf("guarded file must not be reported as in use:\n%s", out)
+	}
+	if !diag.transportFailed() {
+		t.Errorf("expected a transport failure, diag=%+v\n%s", diag, out)
+	}
+	if src != nil {
+		if got, _ := src.Token(); got == tok {
+			t.Errorf("source returned the content of a guarded file")
+		}
+	}
+	assertNoTokenValues(t, out, tok)
+}
+
+// Proxy mode, scion user's file, doctor run with a different HOME (e.g.
+// exec'd as root): read with the guarded reader.
+func TestCheckTransportAuth_ProxyModeLateFileOtherHomeGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
+		t.Run(name, func(t *testing.T) {
+			runGuardedTransportCase(t, setup, func(t *testing.T, _ string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+				t.Setenv("HOME", t.TempDir())
+			})
+		})
+	}
+}
+
+// Proxy mode, doctor run with HOME set to the scion home (e.g. root with
+// HOME=/home/scion): the FromEnv late step reads with the guarded reader.
+func TestCheckTransportAuth_ProxyModeLateFileSameHomeGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
+		t.Run(name, func(t *testing.T) {
+			runGuardedTransportCase(t, setup, func(t *testing.T, _ string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+			})
+		})
+	}
+}
+
+// Injected transport token file (SCION_TRANSPORT_TOKEN_FILE): also read
+// with the guarded reader.
+func TestCheckTransportAuth_InjectedFileGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
+		t.Run(name, func(t *testing.T) {
+			runGuardedTransportCase(t, setup, func(t *testing.T, home string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+				t.Setenv(transportauth.EnvTransportTokenFile,
+					filepath.Join(home, ".scion", transportauth.TransportTokenFileName))
+			})
+		})
+	}
+}
+
+// The missing-credential remediation points at the hub's minter even when
+// no refresh status recorded a problem.
+func TestPrintTransportRemediation_MissingMentionsMinter(t *testing.T) {
+	out := captureStdout(t, func() { printTransportRemediation(doctorDiag{transportMissing: true}) })
+	if !strings.Contains(out, "If reset-auth does not deliver one, check the hub's transport minter configuration and logs.") {
+		t.Errorf("expected minter hint:\n%s", out)
+	}
+}
+
+// Without a proxy mode nothing changes: no transport auth is reported.
+func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	writeDoctorTransportFile(t, home, makeDoctorTestJWT(time.Now().Add(50*time.Minute)))
+
+	out, diag := runCheckTransportAuth(t)
+	if diag.transportConfigured || diag.transportFailed() {
+		t.Fatalf("expected no transport auth, diag=%+v\n%s", diag, out)
+	}
+	if !strings.Contains(out, "[INFO] Transport Auth: none") {
+		t.Errorf("expected none:\n%s", out)
+	}
+}
