@@ -826,6 +826,19 @@ describe('AgentStore feed completeness flag', () => {
       expect(h.feeds[0]?.isAgentSetComplete(view)).toBe(true);
     });
 
+    it('a complete walk of a filtered hub list does not set the flag', async () => {
+      const h = createHarness([agent('a1')], { view });
+      const loads = [
+        h.store.ensure({ scope: 'hub', ownership: 'mine' }),
+        h.store.ensure({ scope: 'hub', label: 'team=a' }),
+      ];
+      await h.connect();
+      const snapshots = await Promise.all(loads);
+
+      expect(snapshots.every((s) => s.complete)).toBe(true);
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+    });
+
     it('a project walk does not set the flag', async () => {
       const h = createHarness([agent('a1')], { view });
       const loading = h.store.ensure(P1);
