@@ -458,7 +458,7 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 //   - degraded:  the process is up and serving, but a non-critical check is
 //     non-healthy (e.g. colocated_broker). "Process is up" consumers treat
 //     this as up and name the non-healthy checks.
-//   - unhealthy: a critical check (database) failed; treated as not up.
+//   - unhealthy: a critical check (database, workspace_storage) failed; treated as not up.
 const (
 	probeStatusHealthy   = "healthy"
 	probeStatusDegraded  = "degraded"

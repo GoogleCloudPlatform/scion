@@ -21,7 +21,7 @@
  *  - healthy:   every check is healthy (the standalone web server reports "ok").
  *  - degraded:  up and serving, but a non-critical check is non-healthy
  *               (e.g. colocated_broker). Shown amber, with the checks named.
- *  - unhealthy: a critical check (database) failed. Shown red.
+ *  - unhealthy: a critical check (database, workspace_storage) failed. Shown red.
  */
 
 export type HealthBannerClass = 'healthy' | 'degraded' | 'unhealthy' | 'unknown';

@@ -122,7 +122,7 @@ type pingFailStore struct {
 func (pingFailStore) Ping(context.Context) error { return errors.New("database is down") }
 
 // TestDeriveHealthStatus pins the severity distinction from
-// ptone/scion#1094: only a critical check (database) makes the composite
+// ptone/scion#1094: only a critical check (database, workspace_storage) makes the composite
 // status unhealthy; any other non-healthy key only degrades it, so
 // informational keys no longer read as "down" to consumers.
 func TestDeriveHealthStatus(t *testing.T) {
@@ -136,6 +136,8 @@ func TestDeriveHealthStatus(t *testing.T) {
 		{"non-critical only", map[string]string{"database": "healthy", "colocated_broker": "unhealthy: registration failed"}, HealthStatusDegraded},
 		{"informational key", map[string]string{"database": "healthy", "workspace_storage": "healthy", "workspace_storage_mount_verification": "unavailable: could not compare filesystem device IDs"}, HealthStatusDegraded},
 		{"database down", map[string]string{"database": "unhealthy"}, HealthStatusUnhealthy},
+		{"workspace storage down", map[string]string{"database": "healthy", "workspace_storage": "unhealthy: mount not available"}, HealthStatusUnhealthy},
+		{"workspace storage down wins over non-critical", map[string]string{"database": "healthy", "workspace_storage": "unhealthy: mount check timed out", "colocated_broker": "unhealthy: registration pending"}, HealthStatusUnhealthy},
 		{"database down wins over non-critical", map[string]string{"database": "unhealthy", "colocated_broker": "unhealthy: registration pending"}, HealthStatusUnhealthy},
 	}
 	for _, tt := range tests {

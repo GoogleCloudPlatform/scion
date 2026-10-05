@@ -61,6 +61,13 @@ const (
 // anything but "healthy". Keep it small: a key belongs here only if, when it
 // fails, the hub cannot serve requests at all.
 //
+//   - database: nothing works without the store.
+//   - workspace_storage: the configured shared workspace mount is missing,
+//     unmounted, or hung. handleReadyz already takes the pod out of service
+//     for this, so /healthz agrees and reports unhealthy. Its companion
+//     workspace_storage_mount_verification ("mount could not be verified")
+//     is deliberately NOT critical: it only degrades.
+//
 // Check-map contract (for anyone adding a key in GetHealthInfo or a check*
 // helper): the value is "healthy" or a non-healthy string, conventionally
 // "unhealthy: <short fixed reason>" (the endpoint is unauthenticated, so no
@@ -71,7 +78,8 @@ const (
 // handleReadyz (Kubernetes readiness) is deliberately independent of this
 // set and consults its own checks.
 var criticalHealthChecks = map[string]bool{
-	"database": true,
+	"database":          true,
+	"workspace_storage": true,
 }
 
 // deriveHealthStatus computes the composite status from a check map: unhealthy
