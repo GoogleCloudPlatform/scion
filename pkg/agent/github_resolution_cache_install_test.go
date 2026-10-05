@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := NewGitHubResolutionCache(dir, time.Hour)
+	first, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	}, true)
 	first.Flush()
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestContentlessHitWithoutCredentialIsUsed(t *testing.T) {
 
 func TestGitHubSkillResolver_FlushCache(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
 	chmod = func(string, os.FileMode) error { return errors.New("operation not permitted") }
 	t.Cleanup(func() { chmod = orig })
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -214,5 +215,99 @@ func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
 	cache.Flush()
 	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
 		t.Fatalf("file has %d entries, want 1", len(f.Entries))
+	}
+}
+
+// TestWithContentFlightKeyIsSeparate checks that a caller that cannot use
+// a content-less entry (its install context does not supply the credential
+// it resolves with) resolves under its own flight key, ending in
+// "|with-content", and so has its own refresh-failure backoff: a failed
+// background refresh for one kind of caller does not stop the other kind
+// from refreshing the same stale entry.
+func TestWithContentFlightKeyIsSeparate(t *testing.T) {
+	const credential = "cred"
+	server, mux := newTestGitHubServer(t)
+	var commitCalls atomic.Int64
+	// A non-retryable failure, so each background refresh fails at once.
+	// Not a 404: a not_found is remembered for the cache key, which both
+	// flight keys share, and the second refresh would not reach GitHub.
+	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		commitCalls.Add(1)
+		http.Error(w, "unprocessable", http.StatusUnprocessableEntity)
+	})
+
+	cache, err := newTestResolutionCache(t.TempDir(), -time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghRef, err := ParseGitHubSkillURI(installTestURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stale in-memory entry with content, which every caller accepts.
+	cache.putEntry(resolutionCacheKey(ghRef, credential), ResolvedSkill{
+		Name: "s", URI: installTestURI,
+		Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("# skill")}},
+	}, true)
+
+	r := newTestGitHubResolver(server)
+	r.token = credential
+	r.resolutionCache = cache
+
+	type serve struct {
+		key     string
+		started bool
+	}
+	var serves []serve
+	hook := func(key string, started bool) { serves = append(serves, serve{key, started}) }
+	staleServeHook.Store(&hook)
+	t.Cleanup(func() { staleServeHook.Store(nil) })
+
+	withContent := context.Background()
+	matching := ContextWithGitHubCredentialLookup(context.Background(), func(string) string { return credential })
+
+	// resolve resolves installTestURI from the stale entry and waits for
+	// the background refresh it started, if any, to finish.
+	resolve := func(ctx context.Context) serve {
+		t.Helper()
+		before := len(serves)
+		got := resolveOneForTest(t, ctx, r)
+		if !hasAllFileContent(got) {
+			t.Fatal("stale entry with content not served")
+		}
+		cache.refreshWG.Wait()
+		if len(serves) != before+1 {
+			t.Fatalf("stale serves = %d, want %d", len(serves), before+1)
+		}
+		return serves[len(serves)-1]
+	}
+
+	first := resolve(withContent)
+	if !strings.HasSuffix(first.key, "|with-content") {
+		t.Fatalf("flight key %q for a caller needing content lacks the |with-content suffix", first.key)
+	}
+	if !first.started {
+		t.Fatal("no refresh started for the first stale serve")
+	}
+
+	second := resolve(matching)
+	if strings.HasSuffix(second.key, "|with-content") {
+		t.Fatalf("flight key %q for a caller whose install credential matches has the |with-content suffix", second.key)
+	}
+	if second.key+"|with-content" != first.key {
+		t.Fatalf("flight keys differ beyond the suffix: %q vs %q", second.key, first.key)
+	}
+	if !second.started {
+		t.Fatal("refresh not started for the plain flight key after the with-content refresh failed")
+	}
+
+	if third := resolve(withContent); third.started {
+		t.Fatal("refresh started again for the with-content key within its failure backoff")
+	}
+	if fourth := resolve(matching); fourth.started {
+		t.Fatal("refresh started again for the plain key within its failure backoff")
+	}
+	if n := commitCalls.Load(); n != 2 {
+		t.Fatalf("GitHub commit lookups = %d, want 2 (one refresh per flight key)", n)
 	}
 }
