@@ -26,7 +26,10 @@ When you are attached to an agent, you interact with `tmux` using a **prefix key
 | **Switch Panes** | `Prefix` then `Arrow Keys` |
 | **Toggle Mouse Mode** | `Prefix` then `m` (Enables scrolling and pane selection via mouse; **on by default**) |
 
-`Prefix` then `d` is the only detach key. Docker and podman's own `Ctrl-p Ctrl-q` detach sequence is turned off for attach sessions. Podman disables it, and docker gets a sequence nobody types by accident. That way `Ctrl-p`, a common history key in agent CLIs, reaches the agent straight away.
+Use `Prefix` then `d` to detach. Attach sessions don't use docker and podman's default `Ctrl-p Ctrl-q` detach sequence, so `Ctrl-p`, a common history key in agent CLIs, reaches the agent straight away:
+
+- **Podman:** detach keys are turned off for attach sessions.
+- **Docker:** docker can't turn detach keys off, so attach sessions move them to `Ctrl-\` then `Ctrl-^`. A single `Ctrl-\` reaches the agent only when you press the next key. Pressing the whole sequence ends the attach the same way a detach does: the agent and its tmux session keep running.
 
 ## Web Terminal Interactivity
 
