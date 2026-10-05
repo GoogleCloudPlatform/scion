@@ -842,6 +842,13 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	if err == nil {
 		return true, created
 	}
+	writeQuotaReserveError(w, limitName, err)
+	return false, false
+}
+
+// writeQuotaReserveError writes the response for a failed quota reservation
+// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
@@ -852,7 +859,6 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 	}
-	return false, false
 }
 
 // releaseAgentQuotas releases resourceID's create-time quota reservations:
@@ -2078,7 +2084,7 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Warn("Failed to update agent status to provisioning", "agent_id", agent.ID, "error", err)
 			}
 
-			s.events.PublishAgentCreated(ctx, agent)
+			s.publishAgentCreatedIfLive(ctx, agent)
 
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
@@ -2169,7 +2175,7 @@ func (s *Server) createAgentInProject(
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 		}
 
-		s.events.PublishAgentCreated(ctx, agent)
+		s.publishAgentCreatedIfLive(ctx, agent)
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -2232,7 +2238,7 @@ func (s *Server) createAgentInProject(
 						s.agentLifecycleLog.Warn("Failed to update agent phase for env-gather", "agent_id", agent.ID, "error", err)
 					}
 
-					s.events.PublishAgentCreated(ctx, agent)
+					s.publishAgentCreatedIfLive(ctx, agent)
 
 					s.enrichAgent(ctx, agent, project, nil)
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
@@ -2339,11 +2345,8 @@ func (s *Server) createAgentInProject(
 	// and since the frontend may have already dropped the earlier "status" event
 	// (it ignores status events for agents not yet in state), the UI would never
 	// reflect the error.
-	if latest, err := s.store.GetAgent(ctx, agent.ID); err == nil {
-		s.events.PublishAgentCreated(ctx, latest)
-	} else {
-		s.events.PublishAgentCreated(ctx, agent)
-	}
+	// A delete that claimed the row meanwhile suppresses it (ptone/scion#2972).
+	s.publishAgentCreatedIfLive(ctx, agent)
 
 	// Enrich agent with project and broker names for display
 	s.enrichAgent(ctx, agent, project, nil)
@@ -2396,7 +2399,10 @@ func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
 // failure) while the broker dispatch is still in flight.
 func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) {
 	current, err := s.store.GetAgent(ctx, agent.ID)
-	if err != nil {
+	// A soft-deleted row is left alone: adopting its StateVersion would let
+	// the caller's write (zero DeletedAt in memory) win the CAS and clear
+	// deleted_at. The write then conflicts and the retry merges into the row.
+	if err != nil || !current.DeletedAt.IsZero() {
 		return
 	}
 	p := state.Phase(current.Phase)
@@ -2471,6 +2477,11 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	if src.Phase == string(state.PhaseRunning) {
 		dst.ExitReason = src.ExitReason
 		dst.ExitCode = src.ExitCode
+		// Likewise the caller's clear of the prior generation's message
+		// and stalled marker (empty values included), so the retry writes
+		// what the first attempt would have (ptone/scion#2014).
+		dst.Message = src.Message
+		dst.StalledFromActivity = src.StalledFromActivity
 	}
 }
 
