@@ -106,13 +106,39 @@ type ServerConfigUpdateDBRequest struct {
 // Layer-1 sections come from OperationalSettings.Snapshot(); Layer-0 comes from
 // the local GlobalConfig (settings.yaml). Section metadata shows provenance.
 func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
+	resp, err := s.buildServerConfigDBResponse(r.Context(), ops)
+	if err != nil {
+		var ue *serverConfigReadError
+		if errors.As(err, &ue) {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, ue.userMsg, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// serverConfigReadError carries the client-facing message for a failure to
+// build the server-config GET view; the cause is logged where it happens.
+type serverConfigReadError struct {
+	userMsg string
+	err     error
+}
+
+func (e *serverConfigReadError) Error() string { return e.userMsg + ": " + e.err.Error() }
+func (e *serverConfigReadError) Unwrap() error { return e.err }
+
+// buildServerConfigDBResponse builds the GET /api/v1/admin/server-config body
+// (sensitive fields masked). The PUT handler also uses it as the reference
+// view for echo detection.
+func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *OperationalSettings) (*ServerConfigDBResponse, error) {
 	// Build the base response from the file (same as file mode) for Layer-0.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to resolve settings directory", "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -120,8 +146,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if err != nil && !os.IsNotExist(err) {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to read settings file", "path", settingsPath, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to read settings file", err}
 	}
 
 	var vs config.VersionedSettings
@@ -129,8 +154,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err := yamlv3.Unmarshal(data, &vs); err != nil {
 			// N3: log the full error server-side for observability.
 			slog.Error("GET server-config: failed to parse settings file", "path", settingsPath, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
-			return
+			return nil, &serverConfigReadError{"Failed to parse settings file", err}
 		}
 	}
 
@@ -164,7 +188,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	resp.Server.Hub.HubName = effectiveHubName(ops)
 
 	// Build section metadata from the cache.
-	resp.SectionMeta = s.buildSectionMetadata(r.Context(), ops)
+	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
 	overrides := ops.EnvOverriddenKeys()
@@ -180,7 +204,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
-	writeJSON(w, http.StatusOK, resp)
+	return &resp, nil
 }
 
 // applySnapshotToResponse writes Layer-1 snapshot values into the
@@ -618,7 +642,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// then decode into the typed struct. This lets us distinguish
 	// OMITTED fields (keep current value) from EXPLICITLY-SENT empty
 	// values ("", [], null) which CLEAR the field in the section doc.
-	// File-mode behavior is untouched — this is postgres-path only.
 	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -627,6 +650,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	if isEmptySettingsBody(rawBody) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "No settings provided", nil)
 		return
 	}
 	// The typed decode above silently drops a removed profiles.<name>.timezone
@@ -686,6 +713,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"message": "These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.",
 			"keys":    unclassifiedKeys,
 		})
+		return
+	}
+
+	// Keys that never became a koanf key (unknown to the request type, or
+	// mapped nowhere) would otherwise be dropped while the PUT reports
+	// "saved". Reject them unless they echo the GET view.
+	if s.rejectUnpersistedKeys(r.Context(), w, ops, rawBody) {
 		return
 	}
 
@@ -1454,7 +1488,7 @@ func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateR
 	}
 }
 
-// buildAccessDocOnCurrent builds the access section doc for a Postgres-mode
+// buildAccessDocOnCurrent builds the access section doc for a DB-backed
 // PUT with carry-forward semantics (design §5.A item 3a): fields omitted from
 // the request keep their current value instead of being wiped by the
 // full-row replace in UpsertHubSetting.
@@ -1539,7 +1573,7 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 // buildSingleSectionDoc extracts the fields for a single section from the
 // update request and marshals them into a section document.
 //
-// N6/N7 presence-aware clearing (postgres-path only):
+// N6/N7 presence-aware clearing (DB-backed path only):
 //
 // The fp (fieldPresence) parameter carries the raw JSON structure so we can
 // distinguish OMITTED fields from EXPLICITLY-SENT empty values:
@@ -1552,7 +1586,8 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 //     zero value in the section doc, which CLEARS it in the DB
 //
 // This applies to: admin_emails, user_access_mode, default_user_role,
-// notification_channels, public_url. File-mode behavior is untouched.
+// notification_channels, public_url. The file-mode handler (hub without
+// OperationalSettings) does not use this.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
@@ -1930,7 +1965,7 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 //   - EXPLICITLY-SENT empty ("", [], null) → in the returned set → CLEAR the field
 //   - EXPLICITLY-SENT non-empty → in the returned set → normal update
 //
-// File-mode behavior is untouched — this is postgres-path only.
+// Used by the DB-backed handlers only; the file-mode handler does not use it.
 type fieldPresence struct {
 	raw map[string]json.RawMessage
 }

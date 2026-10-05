@@ -34,6 +34,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -374,5 +375,160 @@ func TestSQLite_Maintenance_NoRowUsesLiveState(t *testing.T) {
 	}
 	if doc["maintenance_message"] != "new msg" {
 		t.Errorf("DB maintenance doc = %v, want maintenance_message=new msg", doc)
+	}
+}
+
+// putServerConfig issues PUT /api/v1/admin/server-config through the
+// dispatcher and returns the recorder.
+func putServerConfig(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+	return rr
+}
+
+func rejectedKeys(t *testing.T, rr *httptest.ResponseRecorder) (string, []string) {
+	t.Helper()
+	var resp struct {
+		Error string   `json:"error"`
+		Keys  []string `json:"keys"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal %s: %v", rr.Body.String(), err)
+	}
+	return resp.Error, resp.Keys
+}
+
+// Review r1 finding 1: a key the DB-backed PUT neither persists nor rejects
+// by classification must not get 200 "saved". Each case writes nothing.
+func TestSQLite_PutServerConfig_UnpersistedKeysRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"file-only auto_inject_gcloud_adc", `{"auto_inject_gcloud_adc":true}`, []string{"auto_inject_gcloud_adc"}},
+		{"flat dotted key", `{"server.hub.auto_suspend_stalled":true}`, []string{"server.hub.auto_suspend_stalled"}},
+		{"unknown nested key", `{"server":{"hub":{"bogus":1}}}`, []string{"server.hub.bogus"}},
+		{"mixed with a Layer-1 key", `{"quotas":{"enforce_broker_quotas":false},"auto_inject_gcloud_adc":true}`, []string{"auto_inject_gcloud_adc"}},
+		{"unmapped server field, nested key reported once", `{"server":{"scheduler":{"enabled":true}}}`, []string{"server.scheduler"}},
+		{"agent role the handler does not write", `{"default_agent_role":"agent-role-readonly"}`, []string{"default_agent_role"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			settingsPath := tempSettingsHome(t)
+			srv, st, _ := newSQLiteOpsServer(t, nil, nil)
+			before := readFileString(t, settingsPath)
+			rowsBefore := hubSettingRevisions(t, st)
+
+			rr := putServerConfig(t, srv, tc.body)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			}
+			code, keys := rejectedKeys(t, rr)
+			if code != "unpersisted_keys_rejected" || !reflect.DeepEqual(keys, tc.want) {
+				t.Errorf("got error=%q keys=%v, want unpersisted_keys_rejected %v", code, keys, tc.want)
+			}
+			if after := hubSettingRevisions(t, st); !reflect.DeepEqual(after, rowsBefore) {
+				t.Errorf("a rejected PUT must write nothing to the DB:\nbefore: %v\nafter:  %v", rowsBefore, after)
+			}
+			if after := readFileString(t, settingsPath); after != before {
+				t.Errorf("a rejected PUT must not touch settings.yaml:\n%s", after)
+			}
+		})
+	}
+}
+
+func TestSQLite_PutServerConfig_EmptyBodyRejected(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, _ := newSQLiteOpsServer(t, nil, nil)
+	for _, body := range []string{`{}`, `{"expected_revisions":{"quotas":1}}`} {
+		if rr := putServerConfig(t, srv, body); rr.Code != http.StatusBadRequest {
+			t.Errorf("PUT %s: expected 400, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// No-op echoes keep getting 200: GET-only fields sent back unchanged
+// (section_metadata, superseded_keys, version info, ...) and unpersisted
+// keys at the GET view's value (here an empty default_harness_auth, which the
+// admin UI always sends and GET omits). The full GET body is not a 200 echo
+// on any driver: it carries schema_version, rejected as unclassified (#938).
+func TestSQLite_PutServerConfig_EchoAccepted(t *testing.T) {
+	tempSettingsHome(t)
+	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
+		"quotas": `{"enforce_broker_quotas":true}`,
+	})
+
+	getRR := httptest.NewRecorder()
+	srv.handleAdminServerConfig(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET: %d %s", getRR.Code, getRR.Body.String())
+	}
+	var view map[string]json.RawMessage
+	if err := json.Unmarshal(getRR.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	echo := map[string]json.RawMessage{}
+	for _, k := range []string{"scion_version", "settings_tier", "section_metadata", "superseded_keys", "quotas"} {
+		if v, ok := view[k]; ok {
+			echo[k] = v
+		}
+	}
+	if _, ok := echo["section_metadata"]; !ok {
+		t.Fatalf("precondition: GET view should carry section_metadata, got %s", getRR.Body.String())
+	}
+	body, _ := json.Marshal(echo)
+	if rr := putServerConfig(t, srv, string(body)); rr.Code != http.StatusOK {
+		t.Errorf("echo of GET-only fields: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rr := putServerConfig(t, srv, `{"default_harness_auth":"","auto_inject_gcloud_adc":false,"quotas":{"enforce_broker_quotas":false}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("zero-valued unpersisted keys with a Layer-1 change: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, doc := hubSettingDocMap(t, st, "quotas"); doc["enforce_broker_quotas"] != false {
+		t.Errorf("the Layer-1 change must still be written, got %v", doc)
+	}
+}
+
+// Review r1 finding 5: with the real SQLite propagation wiring (in-process
+// ChannelEventPublisher + StartPropagation, as startSettingsPropagation does
+// it), the event echo and a poll-backstop Refresh re-apply leave a PUT intact.
+func TestSQLite_Propagation_PutSurvivesEchoAndRefresh(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, ops := newSQLiteOpsServer(t, nil, map[string]string{
+		"quotas": `{"enforce_broker_quotas":true}`,
+	})
+	ops.server = nil // let StartPropagation wire it, as in production
+	ops.PollInterval = 20 * time.Millisecond
+	pub := NewChannelEventPublisher()
+	ops.SetEventPublisher(pub)
+	// Observe the echo the Update publishes.
+	echo, unsub := pub.Subscribe(settingsUpdatedSubject)
+	defer unsub()
+	ctx, cancel := context.WithCancel(context.Background())
+	ops.StartPropagation(ctx, srv)
+	defer func() { cancel(); ops.StopPropagation() }()
+
+	if rr := putServerConfig(t, srv, `{"quotas":{"enforce_broker_quotas":false}}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-echo:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no admin.settings.updated event published on SQLite")
+	}
+
+	// The subscription loop handles the same event; let the poll backstop
+	// (20ms, with jitter) run a few Refresh re-applies too, then force one.
+	time.Sleep(200 * time.Millisecond)
+	ops.refreshAndApply(context.Background(), srv)
+
+	if srv.brokerQuotasEnforced() {
+		t.Error("PUT reverted by the propagation echo / Refresh re-apply")
+	}
+	if snap := ops.Snapshot(); snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas {
+		t.Errorf("snapshot EnforceBrokerQuotas = %v, want false", snap.EnforceBrokerQuotas)
 	}
 }
