@@ -183,6 +183,16 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   filterKey = '';
 
+  /**
+   * Mark nodes whose parent agent is not in `agents` with an "ancestor not
+   * loaded" tab. Hosts set it only while `agents` is known to be an
+   * incomplete set (the standalone graph's capped or failed load); on a
+   * complete set a missing parent was deleted or is filtered out, so it is
+   * left unmarked.
+   */
+  @property({ attribute: false })
+  markMissingAncestors = false;
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -1394,10 +1404,11 @@ export class ScionAgentTreeView extends LitElement {
     const creator = agent.creatorName || agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
     const isRoot = !parentId || !agentById.has(parentId);
-    // The direct parent is an agent (ancestry longer than the root user)
-    // that is not in the loaded set, e.g. beyond an incomplete load: the
-    // node renders as a root and says so.
-    const ancestorMissing = isRoot && (agent.ancestry?.length ?? 0) > 1;
+    // On an incomplete set, a direct parent that is an agent (ancestry
+    // longer than the root user) but is not loaded: the node renders as a
+    // root and says so.
+    const ancestorMissing =
+      this.markMissingAncestors && isRoot && (agent.ancestry?.length ?? 0) > 1;
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
