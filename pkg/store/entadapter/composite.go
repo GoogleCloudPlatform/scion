@@ -237,7 +237,15 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // performed explicitly here to preserve store parity. Soft delete goes through
 // UpdateAgent and is unaffected, so subscriptions are retained for soft-deleted
 // agents.
+//
+// The agent's group memberships are removed first: group_memberships.agent_id
+// is ON DELETE SET NULL, so once the agent row is gone its membership rows no
+// longer carry the agent ID and could only be found as orphans
+// (ptone/scion#2769).
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
+	if _, err := c.DeleteGroupMembershipsForAgents(ctx, []string{id}); err != nil {
+		return err
+	}
 	if err := c.AgentStore.DeleteAgent(ctx, id); err != nil {
 		return err
 	}
@@ -311,6 +319,11 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 			Where(agentrecovery.IDIn(ids...)).Exec(ctx); err != nil {
 			return err
 		}
+		// Before the agent rows go (agent_id is ON DELETE SET NULL; see
+		// DeleteAgent).
+		if _, err := c.DeleteGroupMembershipsForAgents(ctx, ids); err != nil {
+			return err
+		}
 		if _, err := c.client.Agent.Delete().
 			Where(agent.ProjectIDEQ(uid)).Exec(ctx); err != nil {
 			return err
@@ -382,6 +395,10 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	// Resolved before the transaction opens: the first call probes the
+	// dialect through the non-tx client, which would block behind this
+	// transaction on a single-connection SQLite pool.
+	useLock := c.AgentStore.usesRowLocks(ctx)
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
@@ -395,10 +412,35 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		return 0, err
 	}
 
+	txStore := newTxCompositeStore(tx)
 	var totalDeleted int
 	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
 		if purgeDeletedAgentsTestHook != nil {
 			purgeDeletedAgentsTestHook(tx, batch)
+		}
+
+		// Remove the group memberships of the agents this batch will delete,
+		// before the delete (agent_id is ON DELETE SET NULL; see DeleteAgent).
+		// The set is re-read under the eligibility predicate, and locked where
+		// the database supports row locks, so a candidate restored in between
+		// keeps its memberships just as it keeps its row.
+		eligibleQuery := tx.Agent.Query().
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+		if useLock {
+			eligibleQuery = eligibleQuery.ForUpdate()
+		}
+		eligibleIDs, err := eligibleQuery.IDs(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if len(eligibleIDs) > 0 {
+			eligible := make([]string, 0, len(eligibleIDs))
+			for _, id := range eligibleIDs {
+				eligible = append(eligible, id.String())
+			}
+			if _, err := txStore.DeleteGroupMembershipsForAgents(ctx, eligible); err != nil {
+				return 0, err
+			}
 		}
 
 		deleted, err := tx.Agent.Delete().

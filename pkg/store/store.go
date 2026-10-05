@@ -1573,7 +1573,27 @@ type GroupStore interface {
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
 	// CountGroupMembersByRole counts how many members of a group have the given role.
+	// Only memberships that still reference a user or an agent are counted;
+	// orphaned rows (user and agent both cleared by ON DELETE SET NULL) are not.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
+
+	// DeleteGroupMembershipsForUser removes every group membership of the
+	// given user and returns the number of rows removed. Call it before the
+	// user row is deleted: the FK is ON DELETE SET NULL, so afterwards the
+	// rows no longer carry the user ID (ptone/scion#2769).
+	DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error)
+
+	// DeleteGroupMembershipsForAgents removes every group membership of the
+	// given agents and returns the number of rows removed. Call it before the
+	// agent rows are deleted, for the same reason as
+	// DeleteGroupMembershipsForUser. An empty ids slice is a no-op.
+	DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error)
+
+	// DeleteOrphanedGroupMemberships removes group memberships whose user and
+	// agent are both NULL and returns the number of rows removed. Such rows
+	// are always orphans: group-in-group membership uses the child-group
+	// edge, never a membership row. Idempotent.
+	DeleteOrphanedGroupMemberships(ctx context.Context) (int, error)
 
 	// GetGroupsByIDs retrieves groups by a list of IDs.
 	// Returns only groups that exist; missing IDs are silently skipped.

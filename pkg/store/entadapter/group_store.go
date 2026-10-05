@@ -629,8 +629,10 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 	var members []store.GroupMember
 
 	// Query GroupMembership records (user and agent members)
+	// Orphaned rows (principal deleted, both IDs NULL) are skipped so the
+	// listing never carries a blank member.
 	memberships, err := s.client.GroupMembership.Query().
-		Where(groupmembership.GroupIDEQ(groupUID)).
+		Where(groupmembership.GroupIDEQ(groupUID), liveGroupMembership()).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -1018,6 +1020,7 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 		Where(
 			groupmembership.GroupIDEQ(groupUID),
 			groupmembership.RoleEQ(groupmembership.Role(role)),
+			liveGroupMembership(),
 		).
 		Count(ctx)
 	if err != nil {
@@ -1025,6 +1028,70 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 	}
 
 	return count, nil
+}
+
+// liveGroupMembership matches membership rows that still reference a user or
+// an agent. The user_id and agent_id FKs are ON DELETE SET NULL, so a row
+// whose principal was deleted keeps existing with both columns NULL; such a
+// row is always an orphan (ptone/scion#2769).
+func liveGroupMembership() predicate.GroupMembership {
+	return groupmembership.Or(
+		groupmembership.UserIDNotNil(),
+		groupmembership.AgentIDNotNil(),
+	)
+}
+
+// DeleteGroupMembershipsForUser removes every group membership of userID.
+func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	return s.client.GroupMembership.Delete().
+		Where(groupmembership.UserIDEQ(uid)).
+		Exec(ctx)
+}
+
+// groupMembershipDeleteBatchSize caps the IN(...) list of one
+// DeleteGroupMembershipsForAgents statement.
+const groupMembershipDeleteBatchSize = 500
+
+// DeleteGroupMembershipsForAgents removes every group membership of the
+// given agents. An empty ids slice is a no-op.
+func (s *GroupStore) DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return 0, err
+		}
+		uids = append(uids, uid)
+	}
+	var total int
+	for _, batch := range chunkUUIDs(uids, groupMembershipDeleteBatchSize) {
+		n, err := s.client.GroupMembership.Delete().
+			Where(groupmembership.AgentIDIn(batch...)).
+			Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// DeleteOrphanedGroupMemberships removes membership rows whose user and agent
+// are both NULL.
+func (s *GroupStore) DeleteOrphanedGroupMemberships(ctx context.Context) (int, error) {
+	return s.client.GroupMembership.Delete().
+		Where(
+			groupmembership.UserIDIsNil(),
+			groupmembership.AgentIDIsNil(),
+		).
+		Exec(ctx)
 }
 
 // GetGroupsByIDs retrieves groups by a list of IDs.
