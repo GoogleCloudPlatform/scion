@@ -168,12 +168,12 @@ A broker runs agents for a project only after it is **associated** with the proj
 
 Every path that associates a broker applies both checks: `scion runtime-broker provide` (`POST /api/v1/projects/{id}/providers`), the `brokerId` field of `POST /api/v1/projects/register`, and naming a broker that is not yet a provider when creating an agent. A user access token can carry the project side (`project:update`) but not the broker side, so associating a broker needs a sign-in.
 
-Once a broker is associated by its owner (or a super-admin), **members of the project can create agents on it**, including with a project token that carries `agent:create`. A provider association linked by anyone other than the broker's owner, the auto-provide setting or a super-admin carries no consent: only users who hold `broker.dispatch` on the broker (its owner and super-admins) can use it until the owner provides it again. Brokers with no recorded owner (operator-provisioned) are usable by members of every project they serve.
+Once a broker is associated by its owner (or a super-admin), **members of the project can create agents on it**, including with a project token that can create agents in the project. Members can use a provider broker when its association records the owner's consent (linked by the owner, by auto-provide, or by a user who is an active super-admin); otherwise only holders of `broker.dispatch` on the broker (its owner and super-admins) can use it. Providing the broker as its owner records consent. Brokers with no recorded owner (operator-provisioned) are usable by members of every project they serve.
 
 Related rules:
 
 - **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
-- **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`.
+- **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted.
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
 
 ## Broker Health Monitoring
