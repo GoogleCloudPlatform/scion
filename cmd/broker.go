@@ -65,6 +65,7 @@ var (
 	brokerBrokerID    string // --broker flag for remote broker operations
 	brokerMakeDefault bool   // --make-default flag to set broker as project default
 	brokerHubFlag     string // --hub flag to target a specific hub connection
+	brokerProvidePath string // --path flag: explicit local project path for provide
 
 	// broker register transport flags
 	brokerTransportMode     string
@@ -197,8 +198,14 @@ Examples:
   # Add local broker as provider for current project
   scion runtime-broker provide
 
-  # Add local broker as provider for a specific project
+  # Add local broker as provider for a specific project. No local path is
+  # sent: an existing provider path for this broker is kept (a stored
+  # global-directory path is cleared), otherwise the broker uses its
+  # hub-managed project directory.
   scion runtime-broker provide --project <project-id>
+
+  # Add local broker as provider for a project linked to a local checkout
+  scion runtime-broker provide --project <project-id> --path /path/to/checkout
 
   # Add a remote broker as provider for a project (admin only)
   scion runtime-broker provide --broker <broker-id> --project <project-id>
@@ -367,6 +374,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory)")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -1033,6 +1041,8 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	// Resolve project ID
 	var projectID string
 	var projectName string
+	var localProjectPath string // Local path to the project's .scion directory on this broker
+	var projectSlug string      // Hub slug of the target project when known ("global" for the global project)
 
 	if brokerProjectID != "" {
 		projectID = brokerProjectID
@@ -1043,6 +1053,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to resolve project path: %w\n\nSpecify a project with --project <name-or-id>", err)
 		}
+		localProjectPath = resolvedPath
 
 		settings, err := config.LoadSettings(resolvedPath)
 		if err != nil {
@@ -1060,6 +1071,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		// Get project name for display
 		if isGlobal {
 			projectName = "global"
+			projectSlug = "global"
 		} else {
 			gitRemote := util.GetGitRemote()
 			if gitRemote != "" {
@@ -1083,7 +1095,6 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to resolve project path: %w", err)
 		}
-
 		settings, err := config.LoadSettings(resolvedPath)
 		if err != nil {
 			return fmt.Errorf("failed to load settings: %w", err)
@@ -1106,12 +1117,10 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		}
 		projectID = project.ID
 		projectName = project.Name
+		projectSlug = project.Slug
 	}
 
-	// If we used --broker flag, resolve broker by name or ID. A local
-	// path names something only on this host, so it is registered only
-	// when the resolved broker is this host's own (see providerRegisterPath).
-	brokerIsRemote := false
+	// If we used --broker flag, resolve broker by name or ID
 	if isRemoteBroker {
 		broker, err := resolveBrokerByNameOrID(ctx, client, brokerBrokerID)
 		if err != nil {
@@ -1122,7 +1131,25 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
-		brokerIsRemote = brokerID != getLocalBrokerID()
+		// The current project's path names a directory on this host only,
+		// so it is never registered for another host's broker
+		// (ptone/scion#2839); the broker then uses its hub-managed project
+		// directory. An explicit --path below is still sent. A --broker
+		// naming this host's own broker keeps the path.
+		if brokerID != getLocalBrokerID() {
+			localProjectPath = ""
+		}
+	}
+
+	// An explicit --path replaces the current-project path. With --project
+	// and no --path, no path is sent: the current directory need not belong
+	// to the named project.
+	if brokerProvidePath != "" {
+		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug)
+		if err != nil {
+			return err
+		}
+		localProjectPath = explicitPath
 	}
 
 	// Show confirmation prompt
@@ -1135,7 +1162,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		ID:       projectID,
 		Name:     projectName,
 		BrokerID: brokerID,
-		Path:     providerRegisterPath(projectPath, projectID, brokerProjectID != "", brokerIsRemote),
+		Path:     localProjectPath,
 	}
 
 	resp, err := client.Projects().Register(ctx, req)
@@ -1145,6 +1172,11 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
+	if localProjectPath != "" {
+		fmt.Printf("Local project path: %s\n", localProjectPath)
+	} else {
+		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
+	}
 
 	// Handle --make-default flag
 	if brokerMakeDefault {
@@ -1187,6 +1219,22 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveProvidePath resolves an explicit provide --path to the project
+// path registered with the hub. It refuses the global scion directory unless
+// the target project is the global project (hub slug "global"): registering
+// that directory for any other project makes the broker treat its global
+// directory as that project.
+func resolveProvidePath(path, projectName, projectSlug string) (string, error) {
+	resolved, isGlobal, err := config.ResolveProjectPath(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve --path %q: %w", path, err)
+	}
+	if (isGlobal || config.IsGlobalProjectDir(resolved)) && projectSlug != "global" {
+		return "", fmt.Errorf("--path %q is the global scion directory and cannot be registered for project %q", path, projectName)
+	}
+	return resolved, nil
 }
 
 func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
@@ -2056,52 +2104,4 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 	}
 
 	return &result
-}
-
-// providerRegisterPath returns the local project path `scion broker provide`
-// registers for projectID, or "" to have the hub let the broker resolve the
-// project by its slug (ptone/scion#2839):
-//   - for a remote broker (--broker naming a broker other than this
-//     host's own), always "": a path on this host names nothing on the
-//     broker's host;
-//   - with --project, the CWD's project only if it is linked to projectID
-//     (see localPathForProvidedProject): registering an unrelated CWD
-//     project, often the global ~/.scion, made the broker provision this
-//     project's agents there;
-//   - otherwise the CWD's project, which is the project being provided.
-func providerRegisterPath(projectPath, projectID string, namedProject, remoteBroker bool) string {
-	if remoteBroker {
-		return ""
-	}
-	if namedProject {
-		return localPathForProvidedProject(projectPath, projectID)
-	}
-	resolved, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return ""
-	}
-	return resolved
-}
-
-// localPathForProvidedProject returns the local .scion path to register for
-// projectID on `scion broker provide --project`: the project resolved from
-// projectPath (the CWD when empty) if it is linked to projectID, otherwise
-// "", so the hub has the broker resolve the project by its slug.
-func localPathForProvidedProject(projectPath, projectID string) string {
-	resolved, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil || resolved == "" {
-		return ""
-	}
-	settings, err := config.LoadSettings(resolved)
-	if err != nil {
-		return ""
-	}
-	linked := settings.GetHubProjectID()
-	if linked == "" {
-		linked = settings.ProjectID
-	}
-	if linked == "" || linked != projectID {
-		return ""
-	}
-	return resolved
 }

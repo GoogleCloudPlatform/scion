@@ -222,6 +222,8 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
+  home_storage_backend?: string;
+  home_storage_leaf?: string;
 }
 
 interface V1ProfileConfig {
@@ -233,6 +235,8 @@ interface V1ProfileConfig {
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
+  home_storage_backend?: string;
+  home_storage_leaf?: string;
   [key: string]: unknown;
 }
 
@@ -4199,6 +4203,54 @@ export class ScionPageAdminServerConfig extends LitElement {
               <sl-option value="nfs">nfs</sl-option>
             </sl-select>
           </div>
+          <div class="form-field">
+            <label>Home Storage</label>
+            <span class="hint"
+              >Kubernetes only. Where the agent home lives for agents on this runtime. Empty uses
+              the server setting; a profile's own value wins.</span
+            >
+            <sl-select
+              class="home-storage-backend"
+              placeholder="Server setting"
+              clearable
+              value=${rt.home_storage_backend || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(
+                  name,
+                  'home_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Directory Creation</label>
+            <span class="hint"
+              >How an NFS home directory is created: pod (init container) or broker (broker's mount
+              of the export). Empty uses the server setting.</span
+            >
+            <sl-select
+              class="home-storage-leaf"
+              placeholder="Server setting"
+              clearable
+              value=${rt.home_storage_leaf || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(
+                  name,
+                  'home_storage_leaf',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="pod">pod</sl-option>
+              <sl-option value="broker">broker</sl-option>
+            </sl-select>
+          </div>
           ${!isCloudRun
             ? html`
                 <div class="form-field">
@@ -4554,6 +4606,54 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
               <sl-option value="local">local</sl-option>
               <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Storage</label>
+            <span class="hint"
+              >Kubernetes only. Where the agent home lives for this profile. Empty uses the
+              runtime's value, else the server setting.</span
+            >
+            <sl-select
+              class="home-storage-backend"
+              placeholder="Runtime or server setting"
+              clearable
+              value=${(profile.home_storage_backend as string) || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'home_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Home Directory Creation</label>
+            <span class="hint"
+              >How an NFS home directory is created for this profile: pod or broker. Empty uses the
+              runtime's value, else the server setting.</span
+            >
+            <sl-select
+              class="home-storage-leaf"
+              placeholder="Runtime or server setting"
+              clearable
+              value=${(profile.home_storage_leaf as string) || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'home_storage_leaf',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="pod">pod</sl-option>
+              <sl-option value="broker">broker</sl-option>
             </sl-select>
           </div>
           <div class="form-field">

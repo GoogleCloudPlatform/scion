@@ -25,159 +25,16 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
-// `scion broker provide --project <p>` registers a local path only for the
-// project it names (ptone/scion#2839): registering the CWD's unrelated
-// project, often the global ~/.scion, made the broker provision p's agents
-// there, where a delete cannot safely remove them.
-func TestLocalPathForProvidedProject(t *testing.T) {
-	const target, other = "11111111-aaaa-aaaa-aaaa-111111111111", "22222222-bbbb-bbbb-bbbb-222222222222"
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeSettings := func(scionDir, projectID string) {
-		t.Helper()
-		if err := os.MkdirAll(scionDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		body := "schema_version: \"1\"\n"
-		if projectID != "" {
-			body += "hub:\n  project_id: " + projectID + "\n"
-		}
-		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	globalDir := filepath.Join(home, ".scion")
-	writeSettings(globalDir, other)
-	linked := filepath.Join(home, "linked")
-	writeSettings(filepath.Join(linked, ".scion"), target)
-	unrelated := filepath.Join(home, "unrelated")
-	writeSettings(filepath.Join(unrelated, ".scion"), other)
-	unlinked := filepath.Join(home, "unlinked")
-	writeSettings(filepath.Join(unlinked, ".scion"), "")
-
-	for _, tc := range []struct {
-		name, cwd string
-		wantPath  bool
-	}{
-		{"CWD is the named project", linked, true},
-		{"CWD is the global dir (home)", home, false},
-		{"CWD is another project", unrelated, false},
-		{"CWD project not linked", unlinked, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Chdir(tc.cwd)
-			got := localPathForProvidedProject("", target)
-			if tc.wantPath {
-				want, _ := filepath.EvalSymlinks(filepath.Join(linked, ".scion"))
-				if gotEval, _ := filepath.EvalSymlinks(got); gotEval != want {
-					t.Errorf("got %q, want the named project's %q", got, want)
-				}
-			} else if got != "" {
-				t.Errorf("got %q, want no local path (the broker resolves the project by slug)", got)
-			}
-		})
-	}
-	// The global project itself, provided from home, keeps its path.
-	t.Chdir(home)
-	wantGlobal, _ := filepath.EvalSymlinks(globalDir)
-	if got, _ := filepath.EvalSymlinks(localPathForProvidedProject("", other)); got != wantGlobal {
-		t.Errorf("providing the global project from home registered %q, want %q", got, wantGlobal)
-	}
-
-	// The project ID fallback (no hub.project_id anywhere, so the global
-	// settings are unlinked for this case, as the precedence mirrors the
-	// rest of runBrokerProvide): a git project's project-id file.
-	writeSettings(globalDir, "")
-	fallback := filepath.Join(home, "fallback", ".scion")
-	writeSettings(fallback, "")
-	if err := config.WriteProjectID(fallback, target); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(filepath.Dir(fallback))
-	wantFallback, _ := filepath.EvalSymlinks(fallback)
-	if got, _ := filepath.EvalSymlinks(localPathForProvidedProject("", target)); got != wantFallback {
-		t.Errorf("project_id fallback: got %q, want %q", got, wantFallback)
-	}
-
-	// A non-git linked project: the CWD's .scion is a marker file, and the
-	// settings live in the external config dir it resolves to.
-	markerRoot := filepath.Join(home, "nongit")
-	if err := os.MkdirAll(markerRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	marker := &config.ProjectMarker{ProjectID: target, ProjectName: "nongit", ProjectSlug: "nongit"}
-	if err := config.WriteProjectMarker(filepath.Join(markerRoot, config.DotScion), marker); err != nil {
-		t.Fatal(err)
-	}
-	extDir, err := marker.ExternalProjectPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeSettings(extDir, target)
-	t.Chdir(markerRoot)
-	wantExt, _ := filepath.EvalSymlinks(extDir)
-	if got, _ := filepath.EvalSymlinks(localPathForProvidedProject("", target)); got != wantExt {
-		t.Errorf("marker-file project: got %q, want the external dir %q", got, wantExt)
-	}
-	if got := localPathForProvidedProject("", other); got != "" {
-		t.Errorf("marker-file project linked elsewhere: got %q, want none", got)
-	}
-}
-
-// The path registered by `scion broker provide`: never a local path for a
-// remote broker (--broker), with or without --project; the named project's
-// path only when the CWD is that project; the CWD's project without
-// --project, as before.
-func TestProviderRegisterPath(t *testing.T) {
-	const target = "11111111-aaaa-aaaa-aaaa-111111111111"
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	linked := filepath.Join(home, "linked", ".scion")
-	if err := os.MkdirAll(linked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(linked, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nhub:\n  project_id: "+target+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(filepath.Dir(linked))
-	want, _ := filepath.EvalSymlinks(linked)
-	for _, tc := range []struct {
-		name                       string
-		namedProject, remoteBroker bool
-		wantPath                   bool
-	}{
-		{"local broker, CWD project", false, false, true},
-		{"local broker, --project names the CWD project", true, false, true},
-		{"remote broker, CWD project", false, true, false},
-		{"remote broker, --project", true, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := providerRegisterPath("", target, tc.namedProject, tc.remoteBroker)
-			if !tc.wantPath {
-				if got != "" {
-					t.Errorf("got %q, want no local path", got)
-				}
-				return
-			}
-			if gotEval, _ := filepath.EvalSymlinks(got); gotEval != want {
-				t.Errorf("got %q, want %q", got, want)
-			}
-		})
-	}
-}
-
 // runBrokerProvide end to end against a fake hub that captures the
-// registered path (review NB3), covering the wiring of providerRegisterPath:
-// --project from HOME, a remote --broker, and --broker naming this host's
-// own broker (which, being local, still registers the linked path). The
-// remote decision uses the resolved broker ID, so --broker given by name
-// behaves like --broker given by ID; with no local broker ID at all, any
-// --broker is remote.
+// registered path (ptone/scion#2839): the current project's path is never
+// registered for another host's broker, while --broker naming this host's
+// own broker keeps it and an explicit --path is still sent. The remote
+// decision uses the resolved broker ID, so --broker given by name behaves
+// like --broker given by ID; with no local broker ID at all, any --broker
+// is remote. --project without --path sends no path.
 func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 	const (
 		target      = "11111111-aaaa-aaaa-aaaa-111111111111"
@@ -190,16 +47,19 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 		inLinkedProject bool
 		project, broker string
 		noLocalBroker   bool // no broker credentials on this host
+		explicitPath    bool // pass --path <linked project>
 		wantLinkedPath  bool
 	}{
-		{"--project from HOME", false, target, "", false, false},
-		{"--project from inside the named project", true, target, "", false, true},
-		{"remote --broker from inside a linked project", true, "", otherBroker, false, false},
-		{"remote --broker with --project", true, target, otherBroker, false, false},
-		{"--broker naming this host's own broker", true, "", localBroker, false, true},
-		{"--broker by name: this host's own broker", true, "", "local-host", false, true},
-		{"--broker by name: a remote broker", true, "", "remote-host", false, false},
-		{"--broker with no local broker ID on this host", true, "", localBroker, true, false},
+		{"--project from HOME", false, target, "", false, false, false},
+		{"--project from inside the named project", true, target, "", false, false, false},
+		{"no flags from inside the linked project", true, "", "", false, false, true},
+		{"remote --broker from inside a linked project", true, "", otherBroker, false, false, false},
+		{"remote --broker with --project", true, target, otherBroker, false, false, false},
+		{"remote --broker with an explicit --path", true, target, otherBroker, false, true, true},
+		{"--broker naming this host's own broker", true, "", localBroker, false, false, true},
+		{"--broker by name: this host's own broker", true, "", "local-host", false, false, true},
+		{"--broker by name: a remote broker", true, "", "remote-host", false, false, false},
+		{"--broker with no local broker ID on this host", true, "", localBroker, true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -270,15 +130,19 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 				t.Chdir(home)
 			}
 
-			saved := []any{brokerProjectID, brokerBrokerID, brokerHubFlag, autoConfirm, brokerMakeDefault, projectPath, hubEndpoint}
+			saved := []any{brokerProjectID, brokerBrokerID, brokerHubFlag, autoConfirm, brokerMakeDefault, projectPath, hubEndpoint, brokerProvidePath}
 			t.Cleanup(func() {
 				brokerProjectID, brokerBrokerID, brokerHubFlag = saved[0].(string), saved[1].(string), saved[2].(string)
 				autoConfirm, brokerMakeDefault, projectPath = saved[3].(bool), saved[4].(bool), saved[5].(string)
-				hubEndpoint = saved[6].(string)
+				hubEndpoint, brokerProvidePath = saved[6].(string), saved[7].(string)
 			})
 			brokerProjectID, brokerBrokerID, brokerHubFlag = tc.project, tc.broker, hubConn
 			autoConfirm, brokerMakeDefault, projectPath = true, false, ""
 			hubEndpoint = ""
+			brokerProvidePath = ""
+			if tc.explicitPath {
+				brokerProvidePath = filepath.Dir(linked)
+			}
 			if tc.noLocalBroker {
 				// No hub connection credentials: reach the hub through the
 				// endpoint override instead.
