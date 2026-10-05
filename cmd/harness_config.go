@@ -680,18 +680,19 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				}
 			}
 
-			// Backups and temp files uploaded before they were excluded
-			// stay in the Hub manifest until a Finalize replaces it, so
-			// their presence counts as a change even when no real file
-			// changed. Other remote-only paths are left alone.
-			staleTransient := 0
+			// Sync mirrors the local directory: any remote path that is not
+			// in the local manifest (a file deleted locally, or a backup/temp
+			// file uploaded before those were excluded) is dropped from the
+			// Hub record by finalizing with the local manifest.
+			var removed []string
 			for remotePath := range remoteHashes {
-				if _, local := localFileMap[remotePath]; !local && config.IsHarnessConfigTransientFile(remotePath) {
-					staleTransient++
+				if _, local := localFileMap[remotePath]; !local {
+					removed = append(removed, remotePath)
 				}
 			}
+			sort.Strings(removed)
 
-			if len(filesToUpload) == 0 && staleTransient == 0 {
+			if len(filesToUpload) == 0 && len(removed) == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
@@ -699,8 +700,11 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				return nil
 			}
 
-			if staleTransient > 0 {
-				fmt.Printf("Removing %d backup/temp file(s) from the Hub manifest...\n", staleTransient)
+			if len(removed) > 0 {
+				fmt.Printf("Removing %d file(s) no longer present locally from the Hub:\n", len(removed))
+				for _, p := range removed {
+					fmt.Printf("  - %s\n", p)
+				}
 			}
 			if len(filesToUpload) > 0 {
 				fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
@@ -725,9 +729,9 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		filesToUpload = fileReqs
 	}
 
-	// Request upload URLs and upload. Skipped when only stale backup/temp
-	// entries are being dropped from the manifest: every file it lists is
-	// already stored, so Finalize alone replaces the manifest.
+	// Request upload URLs and upload. Skipped when files are only being
+	// dropped from the manifest: every file it lists is already stored, so
+	// Finalize alone replaces the manifest.
 	if len(filesToUpload) > 0 {
 		fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
 		uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
