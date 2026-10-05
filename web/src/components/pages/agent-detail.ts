@@ -1204,6 +1204,7 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-quick-message-dialog
         agentId=${this.agentId}
         agentName=${this.agent.name || ''}
+        userId=${this.currentUserId}
         ?open=${this.quickMessageOpen}
         @sl-request-close=${() => {
           this.quickMessageOpen = false;

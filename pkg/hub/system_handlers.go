@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -31,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // --- 2.1: System Check (Doctor) ---
@@ -189,32 +189,32 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vs, err := config.LoadSingleFileVersioned(globalDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
-		return
+	// Resolve the effective active profile before taking the settings-file
+	// lock (LoadEffectiveSettings reads the files without it). The
+	// single-file load doesn't merge embedded defaults, so ActiveProfile may
+	// be empty there; update the same profile the server reads at startup
+	// (e.g. "local" from defaults).
+	effectiveActive := "default"
+	if effective, _, eErr := config.LoadEffectiveSettings(""); eErr == nil && effective != nil && effective.ActiveProfile != "" {
+		effectiveActive = effective.ActiveProfile
 	}
 
-	activeProfile := vs.ActiveProfile
-	if activeProfile == "" {
-		// The single-file load doesn't merge embedded defaults, so ActiveProfile
-		// may be empty. Resolve the effective active profile so we update the same
-		// profile the server will read at startup (e.g. "local" from defaults).
-		if effective, _, eErr := config.LoadEffectiveSettings(""); eErr == nil && effective != nil && effective.ActiveProfile != "" {
-			activeProfile = effective.ActiveProfile
-		} else {
-			activeProfile = "default"
+	// Load, modify and save under the settings-file lock so a concurrent
+	// writer (server-config PUT, broker token) is not reverted.
+	err = config.LoadModifySaveVersionedSettings(globalDir, func(vs *config.VersionedSettings) error {
+		activeProfile := vs.ActiveProfile
+		if activeProfile == "" {
+			activeProfile = effectiveActive
 		}
-	}
-
-	if vs.Profiles == nil {
-		vs.Profiles = make(map[string]config.V1ProfileConfig)
-	}
-	profile := vs.Profiles[activeProfile]
-	profile.Runtime = req.Runtime
-	vs.Profiles[activeProfile] = profile
-
-	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
+		if vs.Profiles == nil {
+			vs.Profiles = make(map[string]config.V1ProfileConfig)
+		}
+		profile := vs.Profiles[activeProfile]
+		profile.Runtime = req.Runtime
+		vs.Profiles[activeProfile] = profile
+		return nil
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save runtime setting", nil)
 		return
 	}
@@ -276,15 +276,11 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vs, err := config.LoadSingleFileVersioned(globalDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
-		return
-	}
-
-	vs.ImageRegistry = req.ImageRegistry
-
-	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
+	// Load, modify and save under the settings-file lock.
+	if err := config.LoadModifySaveVersionedSettings(globalDir, func(vs *config.VersionedSettings) error {
+		vs.ImageRegistry = req.ImageRegistry
+		return nil
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
 		return
 	}
@@ -1101,44 +1097,34 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
 		return
 	}
 
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-
-	var raw map[string]interface{}
-	if data, readErr := os.ReadFile(settingsPath); readErr == nil {
-		if err := yamlv3.Unmarshal(data, &raw); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
+	// Edit settings.yaml in place under the process-wide settings-file lock
+	// (not s.mu: the server-config PUT holds the file lock across DB writes
+	// that take s.mu, so taking them in the other order could deadlock).
+	// false removes the key, matching the server-config PUT's omitempty
+	// handling.
+	edit := config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Value: true}
+	if !*req.AutoInjectGcloudADC {
+		edit = config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Delete: true}
+	}
+	unlock := config.LockSettingsFile()
+	staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
+	if err == nil {
+		err = staged.Commit()
+	}
+	unlock()
+	if err != nil {
+		slog.Error("Failed to write workstation settings", "error", err)
+		if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)
 			return
 		}
-	} else if !os.IsNotExist(readErr) {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
-	}
-	if raw == nil {
-		raw = make(map[string]interface{})
-	}
-
-	raw["auto_inject_gcloud_adc"] = *req.AutoInjectGcloudADC
-
-	if _, ok := raw["schema_version"]; !ok {
-		raw["schema_version"] = "1"
-	}
-
-	newData, err := yamlv3.Marshal(raw)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to marshal settings", nil)
-		return
-	}
-
-	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}

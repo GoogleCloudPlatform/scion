@@ -200,3 +200,27 @@ func TestIsGitBlobHash(t *testing.T) {
 		}
 	}
 }
+
+func TestIsContentHash(t *testing.T) {
+	valid := HashBytes([]byte("x"))
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{valid, true},
+		{"sha256:" + strings.Repeat("a", 64), true},
+		{"", false},
+		{strings.Repeat("a", 64), false},
+		{"sha256:" + strings.Repeat("a", 63), false},
+		{"sha256:" + strings.Repeat("a", 65), false},
+		{"sha256:" + strings.Repeat("A", 64), false},
+		{"sha256:" + strings.Repeat("g", 64), false},
+		{"web-dev", false},
+		{"/cache/" + valid, false},
+	}
+	for _, tt := range tests {
+		if got := IsContentHash(tt.in); got != tt.want {
+			t.Errorf("IsContentHash(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}

@@ -2259,12 +2259,13 @@ func (s *Server) createAgentInProject(
 					})
 					return
 				} else {
-					s.preserveTerminalPhase(ctx, agent)
-					if agent.Phase == string(state.PhaseCreated) {
-						agent.Phase = string(state.PhaseProvisioning)
-					}
-					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
-						warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+					if !s.preserveTerminalPhase(ctx, agent) {
+						if agent.Phase == string(state.PhaseCreated) {
+							agent.Phase = string(state.PhaseProvisioning)
+						}
+						if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+							warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+						}
 					}
 				}
 			} else {
@@ -2304,12 +2305,13 @@ func (s *Server) createAgentInProject(
 					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
-					s.preserveTerminalPhase(ctx, agent)
-					if agent.Phase == string(state.PhaseCreated) {
-						agent.Phase = string(state.PhaseProvisioning)
-					}
-					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
-						warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+					if !s.preserveTerminalPhase(ctx, agent) {
+						if agent.Phase == string(state.PhaseCreated) {
+							agent.Phase = string(state.PhaseProvisioning)
+						}
+						if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+							warnings = append(warnings, "Failed to update agent phase: "+err.Error())
+						}
 					}
 				}
 			}
@@ -2406,13 +2408,20 @@ func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
 // UpdateAgent call does not overwrite it with the broker-reported phase.
 // This prevents a race where sciontool reports an error (e.g. git clone
 // failure) while the broker dispatch is still in flight.
-func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) {
+//
+// It returns true when the row was soft-deleted while the dispatch was in
+// flight. The caller then skips the post-dispatch write: the row belongs to
+// the delete, and writing the in-memory agent would clear its DeletedAt.
+func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) (softDeleted bool) {
 	current, err := s.store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		return false
+	}
 	// A soft-deleted row is left alone: adopting its StateVersion would let
 	// the caller's write (zero DeletedAt in memory) win the CAS and clear
-	// deleted_at. The write then conflicts and the retry merges into the row.
-	if err != nil || !current.DeletedAt.IsZero() {
-		return
+	// deleted_at.
+	if !current.DeletedAt.IsZero() {
+		return true
 	}
 	p := state.Phase(current.Phase)
 	if p == state.PhaseError || p == state.PhaseStopped {
@@ -2421,6 +2430,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 		agent.Message = current.Message
 		agent.StateVersion = current.StateVersion
 	}
+	return false
 }
 
 func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agent) error {
@@ -2436,6 +2446,11 @@ func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agen
 	latest, getErr := s.store.GetAgent(ctx, agent.ID)
 	if getErr != nil {
 		return getErr
+	}
+	if !latest.DeletedAt.IsZero() {
+		// Soft-deleted while the dispatch was in flight: the row belongs to
+		// the delete, so the dispatch result is not written.
+		return nil
 	}
 
 	mergeDispatchedAgent(latest, agent)
@@ -2463,6 +2478,17 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	}
 
 	if isTerminalAgentPhase(dst.Phase) {
+		return
+	}
+	// A delete holds the re-read row (design ptone/scion#2483 §2.1: phase
+	// writers outside UpdateAgentStatus respect the deletion predicate). Its
+	// claim owns the status fields: copying the dispatch's phase would move
+	// a deleting row on, e.g. created to running, or overwrite the claim's
+	// stopping (ptone/scion#3055). The delete engine works from its claim
+	// snapshot (broker, run ID), and the claim's own state_version bump is
+	// what sends a pre-claim dispatch write here, so skipping the status
+	// fields is enough.
+	if deleteStopNoop(dst) {
 		return
 	}
 	if src.Phase != "" {
@@ -4301,6 +4327,12 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	}
 	if transportError != "" {
 		resp["transportError"] = transportError
+	}
+	// Conduit grant verification keys (hub.conduit on): the agent's target
+	// refreshes its key set here as well as from each Welcome. Omitted when
+	// the experiment is off or the keys are unavailable.
+	if keys := s.conduitRefreshGrantKeys(r.Context()); len(keys) > 0 {
+		resp["conduit_grant_keys"] = keys
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
