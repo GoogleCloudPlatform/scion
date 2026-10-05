@@ -167,6 +167,15 @@ describe('agent DM peer project', () => {
     expect(store.retain).not.toHaveBeenCalled();
   });
 
+  it('URL-encodes the peer id in its read', async () => {
+    peers['team/bot 1'] = 'proj-enc';
+    const el = await openDM('team/bot 1');
+    expect(apiFetch.mock.calls.some(([path]) => path === '/api/v1/agents/team%2Fbot%201')).toBe(
+      true
+    );
+    expect(peerProject(el)).toBe('proj-enc');
+  });
+
   it('caches the read for the conversation: a reload of the same conversation reads nothing more', async () => {
     const el = await openDM('coder');
     expect(singleAgentReads()).toBe(1);
