@@ -456,6 +456,13 @@ export class ScionPageChat extends LitElement {
    */
   private _hubPresenceGeneration: number | null = null;
   /**
+   * The latest presence request's own claim token. A request that is not
+   * merged releases {@link _hubPresenceGeneration} only while its token is
+   * still the latest, so an older, dropped response cannot release a newer
+   * request's claim for the same generation.
+   */
+  private _hubPresenceClaim: object | null = null;
+  /**
    * Bumped on `disconnectedCallback` and whenever `v2Conversation` is
    * assigned a truthy value (see `updated()`'s `v2Conversation` branch);
    * both retire any hub-members load started before them. The latter also
@@ -2955,8 +2962,9 @@ export class ScionPageChat extends LitElement {
     if (!projectId) return;
     // Claimed up front so a second trigger during the request does not ask
     // again; released below if the merge does not happen.
-    const generation = this._hubMembersGeneration;
-    this._hubPresenceGeneration = generation;
+    this._hubPresenceGeneration = this._hubMembersGeneration;
+    const claim = {};
+    this._hubPresenceClaim = claim;
     let merged = false;
     // Captured, not bumped: this only merges presence fields into whatever
     // loadHubMembers/loadV2Members last populated, it doesn't replace that
@@ -2998,7 +3006,7 @@ export class ScionPageChat extends LitElement {
       // Non-critical — presence will still update via SSE events
     } finally {
       // Not applied (failed, or the view moved on): let the next trigger retry.
-      if (!merged && this._hubPresenceGeneration === generation) {
+      if (!merged && this._hubPresenceClaim === claim) {
         this._hubPresenceGeneration = null;
       }
     }

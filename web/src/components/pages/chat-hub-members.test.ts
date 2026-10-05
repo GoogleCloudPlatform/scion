@@ -408,6 +408,43 @@ describe('hub members: hub presence fetch', () => {
     }
   });
 
+  it("an older presence response dropped after a mobile round trip does not release the newer request's claim", async () => {
+    const held: Array<Deferred<Response>> = [];
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p1/members') {
+        const d = deferred<Response>();
+        held.push(d);
+        return d.promise;
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ humans: [], agents: [] }), { status: 200 })
+      );
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      // Request A in flight; a space expands, then the hub view returns.
+      expect(presenceReads()).toBe(1);
+      await page.loadV2Members('p2');
+      page.loadHubMembers();
+      await settle();
+      // Request B in flight for the same generation.
+      expect(presenceReads()).toBe(2);
+
+      // A lands for a view that moved on: dropped, but B keeps its claim.
+      held[0]?.resolve(new Response(JSON.stringify({ humans: [] }), { status: 200 }));
+      await settle();
+      railLoaded(page);
+      await settle();
+
+      expect(presenceReads()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('a presence response dropped by a view change releases its claim: the next rail load asks again', async () => {
     const presence = deferred<Response>();
     let held = true;
