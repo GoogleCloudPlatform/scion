@@ -236,6 +236,42 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 	return deleteInProgressRefusal(agentID)
 }
 
+// deleteWonAfterLanding returns the delete_in_progress refusal when a
+// synchronous start or restart's broker start landed but a delete won while
+// the broker call was in flight: the row is gone, or deletedOrDeleteHeld
+// (the rule compensateLandedRun, which has already run inside the dispatch,
+// applied to the same row). The refusal's details carry agentId and the
+// dispatch warnings, the compensating delete's among them, since the 409
+// has no agent body to carry them (ptone/scion#3255).
+//
+// A failed re-read returns nil: the caller then writes the status as before
+// and answers from the stored row. A failed delete, or a deleting row whose
+// lease expired, leaves the agent live, so it returns nil too.
+func (s *Server) deleteWonAfterLanding(ctx context.Context, agentID string, warnings []string) *startRefusal {
+	fresh, err := s.store.GetAgent(ctx, agentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agentID, "error", err)
+		return nil
+	case !deletedOrDeleteHeld(fresh):
+		return nil
+	}
+	return deleteInProgressRefusalWithWarnings(agentID, warnings)
+}
+
+// deleteInProgressRefusalWithWarnings is deleteInProgressRefusal with the
+// warnings the request raised added as details.warnings (omitted when
+// empty).
+func deleteInProgressRefusalWithWarnings(agentID string, warnings []string) *startRefusal {
+	ref := deleteInProgressRefusal(agentID)
+	if len(warnings) > 0 {
+		ref.Details["warnings"] = warnings
+	}
+	return ref
+}
+
 // writeRunIntentError answers a failed running-intent write. A refusal
 // because a delete holds the row (store.ErrDeleteInProgress) gets the same
 // delete_in_progress body, details.agentId included, as every other

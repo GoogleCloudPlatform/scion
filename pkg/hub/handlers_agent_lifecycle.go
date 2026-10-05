@@ -829,7 +829,27 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// generation and keeps its live status.
 		statusUpdate.ClearTerminalRemnants = action == api.AgentActionRestart || sd.wroteStarting()
 	}
+	// A start or restart whose broker start landed after a delete won
+	// (ptone/scion#3255): the dispatch has already deleted the landed run
+	// again (compensateLandedRun), so answer 409 delete_in_progress as the
+	// mid-dispatch case does, rather than writing the status and answering
+	// 200 (delete-claimed or soft-deleted row) or 404 (row gone). The
+	// delete engine owns the row and its reservation; nothing is written or
+	// published here. sd is non-nil exactly when a start leg was dispatched.
+	landed := sd != nil && (action == api.AgentActionStart || action == api.AgentActionRestart)
+	if landed {
+		if ref := s.deleteWonAfterLanding(ctx, id, dispatchWarns.Warnings()); ref != nil {
+			ref.write(w)
+			return
+		}
+	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+		// The row was hard-deleted between the re-read above and this
+		// write: the same delete_in_progress answer.
+		if landed && errors.Is(err, store.ErrNotFound) {
+			deleteInProgressRefusalWithWarnings(id, dispatchWarns.Warnings()).write(w)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
