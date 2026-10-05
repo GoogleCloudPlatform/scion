@@ -1764,6 +1764,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// so the client always receives the outcome instead of a dropped
 		// connection after the message was in fact delivered.
 		extendWriteDeadlineForWake(w, len(agents))
+		// Detach from client cancellation: a dropped connection must not
+		// abort a wake in progress, nor the persist and dispatch after it.
+		// The send then runs to its end with its idempotency key in flight
+		// (a retry is told send_in_progress), so the client's retry finds
+		// the finished outcome. The wake stays bounded by its budget and
+		// each later step by its own timeout.
+		ctx = context.WithoutCancel(ctx)
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.

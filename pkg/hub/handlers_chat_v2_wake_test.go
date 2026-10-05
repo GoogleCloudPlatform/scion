@@ -664,3 +664,81 @@ func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
 		})
 	}
 }
+
+// cancelDuringWakeDispatcher cancels the request context when the resume
+// dispatch starts, as a dropped client connection would, and replays the
+// send from inside the resume and the message dispatch.
+type cancelDuringWakeDispatcher struct {
+	*wakeTrackingDispatcher
+	t           *testing.T
+	f           *chatWakeFixture
+	payload     map[string]any
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	replayCodes []int
+	replayBody  []string
+}
+
+func (d *cancelDuringWakeDispatcher) replay() {
+	rec := doRequest(d.t, d.f.srv, http.MethodPost, d.f.path(), d.payload)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.replayCodes = append(d.replayCodes, rec.Code)
+	d.replayBody = append(d.replayBody, rec.Body.String())
+}
+
+func (d *cancelDuringWakeDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, prompt string, cont bool) error {
+	d.cancel()
+	d.replay()
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
+}
+
+func (d *cancelDuringWakeDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.replay()
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+}
+
+// A client that drops its connection during a wake does not abort it: the
+// wake, persist and dispatch run to their end while a retry is told the
+// send is in progress, and a retry afterwards gets the final outcome, with
+// one wake and one dispatch in all.
+func TestChatV2Wake_ClientCancelDuringWake_ReplayGetsOutcome(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	payload := map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-cancel"}
+	reqCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	disp := &cancelDuringWakeDispatcher{
+		wakeTrackingDispatcher: f.disp, t: t, f: f, payload: payload, cancel: cancel,
+	}
+	f.srv.SetDispatcher(disp)
+	f.markReadySoon()
+
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, f.path(), bytes.NewReader(body)).WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	f.srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	require.Error(t, reqCtx.Err(), "the request context was cancelled during the wake")
+
+	disp.mu.Lock()
+	codes, bodies := append([]int(nil), disp.replayCodes...), append([]string(nil), disp.replayBody...)
+	disp.mu.Unlock()
+	require.Len(t, codes, 2, "replays from the resume and the message dispatch")
+	for i, code := range codes {
+		assert.Equal(t, http.StatusConflict, code, "replay %d: %s", i, bodies[i])
+		assert.Contains(t, bodies[i], ErrCodeSendInProgress)
+	}
+
+	retry := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusOK, retry.Code, "body=%s", retry.Body.String())
+	resp := decodeWakeResp(t, retry)
+	assert.Equal(t, "dispatched", resp["dispatchState"])
+	res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, res.Items[0].ID, resp["id"])
+	assert.Equal(t, store.MessageDispatchDispatched, res.Items[0].DispatchState)
+	assert.Len(t, f.disp.getStartCalls(), 1, "one wake")
+	assert.Len(t, f.disp.getMessageCalls(), 1, "one dispatch")
+}
