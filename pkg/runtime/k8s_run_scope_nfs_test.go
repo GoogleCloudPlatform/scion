@@ -115,6 +115,9 @@ func TestPreCleanForRun_NFSHome_RefusesWhenUnconfirmed(t *testing.T) {
 	if !errors.Is(err, errPreviousPodUnconfirmed) {
 		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
 	}
+	if err != nil && !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
+		t.Errorf("error text %q lacks the previous_pod_unconfirmed code", err)
+	}
 	if waited := fc.now.Sub(start); waited < 45*time.Second || waited > 47*time.Second {
 		t.Errorf("refused after %s, want the 45s bound (grace 30 + wait 15)", waited)
 	}
@@ -135,6 +138,9 @@ func TestPreCleanForRun_NFSHome_NodeLostRefusedAtOnce(t *testing.T) {
 	err := rt.preCleanForRun(context.Background(), "default", "a", rsRunA, true, nil)
 	if !errors.Is(err, errPreviousPodUnconfirmed) || fc.sleeps != 0 {
 		t.Errorf("err = %v after %d sleeps, want an immediate refusal", err, fc.sleeps)
+	}
+	if err != nil && !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
+		t.Errorf("error text %q lacks the previous_pod_unconfirmed code", err)
 	}
 }
 
@@ -171,6 +177,9 @@ func TestPreCleanForRun_NFSHome_UnreadablePodRefused(t *testing.T) {
 	if !errors.Is(err, errPreviousPodUnconfirmed) {
 		t.Errorf("err = %v, want previous_pod_unconfirmed wrapping the read error", err)
 	}
+	if err != nil && !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
+		t.Errorf("error text %q lacks the previous_pod_unconfirmed code", err)
+	}
 	if len(*deletes) != 0 {
 		t.Errorf("deletes = %+v, want none", *deletes)
 	}
@@ -192,6 +201,9 @@ func TestPreCleanForRun_NFSHome_TerminatingPodWaitedFor(t *testing.T) {
 	err := rt.preCleanForRun(context.Background(), "default", "a", rsRunA, true, nfsHS())
 	if !errors.Is(err, errPreviousPodUnconfirmed) {
 		t.Fatalf("err = %v, want previous_pod_unconfirmed after waiting", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
+		t.Errorf("error text %q lacks the previous_pod_unconfirmed code", err)
 	}
 	for _, d := range *deletes {
 		if d.GracePeriodSeconds != nil && *d.GracePeriodSeconds == 0 {
@@ -352,30 +364,82 @@ func TestRun_RunScoped_NFSHomeStartLockReleasedOnce(t *testing.T) {
 	}
 }
 
-// The home start lock is held while the run-scoped pre-clean removes the
-// previous pod (it is released only after the start ends or the pod
-// exists), so no other start can run between the delete and the wait.
-func TestRun_RunScoped_NFSHomeLockHeldDuringPreClean(t *testing.T) {
+// The home start lock is held from before the pre-clean removes the
+// previous pod until the new pod is created, on the run-scoped path and on
+// the name-based path: it is checked at the previous pod's delete and at
+// the new pod's create (the previous pod confirms its stop, so Run gets
+// there).
+func TestRun_NFSHomeLockHeldUntilPodCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		runID string
+	}{{"run-scoped", rsRunA}, {"name-based", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			cfg := nfsHomeTestConfig(true)
+			if tc.runID != "" {
+				cfg = withRunID(cfg, tc.runID)
+			}
+			cfg.Name = "a"
+			adc := filepath.Join(t.TempDir(), "adc.json")
+			if err := os.WriteFile(adc, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg.ResolvedAuth.Files[0].SourcePath = adc
+			l := &countingLocker{acquire: true}
+			cfg.Locker = l
+			seedNFSPod(t, rt, rsRunB, corev1.PodSucceeded, nil)
+			held := func(where string) {
+				l.mu.Lock()
+				defer l.mu.Unlock()
+				if l.acquires != 1 || l.releases != 0 {
+					t.Errorf("at %s: acquires %d, releases %d; want the lock held", where, l.acquires, l.releases)
+				}
+			}
+			sawDelete, sawCreate := false, false
+			cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				sawDelete = true
+				held("previous pod delete")
+				return true, nil, nil // graceful: the pod stays until it stops
+			})
+			cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				sawCreate = true
+				held("new pod create")
+				return true, nil, errors.New("stop here")
+			})
+			start := time.Unix(1000, 0)
+			fc := &fakeTerminationClock{now: start}
+			gone := false
+			fc.onTick = func(now time.Time) {
+				if !gone && now.Sub(start) >= 20*time.Second {
+					gone = true // the previous pod's stop is confirmed
+					_ = cs.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "default", "a")
+				}
+			}
+			rt.execReadyClock = fc.clock()
+			_, _ = rt.Run(context.Background(), cfg)
+			if !sawDelete || !sawCreate {
+				t.Fatalf("Run did not reach both steps: delete %v, create %v", sawDelete, sawCreate)
+			}
+		})
+	}
+}
+
+// The configured termination wait is honoured on the run-scoped path: grace
+// 30 + wait 60 refuses at about 90 s, not at the 45 s default bound.
+func TestPreCleanForRun_NFSHome_ConfiguredTerminationWait(t *testing.T) {
 	rt, cs, _ := newTestK8sRuntime()
-	cfg := withRunID(nfsHomeTestConfig(true), rsRunA)
-	cfg.Name = "a"
-	l := &countingLocker{acquire: true}
-	cfg.Locker = l
 	seedNFSPod(t, rt, rsRunB, corev1.PodSucceeded, nil)
-	sawDelete := false
-	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		sawDelete = true
-		if l.acquires != 1 || l.releases != 0 {
-			t.Errorf("pod deleted with acquires %d, releases %d; want the lock held", l.acquires, l.releases)
-		}
-		return true, nil, nil
-	})
-	rt.execReadyClock = (&fakeTerminationClock{now: time.Unix(1000, 0)}).clock()
-	_, _ = rt.Run(context.Background(), cfg)
-	if !sawDelete {
-		t.Fatal("pre-clean did not delete the previous pod")
+	keepPodsOnDelete(cs)
+	start := time.Unix(1000, 0)
+	fc := &fakeTerminationClock{now: start}
+	rt.execReadyClock = fc.clock()
+	err := rt.preCleanForRun(context.Background(), "default", "a", rsRunA, true, &HomeStorageRealization{TerminationWaitSeconds: 60})
+	if !errors.Is(err, errPreviousPodUnconfirmed) {
+		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+	}
+	if waited := fc.now.Sub(start); waited < 90*time.Second || waited > 92*time.Second {
+		t.Errorf("refused after %s, want the 90s bound (grace 30 + wait 60)", waited)
 	}
 }
 
@@ -390,5 +454,8 @@ func TestPreCleanForRun_NFSHome_DeleteErrorUnconfirmed(t *testing.T) {
 	err := rt.preCleanForRun(context.Background(), "default", "a", rsRunA, true, nfsHS())
 	if !errors.Is(err, errPreviousPodUnconfirmed) {
 		t.Errorf("err = %v, want previous_pod_unconfirmed", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
+		t.Errorf("error text %q lacks the previous_pod_unconfirmed code", err)
 	}
 }

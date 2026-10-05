@@ -1031,3 +1031,21 @@ func TestK8sRunScope_RunConflictErrorsCarryNoIdentity(t *testing.T) {
 		check(t, rt.replaceExistingAgentObject(context.Background(), api.ResourceKindSecret, ns, rsAgentSecret, rsRunA))
 	})
 }
+
+// A run-scoped Delete that cannot read the pod fails with fixed text (no
+// namespace or pod name); the cause stays reachable.
+func TestK8sDeleteRun_PodReadError_NoIdentity(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "pods"}, rsAgent, fmt.Errorf("rbac"))
+	})
+	err := rt.Delete(context.Background(), RunRef{ID: "leak-ns/" + rsAgent, RunID: rsRunA})
+	if err == nil || !k8serrors.IsForbidden(err) {
+		t.Fatalf("Delete error = %v, want the Forbidden cause", err)
+	}
+	for _, l := range []string{"leak-ns", rsAgent, rsRunA} {
+		if strings.Contains(err.Error(), l) {
+			t.Errorf("error text %q carries %q", err.Error(), l)
+		}
+	}
+}

@@ -220,7 +220,9 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("failed to read pod %s/%s: %w", namespace, podName, err)
+		runtimeLog.Warn("Run-scoped delete could not read the pod",
+			"pod", podName, "namespace", namespace, "run_id", runID, "error", err)
+		return &opaqueRunScopeError{msg: "failed to read the agent pod", cause: err}
 	}
 
 	podRun := pod.Labels[api.LabelRunID]
@@ -310,13 +312,14 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	case k8serrors.IsNotFound(err):
 		pod = nil
 	case err != nil:
-		cause := err
 		if nfsHomeStart {
 			// An NFS-home start never proceeds past a pod it could not
 			// read: it may be a previous pod still writing to the home.
-			cause = fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err)
+			return opaqueStartError(errPreviousPodUnconfirmed.Error()+": failed to read the previous agent pod; retry later",
+				fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err),
+				"pod", podName, "namespace", namespace, "run_id", runID)
 		}
-		return opaqueStartError("failed to read the existing agent pod before start", cause,
+		return opaqueStartError("failed to read the existing agent pod before start", err,
 			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
 	if pod != nil {
@@ -378,11 +381,12 @@ func (r *KubernetesRuntime) removePreviousPodForRun(ctx context.Context, namespa
 		// Fail the start (retryable) rather than go on to a pod create
 		// that would only report the old pod as still there; a Forbidden
 		// or API error is surfaced as itself.
-		cause := err
 		if isNFSHomePod(pod) {
-			cause = fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err)
+			return opaqueStartError(errPreviousPodUnconfirmed.Error()+": failed to delete the previous agent pod; retry later",
+				fmt.Errorf("%w: %w", errPreviousPodUnconfirmed, err),
+				"pod", podName, "namespace", namespace, "run_id", runID)
 		}
-		return opaqueStartError("failed to delete the stale agent pod before start", cause,
+		return opaqueStartError("failed to delete the stale agent pod before start", err,
 			"pod", podName, "namespace", namespace, "run_id", runID)
 	}
 	if !isNFSHomePod(pod) {
@@ -392,8 +396,13 @@ func (r *KubernetesRuntime) removePreviousPodForRun(ctx context.Context, namespa
 	runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace,
 		"run_id", runID, "bound", bound.String(), "phase", "home-wait")
 	if err := r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound); err != nil {
-		return opaqueStartError("the previous agent pod has not been confirmed stopped", err,
-			"pod", podName, "namespace", namespace, "run_id", runID)
+		// The visible text keeps the documented retryable code
+		// (previous_pod_unconfirmed) without the pod name.
+		msg := "the previous agent pod has not been confirmed stopped"
+		if errors.Is(err, errPreviousPodUnconfirmed) {
+			msg = errPreviousPodUnconfirmed.Error() + ": " + msg + "; retry later"
+		}
+		return opaqueStartError(msg, err, "pod", podName, "namespace", namespace, "run_id", runID)
 	}
 	return nil
 }
