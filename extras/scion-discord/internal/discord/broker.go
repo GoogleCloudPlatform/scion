@@ -43,6 +43,10 @@ const (
 	// dedupTTL is how long a message ID is remembered for deduplication.
 	dedupTTL = 5 * time.Minute
 
+	// askUserExpiry is how long a posted question accepts button and
+	// modal answers.
+	askUserExpiry = 24 * time.Hour
+
 	// OriginMarkerKey is the config key injected into outbound messages
 	// to identify messages originating from the scion hub.
 	OriginMarkerKey = "scion_origin"
@@ -814,6 +818,9 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					})
 				}
 			}
+		} else if msg.Type == messages.TypeInputNeeded && store != nil && senderSlug != "" {
+			// Questions get answer buttons and a pending ask-user entry.
+			err = b.sendInputNeeded(ctx, session, sendQueue, store, channelID, text, msg, senderSlug, projectID, files)
 		} else {
 			// Send via bot API (state changes, input-needed, non-agent messages).
 			if sendQueue != nil {
@@ -837,6 +844,67 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sendInputNeeded posts an input-needed message with answer buttons and
+// records the pending ask-user entry that the button and modal handlers
+// look up. Each channel gets its own request ID.
+func (b *DiscordBroker) sendInputNeeded(
+	ctx context.Context,
+	session *discordgo.Session,
+	sendQueue *SendQueue,
+	store Store,
+	channelID, text string,
+	msg *messages.StructuredMessage,
+	agentSlug, projectID string,
+	files []*discordgo.File,
+) error {
+	requestID := generateRequestID()
+	_, components := RenderInputNeeded(msg, agentSlug, requestID)
+
+	var sent *discordgo.Message
+	var err error
+	if sendQueue != nil {
+		sent, err = sendQueue.Send(ctx, channelID, text, nil, components, files)
+	} else {
+		sent, err = session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:    text,
+			Components: components,
+			Files:      files,
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	// RenderInputNeeded falls back to Reply/Dismiss when the choices do
+	// not parse, so the stored choices follow the same rule.
+	var choices []string
+	if raw := msg.Metadata["choices"]; raw != "" {
+		if jsonErr := json.Unmarshal([]byte(raw), &choices); jsonErr != nil {
+			choices = nil
+		}
+	}
+
+	pending := &PendingAskUser{
+		RequestID: requestID,
+		ChannelID: channelID,
+		AgentSlug: agentSlug,
+		ProjectID: projectID,
+		Choices:   choices,
+		ExpiresAt: time.Now().Add(askUserExpiry),
+	}
+	if sent != nil {
+		pending.MessageID = sent.ID
+	}
+	if _, delErr := store.DeleteExpiredAskUsers(ctx); delErr != nil {
+		b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
+	}
+	if createErr := store.CreatePendingAskUser(ctx, pending); createErr != nil {
+		b.log.Error("Failed to record pending ask-user",
+			"request_id", requestID, "channel_id", channelID, "error", createErr)
+	}
+	return nil
 }
 
 // Close shuts down the Discord broker, closing the gateway session,
