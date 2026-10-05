@@ -5002,7 +5002,9 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// deleteProject removes the local hub-managed project directory for the given slug.
+// deleteProject removes the local hub-managed project directory for the given
+// slug, together with its shared-dir storage when that lives under
+// ~/.scion/project-configs (see hubManagedProjectSharedDirsBase).
 // Returns 204 on success (including when the directory doesn't exist).
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
@@ -5038,6 +5040,25 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// Remove the project's shared-dir storage first: it can live outside
+	// the project directory, and only the project directory's .scion entry
+	// locates it, so a failure here must leave that entry in place for a
+	// retry to find (ptone/scion#2878). The location is derived from the
+	// slug and the project ID on the request, so a request without a
+	// project ID leaves the storage alone.
+	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
+		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
+	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); err != nil {
+		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
+	} else if sharedDirsBase != "" {
+		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
+			s.agentLifecycleLog.Warn("failed to remove project shared-dir storage", "slug", slug, "path", sharedDirsBase, "error", err)
+			RuntimeError(w, "Failed to remove project shared-dir storage: "+err.Error())
+			return
+		}
+		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
+	}
+
 	if err := os.RemoveAll(projectPath); err != nil {
 		s.agentLifecycleLog.Warn("failed to remove project directory", "slug", slug, "path", projectPath, "error", err)
 		RuntimeError(w, "Failed to remove project directory: "+err.Error())
@@ -5046,6 +5067,103 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// hubManagedProjectSharedDirsBase returns the shared-dir storage directory
+// <globalDir>/project-configs/<slug>__<short requestedProjectID>/shared-dirs
+// of the hub-managed project at projectPath (~/.scion/projects/<slug>), the
+// location config.GetSharedDirsBasePath gives such a project with split
+// storage, which removing projectPath would leave behind.
+//
+// The path is computed from slug and requestedProjectID (both required);
+// the project's .scion entry (marker file or project-id file) only has to
+// agree with it. It returns ("", nil) when there is nothing to remove: the
+// entry is missing or records no project (legacy layout, storage inside
+// projectPath), or the storage does not exist. It returns an error when the
+// entry disagrees with the request (a different project ID or slug, or a
+// storage location other than the computed one) or the computed directory
+// is not a real directory inside project-configs
+// (projectConfigPathContained); the caller then leaves the storage alone.
+//
+// This assumes <slug>__<short ID> under project-configs belongs to the
+// project being deleted. A linked (non hub-managed) copy of the same
+// project on this broker with the same slug would share that directory and
+// lose its shared dirs too; that copy belongs to the same hub project the
+// hub is deleting, so its shared dirs go with it.
+func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProjectID string) (string, error) {
+	if requestedProjectID == "" {
+		return "", fmt.Errorf("no project ID requested")
+	}
+	if filepath.Base(projectPath) != slug {
+		return "", fmt.Errorf("project path does not match the slug")
+	}
+	dir := expectedProjectConfigDir(globalDir, slug, requestedProjectID)
+	if dir == "" {
+		return "", fmt.Errorf("slug or project ID is not usable as a path component")
+	}
+	want := filepath.Join(dir, config.SharedDirsSubdir)
+
+	scionPath := filepath.Join(projectPath, config.DotScion)
+	recordedID := projectIDAtPath(scionPath)
+	if recordedID == "" {
+		return "", nil
+	}
+	if recordedID != requestedProjectID {
+		return "", fmt.Errorf("project records a different project ID")
+	}
+	var base string
+	if config.IsProjectMarkerFile(scionPath) {
+		marker, err := config.ReadProjectMarker(scionPath)
+		if err != nil {
+			return "", fmt.Errorf("read project marker: %w", err)
+		}
+		if marker.ProjectID != requestedProjectID || marker.ProjectSlug != slug {
+			return "", fmt.Errorf("project marker does not match the request")
+		}
+		ext, err := marker.ExternalProjectPath()
+		if err != nil {
+			return "", fmt.Errorf("resolve project marker: %w", err)
+		}
+		if base, err = config.GetSharedDirsBasePath(ext); err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		if base, err = config.GetSharedDirsBasePath(scionPath); err != nil {
+			return "", err
+		}
+	}
+	if filepath.Clean(base) != want {
+		return "", fmt.Errorf("shared-dir storage location does not match the request")
+	}
+	if _, err := os.Lstat(want); os.IsNotExist(err) {
+		return "", nil
+	}
+	if !projectConfigPathContained(globalDir, want) {
+		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
+	}
+	return want, nil
+}
+
+// removeProjectConfigsSubtree removes path, which must lie inside
+// <globalDir>/project-configs, through an os.Root opened at project-configs,
+// so no step of the removal (descending into or unlinking entries) can
+// leave that root even if an entry is replaced with a symlink after the
+// caller checked it. The remaining window is a swap of an entry for a
+// symlink to another location inside project-configs between the caller's
+// projectConfigPathContained check and this call.
+func removeProjectConfigsSubtree(globalDir, path string) error {
+	rootDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	rel, err := filepath.Rel(rootDir, path)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s is not inside %s", path, rootDir)
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(rel)
 }
 
 // errDeleteTargetNotFound means no agent with the requested slug exists in
