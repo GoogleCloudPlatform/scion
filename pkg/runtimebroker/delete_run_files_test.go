@@ -208,6 +208,59 @@ func TestDeleteAgent_NotFoundWithOtherRunInFlight_SkipsLeftoverCleanup(t *testin
 	}
 }
 
+// The in-flight check before the not-found cleanup also matches a launch
+// registered under the slugified name, the name the cleanup acts on
+// (review round 2, Nit 2).
+func TestDeleteAgent_NotFoundInFlightCheckUsesSlug(t *testing.T) {
+	mgr := &cleanupRecordingManager{}
+	srv, _ := newCleanupTestServer(t, mgr)
+	lr := newLaunchRecord("sync-1", "dev-agent", "create", "", time.Time{}, func() {})
+	lr.RunID = "run-new"
+	srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev-agent"}, lr)
+
+	rec := doDelete(t, srv, "Dev-Agent", "projectId="+scopeProjB+"&runId=run-old")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertCleanupCalls(t, mgr.cleanupCalls())
+}
+
+// A provision-only create's owner (review round 2, Nit 4): a late delete
+// naming another run (the predecessor's) touches nothing; the agent's own
+// delete, which names no run until its first start, deletes as before.
+func TestDeleteAgent_ProvisionOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name, query string
+		wantCode    int
+	}{
+		{"predecessor's run", "&runId=run-ghost", http.StatusNotFound},
+		{"no run (the agent's own delete)", "", http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &cleanupRecordingManager{}
+			srv, home := newCleanupTestServer(t, mgr)
+			scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			infoB := recordRun(t, scionB, "dev", agent.ProvisionOwnerPrefix+"abc")
+
+			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+tc.query+allDeleteParams)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+			if tc.wantCode == http.StatusNotFound {
+				if mgr.DeleteCalls() != 0 {
+					t.Errorf("expected no DeleteTarget call, got %d", mgr.DeleteCalls())
+				}
+				assertCleanupCalls(t, mgr.cleanupCalls())
+				assertUntouched(t, scionB, "dev", infoB)
+				return
+			}
+			if !mgr.LastDeleteFiles() || mgr.LastDeleteProjectPath() != scionB {
+				t.Errorf("got files=%v path %q, want the files deleted in %q", mgr.LastDeleteFiles(), mgr.LastDeleteProjectPath(), scionB)
+			}
+		})
+	}
+}
+
 func TestLaunchRegistry_OtherRunInFlight(t *testing.T) {
 	key := launchKey{ProjectID: "p1", Slug: "a"}
 	for _, tc := range []struct {

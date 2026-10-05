@@ -213,6 +213,10 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 		{"provision of an existing agent", false, nil, false},
 		{"create while a runtime entry holds the name", true, []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-ghost", RunID: "run-ghost"}}, false},
 		{"create when the runtime cannot be listed", true, nil, true},
+		{"create while only another project's entry holds the name", true, []api.AgentInfo{{
+			Name: "tz-agent", ContainerID: "cid-other", RunID: "run-other",
+			Labels: map[string]string{"scion.name": "tz-agent", "scion.project_id": "other-project"},
+		}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectScionDir, agentDir := startTZFixture(t, "", `""`)
@@ -228,11 +232,18 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 			}}
 			if _, err := NewManager(rt).Provision(context.Background(), api.StartOptions{
 				Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, FreshProvision: tc.fresh,
+				Env: map[string]string{"SCION_PROJECT_ID": "this-project"},
 			}); err != nil {
 				t.Fatalf("Provision: %v", err)
 			}
 			got := GetSavedRunID("tz-agent", projectScionDir)
-			if !tc.fresh || tc.entries != nil || tc.listErr {
+			blocked := tc.listErr
+			for _, e := range tc.entries {
+				if e.Labels["scion.project_id"] == "" {
+					blocked = true
+				}
+			}
+			if !tc.fresh || blocked {
 				if got != "run-ghost" {
 					t.Errorf("recorded = %q, want run-ghost kept", got)
 				}

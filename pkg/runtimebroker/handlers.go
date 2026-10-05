@@ -1304,12 +1304,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-		} else if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); opts.ProjectPath != "" && owner != "" {
-			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
-				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
-				"run_id", opts.RunID, "files_run_id", owner)
 		} else if opts.ProjectPath != "" {
-			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+			if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
+					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+					"run_id", opts.RunID, "files_run_id", owner)
+			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
@@ -1855,7 +1855,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			// treat a 404 on delete as an idempotent success. A start
 			// of another run in flight here may be creating such objects
 			// under this name right now (ptone/scion#2675): leave them.
-			if s.otherRunInFlight(runID, launchKey{ProjectID: projectID, Slug: id}) {
+			// Launch keys use the request's slug; also check the
+			// slugified id, the name cleanupLeftoverAgentResources acts on.
+			if s.otherRunInFlight(runID,
+				launchKey{ProjectID: projectID, Slug: id},
+				launchKey{ProjectID: projectID, Slug: api.Slugify(id)}) {
 				s.agentLifecycleLog.Info("Agent delete: no matching agent in project; a start of another run is in flight, leaving per-agent objects untouched",
 					"agent_id", id, "project_id", projectID, "run_id", runID)
 				NotFound(w, "Agent")
