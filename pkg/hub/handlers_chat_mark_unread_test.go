@@ -284,7 +284,7 @@ func TestChatV2_MarkUnread_DM(t *testing.T) {
 // count as "the latest message". If it did, the predecessor computation
 // would land one message too late (on the last genuinely visible message
 // instead of the one before it), and since the DM list's own hasUnread
-// check (nativeDMLastMessage) already excludes mention rows when computing
+// check (nativeDMLastMessages) already excludes mention rows when computing
 // LastMessageID, the watermark would equal LastMessageID and mark-unread
 // would silently do nothing.
 func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
@@ -337,7 +337,7 @@ func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
 	}
 
 	// hasUnread must be true: if the exclusion were dropped, the watermark
-	// would land on visible2, which equals nativeDMLastMessage's
+	// would land on visible2, which equals nativeDMLastMessages'
 	// (mention-excluding) LastMessageID, and hasUnread would be false.
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
 	if rec.Code != http.StatusOK {

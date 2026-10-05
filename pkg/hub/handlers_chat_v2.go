@@ -2970,7 +2970,8 @@ func (s *Server) writeConversationReadState(
 // recent messages, newest first — the (created_at, id) DESC order
 // ListMessages uses by default, the same order handleConversationRead's
 // monotonic guard reasons in. It resolves the same filter
-// handleConversationHistory and nativeDMLastMessage use, honouring the
+// handleConversationHistory and the DM list (nativeDMLastMessages) use,
+// honouring the
 // ConversationEnvelopeSwitch when it is on so mark-unread sees the same
 // message set the history view and the DM list's "last message" do.
 //
@@ -2985,7 +2986,7 @@ func (s *Server) conversationRecentMessages(
 ) ([]store.Message, error) {
 	var filter store.MessageFilter
 	if isDM {
-		// Mention fan-out copies are excluded, matching nativeDMLastMessage —
+		// Mention fan-out copies are excluded, matching nativeDMLastMessages —
 		// chat-thread does not display them, so they must not count as the
 		// "latest message" mark-unread reasons about.
 		filter = store.MessageFilter{Channel: nativeDMMessageScope.Channel, ThreadID: key,
@@ -3000,7 +3001,7 @@ func (s *Server) conversationRecentMessages(
 				return nil, err
 			}
 			if conv == nil {
-				// Never-used DM: matches nativeDMLastMessage's prior
+				// Never-used DM: matches nativeDMLastMessages' prior
 				// behaviour exactly (nil, nil) rather than falling back to
 				// a ThreadID filter, which would show unrelated legacy rows
 				// once envelope mode is the source of truth.
@@ -3562,42 +3563,29 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // DM Endpoints
 // ---------------------------------------------------------------------------
 
-// nativeDMLastMessage uses the same scope as the history endpoint, not the
-// cross-channel activity watermark. That watermark can point to an external
-// message, a deleted message, or one moved into a promoted thread, none of
-// which can be acknowledged by viewing this DM. Mention fan-out copies are
-// also excluded because chat-thread does not display them.
-//
-// Delegates to conversationRecentMessages (limit 1) rather than keeping a
-// second copy of this filter: the two are used together — this to know
-// "unread compared to what", mark-unread's predecessor lookup to know
-// "unread from what" — and a mention-exclusion (or envelope-switch) fix
-// applied to only one would silently reintroduce a mention row masking
-// mark-unread's effect.
-func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
-	if err != nil {
-		return nil, err
-	}
-	if len(recent) == 0 {
-		return nil, nil
-	}
-	return &recent[0], nil
-}
-
 // nativeDMMessageScope is the message scope shared by every native DM
 // "latest message" read: web channel only, mention fan-out copies excluded.
-// conversationRecentMessages and nativeDMLastMessages both build their
-// filters from it so the two cannot drift.
+// It matches the history endpoint's scope, not the cross-channel activity
+// watermark, which can point to an external message, a deleted message, or
+// one moved into a promoted thread — none of which viewing the DM can
+// acknowledge. Mention copies are excluded because chat-thread does not
+// display them.
+//
+// conversationRecentMessages (mark-unread's "unread from what") and
+// nativeDMLastMessages (the DM list's "unread compared to what") both build
+// their filters from it, so a mention-exclusion fix cannot reach only one
+// of them and let a mention row mask mark-unread's effect.
 var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeType: messages.TypeMention}
 
-// nativeDMLastMessages is nativeDMLastMessage for many DMs at once, with a
-// constant number of store queries: one latest-message lookup, plus one
-// conversation lookup when the conversation envelope switch is on. The
-// result maps a conversation key to its last visible message; keys with no
-// visible message, and keys whose lookup failed, are absent. Failures are
-// logged and leave those DMs without last-message enrichment, as the
-// per-DM path did.
+// nativeDMLastMessages returns the last visible message of each DM for the
+// DM list — for every key, the message conversationRecentMessages(key,
+// isDM, limit 1) would return — with a constant number of store queries:
+// one latest-message lookup, plus one conversation lookup when the
+// conversation envelope switch is on. The result maps a conversation key to
+// its last visible message; keys with no visible message are absent.
+//
+// A failed batched read is logged and degrades rather than failing the
+// list: every DM it covered is listed without last-message enrichment.
 func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[string]*store.Message {
 	result := make(map[string]*store.Message, len(keys))
 	if len(keys) == 0 {
@@ -3608,7 +3596,8 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 	if ops == nil || !ops.ConversationEnvelopeSwitch() {
 		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
 		if err != nil {
-			slog.Warn("failed to fetch DM last messages", "count", len(keys), "error", err)
+			slog.Warn("chat dms: batched last-message read failed",
+				"dms", len(keys), "error", err)
 			return result
 		}
 		for _, key := range keys {
@@ -3628,7 +3617,8 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 	for _, key := range keys {
 		parts := strings.Split(key, ":")
 		if len(parts) != 5 {
-			slog.Warn("failed to fetch DM last message", "key", key, "error", fmt.Errorf("invalid DM key: %q", key))
+			slog.Warn("chat dms: invalid DM key, listed without last message",
+				"key", key, "error", fmt.Errorf("invalid DM key: %q", key))
 			continue
 		}
 		ref, ok := messaging.DMReadExternalRef(s.messageLog, parts[1], parts[2], parts[3], parts[4])
@@ -3643,8 +3633,8 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 	}
 	convs, err := s.store.GetConversationsByExternalRefs(ctx, "native", refs)
 	if err != nil {
-		s.messageLog.Error("read-switch: DM conversation lookup failed", "count", len(refs), "error", err)
-		slog.Warn("failed to fetch DM last messages", "count", len(keys), "error", err)
+		slog.Warn("chat dms: batched conversation read failed",
+			"dms", len(refs), "error", err)
 		return result
 	}
 	convIDs := make([]string, 0, len(convs))
@@ -3656,7 +3646,8 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 	}
 	latest, err := s.store.LatestMessagesByConversationIDs(ctx, convIDs, nativeDMMessageScope)
 	if err != nil {
-		slog.Warn("failed to fetch DM last messages", "count", len(keys), "error", err)
+		slog.Warn("chat dms: batched last-message read failed",
+			"dms", len(convIDs), "error", err)
 		return result
 	}
 	for key, ref := range refByKey {
@@ -3725,7 +3716,8 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 	if len(userPeerIDs) > 0 {
 		var err error
 		if peerUsers, err = s.store.GetUsersByIDs(ctx, userPeerIDs); err != nil {
-			slog.Warn("failed to fetch DM peer users", "error", err)
+			slog.Warn("chat dms: batched peer-user read failed",
+				"users", len(userPeerIDs), "error", err)
 		}
 	}
 	var peerAgents map[string]*store.Agent
@@ -3734,7 +3726,8 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		// Including soft-deleted agents, as GetAgent does: a DM with a
 		// deleted agent keeps showing that agent's name.
 		if peerAgents, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, agentPeerIDs); err != nil {
-			slog.Warn("failed to fetch DM peer agents", "error", err)
+			slog.Warn("chat dms: batched peer-agent read failed",
+				"agents", len(agentPeerIDs), "error", err)
 		}
 	}
 

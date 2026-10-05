@@ -138,6 +138,20 @@ func (w *dmCountingWebChatStore) GetReadStates(ctx context.Context, userID strin
 	return w.WebChatStore.GetReadStates(ctx, userID, keys)
 }
 
+// nativeDMLastMessage is the single-DM last-message read the DM list made
+// before its lookups were batched: conversationRecentMessages with limit 1.
+// It is the reference nativeDMLastMessages must agree with for every key.
+func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
+	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(recent) == 0 {
+		return nil, nil
+	}
+	return &recent[0], nil
+}
+
 // perDMReferenceEntries builds the DM list the way the handler did before
 // its lookups were batched: one last-message read (nativeDMLastMessage),
 // one peer read and one read-state read per DM. The batched handler must
