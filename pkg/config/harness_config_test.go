@@ -533,6 +533,26 @@ func TestSeedHarnessConfig_MockHarness(t *testing.T) {
 	}
 }
 
+// TestMapEmbedFileToHomePath_OpenCode pins where the opencode config is
+// placed: opencode 1.x reads opencode.json, not .opencode.json
+// (ptone/scion#2679). Without a config dir the file is skipped rather than
+// written to the home root, which is what the default branch would do.
+func TestMapEmbedFileToHomePath_OpenCode(t *testing.T) {
+	home := filepath.Join("h", "home")
+	tests := []struct {
+		configDir string
+		want      string
+	}{
+		{configDir: filepath.Join(".config", "opencode"), want: filepath.Join(home, ".config", "opencode", "opencode.json")},
+		{configDir: "", want: ""},
+	}
+	for _, tt := range tests {
+		if got := mapEmbedFileToHomePath(home, tt.configDir, "opencode.json"); got != tt.want {
+			t.Errorf("mapEmbedFileToHomePath(%q, %q, opencode.json) = %q, want %q", home, tt.configDir, got, tt.want)
+		}
+	}
+}
+
 func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	hcBase := filepath.Join(tmpDir, "harness-configs")
