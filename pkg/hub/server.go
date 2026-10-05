@@ -816,6 +816,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// SharedDirBackendChanges and AllowEmptySharedDir mirror
+	// runtimebroker.CreateAgentRequest's fields of the same names. Set only
+	// on a reprovision for `scion reincarnate --shared-dir-backend`.
+	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
+	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -1002,6 +1007,12 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// SharedDirBackendsChanged mirrors
+	// runtimebroker.CreateAgentResponse.SharedDirBackendsChanged.
+	// dispatchProvision fails a reprovision that asked for a shared dir
+	// backend change when the broker does not confirm it.
+	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
 
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
 	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending

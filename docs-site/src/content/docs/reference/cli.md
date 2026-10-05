@@ -462,9 +462,11 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
+    - `--shared-dir-backend <name>=nfs`: Change the recorded [storage backend](/scion/reference/server-config/#changing-an-agents-shared-directory-to-nfs) of the agent's shared directory `<name>` from `local` to `nfs`. Repeatable. Only the agent's record changes; copy the data first. An agent cannot use this on itself.
+    - `--allow-empty-shared-dir`: With `--shared-dir-backend`, let the agent start even if the new `nfs` directory is empty while the previous local directory is not.
 
 :::note[Phase 1]
-This release supports only `--handoff-file`, `--handoff-template`, and `--dry-run`. Overrides such as a different image,
+This release supports only `--handoff-file`, `--handoff-template`, `--dry-run`, and the shared directory backend flags. Overrides such as a different image,
 model, or harness config are not yet available.
 :::
 

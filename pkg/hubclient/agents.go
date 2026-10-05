@@ -1020,6 +1020,13 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// SharedDirBackends changes the recorded shared-dir storage backend of
+	// the named shared dirs (dir name to "nfs"). Only the agent's record
+	// changes; the data is copied by the operator.
+	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
+	// AllowEmptySharedDir skips the start check that refuses an empty nfs
+	// directory while the previous local directory is not empty.
+	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Phase 3 overrides — not yet supported by a Phase 1 hub.
 	Image          string            `json:"image,omitempty"`
@@ -1098,4 +1105,8 @@ type ReincarnationPlan struct {
 	EnvKeys    KeyDiff     `json:"envKeys"`
 	Branch     string      `json:"branch"`
 	Warnings   []string    `json:"warnings,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir echo the request's shared
+	// dir backend change.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }

@@ -1653,6 +1653,12 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.ProvisionOnly = true
 	req.Reprovision = reprovision
 	req.GatherEnv = true
+	wantSharedDirChange := false
+	if reprovision && agent.AppliedConfig != nil && len(agent.AppliedConfig.SharedDirBackendChanges) > 0 {
+		req.SharedDirBackendChanges = agent.AppliedConfig.SharedDirBackendChanges
+		req.AllowEmptySharedDir = agent.AppliedConfig.AllowEmptySharedDir
+		wantSharedDirChange = true
+	}
 
 	// Track which scope provided each key
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
@@ -1751,6 +1757,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		// so this must fail exactly like any other reprovision failure.
 		if !finalResp.Reprovisioned {
 			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
+		}
+		// A broker that predates shared dir backend changes ignores the
+		// field and reprovisions without changing the record.
+		if wantSharedDirChange && !finalResp.SharedDirBackendsChanged {
+			return fmt.Errorf("%s: broker did not confirm the shared dir backend change (it may not support --shared-dir-backend; upgrade the broker)", callerName)
 		}
 	}
 

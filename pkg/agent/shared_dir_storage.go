@@ -329,9 +329,15 @@ const sharedDirStorageRecordFile = "shared-dir-storage.json"
 // dirs whose backend differs from Backend. A record written before per-dir
 // backends existed has no Dirs, so Backend applies to every dir, exactly as
 // before.
+//
+// Previous names the dirs whose backend an explicit change (see
+// applySharedDirBackendChanges) moved to nfs, with the backend they had
+// before. A start checks each such dir once for an empty nfs directory
+// while its previous local directory is not empty, then drops the entry.
 type sharedDirStorageRecord struct {
-	Backend string            `json:"backend"`
-	Dirs    map[string]string `json:"dirs,omitempty"`
+	Backend  string            `json:"backend"`
+	Dirs     map[string]string `json:"dirs,omitempty"`
+	Previous map[string]string `json:"previous,omitempty"`
 }
 
 // backendFor returns the recorded backend of the shared dir name.
@@ -347,7 +353,7 @@ func (r *sharedDirStorageRecord) backendFor(name string) string {
 // start, or an agent created before the backend was recorded). A record
 // that exists but cannot be read or parsed, that names no backend, or
 // whose dirs entries are not valid shared dir names mapped to "local" or
-// "nfs", is an error, so a damaged record never silently falls back to the
+// "nfs" (or previous entries mapped to "local"), is an error, so a damaged record never silently falls back to the
 // current settings.
 func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error) {
 	if agentDir == "" {
@@ -374,6 +380,14 @@ func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error
 		}
 		if backend != "local" && backend != "nfs" {
 			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown backend %q for shared dir %q", path, backend, name)
+		}
+	}
+	for name, backend := range rec.Previous {
+		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+			return nil, fmt.Errorf("the agent's shared-dir storage record %s names an invalid shared dir %q", path, name)
+		}
+		if backend != "local" {
+			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown previous backend %q for shared dir %q", path, backend, name)
 		}
 	}
 	return &rec, nil

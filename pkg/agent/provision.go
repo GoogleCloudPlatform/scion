@@ -654,6 +654,17 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
 	}
 
+	// An explicit shared-dir backend change is checked before anything is
+	// provisioned, and recorded only after provisioning succeeds.
+	var sdChange *pendingSharedDirBackendChange
+	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
+		c, err := prepareSharedDirBackendChange(projectDir, agentDir, opts)
+		if err != nil {
+			return nil, err
+		}
+		sdChange = c
+	}
+
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
 
@@ -664,6 +675,12 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
+	}
+
+	if sdChange != nil {
+		if err := sdChange.record(opts, cfg); err != nil {
+			return cfg, err
+		}
 	}
 
 	// Deliberately no prompt.md write here: the new generation's first task

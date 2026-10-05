@@ -449,6 +449,9 @@ func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []s
 		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
 		Branch:     fresh.Branch,
 		Warnings:   warnings,
+
+		SharedDirBackends:   fresh.SharedDirBackendChanges,
+		AllowEmptySharedDir: fresh.AllowEmptySharedDir,
 	}
 	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
 		plan.Image.Old = fresh.Image

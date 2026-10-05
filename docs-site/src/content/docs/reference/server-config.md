@@ -470,7 +470,26 @@ profiles:
   - A shared directory added to the project after the agent's first start uses the record's `backend`, not the current per-directory settings.
 - **Mounts**: Docker and Podman bind-mount each `nfs` directory from the export and each `local` directory from the broker's local layout. Kubernetes mounts each `nfs` directory from the `pv_name` claim by `subPath`, and each `local` directory as it would without `shared_dir_storage` (its own PersistentVolumeClaim, or the workspace claim when `server.workspace_storage` is `nfs`).
 - **Startup summary**: the startup log has one line per profile and shared directory whose backend comes from a `shared_dir_storage_backends` entry.
+- **Changing an existing agent**: see [Changing an agent's shared directory to nfs](#changing-an-agents-shared-directory-to-nfs).
 - **Known limit, mixed writers**: when agents with different uids write to the same `nfs` directory, for example Docker agents (the broker's uid) and Kubernetes pods (uid 1000 with `fsGroup`), subdirectories and files they create follow each writer's umask, usually `022`. Without POSIX ACLs on the export, one kind of agent cannot write into subdirectories the other created. Scion does not set a group-writable umask for agents in this version. Use the shared-group setup described above, and umask `002` for every agent that writes there.
+
+#### Changing an agent's shared directory to nfs
+
+Settings never move an existing agent's shared directories. To move one directory of an existing agent from `local` to `nfs`, reincarnate it with [`--shared-dir-backend`](/scion/reference/cli/#scion-reincarnate):
+
+```bash
+scion reincarnate my-agent --shared-dir-backend notes=nfs
+```
+
+- **Record only**: the broker changes the agent's `shared-dir-storage.json` during the reincarnation. It never copies, moves or deletes data, and the local directory stays where it is. Copy the data into the `nfs` directory (`<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`) yourself, before the reincarnation, while the agent is stopped if it still writes there.
+- **Checks**: the broker refuses the change, before anything is provisioned, when the directory is not one of the agent's shared directories or `server.shared_dir_storage.nfs` is not complete on that broker. Only `nfs` is accepted as the new backend. An agent without a record first gets the record its next start would have written.
+- **Empty directory check**: the next start refuses with an error when the `nfs` directory is empty while the previous local directory is not, and names both paths. On Kubernetes the previous local storage is a PersistentVolumeClaim that the broker cannot read, so the start is refused whenever the `nfs` directory is empty. After copying the data, start the agent again; once the check passes it is not repeated. To start with an empty `nfs` directory anyway, run the reincarnation again with `--allow-empty-shared-dir`:
+
+  ```bash
+  scion reincarnate my-agent --shared-dir-backend notes=nfs --allow-empty-shared-dir
+  ```
+
+- **Brokers**: the change needs a broker that supports it. A broker that does not confirm the change fails the reincarnation instead of ignoring it.
 
 ### Agent Home Storage (`server.home_storage`)
 

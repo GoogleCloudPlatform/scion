@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -1265,12 +1266,7 @@ authDone:
 	containerWorkspace := runtime.ResolveContainerWorkspace(repoRoot, effectiveWorkspace, opts.GitClone)
 
 	// Inject shared directory volumes from project settings or opts (hub-dispatched)
-	var effectiveSharedDirs []api.SharedDir
-	if settings != nil && len(settings.SharedDirs) > 0 {
-		effectiveSharedDirs = settings.SharedDirs
-	} else if len(opts.SharedDirs) > 0 {
-		effectiveSharedDirs = opts.SharedDirs
-	}
+	effectiveSharedDirs := agentSharedDirs(settings, opts)
 	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
 	// via config.LoadGlobalSettingsWithOverlay() (the global file plus the
 	// co-located hub's DB overlay for runtimes and profiles, which can
@@ -1402,6 +1398,24 @@ authDone:
 		sharedDirStorageCfg, sharedDirBackendOverrides, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
+	}
+	// After an explicit backend change to nfs, refuse an empty nfs
+	// directory while the previous local directory is not empty. Dirs that
+	// pass are not checked again.
+	if passed, err := checkChangedSharedDirs(sharedDirRecord, effectiveSharedDirs, sharedDirStorage, sharedDirVolumes, projectDir, m.Runtime.Name(), containerWorkspace); err != nil {
+		return nil, err
+	} else if len(passed) > 0 {
+		updated := *sharedDirRecord
+		updated.Previous = maps.Clone(sharedDirRecord.Previous)
+		for _, name := range passed {
+			delete(updated.Previous, name)
+		}
+		if len(updated.Previous) == 0 {
+			updated.Previous = nil
+		}
+		if err := saveSharedDirStorageRecord(agentDir, &updated); err != nil {
+			slog.Warn("Start: could not update the agent's shared-dir storage record after checking changed shared dirs", "agent", opts.Name, "error", err)
+		}
 	}
 	if len(effectiveSharedDirs) > 0 && sharedDirRecord == nil && sharedDirStorageResolved {
 		// Record the backends the agent's shared dirs were set up with, so

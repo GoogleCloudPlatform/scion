@@ -280,6 +280,14 @@ type AgentAppliedConfig struct {
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
+	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
+	// explicit shared dir backend change (`scion reincarnate
+	// --shared-dir-backend`), set on that generation's config only and sent
+	// to the broker on its reprovision. A later reincarnation does not
+	// carry them forward.
+	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
+	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
+
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
