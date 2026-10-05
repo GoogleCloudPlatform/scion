@@ -406,3 +406,38 @@ func TestRunBrokerProvide_PathToGlobalDirAllowedForGlobalProject(t *testing.T) {
 	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
 	assert.Equal(t, globalDir, mock.lastAdd(t)["localPath"])
 }
+
+// provide --make-default sets the broker as the project's default through a
+// project update when another broker is the default.
+func TestRunBrokerProvide_MakeDefaultUpdatesProjectDefault(t *testing.T) {
+	mock, _ := setupProvideTest(t)
+	mock.defaults["p-web"] = "broker-other"
+	brokerProjectID = "p-web"
+	brokerMakeDefault = true
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+
+	assert.Equal(t, "broker-1", mock.lastAdd(t)["brokerId"])
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	require.Len(t, mock.updates, 1, "--make-default sends one project update")
+	assert.Equal(t, "p-web", mock.updates[0]["projectId"])
+	assert.Equal(t, "broker-1", mock.updates[0]["defaultRuntimeBrokerId"])
+	assert.Equal(t, "broker-1", mock.defaults["p-web"])
+}
+
+// provide --make-default sends no update when the broker is already the
+// project's default.
+func TestRunBrokerProvide_MakeDefaultAlreadyDefaultSendsNoUpdate(t *testing.T) {
+	mock, _ := setupProvideTest(t)
+	brokerProjectID = "p-web"
+	brokerMakeDefault = true
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+
+	mock.lastAdd(t)
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Empty(t, mock.updates, "the hub sets the first provider as the default")
+	assert.Equal(t, "broker-1", mock.defaults["p-web"])
+}
