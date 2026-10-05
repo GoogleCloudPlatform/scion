@@ -571,6 +571,42 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
     }
   });
 
+  it('the 60s poll reloads the expanded space instead of claiming the sidebar for the hub', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const spaceReads = (): number =>
+        vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members')
+          .length;
+      vi.mocked(apiFetch).mockImplementation((url) =>
+        Promise.resolve(
+          url === '/api/v1/chat/spaces/p1/members'
+            ? new Response(
+                JSON.stringify({
+                  humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+                  agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                }),
+                { status: 200 }
+              )
+            : new Response('{}', { status: 200 })
+        )
+      );
+      await page.loadV2Members('p1');
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+      const usersBefore = usersRequests();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(spaceReads()).toBe(2);
+      expect(usersRequests()).toBe(usersBefore);
+      expect(ids(page.v2AgentMembers)).toEqual(['sp1']);
+      expect(ids(page.v2HumanMembers)).toEqual(['h1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('the hub view claiming it back shows the hub list again', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
