@@ -880,7 +880,7 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 		if a, gerr := s.store.GetAgent(ctx, agentID); gerr == nil {
 			current = a.RunID
 		}
-		s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording it stopped",
+		s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
 			"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current)
 		return false, nil
 	}
@@ -903,7 +903,7 @@ func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action
 	if err != nil || current.RunID == runID {
 		return true
 	}
-	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording it stopped",
+	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
 		"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
 	return false
 }

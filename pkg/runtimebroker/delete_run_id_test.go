@@ -419,11 +419,21 @@ func TestLaunchRegistry_CancelLocalForRun(t *testing.T) {
 			rec := newLaunchRecord("L1", "a", "create", "", time.Time{}, func() { cancelled = true })
 			rec.RunID = tc.recRun
 			r.Begin(key, rec)
-			r.CancelLocalForRun(key, tc.deleteRun)
+			woke := r.CancelLocalForRun(key, tc.deleteRun)
 			if cancelled != tc.wantCancel {
 				t.Errorf("cancelled = %v, want %v", cancelled, tc.wantCancel)
 			}
+			if woke != tc.wantCancel {
+				t.Errorf("CancelLocalForRun returned %v, want %v", woke, tc.wantCancel)
+			}
 		})
+	}
+	if newLaunchRegistry().CancelLocalForRun(key, "r1") {
+		t.Error("CancelLocalForRun returned true with no launch registered")
+	}
+	var nilReg *launchRegistry
+	if nilReg.CancelLocalForRun(key, "r1") {
+		t.Error("nil registry returned true")
 	}
 }
 

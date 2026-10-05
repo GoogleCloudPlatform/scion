@@ -254,6 +254,8 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 				s.releaseBrokerQuota(ctx, agent)
 			}
 		} else if s.stopRunStillCurrent(ctx, agent.ID, agent.RunID, "queued stop") {
+			// A check, not a lock: a run minted between this read and the
+			// release loses its reservation until the backfill restores it.
 			s.releaseBrokerQuota(ctx, agent)
 		}
 	}

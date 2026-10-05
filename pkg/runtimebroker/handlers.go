@@ -2674,8 +2674,9 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// this run may have finished (creating its container) between the
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
+		wokeLaunch := s.cancelLocalLaunchForRun(key, runID)
 		cancelledOwn := s.cancelInFlightStartRun(ctx, key, runID)
-		if s.cancelLocalLaunchForRun(key, runID) {
+		if wokeLaunch {
 			cancelledOwn++
 		}
 		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)

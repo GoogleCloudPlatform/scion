@@ -404,22 +404,20 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		Activity:        "",
 	})
 	if err != nil {
+		// The container is stopped but the write failed. Revoke the
+		// credentials anyway while the row still holds the stopped run (a
+		// check, not a lock), so a stopped container's credentials do not
+		// outlive it; a newer run's are left alone.
+		if s.stopRunStillCurrent(ctx, agent.ID, stopRunID, "suspend") {
+			s.revokeSuspendedCredentials(ctx, agent.ID)
+		}
 		return err
 	}
 	if !recorded {
 		return nil
 	}
 
-	// Revoke all credentials for the suspended agent (best-effort, Phase 1H)
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_suspended"); err != nil {
-		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agent.ID, "error", err)
-	}
-
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType: "agent_credential_revoke",
-		TargetType:   "agent_credential",
-		TargetID:     agent.ID,
-	})
+	s.revokeSuspendedCredentials(ctx, agent.ID)
 
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
@@ -430,6 +428,19 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.releaseBrokerQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
+}
+
+// revokeSuspendedCredentials revokes every credential of a suspended agent
+// and audits it (best-effort, Phase 1H).
+func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string) {
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agentID, "system", "agent_suspended"); err != nil {
+		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agentID, "error", err)
+	}
+	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType: "agent_credential_revoke",
+		TargetType:   "agent_credential",
+		TargetID:     agentID,
+	})
 }
 
 // recordRunIntent sets the agent's run intent in the store and mirrors the
@@ -668,6 +679,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 			return
 		}
+		if agent.Phase != string(state.PhaseSuspended) {
+			// The row moved to a newer run while the stop was in flight,
+			// so nothing was recorded: answer with the current row, as a
+			// stop does.
+			if current, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil {
+				agent = current
+			}
+		}
 		respAgent := *agent
 		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, respAgent)
@@ -713,9 +732,6 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			// The stop leg is for the current run; the start leg below
-			// mints a new one.
-			stopRunID = agent.RunID
 			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
 			// The broker has no runtime of the agent's recorded type
 			// registered (ptone/scion#2748): the agent may still be
@@ -763,7 +779,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// showing its pre-restart phase until the next
 					// heartbeat.
 					sd.settle()
-					if s.recordRestartStopped(ctx, agent.ID, stopRunID) {
+					// Guard on the run this restart left on the row: the
+					// failed start leg may keep the run it minted (or the
+					// broker's), and the dispatcher keeps agent.RunID in
+					// step with it. A run from another caller still misses.
+					if s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
 						s.releaseBrokerQuota(ctx, agent)
 					}
 				} else {
@@ -1014,13 +1034,14 @@ type stopAllResult struct {
 // clients do not keep showing the pre-restart state until the next
 // heartbeat. Failures are logged; the caller still reports the start error.
 //
-// The stopped state is recorded only while the row still holds stopRunID,
-// the run the stop leg was dispatched for (ptone/scion#2550); it reports
+// The stopped state is recorded only while the row still holds runID, the
+// run this restart left on the row after its failed start leg
+// (ptone/scion#2550); it reports
 // whether it was recorded, and the caller releases the reservation only
 // then.
-func (s *Server) recordRestartStopped(ctx context.Context, id, stopRunID string) bool {
+func (s *Server) recordRestartStopped(ctx context.Context, id, runID string) bool {
 	zero := 0
-	recorded, err := s.recordStopStatus(ctx, id, stopRunID, "restart", store.AgentStatusUpdate{
+	recorded, err := s.recordStopStatus(ctx, id, runID, "restart", store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
 		ExitCode:        &zero,
