@@ -14,7 +14,10 @@
 
 package config
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // settingsFileMu serialises read-modify-write cycles on settings files
 // within this process (ptone/scion#3047, in-process part). It is one mutex
@@ -42,4 +45,34 @@ var settingsFileMu sync.Mutex
 func LockSettingsFile() (unlock func()) {
 	settingsFileMu.Lock()
 	return settingsFileMu.Unlock
+}
+
+// ErrSkipSave, returned by a LoadModifySaveVersionedSettings modify
+// function, ends the cycle without writing and without error.
+var ErrSkipSave = errors.New("settings: nothing to save")
+
+// LoadModifySaveVersionedSettings loads the settings file in dir, applies
+// modify, and saves the result, holding the settings-file lock from the
+// read to the write so a concurrent in-process writer's change is not lost
+// by the whole-struct rewrite. modify may return ErrSkipSave to write
+// nothing. It must not call UpdateVersionedSetting, SaveVersionedSettings
+// or LoadModifySaveVersionedSettings (the lock is not re-entrant).
+//
+// The save is the struct round-trip SaveVersionedSettings makes, so
+// comments and unknown keys in the file are not kept; prefer
+// UpdateVersionedSetting or PrepareSettingsPathEdits for single keys.
+func LoadModifySaveVersionedSettings(dir string, modify func(*VersionedSettings) error) error {
+	unlock := LockSettingsFile()
+	defer unlock()
+	vs, err := LoadSingleFileVersioned(dir)
+	if err != nil {
+		return err
+	}
+	if err := modify(vs); err != nil {
+		if errors.Is(err, ErrSkipSave) {
+			return nil
+		}
+		return err
+	}
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
 }

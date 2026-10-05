@@ -28,10 +28,18 @@ import (
 
 // SettingsPathEdit is one edit for PrepareSettingsPathEdits: set Path to
 // Value, or remove Path when Delete is true.
+//
+// ZeroOmitempty marks Value as the zero value of an omitempty field. Absent
+// and zero load the same only while the parent mapping exists (a pointer
+// block such as server.hub.cors is "present" even when empty, and its
+// absence selects other defaults). So when the parent exists the key is
+// removed, keeping the file minimal and making an unchanged empty value a
+// no-op; when it does not, Value is written, which creates the parent.
 type SettingsPathEdit struct {
-	Path   []string
-	Value  interface{}
-	Delete bool
+	Path          []string
+	Value         interface{}
+	Delete        bool
+	ZeroOmitempty bool
 }
 
 // ErrSettingsPathEditUnsupported is returned when an edit cannot be made in
@@ -105,6 +113,11 @@ func PrepareSettingsPathEdits(dir string, edits []SettingsPathEdit) (*StagedSett
 
 	staged := &StagedSettingsEdit{target: target}
 	for _, e := range edits {
+		if e.ZeroOmitempty && !e.Delete {
+			if len(e.Path) == 1 || yamlMappingAtPath(root, e.Path[:len(e.Path)-1]) {
+				e.Delete = true
+			}
+		}
 		cur, found := yamlValueAtPath(root, e.Path)
 		if e.Delete {
 			if !found {
@@ -166,6 +179,20 @@ func PrepareSettingsPathEdits(dir string, edits []SettingsPathEdit) (*StagedSett
 	}
 	staged.data = out
 	return staged, nil
+}
+
+// yamlMappingAtPath reports whether path within root is a mapping (an
+// existing block, possibly empty).
+func yamlMappingAtPath(root *yamlv3.Node, path []string) bool {
+	m := resolveAlias(root)
+	for _, k := range path {
+		if m == nil || m.Kind != yamlv3.MappingNode {
+			return false
+		}
+		_, v := findMapKey(m, k)
+		m = resolveAlias(v)
+	}
+	return m != nil && m.Kind == yamlv3.MappingNode
 }
 
 // yamlValueAtPath decodes the value at path within the mapping root.

@@ -34,7 +34,7 @@ func TestValidateServerMode(t *testing.T) {
 			t.Errorf("ValidateServerMode(%q) = nil, want an error", m)
 			continue
 		}
-		for _, want := range []string{`"workstation"`, `"hosted"`, `"production"`, "--hosted"} {
+		for _, want := range []string{`"workstation"`, `"hosted"`, `"production"`, "SCION_SERVER_MODE", "use --hosted to select hosted mode"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q should name %s", err, want)
 			}

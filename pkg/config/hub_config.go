@@ -1823,7 +1823,7 @@ func ValidateServerMode(mode string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid server.mode %q: must be one of \"\" (workstation), \"workstation\", \"hosted\" or \"production\" (legacy for hosted); or start the server with --hosted", mode)
+	return fmt.Errorf("invalid server.mode %q: must be one of \"\" (workstation), \"workstation\", \"hosted\" or \"production\" (legacy for hosted), case-sensitive; fix server.mode (settings.yaml or SCION_SERVER_MODE); use --hosted to select hosted mode", mode)
 }
 
 // LoadServerMode reads just the server mode from settings.yaml without loading the full config.

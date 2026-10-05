@@ -189,3 +189,83 @@ func TestSettingsFileLock_ConcurrentWritersKeepBothUpdates(t *testing.T) {
 		}
 	}
 }
+
+// LoadModifySaveVersionedSettings holds the lock from the read to the write,
+// so a concurrent UpdateVersionedSetting is not reverted by the struct
+// rewrite; ErrSkipSave writes nothing.
+func TestLoadModifySaveVersionedSettings(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		dir, path := writePathEditFixture(t, pathEditFixture)
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs <- LoadModifySaveVersionedSettings(dir, func(vs *VersionedSettings) error {
+				time.Sleep(5 * time.Millisecond) // widen the read-to-write window
+				vs.ImageRegistry = fmt.Sprintf("reg-%d", i)
+				return nil
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			errs <- UpdateVersionedSetting(dir, "hub.brokerToken", fmt.Sprintf("tok-%d", i))
+		}()
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, _ := os.ReadFile(path)
+		if !strings.Contains(string(data), fmt.Sprintf("image_registry: reg-%d", i)) || !strings.Contains(string(data), fmt.Sprintf("broker_token: tok-%d", i)) {
+			t.Fatalf("iteration %d lost an update:\n%s", i, data)
+		}
+	}
+
+	dir, path := writePathEditFixture(t, pathEditFixture)
+	before, _ := os.ReadFile(path)
+	if err := LoadModifySaveVersionedSettings(dir, func(*VersionedSettings) error { return ErrSkipSave }); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Error("ErrSkipSave wrote the file")
+	}
+}
+
+// ZeroOmitempty: removed when the parent block exists (absent and zero load
+// the same there, and an already-absent key is a no-op), written when it
+// does not, which creates the block.
+func TestPrepareSettingsPathEdits_ZeroOmitempty(t *testing.T) {
+	dir, path := writePathEditFixture(t, pathEditFixture)
+	unlock := LockSettingsFile()
+	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{
+		{Path: []string{"server", "broker", "enabled"}, Value: false, ZeroOmitempty: true},      // parent exists: delete
+		{Path: []string{"server", "hub", "cors", "enabled"}, Value: false, ZeroOmitempty: true}, // parent absent: write
+		{Path: []string{"server", "log_format"}, Value: "", ZeroOmitempty: true},                // already absent: no-op
+	})
+	if err == nil {
+		err = staged.Commit()
+	}
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"server.broker.enabled", "server.hub.cors.enabled"}; fmt.Sprint(staged.Changed) != fmt.Sprint(want) {
+		t.Errorf("Changed = %v, want %v", staged.Changed, want)
+	}
+	var m map[string]interface{}
+	data, _ := os.ReadFile(path)
+	if err := yamlv3.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	srv := m["server"].(map[string]interface{})
+	if _, ok := srv["broker"].(map[string]interface{})["enabled"]; ok {
+		t.Errorf("server.broker.enabled should be removed:\n%s", data)
+	}
+	cors, _ := srv["hub"].(map[string]interface{})["cors"].(map[string]interface{})
+	if v, ok := cors["enabled"]; !ok || v != false {
+		t.Errorf("server.hub.cors.enabled should be written as false:\n%s", data)
+	}
+}
