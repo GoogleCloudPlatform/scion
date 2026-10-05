@@ -561,7 +561,27 @@ func TestResolveLocalKeysTarget_RunningContainerWithCreatedSibling(t *testing.T)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
 	assert.Contains(t, err.Error(), "agent 'reviewer' exists in project")
+	assert.Contains(t, err.Error(), "'scion start --project "+projectPath+" reviewer'", "the hint must repeat the --project the user passed")
 	assert.Empty(t, target.ContainerID, "the created sibling must never resolve to the running container")
+}
+
+func TestNewLocalKeysNotRunningError_StartHint(t *testing.T) {
+	tests := []struct {
+		name, projectName, projectFlag, want string
+	}{
+		{name: "no --project", projectName: "proj", want: "'scion start reviewer'"},
+		{name: "--project passed", projectName: "proj", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+		{name: "--project with a space is quoted", projectName: "proj", projectFlag: "/work/my proj", want: `'scion start --project "/work/my proj" reviewer'`},
+		{name: "no project name", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := newLocalKeysNotRunningError("reviewer", tt.projectName, tt.projectFlag)
+			assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Contains(t, err.Error(), "is not running")
+		})
+	}
 }
 
 // TestResolveLocalKeysTarget_HubLinkedCreatedAgent covers a Hub-linked

@@ -886,7 +886,10 @@ func writeCreatedAgentDir(t *testing.T, projectPath, name string) {
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
-	infoData, _ := json.Marshal(api.AgentInfo{Name: name, Phase: "created"})
+	infoData, err := json.Marshal(api.AgentInfo{Name: name, Phase: "created"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +974,10 @@ func TestListCreatedAgentScanWithoutNameFilterUnchanged(t *testing.T) {
 func writeCreatedAgentDirWithInfo(t *testing.T, projectPath string, info api.AgentInfo) {
 	t.Helper()
 	writeCreatedAgentDir(t, projectPath, info.Name)
-	data, _ := json.Marshal(info)
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(projectPath, "agents", info.Name, "home", "agent-info.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -984,9 +990,12 @@ func writeHubLinkedSettings(t *testing.T, projectPath, hubProjectID string) {
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"hub": map[string]interface{}{"projectId": hubProjectID},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(projectPath, "settings.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -535,7 +536,7 @@ func resolveLocalKeysTarget(ctx context.Context, mgr agent.Manager, agentName st
 	switch len(candidates) {
 	case 0:
 		if createdOnly {
-			return api.AgentInfo{}, localKeysScope{}, newLocalKeysNotRunningError(agentName, projectName)
+			return api.AgentInfo{}, localKeysScope{}, newLocalKeysNotRunningError(agentName, projectName, projectPath)
 		}
 		if projectName != "" {
 			return api.AgentInfo{}, localKeysScope{}, fmt.Errorf("agent '%s' not found in project %q", agentName, projectName)
@@ -574,11 +575,26 @@ type localKeysNotRunningError struct{ msg string }
 func (e *localKeysNotRunningError) Error() string { return e.msg }
 func (e *localKeysNotRunningError) Unwrap() error { return agentkeys.ErrAgentNotRunning }
 
-func newLocalKeysNotRunningError(agentName, projectName string) error {
-	if projectName != "" {
-		return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists in project %q but is not running; start it with 'scion start %s'", agentName, projectName, agentName)}
+// projectFlag is the --project value the user passed, if any; it is
+// repeated in the start hint so the hint targets the same project.
+func newLocalKeysNotRunningError(agentName, projectName, projectFlag string) error {
+	hint := "scion start " + agentName
+	if projectFlag != "" {
+		hint = "scion start --project " + shellQuoteIfNeeded(projectFlag) + " " + agentName
 	}
-	return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists but is not running; start it with 'scion start %s'", agentName, agentName)}
+	if projectName != "" {
+		return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists in project %q but is not running; start it with '%s'", agentName, projectName, hint)}
+	}
+	return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists but is not running; start it with '%s'", agentName, hint)}
+}
+
+// shellQuoteIfNeeded double-quotes s when it contains characters a shell
+// would split on or interpret, so a copied hint stays one argument.
+func shellQuoteIfNeeded(s string) string {
+	if strings.ContainsAny(s, " \t\n'\"$`\\&;|<>()*?[]{}~#!") {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func init() {

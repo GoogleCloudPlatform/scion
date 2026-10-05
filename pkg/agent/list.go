@@ -36,7 +36,8 @@ import (
 // The runtime layer applies filter to each container's labels. The on-disk
 // scan applies the same filter through the same matcher
 // (scionruntime.LabelsMatchFilter), evaluated against createdAgentLabels:
-// the label set the agent's container would carry once started. Per key:
+// an approximation, from what was recorded at create time, of the label
+// set the agent's container would carry once started. Per key:
 //
 //   - scion.agent: always "true" for an on-disk agent.
 //   - scion.name: the agent directory name (a slug).
@@ -44,8 +45,11 @@ import (
 //   - scion.project_id: the project's Hub-linked project ID, the value the
 //     container label is populated from; empty for an unlinked project, so a
 //     project ID filter never matches its created agents (nor its containers).
-//   - scion.template, scion.harness_config, scion.harness_auth: from the
-//     agent's recorded info.
+//   - scion.template, scion.harness_config: the values recorded when the
+//     agent was created. Start may resolve them again, so the running
+//     container's labels can differ.
+//   - scion.harness_auth: resolved only at start, so it is empty for a
+//     created agent and a non-empty filter never matches one.
 //   - status: no agent carries a "status" label, so a status filter matches
 //     no created agent, exactly as it matches no container.
 //   - Any other key (for example agent_id, assigned only at start) is unknown
@@ -307,10 +311,12 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	return agents, nil
 }
 
-// createdAgentLabels returns the label set a created agent's container
-// would carry once started (see the Labels/Annotations built for
+// createdAgentLabels approximates the label set a created agent's
+// container would carry once started (see the Labels/Annotations built for
 // runtime.RunConfig in run.go), for matching List's filter against an
-// on-disk agent. projectID is consulted only when filter asks for the
+// on-disk agent. Template and harness config are the values recorded at
+// create time (start may resolve them again); harness auth is resolved only
+// at start, so it is normally empty here. projectID is consulted only when filter asks for the
 // project ID, because resolving it loads the project's settings.
 func createdAgentLabels(name, projectName, projectPath string, info *api.AgentInfo, filter map[string]string, projectID func() string) map[string]string {
 	labels := map[string]string{
