@@ -1809,6 +1809,23 @@ func normalizeCORSList(list []string) []string {
 	return out
 }
 
+// validServerModes are the server.mode values the settings schema allows.
+// "" means workstation; "production" is the legacy spelling of "hosted".
+var validServerModes = []string{"", "workstation", "hosted", "production"}
+
+// ValidateServerMode returns an error naming the valid values when mode is
+// not one of them. An unknown value (a typo such as "Hosted" or "prod") used
+// to mean workstation silently, which enables dev-auth defaults and lets the
+// admin API write Layer-0 settings to settings.yaml.
+func ValidateServerMode(mode string) error {
+	for _, m := range validServerModes {
+		if mode == m {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid server.mode %q: must be one of \"\" (workstation), \"workstation\", \"hosted\" or \"production\" (legacy for hosted); or start the server with --hosted", mode)
+}
+
 // LoadServerMode reads just the server mode from settings.yaml without loading the full config.
 // Returns "hosted" if mode is set to "hosted" (or legacy "production"), empty string otherwise.
 func LoadServerMode() string {

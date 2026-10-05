@@ -978,6 +978,12 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Reject an unknown server.mode (settings.yaml or SCION_SERVER_MODE)
+	// rather than silently treating it as workstation.
+	if err := config.ValidateServerMode(cfg.Mode); err != nil {
+		return nil, err
+	}
+
 	// Check if hosted mode is set in config
 	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
 		if cfg.Mode == "hosted" || cfg.Mode == "production" {
