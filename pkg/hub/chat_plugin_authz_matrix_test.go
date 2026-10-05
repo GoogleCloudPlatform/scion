@@ -377,23 +377,21 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 	})
 
 	t.Run("account link endpoints accept requests without the linked user", func(t *testing.T) {
-		t.Run("discord link", func(t *testing.T) {
+		t.Run("discord link and link status", func(t *testing.T) {
 			w := env.do(t, http.MethodPost, "/api/v1/discord/link", noUser,
 				map[string]string{"code": "CHATMATRIX1", "discordUserId": "d-123"})
-			assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-		})
-		t.Run("telegram link", func(t *testing.T) {
-			w := env.do(t, http.MethodPost, "/api/v1/telegram/link", noUser,
-				map[string]string{"code": "CHATMATRIX2", "telegramUserId": "t-123"})
-			assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-		})
-		t.Run("discord link status", func(t *testing.T) {
-			w := env.do(t, http.MethodGet, "/api/v1/discord/link/status?discord_user_id=d-123", noUser, nil)
+			require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+			w = env.do(t, http.MethodGet, "/api/v1/discord/link/status?discord_user_id=d-123", noUser, nil)
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
 		})
-		t.Run("telegram link status", func(t *testing.T) {
-			w := env.do(t, http.MethodGet, "/api/v1/telegram/link/status?telegram_user_id=t-123", noUser, nil)
+		t.Run("telegram link and link status", func(t *testing.T) {
+			w := env.do(t, http.MethodPost, "/api/v1/telegram/link", noUser,
+				map[string]string{"code": "CHATMATRIX2", "telegramUserId": "t-123"})
+			require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+			w = env.do(t, http.MethodGet, "/api/v1/telegram/link/status?telegram_user_id=t-123", noUser, nil)
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
 		})
