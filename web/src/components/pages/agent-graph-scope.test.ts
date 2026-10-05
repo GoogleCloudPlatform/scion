@@ -1752,8 +1752,9 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
     }
 
     it('stays in the graph with its deletion view through a re-drain of compact rows; the live delete removes it and a later drain keeps it out', async () => {
-      // Compact rows carry no deletion field, and the hub keeps listing an
-      // agent whose delete it accepted until the delete finishes.
+      // These fake rows carry no deletion field, so the re-drain checks that
+      // the compact merge keeps the store's deletion view; the hub keeps
+      // listing an agent whose delete it accepted until the delete finishes.
       const fake = newFake(25);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph();
@@ -1881,6 +1882,95 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(fake.requests).toEqual([]);
       expect(g(el).agents).toHaveLength(25);
       expect(member(el, id)?.deletion?.state).toBe('deleting');
+    });
+  });
+
+  describe('a cold-loaded compact set with deletion views', () => {
+    const deletingView = (): DeletionInfo => ({
+      state: 'deleting',
+      soft: false,
+      claim: 2,
+      startedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    const failedView = (): DeletionInfo => ({
+      state: 'failed',
+      code: 'runtime_error',
+      error: 'broker unreachable',
+      soft: false,
+      claim: 1,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+
+    /**
+     * Gives `failedId` a failed view and `deletingId` a deleting one, and
+     * every other row an explicit null, as the hub's compact rows carry.
+     */
+    function withDeletions(fake: Fake, failedId: string, deletingId: string): void {
+      fake.agents = fake.agents.map((a) => ({
+        ...a,
+        deletion: a.id === failedId ? failedView() : a.id === deletingId ? deletingView() : null,
+      }));
+    }
+
+    /** The compact deletion badge's text and title on the graph node for `id`. */
+    async function nodeBadge(
+      el: TestEl,
+      id: string
+    ): Promise<{ text: string; title: string } | null> {
+      const badge = treeNode(el, id)?.querySelector<
+        HTMLElement & { updateComplete: Promise<boolean> }
+      >('scion-deletion-badge');
+      await badge?.updateComplete;
+      const inner = badge?.shadowRoot?.querySelector<HTMLElement>('.badge');
+      return inner ? { text: inner.textContent?.trim() ?? '', title: inner.title } : null;
+    }
+
+    async function expectBadges(el: TestEl, failedId: string, deletingId: string, plainId: string) {
+      expect(await nodeBadge(el, failedId)).toEqual({
+        text: 'Delete failed',
+        title: 'Delete failed: broker unreachable',
+      });
+      expect(await nodeBadge(el, deletingId)).toEqual({ text: 'Deleting…', title: 'Deleting…' });
+      expect(await nodeBadge(el, plainId)).toBeNull();
+    }
+
+    it('the unscoped drain renders a failed and a deleting row with the compact badge at once', async () => {
+      const fake = newFake(25);
+      const [failedId, deletingId, plainId] = [
+        fake.agents[2].id,
+        fake.agents[5].id,
+        fake.agents[7].id,
+      ];
+      withDeletions(fake, failedId, deletingId);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph();
+      expect(graphRequests(fake)).toEqual([ALL_PAGE()]);
+      expect(g(el).agents).toHaveLength(25);
+      await expectBadges(el, failedId, deletingId, plainId);
+    });
+
+    it('the fit probe renders a failed and a deleting row with the compact badge at once', async () => {
+      const fake = newFake(25);
+      const [failedId, deletingId, plainId] = projectIds(fake, 'p-1');
+      withDeletions(fake, failedId, deletingId);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      await expectBadges(el, failedId, deletingId, plainId);
+    });
+
+    it('the project drain renders a failed and a deleting row with the compact badge at once', async () => {
+      const fake = newFake(1200);
+      const [failedId, deletingId, plainId] = projectIds(fake, 'p-1');
+      withDeletions(fake, failedId, deletingId);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph('?project=p-1');
+      expect(graphRequests(fake)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
+      expect(ids(g(el).agents)).toEqual(projectIds(fake, 'p-1'));
+      await expectBadges(el, failedId, deletingId, plainId);
     });
   });
 
