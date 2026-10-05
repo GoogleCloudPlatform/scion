@@ -3014,12 +3014,8 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// Look the agent up in the runtime its saved profile selects first
 	// (see ensureAgentOwnRuntime), as handleAgentByID does for the other
 	// existing-agent actions.
-	if ownCtx := s.ensureAgentOwnRuntime(r.Context(), id, projectID, r.URL.Query().Get("projectPath")); ownCtx != r.Context() {
-		r = r.WithContext(ownCtx)
-		if own := agentOwnRuntimeFrom(ownCtx); own != nil {
-			ctx = context.WithValue(ctx, agentOwnRuntimeKey{}, own)
-		}
-	}
+	ctx = s.ensureAgentOwnRuntime(ctx, id, projectID, r.URL.Query().Get("projectPath"))
+	r = r.WithContext(ctx)
 	// Target the runtime holding the agent, recorded runtime type first,
 	// failing only when no runtime lists it and the recorded type has no
 	// manager here (see applyRecordedRuntime).
