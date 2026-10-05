@@ -165,6 +165,9 @@ type createCompensation struct {
 // cleanupFailedCreate). Credential revocation, the broker-side delete and
 // the quota release stay with the caller.
 func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation) error {
+	if c.Agent == nil {
+		return fmt.Errorf("%w: no agent to compensate", errAgentCreateWriteInvalid)
+	}
 	opID := c.OpID
 	if opID == "" {
 		opID = api.NewUUID()
