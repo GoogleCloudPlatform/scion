@@ -111,6 +111,7 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	if projectID != "" {
 		path += "?projectId=" + url.QueryEscape(projectID)
 	}
+	path = withRunIDURL(path, extras.RunID)
 
 	payload := map[string]interface{}{}
 	if task != "" {
@@ -193,6 +194,7 @@ func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID,
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRunIDQuery(query, extras.RunID)
 	query = withRecordedRuntimeQuery(ctx, query)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {

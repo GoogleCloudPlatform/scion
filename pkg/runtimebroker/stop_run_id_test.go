@@ -302,27 +302,27 @@ func TestStopAgent_RunIDOrderingAgainstRuntimeUnavailable(t *testing.T) {
 func TestLaunchRegistry_InFlightOtherRun(t *testing.T) {
 	r := newLaunchRegistry()
 	key := launchKey{ProjectID: "p", Slug: "dev"}
-	if _, ok := r.inFlightOtherRun(key, "run-a"); ok {
+	if _, ok := r.otherRunInFlightID(key, "run-a"); ok {
 		t.Fatal("empty registry reported a launch")
 	}
 	rec := newLaunchRecord("1", "dev", "create", "", time.Time{}, func() {})
 	rec.RunID = "run-b"
 	r.Begin(key, rec)
-	if current, ok := r.inFlightOtherRun(key, "run-a"); !ok || current != "run-b" {
+	if current, ok := r.otherRunInFlightID(key, "run-a"); !ok || current != "run-b" {
 		t.Errorf("launch of run-b reported as (%q, %v) for run-a, want (run-b, true)", current, ok)
 	}
-	if _, ok := r.inFlightOtherRun(key, "run-b"); ok {
+	if _, ok := r.otherRunInFlightID(key, "run-b"); ok {
 		t.Error("launch of the requested run reported as another run")
 	}
-	if _, ok := r.inFlightOtherRun(key, ""); ok {
+	if _, ok := r.otherRunInFlightID(key, ""); ok {
 		t.Error("an empty run ID must never count")
 	}
 	rec.RunID = ""
-	if _, ok := r.inFlightOtherRun(key, "run-a"); ok {
+	if _, ok := r.otherRunInFlightID(key, "run-a"); ok {
 		t.Error("a launch without a run ID must never count")
 	}
 	var nilReg *launchRegistry
-	if _, ok := nilReg.inFlightOtherRun(key, "run-a"); ok {
+	if _, ok := nilReg.otherRunInFlightID(key, "run-a"); ok {
 		t.Error("nil registry reported a launch")
 	}
 }

@@ -60,11 +60,18 @@ func newStartTracker() *startTracker {
 // after the start (including its cleanup) has fully returned. A nil tracker
 // tracks nothing and returns ctx unchanged.
 func (t *startTracker) begin(ctx context.Context, key launchKey) (context.Context, func()) {
+	return t.beginRun(ctx, key, "")
+}
+
+// beginRun is begin with the start's run recorded from the outset
+// (ptone/scion#2550), so a run-scoped stop never sees this start without
+// its run. An empty runID is begin exactly.
+func (t *startTracker) beginRun(ctx context.Context, key launchKey, runID string) (context.Context, func()) {
 	if t == nil {
 		return ctx, func() {}
 	}
 	startCtx, cancel := context.WithCancel(ctx)
-	e := &trackedStart{cancel: cancel, done: make(chan struct{})}
+	e := &trackedStart{cancel: cancel, done: make(chan struct{}), runID: runID}
 	t.mu.Lock()
 	set := t.entries[key]
 	if set == nil {
@@ -153,6 +160,23 @@ func (t *startTracker) cancelAndWaitRun(ctx context.Context, key launchKey, runI
 	}
 	t.mu.Unlock()
 	return cancelAndWaitAll(ctx, waits), len(waits)
+}
+
+// hasRun reports whether a start of run runID exactly is tracked for key.
+// A start with no run recorded does not count, so it never suppresses the
+// refusal of a stale stop. False for an empty runID.
+func (t *startTracker) hasRun(key launchKey, runID string) bool {
+	if t == nil || runID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for e := range t.entries[key] {
+		if e.runID == runID {
+			return true
+		}
+	}
+	return false
 }
 
 // otherRun reports whether a start of a run other than runID is tracked for

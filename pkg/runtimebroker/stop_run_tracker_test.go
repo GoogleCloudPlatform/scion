@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -256,5 +257,199 @@ func TestStartTracker_RunSelection(t *testing.T) {
 	nilTracker.setRunID(ctxB, "run-x")
 	if _, ok := nilTracker.otherRun(k, "run-a"); ok {
 		t.Error("nil tracker reported a start")
+	}
+}
+
+// Review round (merge) F1: a stale start of run-a (its hub cancel lost)
+// and the current run-b start are both tracked. A stop for run-b with no
+// container yet cancels run-b's start and is accepted; run-a's start, of
+// another run, is left alone. Never a 404 that would lose the stop.
+func TestStopAgent_BothRunsTrackedStopCurrentRun(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	relA, doneA := startInFlight(t, srv, mgr, "run-a", nil)
+	_, doneB := startInFlight(t, srv, mgr, "run-b", nil)
+
+	stopDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopDone <- actionWithRun(srv, "stop", "runId=run-b", "") }()
+	waitStopped(t, doneB)
+	if sw := <-stopDone; sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0 (no container)", mgr.StopCalls())
+	}
+	assertStartNotCancelled(t, srv, relA, doneA)
+}
+
+// The re-lookup after the cancel: run-b's cancelled start leaves its
+// container, which the stop then stops, still with run-a's start tracked.
+func TestStopAgent_BothRunsTrackedReLookupStopsOwnContainer(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	relA, doneA := startInFlight(t, srv, mgr, "run-a", nil)
+	_, doneB := startInFlight(t, srv, mgr, "run-b", func() {
+		setAgents(mgr, trackedRunEntry("c-b", "run-b"))
+	})
+
+	stopDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopDone <- actionWithRun(srv, "stop", "runId=run-b", "") }()
+	waitStopped(t, doneB)
+	if sw := <-stopDone; sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 1 || mgr.lastStopAgentID != "c-b" || mgr.lastStopRunID != "run-b" {
+		t.Errorf("stop calls = %d, last {%q, %q}; want one stop of {c-b, run-b}",
+			mgr.StopCalls(), mgr.lastStopAgentID, mgr.lastStopRunID)
+	}
+	assertStartNotCancelled(t, srv, relA, doneA)
+}
+
+// A stop for run-b while run-b's start is in flight and run-a's stale
+// container still holds the name (for example during a restart): the stop
+// still cancels run-b's start, so it is not lost, and never stops run-a's
+// container. Because run-a's entry holds the name afterwards, the answer is
+// the run-mismatch 404 (refusal on a matched entry of another run only).
+func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	setAgents(mgr, trackedRunEntry("c-a", "run-a"))
+	_, doneB := startInFlight(t, srv, mgr, "run-b", nil)
+
+	stopDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopDone <- actionWithRun(srv, "stop", "runId=run-b", "") }()
+	waitStopped(t, doneB)
+	sw := <-stopDone
+	if sw.Code != http.StatusNotFound {
+		t.Fatalf("stop run-b: status %d, want 404 (run-a holds the name): %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", mgr.StopCalls())
+	}
+}
+
+// A stop for run-b whose async launch is registered while a tracked start
+// of run-a is also in flight: the stop wakes run-b's launch, leaves run-a's
+// start alone, and is accepted.
+func TestStopAgent_OwnLaunchRegisteredWithOtherRunsStartTracked(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	relA, doneA := startInFlight(t, srv, mgr, "run-a", nil)
+	launchCancels := 0
+	rec := newLaunchRecord("async-1", "same-name", "create", "", time.Time{}, func() { launchCancels++ })
+	rec.RunID = "run-b"
+	srv.launchRegistry.Begin(launchKey{Slug: "same-name"}, rec)
+
+	sw := actionWithRun(srv, "stop", "runId=run-b", "")
+	if sw.Code != http.StatusAccepted {
+		t.Fatalf("stop run-b: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if launchCancels == 0 {
+		t.Error("the stop did not wake run-b's launch")
+	}
+	assertStartNotCancelled(t, srv, relA, doneA)
+}
+
+// F3: a stale run-a stop that matches run-b's container while a start with
+// no run recorded is in flight gets the 404 before any cancel: the run-less
+// start is not cancelled, and nothing is stopped.
+func TestStopAgent_StaleRunIDMismatchBeforeCancellingRunlessStart(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	setAgents(mgr, trackedRunEntry("c-b", "run-b"))
+	release, done := startInFlight(t, srv, mgr, "", nil)
+
+	sw := actionWithRun(srv, "stop", "runId=run-a", "")
+	if sw.Code != http.StatusNotFound {
+		t.Fatalf("stale stop: status %d, want 404: %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 0 {
+		t.Errorf("stop calls = %d, want 0", mgr.StopCalls())
+	}
+	assertStartNotCancelled(t, srv, release, done)
+}
+
+// F4: a legacy stop (no runId) cancels and waits for the in-flight start
+// before it looks the agent up, so it sees, and stops, the container the
+// start's cleanup left behind (GoogleCloudPlatform/scion#2482's order).
+func TestStopAgent_LegacyLooksUpAfterCancelAndWait(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	_, done := startInFlight(t, srv, mgr, "", func() {
+		setAgents(mgr, trackedRunEntry("c-1", ""))
+	})
+	stopDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopDone <- actionWithRun(srv, "stop", "", "") }()
+	waitStopped(t, done)
+	if sw := <-stopDone; sw.Code != http.StatusAccepted {
+		t.Fatalf("legacy stop: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if mgr.StopCalls() != 1 || mgr.lastStopAgentID != "c-1" {
+		t.Errorf("stop calls = %d, last %q; want one stop of c-1", mgr.StopCalls(), mgr.lastStopAgentID)
+	}
+}
+
+// F2: the runId query parameter is recorded when the start is tracked, so a
+// stale stop that arrives while the start is still reading its body gets
+// the 404 and cancels nothing.
+func TestStopAgent_StaleStopDuringStartBodyRead(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			srv, mgr, _, _ := newSyncStartTestServer(t)
+			started, release := make(chan struct{}), make(chan struct{})
+			blockedStart(mgr, started, release, nil)
+
+			bodyR, bodyW := io.Pipe()
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/same-name/"+action+"?runId=run-b", bodyR)
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				done <- w
+			}()
+			deadline := time.Now().Add(syncStartTestTimeout)
+			for !snapshotHas(srv, "same-name") {
+				if time.Now().After(deadline) {
+					t.Fatal("the start was never tracked")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			// The handler is blocked reading its body.
+			sw := actionWithRun(srv, "stop", "runId=run-a", "")
+			if sw.Code != http.StatusNotFound {
+				t.Fatalf("stale stop during the body read: status %d, want 404: %s", sw.Code, sw.Body.String())
+			}
+
+			if _, err := bodyW.Write([]byte(`{"runId":"run-b"}`)); err != nil {
+				t.Fatal(err)
+			}
+			_ = bodyW.Close()
+			waitSignal(t, started, "the start")
+			assertStartNotCancelled(t, srv, release, done)
+		})
+	}
+}
+
+// F2: when the runId query parameter and the body differ, the body's run is
+// the one recorded on the tracked start (it is the run StartOptions carries;
+// see TestRunID_ThreadedIntoStartOptions); an empty query parameter behaves
+// as an absent one.
+func TestStartAgent_RunIDQueryAndBody(t *testing.T) {
+	for _, tc := range []struct{ name, query, body, want string }{
+		{"differ: body wins", "runId=run-q", `{"runId":"run-b"}`, "run-b"},
+		{"query only", "runId=run-q", `{}`, "run-q"},
+		{"empty query param", "runId=", `{"runId":"run-b"}`, "run-b"},
+		{"absent query param", "", `{"runId":"run-b"}`, "run-b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mgr, _, _ := newSyncStartTestServer(t)
+			started, release := make(chan struct{}), make(chan struct{})
+			blockedStart(mgr, started, release, nil)
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- actionWithRun(srv, "start", tc.query, tc.body) }()
+			waitSignal(t, started, "the start")
+
+			if current, ok := srv.startsInFlight.otherRun(launchKey{Slug: "same-name"}, "run-x"); !ok || current != tc.want {
+				t.Errorf("tracked run = (%q, %v), want %q", current, ok, tc.want)
+			}
+			close(release)
+			<-done
+		})
 	}
 }

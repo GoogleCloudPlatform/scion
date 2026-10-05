@@ -208,13 +208,13 @@ func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
 // on disk. False without a run ID on either side, matching
 // CancelLocalForRun.
 func (r *launchRegistry) OtherRunInFlight(key launchKey, runID string) bool {
-	_, ok := r.inFlightOtherRun(key, runID)
+	_, ok := r.otherRunInFlightID(key, runID)
 	return ok
 }
 
-// inFlightOtherRun is OtherRunInFlight that also returns the other run, for
+// otherRunInFlightID is OtherRunInFlight that also returns the other run ID, for
 // a run-scoped stop to report which run holds the name (ptone/scion#2550).
-func (r *launchRegistry) inFlightOtherRun(key launchKey, runID string) (string, bool) {
+func (r *launchRegistry) otherRunInFlightID(key launchKey, runID string) (string, bool) {
 	if r == nil || runID == "" {
 		return "", false
 	}
@@ -225,6 +225,18 @@ func (r *launchRegistry) inFlightOtherRun(key launchKey, runID string) (string, 
 		return rec.RunID, true
 	}
 	return "", false
+}
+
+// runInFlight reports whether the launch registered under key is of run
+// runID exactly. False for an empty runID or a launch with no run ID.
+func (r *launchRegistry) runInFlight(key launchKey, runID string) bool {
+	if r == nil || runID == "" {
+		return false
+	}
+	r.mu.Lock()
+	rec := r.records[key]
+	r.mu.Unlock()
+	return rec != nil && rec.RunID == runID
 }
 
 // Finish closes rec's done channel and removes it from the registry if it is

@@ -199,6 +199,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task
@@ -287,6 +288,7 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
