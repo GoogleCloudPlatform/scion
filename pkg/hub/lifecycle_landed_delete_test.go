@@ -150,7 +150,7 @@ func (p *landedFaultStore) GetAgent(ctx context.Context, id string) (*store.Agen
 
 func (p *landedFaultStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
 	if p.armed.Load() && u.ClearExit && p.delOnWrite.CompareAndSwap(true, false) {
-		if err := p.Store.DeleteAgent(ctx, id); err != nil {
+		if err := p.DeleteAgent(ctx, id); err != nil {
 			return err
 		}
 	}
