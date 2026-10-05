@@ -266,12 +266,33 @@ func TestV2_AgentRefresh_StaleCacheLooksUpSender(t *testing.T) {
 	counting := &mappingLookupCountingStore{Store: b.store}
 	b.store = counting
 
-	slugs, email, err := b.getProjectAgents(context.Background(), "proj-1", &TGUser{ID: 456})
+	slugs, link, err := b.getProjectAgents(context.Background(), "proj-1", &TGUser{ID: 456})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"coder"}, slugs)
-	assert.Equal(t, "alice@example.com", email)
+	assert.Equal(t, "alice@example.com", link.email())
 	assert.Equal(t, 1, counting.lookups)
 	calls := hub.agentCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, principal, calls[0].OnBehalfOf)
+}
+
+func TestV2_Routing_ReusesSenderLookupFromRefresh(t *testing.T) {
+	b, _, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	linkTestUser(t, b.store, 456, "alice@example.com")
+	saveStaleAgentCache(t, b.store, "proj-1", "coder")
+	counting := &mappingLookupCountingStore{Store: b.store}
+	b.store = counting
+	delivered := make(chan *messages.StructuredMessage, 1)
+	b.InboundHandler = func(_ string, m *messages.StructuredMessage) { delivered <- m }
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	select {
+	case m := <-delivered:
+		assert.Equal(t, "user:alice@example.com", m.Sender)
+	case <-time.After(2 * time.Second):
+		t.Fatal("message not routed")
+	}
+	assert.Equal(t, 1, counting.lookups, "the refresh lookup is reused for routing")
 }
