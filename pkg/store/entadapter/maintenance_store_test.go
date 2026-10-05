@@ -92,7 +92,6 @@ func TestSeedMaintenanceOperations_PartialAndRepeated(t *testing.T) {
 	assert.Equal(t, before.ID, after.ID, "existing row must not be replaced")
 	assert.Equal(t, "pre-existing title", after.Title, "existing row must not be overwritten")
 	assert.Equal(t, store.MaintenanceStatusCompleted, after.Status, "existing row's state must be preserved")
-
 }
 
 // TestSeedMaintenanceOperations_ConcurrentOnEmptyStore: seeders that start

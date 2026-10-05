@@ -175,6 +175,9 @@ func (s *MaintenanceStore) SeedMaintenanceOperations(ctx context.Context) error 
 			SetCategory(op.Category).
 			SetStatus(store.MaintenanceStatusPending))
 	}
+	// Must stay Exec, never Save: when DO NOTHING skips rows, RETURNING yields
+	// fewer ids than builders and ent assigns them to the nodes by position,
+	// so Save would hand back nodes carrying the wrong ids.
 	return s.client.MaintenanceOperation.CreateBulk(builders...).
 		OnConflictColumns(maintenanceoperation.FieldKey).
 		DoNothing().
