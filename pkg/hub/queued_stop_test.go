@@ -172,7 +172,7 @@ type raceStartBeforeStopClaimStore struct {
 func (s *raceStartBeforeStopClaimStore) ClaimAgentStop(ctx context.Context, agentID, owner string, intentAt time.Time, ttl time.Duration) (store.StartClaim, error) {
 	if !s.fired {
 		s.fired = true
-		if _, err := s.Store.ClaimAgentStart(ctx, agentID, "user-hub", store.StartClaimUser, "", time.Minute); err != nil {
+		if _, err := s.ClaimAgentStart(ctx, agentID, "user-hub", store.StartClaimUser, "", time.Minute); err != nil {
 			return store.StartClaim{}, err
 		}
 	}
