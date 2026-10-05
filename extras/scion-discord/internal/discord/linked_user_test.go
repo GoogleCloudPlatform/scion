@@ -830,3 +830,151 @@ func TestLookupUserMapping_LogsFailedLookup(t *testing.T) {
 	assert.Nil(t, lookupUserMapping(context.Background(), store, log, "du-carol"))
 	assert.Empty(t, buf.String(), "an unlinked user is not logged")
 }
+
+// writeCountingStore wraps a Store and counts default-agent writes.
+type writeCountingStore struct {
+	Store
+	mu     sync.Mutex
+	writes int
+}
+
+func (w *writeCountingStore) count() {
+	w.mu.Lock()
+	w.writes++
+	w.mu.Unlock()
+}
+
+func (w *writeCountingStore) UpdateChannelLink(ctx context.Context, link *ChannelLink) error {
+	w.count()
+	return w.Store.UpdateChannelLink(ctx, link)
+}
+
+func (w *writeCountingStore) SetThreadDefault(ctx context.Context, channelID, threadID, agentSlug string) error {
+	w.count()
+	return w.Store.SetThreadDefault(ctx, channelID, threadID, agentSlug)
+}
+
+func (w *writeCountingStore) DeleteThreadDefault(ctx context.Context, channelID, threadID string) error {
+	w.count()
+	return w.Store.DeleteThreadDefault(ctx, channelID, threadID)
+}
+
+func (w *writeCountingStore) writeCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes
+}
+
+func TestDefaultAgentButtons_RequireLinkedUser(t *testing.T) {
+	const threadID = "thread-9"
+	ctx := context.Background()
+
+	channelDefault := func(t *testing.T, e *linkedUserEnv) string {
+		t.Helper()
+		link, err := e.store.GetChannelLink(ctx, luChannel)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		return link.DefaultAgent
+	}
+	threadDefault := func(t *testing.T, e *linkedUserEnv) string {
+		t.Helper()
+		slug, err := e.store.GetThreadDefault(ctx, luChannel, threadID)
+		require.NoError(t, err)
+		return slug
+	}
+
+	arms := []struct {
+		name     string
+		customID string
+		// seed sets the starting defaults; read returns the default the
+		// button writes, and want is its value after a linked user's click.
+		seed func(t *testing.T, e *linkedUserEnv)
+		read func(t *testing.T, e *linkedUserEnv) string
+		want string
+	}{
+		{
+			name:     "setup default agent",
+			customID: "setup:dflt:worker",
+			read:     channelDefault,
+			want:     "worker",
+		},
+		{
+			name:     "set channel default",
+			customID: "default:set:worker",
+			read:     channelDefault,
+			want:     "worker",
+		},
+		{
+			name:     "clear channel default",
+			customID: "default:none",
+			seed: func(t *testing.T, e *linkedUserEnv) {
+				link, err := e.store.GetChannelLink(ctx, luChannel)
+				require.NoError(t, err)
+				link.DefaultAgent = "worker"
+				require.NoError(t, e.store.UpdateChannelLink(ctx, link))
+			},
+			read: channelDefault,
+			want: "",
+		},
+		{
+			name:     "set thread default",
+			customID: "default:set:worker:" + threadID,
+			read:     threadDefault,
+			want:     "worker",
+		},
+		{
+			name:     "clear thread default",
+			customID: "default:none:" + threadID,
+			seed: func(t *testing.T, e *linkedUserEnv) {
+				require.NoError(t, e.store.SetThreadDefault(ctx, luChannel, threadID, "worker"))
+			},
+			read: threadDefault,
+			want: "",
+		},
+	}
+
+	users := []struct {
+		name    string
+		user    string
+		mapping *DiscordUserMapping
+		reply   string
+	}{
+		{name: "linked", user: luDiscordUser},
+		{name: "no link", user: luOtherUser, reply: msgLinkAccountFirst},
+		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
+			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
+		}, reply: msgReRegisterForEmail},
+	}
+
+	for _, arm := range arms {
+		for _, u := range users {
+			t.Run(arm.name+"/"+u.name, func(t *testing.T) {
+				e := newLinkedUserEnv(t)
+				e.linkChannel(t)
+				if u.mapping != nil {
+					require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
+				}
+				if arm.seed != nil {
+					arm.seed(t, e)
+				}
+				before := arm.read(t, e)
+
+				ws := &writeCountingStore{Store: e.store}
+				e.callback.store = ws
+				i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+					CustomID: arm.customID,
+				}), u.user)
+				e.callback.Dispatch(e.session, i, arm.customID, nil)
+
+				if u.reply == "" {
+					assert.Equal(t, 1, ws.writeCount())
+					assert.Equal(t, arm.want, arm.read(t, e))
+					return
+				}
+				assert.Zero(t, ws.writeCount(), "no default-agent write without a linked account")
+				assert.Equal(t, before, arm.read(t, e))
+				assert.Contains(t, e.discord.allBodies(), jsonText(t, u.reply))
+			})
+		}
+	}
+}

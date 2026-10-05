@@ -163,6 +163,12 @@ func (h *CallbackHandler) handleSetupDefaultAgent(s *discordgo.Session, i *disco
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
+
 	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if link == nil {
 		h.respondUpdate(s, i, "Setup session expired. Please use `/scion setup` again.", nil)
@@ -543,6 +549,13 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Every arm below writes a channel or thread default.
+	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
 
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
