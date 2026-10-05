@@ -39,6 +39,10 @@ import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   stateManager: new EventTarget(),
 }));
 
