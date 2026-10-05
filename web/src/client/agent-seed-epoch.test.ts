@@ -195,7 +195,19 @@ describe('AgentSeedEpoch', () => {
     expect(epoch.deletedChanges.sort()).toEqual(['a', 'x']);
   });
 
-  it('seed reports the response rows it left out as deleted, before or during the request', () => {
+  it('seed leaves out a row tombstoned before the epoch opened without reporting it as dropped', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('c')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    const epoch = new AgentSeedEpoch(sm);
+    const result = epoch.seed([makeAgent('a'), makeAgent('c')], { partial: false });
+    epoch.close();
+    // A refresh would leave the row out the same way, so the page is not short.
+    expect(result.agents.map((a) => a.id)).toEqual(['c']);
+    expect(result.dropped).toEqual([]);
+  });
+
+  it('seed leaves out a row deleted during the epoch and reports it as dropped', () => {
     const sm = newState();
     sm.seedAgents([makeAgent('a'), makeAgent('b'), makeAgent('c')]);
     emit(sm, 'agent.a.deleted', { agentId: 'a' });
@@ -206,17 +218,15 @@ describe('AgentSeedEpoch', () => {
     });
     epoch.close();
     expect(result.agents.map((a) => a.id)).toEqual(['c']);
-    expect(result.dropped).toEqual(['a', 'b']);
+    expect(result.dropped).toEqual(['b']);
   });
 
-  it('seed does not report a row as dropped when the store holds its agent again after the delete', () => {
+  it('seed does not report a row deleted during the epoch as dropped when the store holds its agent', () => {
     // The state store ignores a live create for a deleted ID, so a store
     // that holds a tombstoned agent is stubbed here: the rule still keys
-    // off whether the store holds the agent, not off the tombstone alone.
+    // off whether the store holds the agent, not off the delete alone.
     const sm = newState();
     sm.seedAgents([makeAgent('a'), makeAgent('b')]);
-    emit(sm, 'agent.a.deleted', { agentId: 'a' });
-    emit(sm, 'agent.b.deleted', { agentId: 'b' });
     const heldAgain = makeAgent('a');
     const state: AgentSeedEpochState = {
       beginSeedEpoch: () => sm.beginSeedEpoch(),
@@ -228,14 +238,16 @@ describe('AgentSeedEpoch', () => {
       removeEventListener: sm.removeEventListener.bind(sm),
     };
     const epoch = new AgentSeedEpoch(state);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    emit(sm, 'agent.b.deleted', { agentId: 'b' });
     const result = epoch.seed([makeAgent('a'), makeAgent('b')], { partial: false });
     epoch.close();
-    // Both stay off the result; only the agent the store no longer holds is dropped.
+    // Both stay off the result; only the agent the store does not hold is dropped.
     expect(result.agents.map((x) => x.id)).toEqual([]);
     expect(result.dropped).toEqual(['b']);
   });
 
-  it('a live create for a deleted agent is ignored, so a response row for it counts as dropped', () => {
+  it('a live create for a deleted agent is ignored, and a later response row for it is left out without counting as dropped', () => {
     const sm = newState();
     sm.seedAgents([makeAgent('a'), makeAgent('b')]);
     emit(sm, 'agent.a.deleted', { agentId: 'a' });
@@ -245,7 +257,7 @@ describe('AgentSeedEpoch', () => {
     const result = epoch.seed([makeAgent('a'), makeAgent('b')], { partial: false });
     epoch.close();
     expect(result.agents.map((x) => x.id)).toEqual(['b']);
-    expect(result.dropped).toEqual(['a']);
+    expect(result.dropped).toEqual([]);
   });
 
   it('a create for an agent deleted while the request is in flight is ignored and stays off the result', () => {

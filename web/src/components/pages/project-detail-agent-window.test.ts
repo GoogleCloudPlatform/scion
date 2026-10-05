@@ -1249,33 +1249,78 @@ describe('project-detail — agent list window', () => {
         return { el, requests, id };
       }
 
-      it('a create for a deleted agent is ignored: it stays off the page, and a refresh that still lists it shows the chip', async () => {
+      it('a restored agent the response still lists stays off the page and raises no chip on refresh, and repeated refreshes stay chip-free', async () => {
         const { el, requests, id } = await pagedWithDeleted('p-paged-restored', true);
         const win = internals(el).agentWindow;
         expect(stateManager.getAgent(id)).toBeUndefined();
-        for (let i = 0; i < 2; i++) {
+        for (let i = 0; i < 3; i++) {
           const before = requests.length;
           await win.refresh();
           await settle(el);
           expect(requests.length - before).toBe(1);
-          // The row is left out as deleted and the store does not hold the
-          // agent, so the page is one row short: the backfill chip.
+          // The row is left out as deleted, but its delete predates the
+          // request, so another refresh would leave it out the same way: no
+          // backfill chip.
           expect(win.items).toHaveLength(24);
-          expect(win.updatesAvailable).toBe(true);
+          expect(win.updatesAvailable).toBe(false);
           expect(win.items.some((a) => a.id === id)).toBe(false);
           expect(win.memberIndex.has(id)).toBe(false);
           expect(stateManager.getAgent(id)).toBeUndefined();
         }
       });
 
-      it('a deleted agent the response still lists shows the chip after a refresh', async () => {
+      it('a deleted agent the response still lists stays off the page and raises no chip on a later refresh', async () => {
         const { el, id } = await pagedWithDeleted('p-paged-deleted-listed', false);
         const win = internals(el).agentWindow;
-        await win.refresh();
+        for (let i = 0; i < 2; i++) {
+          await win.refresh();
+          await settle(el);
+          expect(win.items.some((a) => a.id === id)).toBe(false);
+          expect(win.items).toHaveLength(24);
+          expect(win.updatesAvailable).toBe(false);
+        }
+      });
+
+      it('a delete during an in-flight refresh raises the chip for that refresh only', async () => {
+        const projectId = 'p-paged-inflight-delete';
+        const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
+        const requests: AgentsRequest[] = [];
+        const el = await mountForcedPaged(projectId, agents, requests);
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        const id = win.items[0].id;
+        const h = holdable(
+          globalThis.fetch as (
+            input: string | URL | Request,
+            init?: RequestInit
+          ) => Promise<Response>,
+          (u) => u.pathname === `/api/v1/projects/${projectId}/agents`
+        );
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+
+        h.hold();
+        const refreshed = win.refresh();
+        await vi.waitFor(() => expect(h.heldCount).toBe(1));
+        (
+          stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+        ).handleUpdate({ subject: `project.${projectId}.agent.deleted`, data: { agentId: id } });
+        await flushLive(el);
+        h.release();
+        await refreshed;
         await settle(el);
+        // The response predates the delete and still lists the row: the page
+        // is one row short, and a refresh can fill it.
         expect(win.items.some((a) => a.id === id)).toBe(false);
         expect(win.items).toHaveLength(24);
         expect(win.updatesAvailable).toBe(true);
+
+        // The next refresh's delete predates its request, so it raises no chip.
+        await win.refresh();
+        await settle(el);
+        expect(h.sent).toHaveLength(2);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(win.items).toHaveLength(24);
+        expect(win.updatesAvailable).toBe(false);
       });
     });
   });

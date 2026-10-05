@@ -2015,33 +2015,71 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       return { el, fake, id };
     }
 
-    it('a create for a deleted agent is ignored: it stays off the page, and a refresh that still lists it shows the chip', async () => {
+    it('a restored agent the response still lists stays off the page and raises no chip on refresh, and repeated refreshes stay chip-free', async () => {
       const { el, fake, id } = await pagedWithDeleted(true);
       const win = internals(el).agentWindow;
       expect(stateManager.getAgent(id)).toBeUndefined();
-      for (let i = 0; i < 2; i++) {
+      for (let i = 0; i < 3; i++) {
         const before = fake.requests.length;
         await win.refresh();
         await settle(el);
         expect(fake.requests.length - before).toBe(1);
-        // The row is left out as deleted and the store does not hold the
-        // agent, so the page is one row short: the backfill chip.
+        // The row is left out as deleted, but its delete predates the
+        // request, so another refresh would leave it out the same way: no
+        // backfill chip.
         expect(win.items).toHaveLength(24);
-        expect(win.updatesAvailable).toBe(true);
+        expect(win.updatesAvailable).toBe(false);
         expect(win.items.some((a) => a.id === id)).toBe(false);
         expect(win.memberIndex.has(id)).toBe(false);
         expect(stateManager.getAgent(id)).toBeUndefined();
       }
     });
 
-    it('a deleted agent the response still lists shows the chip after a refresh', async () => {
+    it('a deleted agent the response still lists stays off the page and raises no chip on a later refresh', async () => {
       const { el, id } = await pagedWithDeleted(false);
       const win = internals(el).agentWindow;
-      await win.refresh();
+      for (let i = 0; i < 2; i++) {
+        await win.refresh();
+        await settle(el);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(win.items).toHaveLength(24);
+        expect(win.updatesAvailable).toBe(false);
+      }
+    });
+
+    it('a delete during an in-flight refresh raises the chip for that refresh only', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+
+      h.hold();
+      const refreshed = win.refresh();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      handleUpdate(`agent.${id}.deleted`, {});
+      await flushLive(el);
+      h.release();
+      await refreshed;
       await settle(el);
+      // The response predates the delete and still lists the row: the page
+      // is one row short, and a refresh can fill it.
       expect(win.items.some((a) => a.id === id)).toBe(false);
       expect(win.items).toHaveLength(24);
       expect(win.updatesAvailable).toBe(true);
+
+      // The next refresh's delete predates its request, so it raises no chip.
+      await win.refresh();
+      await settle(el);
+      expect(h.sent).toHaveLength(3);
+      expect(win.items.some((a) => a.id === id)).toBe(false);
+      expect(win.items).toHaveLength(24);
+      expect(win.updatesAvailable).toBe(false);
     });
 
     for (const serverLists of [false, true]) {

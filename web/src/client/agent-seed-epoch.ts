@@ -84,16 +84,18 @@ export interface AgentSeedResult {
   /** Live creates the response did not contain, as state objects (a subset of `agents`). */
   liveCreated: Agent[];
   /**
-   * IDs of response rows left out because the agent was deleted live
-   * (before or while the request was in flight) and the store no longer
-   * holds it. A page that renders the response as one server page is short
-   * by at least this many rows.
+   * IDs of response rows left out because the agent was deleted live while
+   * the request was in flight (its delete arrived after the epoch opened)
+   * and the store does not hold it. A page that renders the response as
+   * one server page is short by at least this many rows, and a refresh
+   * clears the shortfall.
    *
-   * A tombstoned row whose agent the store still holds is left out of
-   * `agents`, but is not listed here: a refresh would leave it out the same
-   * way, so offering one could never clear the shortfall. (The store
-   * ignores a live `created` for a tombstoned ID, so it does not re-add a
-   * deleted agent that way.)
+   * Every other tombstoned row is left out of `agents` without being
+   * listed here, because a refresh would leave it out the same way:
+   * - a row whose tombstone predates the request (for example a deleted
+   *   agent the server lists again; the store ignores a live `created` for
+   *   a tombstoned ID, so it never re-enters the store);
+   * - a row whose agent the store still holds.
    */
   dropped: string[];
   /** A live create could not be decided (no `isMember` rule). */
@@ -223,7 +225,9 @@ export class AgentSeedEpoch {
     const dropped: string[] = [];
     for (const a of agents) {
       if (tombstones.has(a.id)) {
-        if (!this.state.getAgent(a.id)) dropped.push(a.id);
+        // Only a delete that arrived during this request makes the page
+        // short; an older tombstone hides the row on every refresh.
+        if (this.deletedIds.has(a.id) && !this.state.getAgent(a.id)) dropped.push(a.id);
         continue;
       }
       members.set(a.id, this.state.getAgent(a.id) ?? a);
