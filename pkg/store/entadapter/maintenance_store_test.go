@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -62,7 +63,7 @@ func TestSeedMaintenanceOperations(t *testing.T) {
 // TestSeedMaintenanceOperations_PartialAndRepeated covers the upsert path
 // (ptone/scion#366): a store that already holds some seed keys gets only the
 // missing ones, existing rows (and their state) are left untouched, and
-// repeated or concurrent seeding never errors.
+// repeated seeding never errors.
 func TestSeedMaintenanceOperations_PartialAndRepeated(t *testing.T) {
 	require.GreaterOrEqual(t, len(defaultSeedOperations), 2, "test needs at least two seed operations")
 	s := newTestMaintenanceStore(t)
@@ -92,23 +93,73 @@ func TestSeedMaintenanceOperations_PartialAndRepeated(t *testing.T) {
 	assert.Equal(t, "pre-existing title", after.Title, "existing row must not be overwritten")
 	assert.Equal(t, store.MaintenanceStatusCompleted, after.Status, "existing row's state must be preserved")
 
-	// Concurrent seeders (e.g. hub replicas starting together) must all succeed.
+}
+
+// TestSeedMaintenanceOperations_ConcurrentOnEmptyStore: seeders that start
+// together on an empty store (hub replicas booting at once) all succeed and
+// every key ends up exactly once. On SQLite the test client serializes
+// writes; on Postgres (make test-launch-store-postgres) the seeders really
+// race into ON CONFLICT (key) DO NOTHING with fewer RETURNING rows than
+// builders.
+func TestSeedMaintenanceOperations_ConcurrentOnEmptyStore(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+
 	var wg sync.WaitGroup
-	errs := make([]error, 4)
+	start := make(chan struct{})
+	errs := make([]error, 8)
 	for i := range errs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			<-start
 			errs[i] = s.SeedMaintenanceOperations(ctx)
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 	for i, err := range errs {
 		assert.NoError(t, err, "concurrent seeder %d", i)
 	}
-	ops, err = s.ListMaintenanceOperations(ctx)
+
+	ops, err := s.ListMaintenanceOperations(ctx)
 	require.NoError(t, err)
-	assert.Len(t, ops, len(defaultSeedOperations))
+	assert.Len(t, ops, len(defaultSeedOperations), "every seed key exactly once")
+}
+
+// TestSeedMaintenanceOperations_DoesNotMaskOtherConstraintErrors pins the
+// behaviour change in ptone/scion#366: only a conflict on the seed key is
+// skipped. The old code swallowed every ent constraint error, so a seed row
+// rejected for any other reason silently went missing while seeding reported
+// success. A hook forces one seed row onto an existing primary key, a
+// constraint violation that is not the key conflict.
+func TestSeedMaintenanceOperations_DoesNotMaskOtherConstraintErrors(t *testing.T) {
+	require.GreaterOrEqual(t, len(defaultSeedOperations), 2, "test needs at least two seed operations")
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+
+	existing, err := s.client.MaintenanceOperation.Create().
+		SetKey("unrelated-existing-op").
+		SetTitle("unrelated").
+		SetCategory("operation").
+		Save(ctx)
+	require.NoError(t, err)
+
+	target := defaultSeedOperations[1].Key
+	s.client.MaintenanceOperation.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if mm, ok := m.(*ent.MaintenanceOperationMutation); ok && mm.Op().Is(ent.OpCreate) {
+				if key, ok := mm.Key(); ok && key == target {
+					mm.SetID(existing.ID)
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	err = s.SeedMaintenanceOperations(ctx)
+	require.Error(t, err, "a non-key constraint violation must not be reported as a successful seed")
+	assert.True(t, ent.IsConstraintError(err), "want the underlying constraint error, got %v", err)
 }
 
 func TestGetMaintenanceOperationNotFound(t *testing.T) {
