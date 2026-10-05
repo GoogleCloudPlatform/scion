@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -31,6 +32,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -1676,3 +1679,58 @@ func TestAsyncDeliveryFailureCallers_NeverBuildRawTrue(t *testing.T) {
 }
 
 var errTestDeliveryFailure = fmt.Errorf("test delivery failure")
+
+// A stale agent.created for an agent that was deleted (hard, soft, or
+// delete-claimed) must not subscribe its slug (ptone/scion#3056). The
+// control shows a live agent still subscribes on created.
+func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T) {
+	cases := []struct {
+		name      string
+		prepare   func(t *testing.T, s store.Store, a *store.Agent)
+		subscribe bool
+	}{
+		{"live", func(*testing.T, store.Store, *store.Agent) {}, true},
+		{"hard-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			require.NoError(t, s.DeleteAgent(context.Background(), a.ID))
+		}, false},
+		{"soft-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			a.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), a))
+		}, false},
+		{"delete-claimed", func(t *testing.T, s store.Store, a *store.Agent) {
+			lease := time.Now().Add(time.Minute)
+			deleting := store.DeletionStateDeleting
+			n, err := s.UpdateAgentDeletion(context.Background(), a.ID,
+				store.DeletionPredicate{States: []string{""}, DeletedAtNull: true},
+				store.DeletionFields{State: &deleting, LeaseAt: &lease})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newBrokerTestStore(t)
+			projectID := setupBrokerTestProject(t, s)
+			slug := "created-" + tc.name
+			agent := setupBrokerTestAgent(t, s, projectID, slug, "created")
+
+			events := NewChannelEventPublisher()
+			defer events.Close()
+			b := eventbus.NewInProcessEventBus(slog.Default())
+			t.Cleanup(func() { _ = b.Close() })
+			proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+			proxy.Start()
+			defer proxy.Stop()
+
+			tc.prepare(t, s, agent)
+			data, err := json.Marshal(AgentCreatedEvent{AgentID: agent.ID, ProjectID: projectID, Name: slug, Slug: slug})
+			require.NoError(t, err)
+			proxy.handleLifecycleEvent(Event{Subject: "project." + projectID + ".agent.created", Data: data})
+
+			proxy.mu.Lock()
+			got := proxy.subscribedTopics[eventbus.TopicAgentMessages(projectID, slug)]
+			proxy.mu.Unlock()
+			assert.Equal(t, tc.subscribe, got)
+		})
+	}
+}

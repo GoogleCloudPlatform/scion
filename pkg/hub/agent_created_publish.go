@@ -49,9 +49,8 @@ import (
 // engine, so a delete that claims and finishes between them can still emit
 // this (unmarked) created after its deleted. Web clients drop an unmarked
 // created for an ID they tombstoned on deleted (ptone/scion#2886), which
-// covers it there. MessageBrokerProxy.handleLifecycleEvent is not covered:
-// it subscribes on any created, so a created lost to this window leaves a
-// subscription for the deleted agent's slug.
+// covers it there. MessageBrokerProxy.handleLifecycleEvent re-checks the row
+// by the same rule before subscribing (createdAgentLive, ptone/scion#3056).
 func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Agent) {
 	fresh, err := s.store.GetAgent(ctx, agent.ID)
 	switch {
