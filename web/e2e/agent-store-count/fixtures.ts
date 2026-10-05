@@ -26,7 +26,11 @@ import type { Page, Request } from '@playwright/test';
 
 export const PROJECT_ID = 'project-one';
 export const AGENT_COUNT = 450;
-/** The agent store's page size: every store walk of the hub reads this many rows a page. */
+/**
+ * The agent store's page size: every store walk of the hub reads this many
+ * rows a page. Must equal `AGENT_STORE_PAGE_SIZE` in `src/client/agent-store.ts`
+ * (not imported, so Playwright does not evaluate the store in Node).
+ */
 export const STORE_PAGE_SIZE = 200;
 /** Pages in one store walk of the fixture hub. */
 export const STORE_PAGES_PER_WALK = Math.ceil(AGENT_COUNT / STORE_PAGE_SIZE);

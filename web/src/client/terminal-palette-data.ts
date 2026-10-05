@@ -130,6 +130,10 @@ export async function loadTerminalPaletteAgents(
       }),
     });
   } catch (err) {
+    // The store rejects an aborted caller with an AbortError itself; the
+    // abort check covers a walk failure already queued when the host aborts
+    // on close, which does not supersede the load, so it would otherwise
+    // show an error state on the closed palette.
     if (controller.signal.aborted || !isCurrent()) throw abortError();
     throw err;
   }
