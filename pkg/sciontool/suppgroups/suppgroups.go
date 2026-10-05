@@ -73,3 +73,11 @@ func FromEnv() []uint32 {
 	}
 	return out
 }
+
+// SetGetgroupsForTest replaces the source of this process's supplementary
+// groups for tests in other packages and returns a restore function.
+func SetGetgroupsForTest(f func() ([]int, error)) (restore func()) {
+	prev := getgroups
+	getgroups = f
+	return func() { getgroups = prev }
+}

@@ -58,3 +58,27 @@ func TestFromEnv_GetgroupsError(t *testing.T) {
 	withGranted(t, nil, errors.New("boom"))
 	assert.Nil(t, FromEnv())
 }
+
+func TestCredential(t *testing.T) {
+	t.Run("granted groups kept", func(t *testing.T) {
+		t.Setenv(EnvVar, "1500,2000")
+		withGranted(t, []int{0, 1500}, nil)
+		c := Credential(1000, 1001)
+		assert.Equal(t, uint32(1000), c.Uid)
+		assert.Equal(t, uint32(1001), c.Gid)
+		assert.Equal(t, []uint32{1500}, c.Groups)
+		assert.False(t, c.NoSetGroups)
+	})
+	t.Run("no groups gives a non-nil empty slice", func(t *testing.T) {
+		t.Setenv(EnvVar, "")
+		withGranted(t, []int{0, 1500}, nil)
+		c := Credential(1000, 1001)
+		assert.NotNil(t, c.Groups)
+		assert.Empty(t, c.Groups)
+	})
+	t.Run("ungranted env value dropped", func(t *testing.T) {
+		t.Setenv(EnvVar, "27")
+		withGranted(t, []int{0}, nil)
+		assert.Empty(t, Credential(1000, 1001).Groups)
+	})
+}

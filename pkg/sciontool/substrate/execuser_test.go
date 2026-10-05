@@ -16,6 +16,7 @@ package substrate
 
 import (
 	"fmt"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -334,5 +335,24 @@ func TestExecUserCredential_RealScionUser(t *testing.T) {
 	}
 	if got["SHELL"] != "/bin/sh" {
 		t.Errorf("envPairs SHELL = %q, want %q (the resolved sh path, not the passwd-configured login shell)", got["SHELL"], "/bin/sh")
+	}
+}
+
+// The /exec credential keeps the runtime-granted nfs shared-dir groups,
+// like the harness (ptone/scion#3155).
+func TestExecUserCredential_KeepsSharedDirGroups(t *testing.T) {
+	const g = 4242
+	t.Cleanup(suppgroups.SetGetgroupsForTest(func() ([]int, error) { return []int{0, g}, nil }))
+	t.Setenv(suppgroups.EnvVar, strconv.Itoa(g))
+	fakeUser := &user.User{Uid: strconv.Itoa(os.Geteuid() + 1000), Gid: strconv.Itoa(os.Getegid() + 1000), Username: "scion", HomeDir: "/home/scion"}
+	restore := SetExecUserLookupForTest(func(string) (*user.User, error) { return fakeUser, nil })
+	defer restore()
+
+	_, _, cred, err := execUserCredential("scion", "/bin/sh")
+	if err != nil {
+		t.Fatalf("execUserCredential: %v", err)
+	}
+	if cred == nil || len(cred.Groups) != 1 || cred.Groups[0] != uint32(g) {
+		t.Fatalf("cred = %+v, want Groups [%d]", cred, g)
 	}
 }

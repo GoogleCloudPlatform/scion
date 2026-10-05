@@ -100,7 +100,7 @@ var execSiteAllowlist = map[string]string{
 	// path is an absolute path built by the caller, not a bare name — PATH
 	// is never consulted for it, so there is nothing for this guard to
 	// resolve through rootexec.
-	"pkg/sciontool/hooks/lifecycle.go:310": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
+	"pkg/sciontool/hooks/lifecycle.go:311": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
 
 	// supervisor.Run: args[0] is the operator/harness-selected entrypoint.
 	// Run() sets a Credential before Start() whenever UID/GID are supplied,
@@ -111,14 +111,14 @@ var execSiteAllowlist = map[string]string{
 	// happens in the (root) parent using its inherited PATH, and the
 	// resulting process runs as the workload's own uid whenever that
 	// happens.
-	"pkg/sciontool/supervisor/supervisor.go:145": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/supervisor/supervisor.go:146": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// services.Manager.start: svc.spec.Command[0] comes from a workload-
 	// supplied services.yaml. start() itself requires uid/gid>0 (or fails
 	// closed with services.ErrPrivilegeDropRequired under
 	// requirePrivilegeDrop) before any service is started — the identical
 	// Go-level drop-before-exec model as supervisor.Run.
-	"pkg/sciontool/services/manager.go:392": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/services/manager.go:393": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// runExec's shPath is assigned a few lines above from execResolve("sh")
 	// (production: rootexec.Resolve) and used here as both the exec target

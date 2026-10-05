@@ -399,13 +399,8 @@ func (svc *managedService) start() error {
 	}
 
 	if svc.uid > 0 && svc.gid > 0 {
-		cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: uint32(svc.uid),
-			Gid: uint32(svc.gid),
-			// Keep the runtime-granted nfs shared-dir groups
-			// (ptone/scion#3155); nil keeps today's empty set.
-			Groups: suppgroups.FromEnv(),
-		}
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155).
+		cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(svc.uid), uint32(svc.gid))
 	} else if svc.requirePrivilegeDrop {
 		return ErrPrivilegeDropRequired
 	}
