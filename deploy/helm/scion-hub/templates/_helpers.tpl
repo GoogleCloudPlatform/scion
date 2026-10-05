@@ -1742,7 +1742,7 @@ Exactly one list is.
 
 {{- /*
 5. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
-   SILENTLY. Two of the five are delivered by this chart and three are not, and
+   SILENTLY. Four of the five are delivered by this chart and one is not, and
    that split is the paragraph. It was one claim about five flags until the
    settings rendering landed, and it is two claims now.
 
@@ -1752,17 +1752,18 @@ Exactly one list is.
                      reaching the container by envFrom at
                      templates/deployment.yaml:147-148.
      storage-bucket  server.storage.bucket in the rendered settings.yaml.
+     db              server.database.url in the rendered settings.yaml, under
+                     postgres. Landed with Cloud SQL.
+     admin-emails    server.hub.admin_emails in the rendered settings.yaml, from
+                     hub.adminEmails. parseAdminEmails
+                     (cmd/server_foreground.go) reads argv first and consults
+                     the settings file only when argv is empty.
 
    NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
    effect if passed:
 
-     db              cfg.Database.URL, cmd/server_foreground.go:875-877.
-                     Arrives with Cloud SQL.
      storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
                      Arrives with the workspace share.
-     admin-emails    cfg.Hub.AdminEmails, cmd/server_foreground.go:1402-1409 and
-                     :2116-2124. Both sites read argv first and consult the
-                     settings file only when argv is empty. No phase claims it.
 
    THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
    EDITED. It read "there is no second source yet for anything to disagree with"
@@ -1775,24 +1776,25 @@ Exactly one list is.
    of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead. For base-url, storage-bucket and - since the Cloud SQL
-   phase - db, that is the first list above, and the answer is still not argv.
-   For the other two, admin-emails and storage-dir, it is nowhere yet. None of
+   where it lands instead. For base-url, storage-bucket, db (since the Cloud SQL
+   phase) and admin-emails (since hub.adminEmails), that is the first list
+   above, and the answer is still not argv. For storage-dir it is nowhere yet. None of
    the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is a flag that no longer
    exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), and
    none weakens authentication ($unsafeToPass).
 
-   The harm is present for three of the five and scheduled for the other two.
-   Passing -base-url, -storage-bucket or -db today makes argv the silent winner
-   over a value this chart rendered, and nothing logs the disagreement. -db
-   joined that group when the Cloud SQL phase started rendering
-   server.database.url, and the move was forced rather than remembered:
-   hack/verify.sh carries the delivery state as a committed number per flag and
-   goes red when a channel appears without this paragraph being re-tensed in the
-   same diff. Passing admin-emails or storage-dir today changes a setting nothing
-   else sets; the same silent overriding starts the day its channel lands, with
-   no edit here to mark it. The
+   The harm is present for four of the five and scheduled for the fifth.
+   Passing -base-url, -storage-bucket, -db or -admin-emails today makes argv the
+   silent winner over a value this chart rendered, and nothing logs the
+   disagreement. -db joined that group when the Cloud SQL phase started
+   rendering server.database.url, and -admin-emails when hub.adminEmails started
+   rendering server.hub.admin_emails; both moves were forced rather than
+   remembered: hack/verify.sh carries the delivery state as a committed number
+   per flag and goes red when a channel appears without this paragraph being
+   re-tensed in the same diff. Passing storage-dir today changes a setting
+   nothing else sets; the same silent overriding starts the day its channel
+   lands, with no edit here to mark it. The
    asymmetry is what decides it - reserving costs an operator a flag they have no
    reason to want, un-reserving is a deliberate act with a place to record itself
    (see the closing paragraph), and reserving after the fact requires somebody to
@@ -2057,7 +2059,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Two of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket onto server.storage.bucket in the settings file it renders, so passing either makes argv the winner over a value already set here. The other three - -db, -storage-dir and -admin-emails - have no second source in this release and would simply take effect; they stay reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Four of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket, -db and -admin-emails onto server.storage.bucket, server.database.url and server.hub.admin_emails in the settings file it renders, so passing any of them makes argv the winner over a value set here. The fifth, -storage-dir, has no second source in this release and would simply take effect; it stays reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
@@ -2423,7 +2425,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
 {{- end }}
 
 {{/*
@@ -2473,6 +2475,7 @@ it; keep that call.
 {{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
 {{- /*
 PHASE 2 DELTA. The three database leaves below are the append this comment asked
 later phases for, and phase 2 owed it: phase 2 is what introduced the database
@@ -3037,6 +3040,14 @@ real deep merge rather than a text append.
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
 {{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+{{- /*
+server.hub.admin_emails, the V1ServerHubConfig spelling. Omitted when empty:
+parseAdminEmails (cmd/server_foreground.go) treats an absent list and an empty
+one the same, and an absent key keeps the rendered file free of a no-op line.
+*/}}
+{{- with .Values.hub.adminEmails }}
+{{- $hub = set $hub "admin_emails" (toStrings .) }}
+{{- end }}
 
 {{- /*
 server.database. The key is url, not dsn. Pool settings are here now because they

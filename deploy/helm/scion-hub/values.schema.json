@@ -114,6 +114,11 @@
           "type": "string",
           "description": "Display name for the hub. Cosmetic."
         },
+        "adminEmails": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^\\S+@\\S+$"},
+          "description": "Email addresses auto-promoted to the admin role, rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig, pkg/config/settings_v1.go). Empty omits the key."
+        },
         "baseUrl": {
           "type": "string",
           "pattern": "^https://[^\\s/]+(/[^\\s]*)?$",

@@ -2018,6 +2018,7 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.google.clientSecret]='--set-string|auth.oauth.web.google.clientSecret=probe-oauth-mutated-secret'
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
+  [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
@@ -3073,8 +3074,8 @@ done
 step "the \$ownedByConfig split, measured against the render"
 # --------------------------------------------------------------------------
 # _helpers.tpl reserves five flags on the grounds that each has a delivery
-# channel other than argv. Two of the five are delivered by this chart and three
-# are not, and the file says which in prose.
+# channel other than argv. Four of the five are delivered by this chart and one
+# is not, and the file says which in prose.
 #
 # THIS EXISTS BECAUSE THAT PROSE WENT STALE WITHOUT THE FILE BEING EDITED. At
 # phase 0 it read "this chart delivers none of them yet", which was true while
@@ -3095,7 +3096,7 @@ declare -A DELIVERED=(
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
   [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
-  [admin-emails]=0    # server.hub.admin_emails - no phase claims it
+  [admin-emails]=1    # server.hub.admin_emails - LANDED with hub.adminEmails; was 0 until then
 )
 # The probe per flag. Each reads the channel the reservation names, not a proxy
 # for it: a probe for "is there a Secret" would answer yes for a chart that

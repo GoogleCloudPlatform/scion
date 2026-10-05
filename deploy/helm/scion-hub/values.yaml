@@ -132,6 +132,17 @@ hub:
   # Display name for the hub. Cosmetic; unlike hubId nothing is scoped by it.
   name: Scion Hub
 
+  # Optional. Email addresses auto-promoted to the admin role at sign-in,
+  # rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig,
+  # pkg/config/settings_v1.go). The hub lower-cases and trims each entry
+  # (config.SanitizeEmailList). Empty leaves the key out, and the hub then
+  # promotes nobody from configuration.
+  #
+  #   adminEmails:
+  #     - alice@example.com
+  #
+  adminEmails: []
+
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
   # the hub - it warns once and falls back to http://localhost:<port>, which
@@ -377,7 +388,8 @@ config:
   # NOTES.txt, from a single definition in templates/_helpers.tpl.
   #
   # Not listed, because they refuse rather than go quiet: config.extra,
-  # storage.bucket, agents.imageRegistry, the database name, user and password,
+  # storage.bucket, agents.imageRegistry, hub.adminEmails, the database name,
+  # user and password,
   # the OAuth web client credentials, auth.proxy.iap.audience and the three
   # auth.transport values fail the render when set together with this
   # (NOTES.txt prints the exact list). auth.proxy.provider is not on either

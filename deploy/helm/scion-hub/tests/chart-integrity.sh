@@ -324,8 +324,9 @@ fi
 #               which of the listed keys this release DOES deliver and which it
 #               does not, rather than saying none of them land.
 #   P0 :1089 -> the hub.args reservation, now at _helpers.tpl:1152, which names
-#               -base-url and -storage-bucket as live and the other three as
-#               still having no second source.
+#               the live flags (-base-url, -storage-bucket, -db and, since
+#               hub.adminEmails, -admin-emails) and -storage-dir as still
+#               having no second source.
 DELIVERS_BASE_URL_CHANNEL=1
 
 # THE POSITIVE CONTROL COMES FIRST. "Zero channels deliver base-url" is a

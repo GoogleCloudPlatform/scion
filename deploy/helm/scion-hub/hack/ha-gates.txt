@@ -22,8 +22,8 @@
 #   existing-secret.yaml     db0359b7092a35d6580b7985f2d07e2e69c4ea185118e52c1d0125142a08f76a
 #   minimal.yaml             fa1f95f9e13d85a06bb8a5914a4a6f561d9cd8f4437c98ee8bc85b4e55483307
 #   session-existing.yaml    a6a272606b88e9bbf81151c3a116d81ce610a6a3085377e39cbafb6eebdf34b6
-#   settings-oauth.yaml      9e3d59c1d371451a65bafe09a400ed8faa4d0e7603a90f1328e5f0e40931c701
-#   settings.yaml            60e8864d021936116102207301fc72718d61be380fdf6fc1c8389250065716e9
+#   settings-oauth.yaml      b6f90ff1c88b62111e2e2fd2a16ea08dc4f5bd477ea8af7e1f18350c24f6bddd
+#   settings.yaml            208504ee168f0a9d862f205cede5b30a6b06ad1a72e3f967a0a04ace71f65689
 #   varied.yaml              12b1c7a8ba1f58f3cbc6d77754631c9125847d5677d32356884c580c8781e345
 
 ===== existing-secret.yaml
