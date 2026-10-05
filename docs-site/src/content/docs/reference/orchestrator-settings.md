@@ -221,7 +221,6 @@ profiles:
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
-| `env` | map | Environment variables merged into the runtime environment. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
@@ -234,16 +233,11 @@ profiles:
 
 **Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's or template's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
 
-**Agent timezone (Hub-dispatched agents).** The Hub is the only source of `TZ` for agents it dispatches. On create, start and restart it sends the first value set in this chain:
+**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
-1. The agent's explicit timezone: a `TZ` given at create time (request `config.env`, a Hub-resolved template, or the Hub harness config), or a pin set later with the agent `PATCH` field `explicitTimezone` (see [Agents API](/scion/reference/api/)).
-2. A `TZ` entry in the Hub environment-variable store with injection mode `always`, at user, project, hub or broker scope (user wins), then an ancestor's user-scope variable shared with progeny.
-3. The Hub-level `agent_defaults.default_timezone` (Admin → Server config → Agent defaults; see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)). In `settings.yaml` this is the top-level `default_timezone` key.
-4. Otherwise no `TZ` is sent and the container uses the image default (UTC).
+#### Removed: profile `timezone`
 
-There is no runtime-profile step: a `TZ` in a profile's `env` or `harness_overrides` map is not used. The Runtime Broker also ignores `TZ` from broker-local templates, broker settings (harness-config entry `env`) and the agent's persisted `scion-agent.json`, and logs a warning for each non-empty value it drops. To give every agent on a broker a timezone, set a broker-scope `TZ` environment variable on the Hub instead. Local mode (no Hub) is unaffected.
-
-**Removed: profile `timezone`.** The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
+The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
 
 ## Telemetry Configuration (`telemetry`)
 

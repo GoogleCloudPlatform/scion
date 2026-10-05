@@ -229,12 +229,32 @@ func resolveHubURL() string {
 func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 	fmt.Println("\n--- Transport Auth ---")
 
-	src, err := transportauth.FromEnv()
+	// Both file-backed steps read with sciontool's guarded reader, as for
+	// the agent token file.
+	src, err := transportauth.FromEnvWithReader(hub.ReadTransportTokenFileGuarded)
 	if err != nil {
 		fmt.Printf("[WARN] Transport auth error: %v\n", err)
 		return nil
 	}
 	if src == nil {
+		src = scionHomeLateFileSource()
+	}
+	if src == nil {
+		if mode := os.Getenv(transportauth.EnvTransportMode); transportauth.IsProxyMode(mode) {
+			// A proxy guards the hub but no transport token has been
+			// received yet (for example the dispatch-time mint failed).
+			// A later refresh or reset-auth installs one.
+			// The path shown is the scion user's file, which is where the
+			// agent writes it, even when doctor runs with another HOME.
+			diag.transportConfigured = true
+			diag.transportMissing = true
+			fmt.Println("[INFO] Transport Auth: hub-provided token (awaiting first token)")
+			printTransportModeAndAudience()
+			fmt.Printf("[FAIL] Transport credential: none received yet (no %s value and no file at %s)\n",
+				transportauth.EnvTransportToken, hub.TransportTokenFilePath())
+			reportTransportRefreshStatus(diag)
+			return nil
+		}
 		fmt.Println("[INFO] Transport Auth: none")
 		return nil
 	}
@@ -259,6 +279,27 @@ func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 	}
 
 	return src
+}
+
+// scionHomeLateFileSource returns a file-backed source for the scion
+// user's transport token file when a proxy mode is set and that file
+// exists. FromEnv looks under $HOME, so doctor run with another HOME (for
+// example exec'd as root) would otherwise miss a token the agent received
+// after start. The file is read with sciontool's guarded reader, as for
+// the agent token file. It returns nil outside a proxy mode or when the
+// file is absent.
+func scionHomeLateFileSource() transportauth.TokenSource {
+	if !transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
+		return nil
+	}
+	path := hub.TransportTokenFilePath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil
+	}
+	return hub.NewTransportTokenFileSource()
 }
 
 func wrapTransport(client *http.Client, src transportauth.TokenSource) {

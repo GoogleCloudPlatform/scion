@@ -2980,6 +2980,20 @@ profiles:
 }
 
 func TestStartPropagatesNFSWorkspaceBackendToRunConfig(t *testing.T) {
+	// subpath_root reaches the runtime two ways that must agree: inside
+	// Workspace/NFSSubPath (via the nfs backend) and as NFSSubPathRoot, from
+	// which the Cloud Run runtime rebuilds its export and host paths. If
+	// NFSSubPathRoot fell back to the default while the backend used the
+	// configured root, every Cloud Run agent start would fail.
+	t.Run("default subpath_root", func(t *testing.T) {
+		testStartPropagatesNFSWorkspaceBackendToRunConfig(t, "")
+	})
+	t.Run("configured subpath_root", func(t *testing.T) {
+		testStartPropagatesNFSWorkspaceBackendToRunConfig(t, "team/trees")
+	})
+}
+
+func testStartPropagatesNFSWorkspaceBackendToRunConfig(t *testing.T, subPathRoot string) {
 	tmpDir := t.TempDir()
 
 	oldWd, err := os.Getwd()
@@ -3014,6 +3028,7 @@ server:
       uid: 2000
       gid: 2001
       storage_class: filestore-sc
+      subpath_root: %q
       shares:
         - id: share-1
           server: 10.0.0.2
@@ -3027,7 +3042,7 @@ harness_configs:
 profiles:
   local:
     runtime: docker
-`, nfsMountRoot)
+`, nfsMountRoot, subPathRoot)
 	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
@@ -3077,9 +3092,13 @@ profiles:
 	if capturedConfig.WorkspaceBackendName != "nfs" {
 		t.Fatalf("WorkspaceBackendName = %q, want nfs", capturedConfig.WorkspaceBackendName)
 	}
-	wantWorkspace := filepath.Join(nfsMountRoot, "share-1", "projects", "proj-123", "workspace")
+	wantRoot := config.SubPathRootOrDefault(subPathRoot)
+	wantWorkspace := filepath.Join(nfsMountRoot, "share-1", filepath.FromSlash(wantRoot), "proj-123", "workspace")
 	if capturedConfig.Workspace != wantWorkspace {
 		t.Fatalf("Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+	if got := config.SubPathRootOrDefault(capturedConfig.NFSSubPathRoot); got != wantRoot {
+		t.Fatalf("NFSSubPathRoot = %q (effective %q), want effective %q", capturedConfig.NFSSubPathRoot, got, wantRoot)
 	}
 	if capturedConfig.NFSUID != 2000 || capturedConfig.NFSGID != 2001 {
 		t.Fatalf("NFS uid/gid = %d/%d, want 2000/2001", capturedConfig.NFSUID, capturedConfig.NFSGID)
@@ -3087,7 +3106,7 @@ profiles:
 	if capturedConfig.NFSPVClaimName != "scion-workspaces-pv" {
 		t.Fatalf("NFSPVClaimName = %q", capturedConfig.NFSPVClaimName)
 	}
-	if capturedConfig.NFSSubPath != filepath.Join("projects", "proj-123", "workspace") {
+	if capturedConfig.NFSSubPath != filepath.Join(filepath.FromSlash(wantRoot), "proj-123", "workspace") {
 		t.Fatalf("NFSSubPath = %q", capturedConfig.NFSSubPath)
 	}
 	if capturedConfig.NFSStorageClass != "filestore-sc" {

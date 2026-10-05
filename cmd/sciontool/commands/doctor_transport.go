@@ -297,6 +297,8 @@ func printTransportRemediation(diag doctorDiag) bool {
 	if diag.transportRefreshProblem != "" {
 		fmt.Printf("[!] The last refresh did not renew it: %s. Check the hub's transport minter configuration and logs.\n",
 			diag.transportRefreshProblem)
+	} else if diag.transportMissing {
+		fmt.Println("[!] If reset-auth does not deliver one, check the hub's transport minter configuration and logs.")
 	}
 	fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>  (also pushes a fresh transport token)")
 	fmt.Println("[!] Or restart agent:   scion agent restart <agent-name>")
