@@ -776,10 +776,19 @@ func TestDeleteAgent_RecordedRuntimeRestrictsBeforeRunFilter(t *testing.T) {
 	}
 }
 
-// panickingManager panics in Stop or Start, after recording the call.
+// panickingManager panics in Stop or Start, after recording the call,
+// and, with listPanicsAfterStart, in List once Start has been called.
 type panickingManager struct {
 	*mockManager
-	panicIn string // "stop" or "start"
+	panicIn              string // "stop" or "start"
+	listPanicsAfterStart bool
+}
+
+func (m *panickingManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.listPanicsAfterStart && m.StartCalls() > 0 {
+		panic("list panicked")
+	}
+	return m.mockManager.List(ctx, filter)
 }
 
 func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath string) error {
@@ -803,14 +812,19 @@ func (m *panickingManager) Start(ctx context.Context, opts api.StartOptions) (*a
 // ID, like a failed Manager.Start, not with the recovery middleware's
 // generic error.
 func TestStartPanic_MarksStartAttempted(t *testing.T) {
-	for _, tc := range []struct{ name, path, panicIn string }{
-		{"start panics in Manager.Start", "/api/v1/agents/test-agent-1/start", "start"},
-		{"restart panics in Stop", "/api/v1/agents/test-agent-1/restart", "stop"},
-		{"restart panics in Manager.Start", "/api/v1/agents/test-agent-1/restart", "start"},
+	for _, tc := range []struct {
+		name, path, panicIn string
+		listPanics          bool // the re-list for the current run panics too
+	}{
+		{name: "start panics in Manager.Start", path: "/api/v1/agents/test-agent-1/start", panicIn: "start"},
+		{name: "restart panics in Stop", path: "/api/v1/agents/test-agent-1/restart", panicIn: "stop"},
+		{name: "restart panics in Manager.Start", path: "/api/v1/agents/test-agent-1/restart", panicIn: "start"},
+		{name: "start panics, then the re-list panics", path: "/api/v1/agents/test-agent-1/start", panicIn: "start", listPanics: true},
+		{name: "restart panics, then the re-list panics", path: "/api/v1/agents/test-agent-1/restart", panicIn: "start", listPanics: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "running"}}}
-			srv := newTestServerWithManager(t, &panickingManager{mockManager: mock, panicIn: tc.panicIn})
+			srv := newTestServerWithManager(t, &panickingManager{mockManager: mock, panicIn: tc.panicIn, listPanicsAfterStart: tc.listPanics})
 			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"runId":"run-x"}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()

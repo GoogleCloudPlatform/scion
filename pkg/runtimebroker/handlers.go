@@ -2623,9 +2623,24 @@ func (s *Server) reportRuntimePanic(ctx context.Context, w http.ResponseWriter, 
 	}
 	s.agentLifecycleLog.Error("Agent "+op+" panicked",
 		"agent_id", id, "panic", p, "stack", string(debug.Stack()))
-	details := s.startFailureDetails(ctx, mgr, id, projectID, runID)
+	details := s.panicFailureDetails(ctx, mgr, id, projectID, runID)
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 		runtimeOpError(op, fmt.Errorf("panic: %v", p)).Error(), details)
+}
+
+// panicFailureDetails is startFailureDetails for reportRuntimePanic. The
+// runtime that panicked may panic again while it is re-listed for the
+// current run; that panic is recovered here and the details fall back to
+// startAttemptedDetails, so the startAttempted marker is still sent.
+func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) (details map[string]interface{}) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.agentLifecycleLog.Error("Agent start failure: re-listing the runtime panicked",
+				"agent_id", id, "panic", p)
+			details = startAttemptedDetails(runID)
+		}
+	}()
+	return s.startFailureDetails(ctx, mgr, id, projectID, runID)
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
