@@ -53,6 +53,8 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushPermission: PushPermissionState = 'default';
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
   private boundOnPushPreference = (): void => this.syncPushState();
@@ -73,34 +75,48 @@ export class ScionNotificationTray extends LitElement {
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
-    if (this.user) {
-      void this.fetchNotifications();
-      this.startPolling();
-      this.listenForNotifications();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchNotifications();
-        this.startPolling();
-        this.listenForNotifications();
-      } else {
-        this.stopPolling();
-        this.stopListeningForNotifications();
-        this.notifications = [];
-      }
-    }
+    if (changed.has('user')) this.syncUser();
     this.detectTruncation();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchNotifications();
+      this.startPolling();
+      this.listenForNotifications();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForNotifications();
+      this.notifications = [];
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -687,9 +703,9 @@ export class ScionNotificationTray extends LitElement {
         aria-expanded=${this.open}
       >
         <sl-icon name="bell"></sl-icon>
-        ${count > 0
-          ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>`
-          : nothing}
+        ${
+          count > 0 ? html`<span class="badge pulse">${count > 99 ? '99+' : count}</span>` : nothing
+        }
       </button>
       ${this.open ? this.renderPanel() : nothing}
     `;
@@ -701,11 +717,13 @@ export class ScionNotificationTray extends LitElement {
       <div class="panel" role="dialog" aria-label="Notifications">
         <div class="panel-header">
           <h3 class="panel-title">Notifications</h3>
-          ${count > 0
-            ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
-                Mark all read
-              </button>`
-            : nothing}
+          ${
+            count > 0
+              ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
+                  Mark all read
+                </button>`
+              : nothing
+          }
         </div>
         <div class="panel-list">
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
@@ -777,17 +795,19 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            ${isChatNotificationStatus(n.status)
-              ? // Chat rows carry the nil agent UUID, so "View agent" would
-                // link to /agents/00000000-... and 404. Until the row records
-                // its conversation there is nowhere honest to send the click.
-                nothing
-              : html`<a
-                  href="/agents/${n.agentId}"
-                  @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
-                >
-                  View agent
-                </a>`}
+            ${
+              isChatNotificationStatus(n.status)
+                ? // Chat rows carry the nil agent UUID, so "View agent" would
+                  // link to /agents/00000000-... and 404. Until the row records
+                  // its conversation there is nowhere honest to send the click.
+                  nothing
+                : html`<a
+                    href="/agents/${n.agentId}"
+                    @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
+                  >
+                    View agent
+                  </a>`
+            }
             <button class="mark-read-link" @click=${(): void => void this.ackOne(n.id)}>
               Mark read
             </button>
