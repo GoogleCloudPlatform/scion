@@ -474,6 +474,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	for _, e := range config.Env {
 		parts := strings.SplitN(e, "=", 2)
+		if parts[0] == SupplementalGIDsEnvVar {
+			// Broker-owned: only appendSharedDirGroupArgs sets it
+			// (ptone/scion#3155), never template or user env.
+			continue
+		}
 		if len(parts) == 2 {
 			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
 		} else {
@@ -495,7 +500,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -1231,4 +1236,54 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 		return 0, false
 	}
 	return code, true
+}
+
+// SupplementalGIDsEnvVar tells sciontool init which supplementary groups to
+// keep when it drops from root to the agent user (Go's privilege drop
+// otherwise clears them). sciontool keeps only ids that are also in its own
+// supplementary groups, i.e. ids the runtime actually granted with
+// --group-add. The broker owns it: buildCommonRunArgs drops any value from
+// template or user env, and appendSharedDirGroupArgs sets it. Mirrored in
+// pkg/sciontool/supervisor (ptone/scion#3155).
+const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
+
+// sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
+// or nil when the agent mounts no nfs shared dir.
+func sharedDirGroups(config RunConfig) []int64 {
+	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+		return nil
+	}
+	var out []int64
+	for _, gid := range config.SharedDirStorage.SupplementalGroups {
+		if gid > 0 {
+			out = append(out, gid)
+		}
+	}
+	return out
+}
+
+// appendSharedDirGroupArgs adds one --group-add per nfs shared-dir leaf
+// group, plus SupplementalGIDsEnvVar so sciontool keeps them after its
+// privilege drop (ptone/scion#3155). When the runtime cannot add groups
+// (supported false: rootless Podman, whose user namespace does not map the
+// leaf gid, or Apple's container CLI), it logs a warning and returns args
+// unchanged, so the agent starts as before.
+func appendSharedDirGroupArgs(args []string, config RunConfig, runtimeName string, supported bool) []string {
+	groups := sharedDirGroups(config)
+	if len(groups) == 0 {
+		return args
+	}
+	if !supported {
+		runtimeLog.Warn("shared dir groups are not supported on this runtime; the agent starts without them "+
+			"and may be unable to modify files other agents create in its nfs shared dirs",
+			"runtime", runtimeName, "gids", groups)
+		return args
+	}
+	ids := make([]string, 0, len(groups))
+	for _, gid := range groups {
+		id := strconv.FormatInt(gid, 10)
+		args = append(args, "--group-add", id)
+		ids = append(ids, id)
+	}
+	return append(args, "-e", SupplementalGIDsEnvVar+"="+strings.Join(ids, ","))
 }

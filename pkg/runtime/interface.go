@@ -297,6 +297,12 @@ type SharedDirRealization struct {
 	// SubPaths maps each shared dir name to its subPath within PVClaimName,
 	// e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// SupplementalGroups are the owning group ids of the shared-dir leaves,
+	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
+	// and filtered by its guard. Kubernetes adds them to the pod's
+	// supplementalGroups; Docker and rootful Podman pass them as
+	// --group-add. Empty means no extra group (ptone/scion#3155).
+	SupplementalGroups []int64
 }
 
 // RunRef identifies the runtime entry a Delete targets. ID is the backend

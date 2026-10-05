@@ -338,6 +338,8 @@ In both modes, NFS problems are logged and reported per share in the `nfs_mounts
 
 With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is not yet applied on Kubernetes (ptone/scion#2608). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
 
+Pods get `fsGroup` from `nfs.gid` (default `1000`). With `server.shared_dir_storage.backend: nfs`, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it. Shared directories served from the workspace export (`workspace_storage` set to `nfs` without `shared_dir_storage`) do not get that group: there, set `nfs.gid` to the shared-directory leaf group, otherwise pods lose group access to the leaf.
+
 #### Ephemeral Storage & 503 Safety Gate
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
@@ -357,18 +359,36 @@ This setting is **global-only**: each broker process reads it from its own globa
 | `nfs.mount_root` | string | | **Required for `nfs`.** Host directory under which the share is mounted, at `<mount_root>/<shares[0].id>`. Docker, Podman, and Apple runtimes bind-mount from here. |
 | `nfs.shares` | list of objects | `[]` | **Required for `nfs`.** Only the first entry is used. `id` is required. `pv_name` names the static PersistentVolumeClaim that Kubernetes pods mount by `subPath`, and is required for Kubernetes brokers. |
 | `nfs.subpath_root` | string | `"projects"` | Directory within the share that holds per-project trees. Must be a relative path. |
+| `nfs.gid` | integer | | Optional. The only shared-directory group that agents may be given as a supplementary group. When set, a leaf owned by any other group is skipped with a warning. See [Agent groups](#agent-groups-on-nfs-shared-directories). |
 
 Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
 
-The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
 
 With the `nfs` backend, the Hub and brokers also apply the following:
 
 - **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
-- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
-- **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`), make the broker user a member of that group, and set the pods' `fsGroup` to it; Kubernetes adds `fsGroup` as a supplementary group and does not change ownership on NFS volumes. If the export does not support POSIX ACLs, files created inside a leaf follow each writer's umask, so use umask `002` for every agent that writes there.
+- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Files created inside such a directory follow each writer's umask (usually `022`), so they are not group-writable. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`) so every leaf inherits it. Scion then adds that group to each agent that mounts the leaf; see [Agent groups](#agent-groups-on-nfs-shared-directories).
 - **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
 - **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
+
+#### Agent groups on NFS shared directories
+
+Different kinds of agents can write to the same NFS shared directory (leaf): Docker or rootful Podman agents on brokers, and Kubernetes pods. They usually run with different uids, so each one can modify the others' files only through the leaf's group. For that to work:
+
+- **The export must support POSIX ACLs.** The leaf's default ACL makes new files group-writable whatever the writer's umask. Without ACL support, files follow each writer's umask (usually `022`) and other writers cannot modify them. Scion logs a warning once when it cannot set the ACL. ACL-capable storage is required for shared directories with mixed writers.
+- **Every writer must be in the leaf's group.** At each agent start, the broker reads the group of every NFS shared directory the agent mounts, from the leaf itself, and adds it to the agent:
+  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated.
+  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user; older images drop them and keep the previous behaviour.
+  - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group.
+
+  For safety, the broker skips a group (with a warning) when it is below `1000`, when it is an overflow id (`65534` or `4294967294`, which NFSv4 id mapping reports for unmapped groups), or when `nfs.gid` is set and does not match. If the group cannot be read, the agent starts without it. Agents without an NFS shared directory are unchanged. On an `all_squash` export the server maps every client to one identity, so the added group has no effect there.
+
+Some files are not upgraded:
+
+- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; an ACL cannot add permissions the creator did not request.
+- Leaves created outside Scion, or before Scion added the leaf ACL, keep their existing mode and ACL. Scion only sets modes and ACLs on leaves it creates. Fix them by hand (see the hybrid tier guide).
 
 The `local` backend (or an unset `shared_dir_storage`) behaves as before.
 

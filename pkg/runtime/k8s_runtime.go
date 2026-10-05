@@ -2111,6 +2111,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
+		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
 
 	// Determine image pull policy
@@ -4360,4 +4361,24 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
 	}
 	return envs
+}
+
+// sharedDirSupplementalGroups returns the nfs shared-dir leaf groups
+// (RunConfig.SharedDirStorage.SupplementalGroups, already guarded by
+// pkg/agent) to add as pod supplementalGroups, so the agent can write files
+// other agent kinds create in the leaf's group (ptone/scion#3155). A gid
+// equal to fsGroup is skipped, since Kubernetes already adds fsGroup. Nil
+// when the agent mounts no nfs shared dir, leaving the pod spec unchanged.
+func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
+	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+		return nil
+	}
+	var out []int64
+	for _, gid := range config.SharedDirStorage.SupplementalGroups {
+		if gid <= 0 || gid == fsGroup {
+			continue
+		}
+		out = append(out, gid)
+	}
+	return out
 }
