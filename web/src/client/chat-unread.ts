@@ -77,6 +77,21 @@ export function countUnreadDMs(dms: readonly UnreadDM[]): number {
 }
 
 /**
+ * The browser's idle-callback API, or null where there is no window (a
+ * non-browser environment) or the browser lacks it; callers then use a timer.
+ */
+function idleCallbacks(): Pick<Window, 'requestIdleCallback' | 'cancelIdleCallback'> | null {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.requestIdleCallback !== 'function' ||
+    typeof window.cancelIdleCallback !== 'function'
+  ) {
+    return null;
+  }
+  return window;
+}
+
+/**
  * Owns the tab-title unread count for the lifetime of the page.
  */
 export class ChatUnreadCounter {
@@ -219,10 +234,11 @@ export class ChatUnreadCounter {
   private scheduleInitialRefresh(): void {
     this.cancelInitialRefresh();
     const run = (): void => this.runInitialRefresh();
-    if (typeof window.requestIdleCallback === 'function') {
+    const idle = idleCallbacks();
+    if (idle) {
       this.initial = {
         kind: 'idle',
-        id: window.requestIdleCallback(run, { timeout: INITIAL_REFRESH_MAX_DELAY_MS }),
+        id: idle.requestIdleCallback(run, { timeout: INITIAL_REFRESH_MAX_DELAY_MS }),
       };
     } else {
       this.initial = { kind: 'timeout', id: setTimeout(run, INITIAL_REFRESH_MAX_DELAY_MS) };
@@ -241,7 +257,7 @@ export class ChatUnreadCounter {
     const pending = this.initial;
     if (!pending) return;
     this.initial = null;
-    if (pending.kind === 'idle') window.cancelIdleCallback(pending.id);
+    if (pending.kind === 'idle') idleCallbacks()?.cancelIdleCallback(pending.id);
     else clearTimeout(pending.id);
   }
 

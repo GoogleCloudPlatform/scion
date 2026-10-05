@@ -576,6 +576,62 @@ describe('ChatUnreadCounter first refresh', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  describe('with no window (a non-browser environment)', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('takes the timer fallback and sends one pair at the bound', async () => {
+      vi.useFakeTimers();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      vi.stubGlobal('window', undefined);
+      try {
+        expect(typeof window).toBe('undefined');
+        expect(() => counter.start()).not.toThrow();
+        expect(vi.getTimerCount()).toBe(1);
+        await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+        expect(apiFetch).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      } finally {
+        counter.stop();
+      }
+    });
+
+    it('sends nothing and does not throw when stopped before the bound', async () => {
+      vi.useFakeTimers();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      vi.stubGlobal('window', undefined);
+      counter.start();
+      expect(() => counter.stop()).not.toThrow();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not throw cancelling an idle refresh once the window is gone', async () => {
+      vi.useFakeTimers();
+      const idle = installIdleCallback();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      try {
+        counter.start();
+        expect(idle.timeouts).toHaveLength(1);
+        vi.stubGlobal('window', undefined);
+        expect(() => counter.stop()).not.toThrow();
+        await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+        expect(apiFetch).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        idle.restore();
+      }
+    });
+  });
+
   it('sends nothing when both halves were pushed before idle', async () => {
     vi.useFakeTimers();
     const idle = installIdleCallback();
