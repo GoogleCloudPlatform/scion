@@ -89,11 +89,9 @@ image:
   #
   # The hub image this chart needs is the one built from the root Dockerfile
   # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
-  # KUBECONFIG. That stage is added by the image-build change that accompanies
-  # this chart and is not in the root Dockerfile yet, so the build command above
-  # fails with an unknown-target error until it lands - which is a known
-  # sequencing gap and not a mistake in this file.
-  # No such image is published anywhere, so every possible default
+  # KUBECONFIG. image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
+  # <registry>/scion-hub-gke:<git short sha> (see image-build/README.md).
+  # The chart has no canonical registry to point at, so every possible default
   # would point either at an empty registry path or at somebody else's
   # artifact - and a default that cannot be correct turns an install-time error
   # into a runtime mystery.
