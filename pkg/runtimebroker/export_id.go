@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -90,15 +91,18 @@ func readExportIDMarker(marker string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	buf := make([]byte, exportIDMarkerMaxBytes)
-	n, err := f.Read(buf)
-	if err != nil && n == 0 {
+	// Bounded read: the marker is on a shared export, so it is never read
+	// whole; one byte past the limit detects an oversized file.
+	data, err := io.ReadAll(io.LimitReader(f, exportIDMarkerMaxBytes+1))
+	if err != nil {
 		return "", fmt.Errorf("read export identity marker %s: %w", marker, err)
 	}
-	id := strings.TrimSpace(string(buf[:n]))
-	parsed, err := uuid.Parse(id)
+	if len(data) > exportIDMarkerMaxBytes {
+		return "", fmt.Errorf("export identity marker %s is larger than %d bytes", marker, exportIDMarkerMaxBytes)
+	}
+	parsed, err := uuid.Parse(strings.TrimSpace(string(data)))
 	if err != nil {
-		return "", fmt.Errorf("export identity marker %s does not hold a UUID", marker)
+		return "", fmt.Errorf("export identity marker %s does not hold a UUID: %w", marker, err)
 	}
 	return parsed.String(), nil
 }

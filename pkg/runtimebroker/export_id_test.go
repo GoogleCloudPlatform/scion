@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -281,4 +282,26 @@ func TestHubConnectionStart_HeartbeatReportsDefaultProfile(t *testing.T) {
 func TestAgentInfoToResponse_CarriesWorkspacePlacement(t *testing.T) {
 	resp := AgentInfoToResponse(api.AgentInfo{Name: "a", WorkspacePlacement: api.WorkspacePlacementExport})
 	require.Equal(t, api.WorkspacePlacementExport, resp.WorkspacePlacement)
+}
+
+// readExportIDMarker reads the whole marker (bounded): an oversized file and
+// a read error are errors, and surrounding whitespace is tolerated.
+func TestReadExportIDMarker(t *testing.T) {
+	dir := t.TempDir()
+	const id = "33333333-3333-4333-8333-333333333333"
+
+	ok := filepath.Join(dir, "ok")
+	require.NoError(t, os.WriteFile(ok, []byte("  "+id+"\n"), 0o644))
+	got, err := readExportIDMarker(ok)
+	require.NoError(t, err)
+	require.Equal(t, id, got)
+
+	big := filepath.Join(dir, "big")
+	require.NoError(t, os.WriteFile(big, []byte(id+strings.Repeat(" ", exportIDMarkerMaxBytes)), 0o644))
+	_, err = readExportIDMarker(big)
+	require.ErrorContains(t, err, "larger than")
+
+	// A directory opens but cannot be read.
+	_, err = readExportIDMarker(dir)
+	require.ErrorContains(t, err, "read export identity marker")
 }
