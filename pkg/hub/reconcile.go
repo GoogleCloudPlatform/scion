@@ -284,27 +284,25 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		claim = args.Claim
 	}
 	// A delete engine's intent applies only while the claim it was created
-	// under is still the row's current, live claim: the engine may have
-	// died, its lease lapsed and the user started the agent again since
-	// (ptone/scion#2906). A stale intent is dropped without dispatching;
-	// failing it (rather than completing it) keeps a waiting engine from
-	// reading it as a teardown that ran. The deadline sent to the broker is
-	// computed now, from the row's lease, not when the intent was written.
+	// under is still the row's current claim, live or failed in_doubt (see
+	// deferredDeleteDeadline): the engine may have died, its lease lapsed
+	// and the user started the agent again since (ptone/scion#2906). A
+	// stale intent is dropped without dispatching; failing it (rather than
+	// completing it) keeps a waiting engine from reading it as a teardown
+	// that ran. The deadline sent to the broker is computed now, not when
+	// the intent was written.
 	//
 	// An intent records no run ID of its own until ptone/scion#2550 P5; the
 	// broker gets the re-read row's run ID.
 	if claim != 0 {
-		now := deleteClock()
-		if !deleteClaimLive(agent, claim, now) {
-			s.agentLifecycleLog.Info("reconcile: deferred delete intent's claim is no longer live; dropped",
+		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
+		if !ok {
+			s.agentLifecycleLog.Info("reconcile: deferred delete intent's claim is no longer current; dropped",
 				"id", d.ID, "agent_id", agent.ID, "intent_claim", claim, "row_claim", agent.DeletionClaim,
-				"deletion_state", agent.DeletionState)
+				"deletion_state", agent.DeletionState, "deletion_code", agent.DeletionCode)
 			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
 		}
-		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{
-			claim:    claim,
-			notAfter: deleteNotAfter(now, *agent.DeletionLeaseAt),
-		})
+		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
 		if isStaleDeleteDispatch(err) && !errors.Is(err, errStaleDeleteDispatch) {

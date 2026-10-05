@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 		name   string
 		budget time.Duration
 	}{
-		{"lease bound", 0},                 // default: lease 60s < budget 120s
+		{"lease bound", 0},                 // default: lease 60s - 5s < budget 120s
 		{"budget bound", 30 * time.Second}, // budget below the lease
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,11 +86,11 @@ func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 
 			got := client.lastDeleteOpts.notAfter
 			require.False(t, got.IsZero(), "the engine sent no notAfter")
-			assert.False(t, got.After(t0.Add(deleteLease)), "notAfter %v past the lease expiry %v", got, t0.Add(deleteLease))
+			assert.False(t, got.After(t0.Add(deleteLease-deleteNotAfterMargin)), "notAfter %v past the lease expiry less the margin", got)
 			assert.False(t, got.After(t0.Add(deleteDispatchBudget)), "notAfter %v past now+budget %v", got, t0.Add(deleteDispatchBudget))
-			want := t0.Add(deleteLease)
-			if deleteDispatchBudget < deleteLease {
-				want = t0.Add(deleteDispatchBudget)
+			want := t0.Add(55 * time.Second) // lease 60s - margin 5s
+			if tc.budget != 0 {
+				want = t0.Add(tc.budget)
 			}
 			assert.True(t, got.Equal(want), "notAfter = %v, want %v", got, want)
 		})
@@ -98,9 +99,11 @@ func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 
 func TestDeleteNotAfter_MinOfLeaseAndBudget(t *testing.T) {
 	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	assert.Equal(t, t0.Add(40*time.Second), deleteNotAfter(t0, t0.Add(40*time.Second)))
+	// The lease bound subtracts the margin, toward refusal.
+	assert.Equal(t, t0.Add(35*time.Second), deleteNotAfter(t0, t0.Add(40*time.Second)))
 	assert.Equal(t, t0.Add(deleteDispatchBudget), deleteNotAfter(t0, t0.Add(deleteDispatchBudget+time.Minute)))
 	assert.Equal(t, t0.Add(deleteDispatchBudget), deleteNotAfter(t0, time.Time{}))
+	assert.Equal(t, 5*time.Second, deleteNotAfterMargin, "keep equal to the broker's deleteNotAfterSkew")
 }
 
 // Both transports put notAfter on the delete query only when set.
@@ -173,6 +176,7 @@ func TestDeleteFence_StaleDispatchIsNotActedOn(t *testing.T) {
 			assert.Equal(t, store.DeletionCodeAbandoned, view.Code, "the claim reads abandoned")
 			_, details := errorBody(t, rec)
 			assert.Equal(t, store.DeletionCodeAbandoned, details["deletionCode"])
+			assert.Contains(t, rec.Body.String(), "after its deadline", "a stale-specific message")
 		})
 	}
 }
@@ -238,17 +242,30 @@ func TestDeleteFence_DeferredIntentCarriesClaim_StaleIsAbandoned(t *testing.T) {
 func TestDeleteFence_ExecDeferredDeleteChecksClaim(t *testing.T) {
 	ctx := context.Background()
 	type tc struct {
-		name     string
-		seed     deleteSeed
-		claimAdj int64 // intent claim = row claim + claimAdj
-		wantSend bool
+		name        string
+		seed        deleteSeed
+		claimAdj    int64 // intent claim = row claim + claimAdj
+		softDeleted bool
+		wantSend    bool
+		// wantNotAfter computes the expected deadline from t0 and the row.
+		wantNotAfter func(t0 time.Time, row *store.Agent) time.Time
 	}
+	leaseBound := func(_ time.Time, row *store.Agent) time.Time {
+		return row.DeletionLeaseAt.Add(-deleteNotAfterMargin)
+	}
+	budgetBound := func(t0 time.Time, _ *store.Agent) time.Time { return t0.Add(deleteDispatchBudget) }
 	for _, c := range []tc{
-		{"current live claim", seedLiveDeleting, 0, true},
-		{"newer claim on the row", seedLiveDeleting, -1, false},
-		{"lease lapsed", deleteSeed{name: "lapsed", state: store.DeletionStateDeleting, leaseIn: -time.Minute}, 0, false},
-		{"claim failed", deleteSeed{name: "failed", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, 0, false},
-		{"claim finalizing", deleteSeed{name: "finalizing", state: store.DeletionStateFinalizing, leaseIn: time.Minute}, 0, false},
+		{name: "current live claim", seed: seedLiveDeleting, wantSend: true, wantNotAfter: leaseBound},
+		// The engine's wait ended with this intent outstanding: it still
+		// runs (design §2.3.1, follow-up 3), bounded by the budget.
+		{name: "claim failed in_doubt", seed: deleteSeed{name: "in_doubt", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}, wantSend: true, wantNotAfter: budgetBound},
+		{name: "in_doubt but soft-deleted", seed: deleteSeed{name: "in_doubt", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}, softDeleted: true},
+		{name: "live claim but soft-deleted", seed: seedLiveDeleting, softDeleted: true},
+		{name: "in_doubt of an older claim", seed: deleteSeed{name: "in_doubt", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}, claimAdj: -1},
+		{name: "newer claim on the row", seed: seedLiveDeleting, claimAdj: -1},
+		{name: "lease lapsed", seed: deleteSeed{name: "lapsed", state: store.DeletionStateDeleting, leaseIn: -time.Minute}},
+		{name: "claim failed", seed: deleteSeed{name: "failed", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}},
+		{name: "claim finalizing", seed: deleteSeed{name: "finalizing", state: store.DeletionStateFinalizing, leaseIn: time.Minute}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t0 := fenceNow(t)
@@ -260,6 +277,12 @@ func TestDeleteFence_ExecDeferredDeleteChecksClaim(t *testing.T) {
 			if c.claimAdj < 0 {
 				// A later claim took the row (claim 2); the intent is claim 1's.
 				seedAgentDeletion(t, s, agent.ID, c.seed)
+			}
+			if c.softDeleted {
+				past := time.Now().Add(-time.Minute)
+				n, err := s.UpdateAgentDeletion(ctx, agent.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &past})
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
 			}
 			row := mustGetAgent(t, s, agent.ID)
 			args, err := MarshalDispatchArgs(&DeleteDispatchArgs{Claim: row.DeletionClaim + c.claimAdj})
@@ -275,9 +298,8 @@ func TestDeleteFence_ExecDeferredDeleteChecksClaim(t *testing.T) {
 			}
 			require.NoError(t, execErr)
 			require.True(t, client.deleteCalled)
-			want := deleteNotAfter(t0, *row.DeletionLeaseAt)
+			want := c.wantNotAfter(t0, row)
 			assert.True(t, client.lastDeleteOpts.notAfter.Equal(want), "notAfter = %v, want %v", client.lastDeleteOpts.notAfter, want)
-			assert.False(t, client.lastDeleteOpts.notAfter.After(*row.DeletionLeaseAt))
 		})
 	}
 	t.Run("no claim (not from the engine)", func(t *testing.T) {
@@ -302,4 +324,129 @@ func TestDeleteFence_ExecDeferredDeleteChecksClaim(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, staleDeleteDispatchFromText(err.Error()), "error text %q lacks the stale marker", err.Error())
 	})
+}
+
+// An in_doubt intent's deadline is bounded by the executing ctx's deadline
+// when that comes first.
+func TestDeferredDeleteDeadline_InDoubtUsesCtxDeadline(t *testing.T) {
+	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	row := &store.Agent{DeletionClaim: 3, DeletionState: store.DeletionStateFailed, DeletionCode: store.DeletionCodeInDoubt}
+	got, ok := deferredDeleteDeadline(context.Background(), row, 3, t0)
+	require.True(t, ok)
+	assert.Equal(t, t0.Add(deleteDispatchBudget), got)
+
+	dl := time.Now().Add(30 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), dl)
+	defer cancel()
+	got, ok = deferredDeleteDeadline(ctx, row, 3, time.Now())
+	require.True(t, ok)
+	assert.True(t, got.Equal(dl), "notAfter = %v, want the ctx deadline %v", got, dl)
+}
+
+// renewalHookStore observes the engine's lease renewals. The first renewal
+// fails (failFirst) or goes through; later ones are held until release is
+// closed, so exactly one renewal lands before the dispatch. SwapRunIntent
+// (the engine's run-intent write, just before the dispatch computes
+// notAfter) waits for that first renewal.
+type renewalHookStore struct {
+	store.Store
+	failFirst bool
+	first     chan struct{} // closed once the first renewal returned
+	release   chan struct{}
+	mu        sync.Mutex
+	renewals  int
+}
+
+func isRenewal(set store.DeletionFields) bool {
+	return set.KeepUpdated && set.LeaseAt != nil && set.State == nil && !set.BumpClaim
+}
+
+func (h *renewalHookStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
+	if !isRenewal(set) {
+		return h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+	}
+	h.mu.Lock()
+	h.renewals++
+	n := h.renewals
+	h.mu.Unlock()
+	if n > 1 {
+		<-h.release
+		return h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+	}
+	defer close(h.first)
+	if h.failFirst {
+		return 0, errInjectedDeletionWrite
+	}
+	return h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+}
+
+func (h *renewalHookStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	select {
+	case <-h.first:
+	case <-time.After(10 * time.Second):
+	}
+	return h.Store.SwapRunIntent(ctx, agentID, intent)
+}
+
+// releasingClient records the dispatch's notAfter, then lets held renewals
+// through so the engine can stop its renewal goroutine.
+type releasingClient struct {
+	mockRuntimeBrokerClient
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *releasingClient) DeleteAgent(ctx context.Context, brokerID, endpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+	err := c.mockRuntimeBrokerClient.DeleteAgent(ctx, brokerID, endpoint, agentID, projectID, opts)
+	c.once.Do(func() { close(c.release) })
+	return err
+}
+
+// notAfter tracks the lease the engine last wrote: a renewal that took
+// moves it forward, a failed one does not.
+func TestDeleteFence_NotAfterTracksRenewals(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failFirst bool
+		want      time.Duration // from t0
+	}{
+		// Claim at t0 (lease t0+60s); the renewal runs at t0+20s and
+		// writes t0+80s, so notAfter = t0+80s-5s.
+		{"renewal took", false, 75 * time.Second},
+		// The renewal failed: the row still holds t0+60s.
+		{"renewal failed", true, 55 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setDeleteKnob(t, &deleteLeaseRenewInterval, 5*time.Millisecond)
+			t0 := time.Now().UTC().Truncate(time.Second)
+			var clockMu sync.Mutex
+			now := t0
+			setDeleteClock(t, func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now })
+
+			srv, s := testServer(t)
+			release := make(chan struct{})
+			hooks := &renewalHookStore{Store: s, failFirst: tc.failFirst, first: make(chan struct{}), release: release}
+			srv.store = hooks
+			client := &releasingClient{release: release}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+			agent := setupBrokerAgentInPhase(t, s, "fence-renew-"+map[bool]string{true: "f", false: "ok"}[tc.failFirst], state.PhaseRunning)
+
+			plan, err := srv.claimAgentDeletion(context.Background(), agent.ID, agentDeleteParams{})
+			require.NoError(t, err)
+			require.NotNil(t, plan)
+			clockMu.Lock()
+			now = t0.Add(20 * time.Second)
+			clockMu.Unlock()
+			select {
+			case <-srv.runAgentDeletion(context.Background(), plan):
+			case <-time.After(10 * time.Second):
+				t.Fatal("the engine never finished")
+			}
+
+			require.True(t, client.deleteCalled)
+			want := t0.Add(tc.want)
+			got := client.lastDeleteOpts.notAfter
+			assert.True(t, got.Equal(want), "notAfter = %v, want %v", got, want)
+		})
+	}
 }

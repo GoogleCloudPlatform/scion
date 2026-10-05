@@ -19,10 +19,12 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -44,11 +47,32 @@ import (
 
 // holdingBrokerClient forwards to the real HTTP client, but holds each
 // DeleteAgent until release is closed, as a slow network or a frozen hub
-// would.
+// would. StartAgent stands in for the broker's start handler, which the
+// fake runtime cannot run: when the agent's entry still exists it keeps it
+// and reports its run (the broker's "already running" answer, which the hub
+// adopts); otherwise it runs a new entry labelled with the run ID the hub
+// minted, as pkg/agent.Start does.
 type holdingBrokerClient struct {
 	RuntimeBrokerClient
-	held    chan DeleteAgentOptions
-	release chan struct{}
+	held     chan DeleteAgentOptions
+	release  chan struct{}
+	mgr      *runLabelManager
+	project  string
+	scionDir string
+	starts   int
+}
+
+func (c *holdingBrokerClient) StartAgent(_ context.Context, _, _, agentID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, extras StartExtras) (*RemoteAgentResponse, error) {
+	c.starts++
+	entries, _ := c.mgr.snapshot()
+	for _, e := range entries {
+		if e.Name == agentID {
+			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{Slug: agentID, ContainerID: e.ContainerID, Phase: "running", RunID: e.RunID}}, nil
+		}
+	}
+	cid := "cid-new"
+	c.mgr.run(agentID, cid, c.project, c.scionDir, extras.RunID)
+	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{Slug: agentID, ContainerID: cid, Phase: "running", RunID: extras.RunID}, Created: true}, nil
 }
 
 func (c *holdingBrokerClient) DeleteAgent(ctx context.Context, brokerID, endpoint, agentID, projectID string, opts DeleteAgentOptions) error {
@@ -61,7 +85,7 @@ type fenceE2E struct {
 	srv       *Server
 	s         store.Store
 	mgr       *runLabelManager
-	broker    *runtimebroker.Server
+	brokerNow *atomic.Pointer[time.Time]
 	client    *holdingBrokerClient
 	agent     *store.Agent
 	infoPath  string
@@ -91,8 +115,10 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 	cfg := runtimebroker.DefaultServerConfig()
 	cfg.BrokerID = "fence-broker"
 	cfg.BrokerName = "fence-broker"
+	brokerNow := &atomic.Pointer[time.Time]{}
+	brokerNow.Store(&t0)
+	cfg.DeleteClock = func() time.Time { return *brokerNow.Load() }
 	broker := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
-	broker.SetDeleteClock(func() time.Time { return t0 })
 	httpSrv := httptest.NewServer(broker.Handler())
 	t.Cleanup(httpSrv.Close)
 
@@ -106,6 +132,9 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 		RuntimeBrokerClient: NewHTTPRuntimeBrokerClient(),
 		held:                make(chan DeleteAgentOptions, 1),
 		release:             make(chan struct{}),
+		mgr:                 mgr,
+		project:             projectID,
+		scionDir:            scionDir,
 	}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 
@@ -118,7 +147,7 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 	require.NoError(t, err)
 	mgr.run(name, "cid-a", projectID, scionDir, "run-a")
 
-	return &fenceE2E{srv: srv, s: s, mgr: mgr, broker: broker, client: client, agent: a,
+	return &fenceE2E{srv: srv, s: s, mgr: mgr, brokerNow: brokerNow, client: client, agent: a,
 		infoPath: infoPath, projectID: projectID, scionDir: scionDir, t0: t0}
 }
 
@@ -154,6 +183,20 @@ func (f *fenceE2E) lapse(t *testing.T, plan *agentDeletionPlan) {
 	view := store.ComputeAgentDeletion(got, time.Now())
 	require.NotNil(t, view)
 	require.Equal(t, store.DeletionCodeAbandoned, view.Code)
+}
+
+// setBrokerNow sets the broker's delete clock.
+func (f *fenceE2E) setBrokerNow(t time.Time) { f.brokerNow.Store(&t) }
+
+// start drives a real start through the hub's start handler (start gate,
+// clearing the abandoned delete marker, run ID mint and adoption).
+func (f *fenceE2E) start(t *testing.T) {
+	t.Helper()
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, "start: %d %s", rec.Code, rec.Body.String())
+	require.Equal(t, 1, f.client.starts, "the start did not reach the broker")
+	got := mustGetAgent(t, f.s, f.agent.ID)
+	require.Equal(t, store.DeletionStateNone, got.DeletionState, "the start did not clear the abandoned delete")
 }
 
 func (f *fenceE2E) wait(t *testing.T, done <-chan deletionOutcome) deletionOutcome {
@@ -201,28 +244,28 @@ func TestDeleteFence_E2E_LateDeleteAfterAbandonment(t *testing.T) {
 		},
 		{
 			// ii2 step 9b: run A survived the freeze, the user's start
-			// adopted it (same run ID), then DELETE(run A) arrived. run_id
-			// cannot fence this.
+			// adopted it (the hub records the broker's run-a again), then
+			// DELETE(run A) arrived. run_id cannot fence this.
 			name: "start adopted the surviving run",
 			between: func(t *testing.T, f *fenceE2E) {
-				require.NoError(t, f.s.UpdateAgentStatus(context.Background(), f.agent.ID,
-					store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+				f.start(t)
+				require.Equal(t, "run-a", mustGetAgent(t, f.s, f.agent.ID).RunID, "the start did not adopt run-a")
 			},
 			wantRun: "run-a",
 		},
 		{
-			// Run N's delete delivered after the run N+1 restart. The
-			// broker's run_id check alone would answer 404, which the
-			// engine reads as success and finalizes; the deadline refuses
-			// it first, so the hub row survives too.
-			name: "restarted as a new run",
+			// Run N's delete delivered after the run N+1 start: run A's
+			// container went away meanwhile and the start created a new
+			// run. The broker's run_id check would also spare it (404);
+			// the deadline refuses the delete first.
+			name: "started as a new run",
 			between: func(t *testing.T, f *fenceE2E) {
 				f.mgr.mu.Lock()
 				f.mgr.entries = nil
 				f.mgr.mu.Unlock()
-				f.mgr.run("dev", "cid-b", f.projectID, f.scionDir, "run-b")
+				f.start(t)
 			},
-			wantRun: "run-b",
+			wantRun: "",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,10 +278,19 @@ func TestDeleteFence_E2E_LateDeleteAfterAbandonment(t *testing.T) {
 			tc.between(t, f)
 			// The delete reaches the broker 75s after it was sent: past
 			// notAfter (the 60s lease) plus the skew margin.
-			f.broker.SetDeleteClock(func() time.Time { return f.t0.Add(75 * time.Second) })
+			// (The last accepted instant is notAfter + 5s = the lease
+			// expiry, t0+60s.)
+			f.setBrokerNow(f.t0.Add(75 * time.Second))
 			close(f.client.release)
 
-			f.requireSurvived(t, f.wait(t, done), tc.wantRun)
+			wantRun := tc.wantRun
+			if wantRun == "" {
+				wantRun = mustGetAgent(t, f.s, f.agent.ID).RunID
+				require.NotEqual(t, "run-a", wantRun)
+			}
+			out := f.wait(t, done)
+			assert.Contains(t, out.message, "after its deadline")
+			f.requireSurvived(t, out, wantRun)
 		})
 	}
 }
@@ -248,7 +300,7 @@ func TestDeleteFence_E2E_LateDeleteAfterAbandonment(t *testing.T) {
 func TestDeleteFence_E2E_InTimeDeleteProceeds(t *testing.T) {
 	f := newFenceE2E(t)
 	done, _, _ := f.startDelete(t)
-	f.broker.SetDeleteClock(func() time.Time { return f.t0.Add(10 * time.Second) })
+	f.setBrokerNow(f.t0.Add(10 * time.Second))
 	close(f.client.release)
 
 	out := f.wait(t, done)

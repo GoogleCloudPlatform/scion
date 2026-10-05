@@ -54,6 +54,10 @@ import (
 
 // ServerConfig holds configuration for the Runtime Broker API server.
 type ServerConfig struct {
+	// DeleteClock, for tests only, replaces time.Now as the clock the delete
+	// notAfter check reads (see delete_not_after.go). nil means time.Now.
+	DeleteClock func() time.Time
+
 	// Port is the HTTP port to listen on.
 	Port int
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
@@ -304,12 +308,8 @@ type Server struct {
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
-
-	// deleteClock, when set, replaces time.Now for the delete notAfter
-	// check (tests only; see delete_not_after.go).
-	deleteClock  func() time.Time
-	messageLog   *slog.Logger
-	envSecretLog *slog.Logger
+	messageLog        *slog.Logger
+	envSecretLog      *slog.Logger
 }
 
 // auxiliaryRuntime pairs a runtime with its manager for non-default runtimes.

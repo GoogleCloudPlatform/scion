@@ -65,7 +65,7 @@ func (m *fencingManager) nfsCallCount() int {
 
 var _ nfsAgentFilesRemover = (*fencingManager)(nil)
 
-// fakeDeleteClock is a settable clock for Server.deleteClock.
+// fakeDeleteClock is a settable clock for ServerConfig.DeleteClock.
 type fakeDeleteClock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -106,7 +106,7 @@ func newFenceFixture(t *testing.T, withAgent bool) *fenceFixture {
 		mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-dev", scopeProjB, scionB), "run-a")}
 	}
 	clock := &fakeDeleteClock{now: fenceT0}
-	srv.deleteClock = clock.Now
+	srv.config.DeleteClock = clock.Now
 	cancels := 0
 	rec := newLaunchRecord("sync-1", "dev", "create", "", time.Time{}, func() { cancels++ })
 	rec.RunID = "run-a"
@@ -306,4 +306,29 @@ func TestControlChannel_DeleteNotAfter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Ordering against the P1 answers (ptone/scion#2550): a stale delete gets
+// 409 stale_dispatch, not the 503 runtime_unavailable the recorded-runtime
+// check would give, nor the 404 a run mismatch would give.
+func TestDeleteAgent_StaleBeatsRuntimeUnavailable(t *testing.T) {
+	f := newFenceFixture(t, false)
+	// Without the fence: no runtime lists "ghost" and this broker has no
+	// cloudrun manager, so the recorded-runtime check answers 503.
+	if rec := doDelete(t, f.srv, "ghost", "projectId="+scopeProjB+"&"+api.RecordedRuntimeQueryParam+"=cloudrun"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("precondition: status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	rec := doDelete(t, f.srv, "ghost", "projectId="+scopeProjB+"&"+api.RecordedRuntimeQueryParam+"=cloudrun"+notAfterParam(fenceT0.Add(-time.Minute)))
+	assertStaleDispatch(t, rec.Code, rec.Body.Bytes())
+	f.assertNoDeleteSideEffects(t)
+}
+
+func TestDeleteAgent_StaleBeatsRunMismatch(t *testing.T) {
+	f := newFenceFixture(t, false)
+	f.mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-b", scopeProjB, f.scion), "run-b")}
+	notAfter := fenceT0.Add(10 * time.Second)
+	f.mgr.onList = func() { f.clock.Set(notAfter.Add(deleteNotAfterSkew + time.Second)) }
+	rec := doDelete(t, f.srv, "dev", "projectId="+scopeProjB+"&runId=run-old"+allDeleteParams+notAfterParam(notAfter))
+	assertStaleDispatch(t, rec.Code, rec.Body.Bytes())
+	f.assertNoPostResolutionSideEffects(t)
 }

@@ -455,7 +455,7 @@ func (e *deletionEngine) publishStatus(ctx context.Context) {
 func (e *deletionEngine) abandon() {
 	ctx, cancel := context.WithTimeout(e.base, deleteShortStep)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(),
 		e.claimPred(store.DeletionStateDeleting, store.DeletionStateFinalizing),
 		store.DeletionFields{LeaseAt: &now})
@@ -471,10 +471,19 @@ func (e *deletionEngine) abandon() {
 // terminal write (finalizing, rollback, in_doubt) errors, so the row does not
 // keep blocking start until the lease lapses.
 func (e *deletionEngine) abandonOutcome() deletionOutcome {
+	return e.abandonWith("the delete engine stopped unexpectedly; retry the delete")
+}
+
+// staleDispatchMessage is the abandoned outcome's message when the broker
+// (or the executing hub node) refused the dispatch as stale.
+const staleDispatchMessage = "the broker received the delete after its deadline and did nothing; retry the delete"
+
+// abandonWith abandons the claim (see abandon) and returns failed{abandoned}
+// with msg.
+func (e *deletionEngine) abandonWith(msg string) deletionOutcome {
 	e.stopRenewal()
 	e.abandon()
-	return deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned,
-		message: "the delete engine stopped unexpectedly; retry the delete"}
+	return deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned, message: msg}
 }
 
 // run executes the engine steps (design §2.3 table).
@@ -648,7 +657,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		// failed/abandoned and a retry re-claims it, as when an engine dies.
 		s.agentLifecycleLog.Warn("delete engine: dispatch refused as stale; abandoning the claim",
 			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
-		return e.abandonOutcome(), false
+		return e.abandonWith(staleDispatchMessage), false
 	}
 	switch {
 	case bestEffort:
@@ -736,7 +745,7 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	failed := store.DeletionStateFailed
 	prior := e.plan.prior
 	set := store.DeletionFields{
@@ -787,7 +796,7 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	failed := store.DeletionStateFailed
 	code := store.DeletionCodeInDoubt
 	msg := deleteInDoubtMessage
@@ -812,7 +821,7 @@ func (e *deletionEngine) failFinalizing(code, msg string) deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateFinalizing),
 		store.DeletionFields{LeaseAt: &now, FailedAt: &now, Code: &code, Error: &msg})
 	if err != nil {

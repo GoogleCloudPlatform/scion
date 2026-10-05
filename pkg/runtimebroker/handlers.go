@@ -1730,26 +1730,28 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A delete the hub fenced with a deadline is refused once that deadline
+	// has passed, before anything below (the recorded-runtime check
+	// included) can act on it (ptone/scion#2906).
+	var fence deleteFence
+	if isBareDelete {
+		var err error
+		fence, err = parseDeleteNotAfter(r.URL.Query())
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if s.refuseStaleDelete(w, fence, "arrival", id, projectID, r.URL.Query().Get("runId")) {
+			return
+		}
+	}
+
 	// Every request below except start acts on an existing agent: target the
 	// runtime that holds it, checking the runtime type the hub recorded for
 	// it first, and answer 503 only when no runtime lists the agent and this
 	// broker has no manager for the recorded type (see applyRecordedRuntime).
 	// Keys applies the same check itself, after reading its body, so it can
 	// answer in its own result shape.
-	// A delete the hub fenced with a deadline is refused once that deadline
-	// has passed, before anything below (the recorded-runtime check
-	// included) can act on it (ptone/scion#2906).
-	if isBareDelete {
-		notAfter, has, err := parseDeleteNotAfter(r.URL.Query())
-		if err != nil {
-			ValidationError(w, err.Error(), nil)
-			return
-		}
-		if s.refuseStaleDelete(w, notAfter, has, "arrival", id, projectID, r.URL.Query().Get("runId")) {
-			return
-		}
-	}
-
 	if isExistingAgentRequest(action) {
 		ctx, recorded, err := s.applyRecordedRuntime(r, id, projectID)
 		if err != nil {
@@ -1769,7 +1771,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, projectID)
+		s.deleteAgentFenced(w, r, id, projectID, fence)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
@@ -1797,7 +1799,21 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 	NotFound(w, "Agent")
 }
 
+// deleteAgent deletes the agent, parsing the delete's deadline itself. For
+// callers that bypass handleAgentByID (tests); the route uses
+// deleteAgentFenced with the deadline it already parsed and checked.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	fence, err := parseDeleteNotAfter(r.URL.Query())
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	s.deleteAgentFenced(w, r, id, projectID, fence)
+}
+
+// deleteAgentFenced deletes the agent. fence is the delete's deadline,
+// already parsed and checked on arrival by handleAgentByID.
+func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, projectID string, fence deleteFence) {
 	ctx := r.Context()
 
 	ctx, span := tracer.Start(ctx, "broker.agent.delete")
@@ -1831,15 +1847,9 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
 
-	// notAfter, when the hub sends it, is the delete's deadline
-	// (ptone/scion#2906). handleAgentByID already validated it and refused
-	// a delete that arrived late; it is checked again below once the target
-	// is resolved.
-	notAfter, hasNotAfter, err := parseDeleteNotAfter(query)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
-		return
-	}
+	// fence (notAfter, ptone/scion#2906) was checked on arrival by
+	// handleAgentByID; it is checked again below once the target is
+	// resolved.
 
 	// Cancel any in-flight start of this agent on this broker first, before
 	// resolving the delete target: a start still blocked in provisioning
@@ -1858,7 +1868,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// again before the first side effect after it: the leftover cleanup of
 	// a not-found, the launch cancel, the soft-delete marking and
 	// DeleteTarget. Nothing slow runs between here and DeleteTarget.
-	if s.refuseStaleDelete(w, notAfter, hasNotAfter, "resolved", id, projectID, runID) {
+	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
 		span.SetStatus(codes.Error, "stale delete dispatch")
 		return
 	}
