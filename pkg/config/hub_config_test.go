@@ -1934,3 +1934,32 @@ func TestLoadGlobalConfig_TopLevelYAML11Bools(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadGlobalConfig_TopLevelQuotedBools pins that quoted "no"/"yes"
+// decode as booleans in the top-level sections (yaml.v3 behaviour via
+// decodeTopLevelSection; the pre-#2284 raw .(bool) path ignored them), and
+// that a non-boolean value is still ignored, on both load paths.
+func TestLoadGlobalConfig_TopLevelQuotedBools(t *testing.T) {
+	const top = "quotas:\n  enforce_broker_quotas: \"no\"\nagent_secrets:\n  user_scope_only: \"yes\"\nproject_defaults:\n  default_scratchpad: maybe\n"
+	for name, settings := range map[string]string{
+		"with server":    "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + top,
+		"without server": "schema_version: \"1\"\n" + top,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, map[string]string{"settings.yaml": settings})
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+				t.Errorf("EnforceBrokerQuotas = %s, want false", boolPtrString(gc.EnforceBrokerQuotas))
+			}
+			if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
+				t.Errorf("AgentSecretsUserScopeOnly = %s, want true", boolPtrString(gc.AgentSecretsUserScopeOnly))
+			}
+			if gc.DefaultScratchpad != nil {
+				t.Errorf("DefaultScratchpad = %s, want <nil> for a non-boolean value", boolPtrString(gc.DefaultScratchpad))
+			}
+		})
+	}
+}

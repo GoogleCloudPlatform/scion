@@ -2000,6 +2000,11 @@ func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
 // decodeTopLevelSection decodes raw[key] into out (a pointer to a small
 // typed struct) through yaml.v3, so typed fields accept the same spellings
 // as a direct settings.yaml decode (e.g. YAML 1.1 booleans yes/no/on/off).
+// Because the section is re-marshalled first, yaml.v3's YAML 1.1 bool
+// compatibility also applies to quoted strings: enforce_broker_quotas: "no"
+// decodes as false. The previous raw .(bool) assertion accepted neither
+// unquoted yes/no nor quoted strings (both were ignored). A value that is
+// not a boolean (e.g. maybe, 1) still makes the decode fail and is ignored.
 // It reports whether the section was present and decoded.
 func decodeTopLevelSection(raw map[string]interface{}, key string, out interface{}) bool {
 	section, ok := raw[key]
