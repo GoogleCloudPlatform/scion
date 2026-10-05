@@ -2400,10 +2400,18 @@ export class ScionPageChat extends LitElement {
     if (!oldConversationKey || !newTopic) return;
 
     // If we're currently viewing the promoted DM, navigate to the new thread
+    // — unless the user is typing in it. This event is server-pushed (the
+    // promotion may come from another tab or device), so moving them would
+    // pull the conversation out from under their draft; offer a link to the
+    // new thread instead and leave them where they are.
     if (this.v2Conversation?.conversationKey === oldConversationKey) {
       this.promoteDialogOpen = false;
-      this.navigateToPromotedThread(newTopic);
-      this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
+      if (this.isComposingInConversation()) {
+        this.showPromotedThreadLinkToast(newTopic);
+      } else {
+        this.navigateToPromotedThread(newTopic);
+        this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
+      }
     }
 
     // Reload the space rail so the new thread appears
@@ -2411,6 +2419,46 @@ export class ScionPageChat extends LitElement {
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
     if (rail) void rail.reload();
+  }
+
+  /** Whether the user has a draft in, or focus on, the open composer. */
+  private isComposingInConversation(): boolean {
+    const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
+    return thread?.isComposing ?? false;
+  }
+
+  /**
+   * Tell the user the DM they are typing in was promoted, with a link to the
+   * new thread (routed client-side by the document click handler). Built
+   * from DOM nodes, not markup, since the thread name is user content.
+   */
+  private showPromotedThreadLinkToast(topic: {
+    id: string;
+    projectId: string;
+    name: string;
+  }): void {
+    const slug = this._projectIdToSlug.get(topic.projectId);
+    const path = slug
+      ? `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topic.id)}`
+      : `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
+    const alert = Object.assign(document.createElement('sl-alert'), {
+      variant: 'primary',
+      closable: true,
+      duration: 10000,
+    });
+    alert.classList.add('dm-promoted-toast');
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'info-circle');
+    icon.setAttribute('slot', 'icon');
+    const link = document.createElement('a');
+    link.href = path;
+    link.textContent = `Open #${topic.name}`;
+    link.addEventListener('click', () => (alert as unknown as { hide(): void }).hide?.());
+    alert.append(icon, 'This conversation was promoted to a thread. ', link);
+    document.body.appendChild(alert);
+    void (alert as unknown as { toast?(): Promise<void> }).toast?.();
   }
 
   private handleThreadSelect(e: CustomEvent): void {

@@ -2820,6 +2820,14 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** Whether the user is typing (or has a draft) in this thread's composer. */
+  get isComposing(): boolean {
+    const composer = this.shadowRoot?.querySelector('scion-chat-composer') as
+      | import('./chat-composer.js').ScionChatComposer
+      | null;
+    return composer?.isComposing ?? false;
+  }
+
   /**
    * The current scroll position as an anchor, for a chat page that is about
    * to be destroyed to hand on to its replacement. Null until the thread has

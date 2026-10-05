@@ -470,3 +470,28 @@ describe('composer — caret-end focus hardening when sl-textarea is not yet upg
     });
   });
 });
+
+describe('isComposing', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('is true with draft text or focus inside, false when idle', async () => {
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.isComposing).toBe(false);
+
+    el.text = '   ';
+    expect(el.isComposing).toBe(false);
+    el.text = 'half a thought';
+    expect(el.isComposing).toBe(true);
+
+    el.text = '';
+    Object.defineProperty(el.shadowRoot, 'activeElement', {
+      configurable: true,
+      get: () => el.shadowRoot.querySelector('sl-textarea'),
+    });
+    expect(el.isComposing).toBe(true);
+  });
+});

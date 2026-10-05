@@ -1856,3 +1856,101 @@ describe('chat page — thread and scroll position across mode switches', () => 
     expect(titles[titles.length - 1]).toEqual(['#design', 'Chat']);
   });
 });
+
+describe('chat page — late conversation switches while composing', () => {
+  const DM_KEY = 'dm:agent:agent-1:user:user-me';
+  const NEW_TOPIC = { id: 'topic-9', projectId: 'p1', name: 'promoted <b>name</b>' };
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /** A page showing the agent DM, whose thread reports `composing`. */
+  function pageOnDM(composing: boolean): any {
+    const el = createPage();
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.v2Conversation = { conversationKey: DM_KEY, isDM: true, peerId: 'agent-1', projectId: '' };
+    Object.defineProperty(el, 'shadowRoot', {
+      value: {
+        querySelector: (sel: string) =>
+          sel === 'scion-chat-thread' ? { isComposing: composing } : null,
+      },
+    });
+    return el;
+  }
+
+  function promoted(oldConversationKey = DM_KEY): CustomEvent {
+    return new CustomEvent('chat-dm-promoted', {
+      detail: { data: { oldConversationKey, newTopic: NEW_TOPIC } },
+    });
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('a promotion pushed while typing in the DM leaves the user there, with a link', () => {
+    const el = pageOnDM(true);
+    window.history.replaceState({}, '', `/chat/dm/${encodeURIComponent(DM_KEY)}`);
+    el.handleDMPromoted(promoted());
+
+    expect(el.v2Conversation.conversationKey).toBe(DM_KEY);
+    expect(window.location.pathname).toBe(`/chat/dm/${encodeURIComponent(DM_KEY)}`);
+    const link = document.querySelector('.dm-promoted-toast a') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/chat/alpha/topic-9');
+    // The thread name is user content: rendered as text, never as markup.
+    expect(link.textContent).toBe('Open #promoted <b>name</b>');
+    expect(document.querySelector('.dm-promoted-toast b')).toBeNull();
+  });
+
+  it('a promotion of the DM on screen moves an idle user to the new thread', () => {
+    const el = pageOnDM(false);
+    const toast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => {});
+    el.handleDMPromoted(promoted());
+    expect(el.v2Conversation.conversationKey).toBe('topic-9');
+    expect(toast).toHaveBeenCalledWith('Conversation promoted to #promoted <b>name</b>', 'success');
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-9');
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it('a promotion of some other DM changes nothing', () => {
+    const el = pageOnDM(false);
+    el.handleDMPromoted(promoted('dm:agent:agent-2:user:user-me'));
+    expect(el.v2Conversation.conversationKey).toBe(DM_KEY);
+  });
+
+  it('a peer-ID DM route still resolving does not pull the user out of a thread they opened', async () => {
+    // The DM list has no match and the user ID is not cached, so the lookup
+    // waits on /auth/me — the slow path that used to land late.
+    let releaseMe: () => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/chat/dms') {
+        return new Response(JSON.stringify({ dms: [] }), { status: 200 });
+      }
+      if (path === '/api/v1/auth/me') {
+        await new Promise<void>((resolve) => (releaseMe = resolve));
+        return new Response(JSON.stringify({ id: 'user-me' }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const el = createPage();
+    el.pageData = {};
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The user picks a thread from the rail and starts typing in it.
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    releaseMe();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+});

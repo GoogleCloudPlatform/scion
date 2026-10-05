@@ -1693,6 +1693,16 @@ export class ScionChatComposer extends LitElement {
   }
 
   /** Focus the textarea after send/cancel. */
+  /**
+   * Whether the user is mid-composition: there is draft text, or focus is
+   * inside the composer. Used to hold off server-pushed navigation that
+   * would otherwise pull the conversation out from under them.
+   */
+  get isComposing(): boolean {
+    if (this.text.trim().length > 0) return true;
+    return this.shadowRoot?.activeElement != null;
+  }
+
   private focusTextarea(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {
