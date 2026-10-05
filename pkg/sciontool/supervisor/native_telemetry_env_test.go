@@ -30,17 +30,12 @@ func clearNativeTelemetryEnv(t *testing.T) {
 	}
 }
 
+// nativeTelemetryTestKey reports whether a test must clear key: every key
+// the policy itself reserves (shared with hooks so the lists cannot drift),
+// plus CODEX_HOME (conditionally protected by ValidateNativeTelemetryEnv)
+// and SCION_* runtime contract variables, including the policy marker.
 func nativeTelemetryTestKey(key string) bool {
-	switch key {
-	case "CLAUDE_CODE_ENABLE_TELEMETRY", "GROK_EXTERNAL_OTEL", "CODEX_HOME":
-		return true
-	}
-	for _, prefix := range []string{"OTEL_", "GEMINI_TELEMETRY_", "COPILOT_OTEL_", "GROK_TELEMETRY_", "SCION_"} {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
+	return hooks.IsReservedNativeTelemetryKey(key) || key == "CODEX_HOME" || strings.HasPrefix(key, "SCION_")
 }
 
 func TestNativeTelemetryPolicyRejectsBeforeChildLaunch(t *testing.T) {
