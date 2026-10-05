@@ -3334,12 +3334,12 @@ export class ScionChatThread extends LitElement {
   /**
    * A jump that found no target gives the open-time scroll back: to the
    * initial load if it is still running, else straight to the bottom if the
-   * load already left the view to this jump.
+   * load already left the view to this jump. Either way a later load (a
+   * Retry after a failed one) no longer counts this jump as started.
    */
   private handOpenScrollBack(): void {
-    if (this.loading) {
-      this._jumpSeqAtOpen = this._jumpSeq;
-    } else if (this._openScrollDeferred) {
+    this._jumpSeqAtOpen = this._jumpSeq;
+    if (!this.loading && this._openScrollDeferred) {
       this._openScrollDeferred = false;
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
