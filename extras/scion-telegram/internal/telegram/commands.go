@@ -49,9 +49,11 @@ type HubClient interface {
 	// ListProjectsFresh lists every project served by this broker. It is
 	// not scoped to a user and must not feed user-facing project pickers.
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	// ListProjectsForUser returns the projects visible to the linked user.
+	// ListProjectsForUser returns the projects visible to the linked user,
+	// following pagination. At the page limit the list is truncated.
 	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
-	// ListAgents returns the agents of a project as seen by the linked user.
+	// ListAgents returns the agents of a project as seen by the linked user,
+	// following pagination. At the page limit the list is truncated.
 	ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error)
 
 	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
@@ -931,6 +933,10 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 // maxUserProjectPages bounds how many pages ListProjectsForUser follows.
 const maxUserProjectPages = 20
 
+// ListProjectsForUser follows nextCursor for up to maxUserProjectPages
+// pages, sending the linked user on each. If more pages remain at the limit
+// it returns the projects fetched so far (truncated) and logs a warning. An
+// error on any page returns the error, not a partial list.
 func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	var projects []ProjectOption
 	cursor := ""
@@ -990,6 +996,10 @@ func (c *httpHubClient) listUserProjectsPage(ctx context.Context, onBehalfOf, cu
 // maxAgentPages bounds how many pages ListAgents follows.
 const maxAgentPages = 20
 
+// ListAgents follows nextCursor for up to maxAgentPages pages, sending the
+// linked user on each. If more pages remain at the limit it returns the
+// agents fetched so far (truncated) and logs a warning. An error on any page
+// returns the error, not a partial list.
 func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	var agents []AgentInfo
 	cursor := ""
