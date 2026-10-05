@@ -1969,7 +1969,12 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				}
 				errorType := "default_agent_not_found"
 				if agentsErr != nil {
-					errorType = "agent_list_unavailable"
+					// Keyed per error kind and sender so one user's reply
+					// does not suppress a different reply to another user.
+					errorType = "agent_list_unavailable:" + agentListErrorKind(agentsErr)
+					if tgMsg.From != nil {
+						errorType += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
+					}
 				}
 				if !b.shouldSuppressError(chatID, threadID, errorType) {
 					replyTo := ""
@@ -2060,7 +2065,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			return
 		case errors.Is(senderLookup.err, errSenderNotLinked):
 			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
-			b.api.SendMessage(ctx, chatID, "Please /register first to use this bot.", "")
+			b.api.SendMessage(ctx, chatID, registerHint, "")
 			return
 		case errors.Is(senderLookup.err, errSenderLinkStale):
 			b.api.SendMessage(ctx, chatID, staleLinkText, "")
@@ -2823,6 +2828,23 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	}
 
 	return agentSlugs(agents), link, nil
+}
+
+// agentListErrorKind names the kind of agent-list failure, for keying
+// repeated-reply suppression.
+func agentListErrorKind(err error) string {
+	switch {
+	case errors.Is(err, errSenderNotLinked):
+		return "not_linked"
+	case errors.Is(err, errSenderLinkStale), isStaleLinkError(err):
+		return "stale_link"
+	case errors.Is(err, errSenderLookupFailed):
+		return "lookup_failed"
+	case isForbiddenHubError(err):
+		return "forbidden"
+	default:
+		return "unavailable"
+	}
 }
 
 // replyAgentListUnavailable tells the sender why their message could not be

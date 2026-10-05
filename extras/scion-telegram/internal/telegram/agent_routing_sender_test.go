@@ -296,3 +296,48 @@ func TestV2_Routing_ReusesSenderLookupFromRefresh(t *testing.T) {
 	}
 	assert.Equal(t, 1, counting.lookups, "the refresh lookup is reused for routing")
 }
+
+func TestAgentListErrorKind(t *testing.T) {
+	assert.Equal(t, "not_linked", agentListErrorKind(errSenderNotLinked))
+	assert.Equal(t, "stale_link", agentListErrorKind(errSenderLinkStale))
+	assert.Equal(t, "stale_link", agentListErrorKind(staleLinkError("on-behalf-of principal not found")))
+	assert.Equal(t, "lookup_failed", agentListErrorKind(errSenderLookupFailed))
+	assert.Equal(t, "forbidden", agentListErrorKind(forbiddenListAgents()))
+	assert.Equal(t, "unavailable", agentListErrorKind(errors.New("connection refused")))
+}
+
+func TestV2_AgentListUnavailable_OneUsersReplyDoesNotSuppressAnothers(t *testing.T) {
+	b, tgSrv, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	// 456 is not linked (register hint); 789 is linked but denied.
+	linkTestUser(t, b.store, 789, "bob@example.com")
+	hub.listAgentsErr = forbiddenListAgents()
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(plainGroupMessage(789, "hi"))
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 2)
+	assert.Equal(t, registerHint, sent[0].Text)
+	assert.Contains(t, sent[1].Text, "Your Scion account (bob@example.com) doesn't have permission")
+}
+
+func TestV2_AgentListUnavailable_SameUserRepeatIsSuppressed(t *testing.T) {
+	b, tgSrv, _ := newRoutingTestBroker(t)
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(plainGroupMessage(456, "hello again"))
+
+	assert.Len(t, tgSrv.getSentMessages(), 1)
+}
+
+func TestV2_Routing_UnlinkedSenderGetsRegisterHint(t *testing.T) {
+	b, tgSrv, _ := newRoutingTestBroker(t)
+	saveStaleAgentCache(t, b.store, "proj-1", "coder")
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, registerHint, sent[0].Text)
+}
