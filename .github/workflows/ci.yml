@@ -307,9 +307,10 @@ jobs:
       # so it is actually compiled and run somewhere that can fail a PR.
       # perf/bench/seed's own SQLite-backed tests carry the same constraint,
       # for the same reason (ptone/scion#2393), and are included here too --
-      # see make test-hub-sqlite.
+      # see make test-hub-sqlite. pkg/conduit's relay/router tests run against
+      # the SQLite-backed conduit registry store and are included too.
       #
-      # It is scoped to pkg/hub and perf/bench/seed (not the whole module)
+      # It is scoped to pkg/hub, perf/bench/seed and pkg/conduit (not the whole module)
       # and runs as its own parallel job so it doesn't add to the
       # wall-clock time of Build & Test. Clean CI runs range from ~770s to
       # ~1480s, close to the old 25m (1500s) go test timeout
@@ -325,7 +326,7 @@ jobs:
       # unrelated to this job (ptone/scion#1847) that already reproduce on
       # main today under `go test ./pkg/hub/...`. They are not new failures
       # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
-      - name: Run pkg/hub + perf/bench/seed tests (SQLite-enabled)
+      - name: Run pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)
         run: make test-hub-sqlite
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
@@ -383,6 +384,16 @@ jobs:
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-launch-store-postgres
+
+      # The pkg/hub web chat store has its own Postgres SQL (it is not an
+      # Ent store), so its Postgres tests read SCION_TEST_POSTGRES_DSN rather
+      # than the enttest URL. This step points them at the same service;
+      # they touch only webchat_* tables. See the Makefile target's comment.
+      - name: Run web chat store tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-webchat-postgres
 
       # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
       # test. It runs the SQLite and Postgres cases (about 2-3 minutes,

@@ -889,6 +889,12 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 	}
+	// Project members groups cannot be granted roles. Only new bindings are
+	// refused: keeping an unchanged set (the idempotent return above) and
+	// removing roles stay allowed so existing bindings can be cleaned up.
+	if len(plan0.Create) > 0 && isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
+	}
 
 	authPre, aErr := svc.memberActorAuthorityPreTx(ctx, req.Actor.ID(), req.ProjectID,
 		len(plan0.Create) > 0, len(plan0.Remove) > 0, plan0.hasCustomCreate(), plan0.hasCustomRemove(currentDefs0))
@@ -1196,6 +1202,9 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 		if errors.Is(txErr, store.ErrAlreadyExists) || errors.Is(txErr, store.ErrBuiltInMembershipConflict) {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: txErr.Error(), HTTPStatus: 409}
+		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
 	}

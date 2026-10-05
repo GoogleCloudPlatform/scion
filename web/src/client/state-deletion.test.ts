@@ -24,7 +24,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
-import type { DeletionInfo } from '../shared/types.js';
+import type { Agent, DeletionInfo } from '../shared/types.js';
 import { isDeletionActive } from '../shared/agent-deletion.js';
 
 function emit(sm: StateManager, subject: string, data: unknown): void {
@@ -172,6 +172,56 @@ describe('applyDeleteAccepted (DELETE 202)', () => {
     vi.advanceTimersByTime(100);
     expect(sm.applyDeleteAccepted('a1', deleting())).toBe(false);
     expect(sm.getAgent('a1')).toBeUndefined();
+  });
+});
+
+describe('partial compact seed carrying the server deletion value', () => {
+  // Compact list rows always carry `deletion` (null when there is none), so a
+  // partial seed replaces the store's view with the server's. A DELETE 202 or
+  // an SSE delta that lands while the request is in flight is recorded by the
+  // seed epoch and replayed over the seeded row.
+  function compactRow(deletion: DeletionInfo | null): Agent {
+    return { id: 'a1', name: 'A1', phase: 'running', deletion } as unknown as Agent;
+  }
+
+  beforeEach(() => {
+    vi.setSystemTime(T0);
+  });
+
+  it('a 202 accepted during the request survives a page read before the claim (null)', () => {
+    const sm = freshManager();
+    const token = sm.beginSeedEpoch();
+    expect(sm.applyDeleteAccepted('a1', deleting(1))).toBe(true);
+    sm.seedAgents([compactRow(null)], { token, partial: true });
+    expect(sm.getAgent('a1')?.deletion).toMatchObject({ state: 'deleting', claim: 1 });
+  });
+
+  it('a retry 202 accepted during the request survives a page still carrying the older failure', () => {
+    const sm = freshManager();
+    emit(sm, 'agent.a1.status', { deletion: failed(1) });
+    vi.advanceTimersByTime(100);
+    const token = sm.beginSeedEpoch();
+    expect(sm.applyDeleteAccepted('a1', deleting(2))).toBe(true);
+    sm.seedAgents([compactRow(failed(1))], { token, partial: true });
+    expect(sm.getAgent('a1')?.deletion).toMatchObject({ state: 'deleting', claim: 2 });
+  });
+
+  it('an SSE failure that beat the 202 during the request survives a null page; the 202 is skipped', () => {
+    const sm = freshManager();
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { deletion: failed(2) });
+    expect(sm.applyDeleteAccepted('a1', deleting(2))).toBe(false);
+    sm.seedAgents([compactRow(null)], { token, partial: true });
+    expect(sm.getAgent('a1')?.deletion).toMatchObject({ state: 'failed', claim: 2 });
+  });
+
+  it('a failed view the server no longer reports is cleared by a null page, as a full seed does', () => {
+    const sm = freshManager();
+    emit(sm, 'agent.a1.status', { deletion: failed(1) });
+    vi.advanceTimersByTime(100);
+    const token = sm.beginSeedEpoch();
+    sm.seedAgents([compactRow(null)], { token, partial: true });
+    expect(sm.getAgent('a1')?.deletion).toBeNull();
   });
 });
 

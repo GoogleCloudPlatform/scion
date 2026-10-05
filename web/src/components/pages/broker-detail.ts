@@ -31,9 +31,7 @@ import type {
   BrokerSettingsResponse,
   InheritedSetting,
 } from '../../shared/types.js';
-import { getAgentDisplayStatus } from '../../shared/types.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -1092,11 +1090,7 @@ export class ScionPageBrokerDetail extends LitElement {
             </h3>
             <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
         </div>
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
       </a>
