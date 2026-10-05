@@ -56,7 +56,7 @@ cli:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `autohelp` | bool | Whether to print usage help on every error. Default: `true`. |
+| `autohelp` | bool | Whether to print the usage block after an argument or flag error. Default: `true`. |
 | `interactive_disabled` | bool | If `true`, disables all interactive prompts (useful for scripts). |
 
 ## Hub Client Configuration (`hub`)

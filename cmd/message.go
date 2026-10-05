@@ -157,15 +157,15 @@ Examples:
 		// explicitly instead.
 		if cmd.Flags().Changed("broadcast") {
 			if resolveMode() == ModeAgent {
-				return fmt.Errorf("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+				return newUsageError("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
 			}
-			return fmt.Errorf("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
+			return newUsageError("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
 		}
 		if cmd.Flags().Changed("all") {
 			if resolveMode() == ModeAgent {
-				return fmt.Errorf("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+				return newUsageError("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
 			}
-			return fmt.Errorf("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
+			return newUsageError("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
 		}
 
 		// Emit deprecation warnings for any deprecated flags in use.
@@ -180,7 +180,7 @@ Examples:
 
 		{
 			if len(args) < 1 {
-				return fmt.Errorf("recipient is required")
+				return newUsageError("recipient is required")
 			}
 			recipient := args[0]
 			if len(args) > 1 {
@@ -199,15 +199,15 @@ Examples:
 			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
 				// Looks like a conversation reference but failed to parse.
 				// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
-				return fmt.Errorf("invalid conversation reference: %w", err)
+				return newUsageError("invalid conversation reference: %w", err)
 			} else if strings.HasPrefix(recipient, "@") {
 				// @ prefix is exclusively a conversation reference in the new grammar.
 				// A bare email without leading @ falls through to the legacy path below.
-				return fmt.Errorf("invalid conversation reference: %w", err)
+				return newUsageError("invalid conversation reference: %w", err)
 			} else if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
 				if err != nil {
-					return fmt.Errorf("invalid group recipient: %w", err)
+					return newUsageError("invalid group recipient: %w", err)
 				}
 				groupRecipients = parsed
 			} else if strings.HasPrefix(recipient, "user:") {
@@ -223,7 +223,7 @@ Examples:
 
 		// Validate --body-file conflicts
 		if msgBodyFile != "" && len(args) > 1 {
-			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+			return newUsageError("--body-file and positional message arguments are mutually exclusive")
 		}
 
 		// Resolve body from --body-file or stdin
@@ -240,12 +240,12 @@ Examples:
 
 		// Validate scheduling flags
 		if msgIn != "" && msgAt != "" {
-			return fmt.Errorf("--in and --at are mutually exclusive")
+			return newUsageError("--in and --at are mutually exclusive")
 		}
 
 		// Validate --thread-id requires --channel
 		if msgThreadID != "" && msgChannel == "" {
-			return fmt.Errorf("--thread-id requires --channel to be set")
+			return newUsageError("--thread-id requires --channel to be set")
 		}
 
 		// Validate --cc restrictions: parse first so empty-string values
@@ -254,46 +254,46 @@ Examples:
 		parsedCC := parseCCFlag(msgCC)
 		if len(parsedCC) > 0 {
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--cc cannot be combined with --in or --at")
+				return newUsageError("--cc cannot be combined with --in or --at")
 			}
 			if userRecipient != "" {
-				return fmt.Errorf("--cc cannot be used with user recipients")
+				return newUsageError("--cc cannot be used with user recipients")
 			}
 		}
 
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--in/--at cannot be used with user recipients")
+				return newUsageError("--in/--at cannot be used with user recipients")
 			}
 		}
 
 		// Validate group recipient restrictions
 		if len(groupRecipients) > 0 {
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--in/--at cannot be used with group[] recipients")
+				return newUsageError("--in/--at cannot be used with group[] recipients")
 			}
 			if msgNotify {
-				return fmt.Errorf("--notify cannot be used with group[] recipients")
+				return newUsageError("--notify cannot be used with group[] recipients")
 			}
 		}
 
 		// Validate --wake restrictions
 		if msgWake {
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--wake cannot be combined with --in or --at")
+				return newUsageError("--wake cannot be combined with --in or --at")
 			}
 			if userRecipient != "" {
-				return fmt.Errorf("--wake cannot be used with user recipients")
+				return newUsageError("--wake cannot be used with user recipients")
 			}
 		}
 
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
-			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
+			return newUsageError("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
 		}
 		if len(msgAttach) > 0 && (msgIn != "" || msgAt != "") {
-			return fmt.Errorf("--attach cannot be combined with --in or --at")
+			return newUsageError("--attach cannot be combined with --in or --at")
 		}
 
 		// Validate attachment file paths exist
@@ -349,7 +349,7 @@ Examples:
 			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 				(ownProjectID != "" && projectPath == ownProjectID)
 			if !isSameProject {
-				return fmt.Errorf("--project cannot be used with conv: references; the conversation already identifies its project context")
+				return newUsageError("--project cannot be used with conv: references; the conversation already identifies its project context")
 			}
 		}
 

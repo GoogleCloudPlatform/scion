@@ -233,7 +233,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	skillID, _ := cmd.Flags().GetString("skill-id")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
+		return newUsageError("--version is required")
 	}
 
 	// Verify SKILL.md exists
@@ -499,10 +499,10 @@ func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
 	replacement, _ := cmd.Flags().GetString("replacement")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
+		return newUsageError("--version is required")
 	}
 	if message == "" {
-		return fmt.Errorf("--message is required")
+		return newUsageError("--message is required")
 	}
 
 	skillSvc := hubCtx.Client.Skills()

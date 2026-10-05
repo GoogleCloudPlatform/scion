@@ -621,7 +621,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
-		return fmt.Errorf("--format json and --attach are mutually exclusive")
+		return newUsageError("--format json and --attach are mutually exclusive")
 	}
 	// Fail before creating or starting anything when --attach has no
 	// terminal to attach (same check as scion attach).
@@ -633,11 +633,18 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// Reject --enable-telemetry with --disable-telemetry (mutually exclusive)
 	if enableTelemetry && disableTelemetry {
-		return fmt.Errorf("--enable-telemetry and --disable-telemetry are mutually exclusive")
+		return newUsageError("--enable-telemetry and --disable-telemetry are mutually exclusive")
 	}
 
 	if err := validateLaunchWaitFlags(); err != nil {
-		return err
+		return asUsageError(err)
+	}
+
+	// Validate --template-scope here with the other flag checks, so a bad
+	// value is reported as a usage error before any hub work.
+	// ResolveTemplateForHub keeps its own check as a guard.
+	if err := validateTemplateScope(templateScope); err != nil {
+		return asUsageError(err)
 	}
 
 	// Validate --harness-auth value
@@ -646,7 +653,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		case "api-key", "oauth-token", "auth-file", "vertex-ai":
 			// valid
 		default:
-			return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
+			return newUsageError("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
 		}
 	}
 
@@ -680,7 +687,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 	if thinkingLevelFlag != -1 {
 		if thinkingLevelFlag < 0 || thinkingLevelFlag > 100 {
-			return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", thinkingLevelFlag)
+			return newUsageError("invalid --thinking-level value %d: must be between 0 and 100", thinkingLevelFlag)
 		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}
@@ -1149,17 +1156,17 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 
 	parsedLabels, err := parseLabels(labelFlags)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --role flag if provided
 	if err := validateAgentRole(agentRoleFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --message-mode flag if provided
 	if err := validateMessageMode(messageModeFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Build create request (Hub creates and starts in one operation)

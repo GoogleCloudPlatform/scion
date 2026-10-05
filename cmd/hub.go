@@ -1563,7 +1563,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 
 	// Validate URL format
 	if !util.IsGitURL(gitURL) {
-		return fmt.Errorf("invalid git URL: %s\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo", gitURL)
+		return newUsageError("invalid git URL: %s\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo", gitURL)
 	}
 
 	normalized := util.NormalizeGitRemote(gitURL)
@@ -1714,10 +1714,10 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 // Hub to validate (e.g. worktree-per-agent without git is a 400).
 func runHubProjectCreateHubManaged() error {
 	if strings.TrimSpace(hubProjectCreateName) == "" {
-		return fmt.Errorf("--name is required when creating a project without a git URL")
+		return newUsageError("--name is required when creating a project without a git URL")
 	}
 	if hubProjectCreateBranch != "" {
-		return fmt.Errorf("--branch requires a git URL; hub-managed projects have no git branch")
+		return newUsageError("--branch requires a git URL; hub-managed projects have no git branch")
 	}
 
 	displayName := strings.TrimSpace(hubProjectCreateName)
@@ -2056,7 +2056,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 	// Broker name is required for delete
 	if len(args) == 0 {
-		return fmt.Errorf("broker name or ID is required.\n\nUsage: scion hub brokers delete <broker-name>")
+		return newUsageError("broker name or ID is required.\n\nUsage: scion hub brokers delete <broker-name>")
 	}
 
 	brokerNameOrID := args[0]
