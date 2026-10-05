@@ -59,7 +59,7 @@ interface GraphIncomplete {
   loaded: number;
   /** The drain covered every project (so a project filter can narrow it). */
   unscoped: boolean;
-  /** The drain failed and the previous complete graph of the same scope is still shown. */
+  /** A re-drain of the same scope failed and the graph shown before it is still shown. */
   keptPrevious: boolean;
 }
 
@@ -67,6 +67,8 @@ interface GraphIncomplete {
 interface CappedSet {
   members: Map<string, Agent>;
   loaded: number;
+  /** Live changes to this set may have been missed (a resync, or a late connect). */
+  stale: boolean;
 }
 
 /**
@@ -116,8 +118,6 @@ export class AgentGraphPage extends LitElement {
 
   /** What `agents` covers: `''` every project, a project ID that project, `null` nothing yet. */
   private memberScope: string | null = null;
-  /** `agents` is the complete set of `memberScope`. */
-  private complete = false;
   /** The fit probe was sent; it is never repeated in the page lifetime. */
   private probed = false;
   /** A load already showed more than 500 agents, so a probe cannot be complete. */
@@ -131,6 +131,12 @@ export class AgentGraphPage extends LitElement {
   /** IDs created live since the last `agents-changed`. */
   private pendingCreated = new Set<string>();
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Counts attachments, so a previous attachment's connect wait is ignored. */
+  private attachment = 0;
+  /** The first live connection of this attachment is up. */
+  private firstConnected = false;
+  /** The first live connection was not up within the drain's connect timeout. */
+  private firstConnectLate = false;
 
   /** "Jump to agent" over the graph, offering the agents its tree view shows. */
   readonly graphPalette = new GraphPaletteController(this, {
@@ -158,6 +164,7 @@ export class AgentGraphPage extends LitElement {
 
   private readonly onAgentsResync = (): void => {
     if (this.memberScope !== null) this.stale = true;
+    if (this.cappedAll) this.cappedAll.stale = true;
   };
 
   override connectedCallback(): void {
@@ -198,6 +205,28 @@ export class AgentGraphPage extends LitElement {
       clearTimeout(this.connectTimer);
       this.connectTimer = undefined;
     }
+    this.resetPageState();
+  }
+
+  /**
+   * Forget everything learned in this attachment: the capped set stops
+   * receiving live changes while detached, and the probe and size facts
+   * may no longer hold, so a re-attached page loads from scratch.
+   */
+  private resetPageState(): void {
+    this.agents = [];
+    this.memberScope = null;
+    this.incomplete = null;
+    this.stale = false;
+    this.error = null;
+    this.loading = true;
+    this.reloading = false;
+    this.probed = false;
+    this.knownLarge = false;
+    this.cappedAll = null;
+    this.pendingCreated.clear();
+    this.firstConnected = false;
+    this.firstConnectLate = false;
   }
 
   /**
@@ -208,15 +237,19 @@ export class AgentGraphPage extends LitElement {
    */
   private watchFirstConnect(): void {
     const gen = stateManager.scopeGeneration;
+    const attachment = ++this.attachment;
     let settled = false;
     this.connectTimer = setTimeout(() => {
       this.connectTimer = undefined;
       if (settled || !this.isConnected) return;
+      this.firstConnectLate = true;
+      if (this.cappedAll) this.cappedAll.stale = true;
       if (!this.drainRunner.running) this.stale = true;
     }, DRAIN_CONNECT_TIMEOUT_MS);
     stateManager.sseConnected(gen).then(
       () => {
         settled = true;
+        if (attachment === this.attachment) this.firstConnected = true;
         if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
         this.connectTimer = undefined;
       },
@@ -230,7 +263,6 @@ export class AgentGraphPage extends LitElement {
   private adoptHeldSet(): void {
     this.agents = stateManager.getAgents();
     this.memberScope = '';
-    this.complete = true;
     this.incomplete = null;
     this.error = null;
     this.loading = false;
@@ -315,6 +347,9 @@ export class AgentGraphPage extends LitElement {
    */
   private async probe(seq: number): Promise<'complete' | 'not-complete' | 'superseded'> {
     this.probed = true;
+    // A probe sent before the first connect came up may predate changes the
+    // live connection never delivered.
+    const connectedAtSend = this.firstConnected;
     const controller = new AbortController();
     this.probeController = controller;
     const epoch = new AgentSeedEpoch();
@@ -331,12 +366,11 @@ export class AgentGraphPage extends LitElement {
         return 'not-complete';
       }
       if (seq !== this.loadSeq) return 'superseded';
-      if (Array.isArray(body) || body.complete !== true) {
-        if (!Array.isArray(body) && body.complete === false) this.knownLarge = true;
-        return 'not-complete';
-      }
+      // A complete: false answer needs no knownLarge: probed already stops a second probe.
+      if (Array.isArray(body) || body.complete !== true) return 'not-complete';
       const seeded = epoch.seed(body.agents ?? [], { partial: true, isMember: () => true });
-      this.adopt(seeded.agents, '', true, null, epoch.sawResync);
+      const lateConnect = !connectedAtSend && this.firstConnectLate;
+      this.adopt(seeded.agents, '', null, epoch.sawResync || lateConnect);
       stateManager.markAgentSetComplete('compact');
       return 'complete';
     } finally {
@@ -359,8 +393,10 @@ export class AgentGraphPage extends LitElement {
       this.cappedAll = {
         members: new Map(result.agents.map((a) => [a.id, a])),
         loaded: result.agents.length,
+        stale: result.stale,
       };
-    } else if (!result.error) {
+    } else {
+      // The adopted set is what "all projects" shows now.
       this.cappedAll = null;
     }
     if (result.complete && !result.capped && !result.error) {
@@ -380,42 +416,34 @@ export class AgentGraphPage extends LitElement {
   }
 
   /**
-   * Show a drain result for `scope`. A failure keeps the previous complete
-   * graph of the same scope (with the banner); a first page that failed
-   * with nothing to keep shows the error. Returns whether the result was
+   * Show a drain result for `scope`. A failure keeps the graph already
+   * shown for the same scope (complete, capped or partial) with its banner
+   * and a "showing the previous graph" note; a first page that failed with
+   * no graph of that scope shows the error. Returns whether the result was
    * adopted as the new membership.
    */
   private adoptDrain(result: SeededDrainResult, scope: string): boolean {
-    if (result.error) {
-      if (this.complete && this.memberScope === scope) {
-        this.incomplete = {
+    if (result.error && this.memberScope === scope) {
+      // A capped or partial graph keeps its own reason and count; a complete
+      // one reports what it shows, never fewer rows than are on screen.
+      this.incomplete = {
+        ...(this.incomplete ?? {
           reason: 'failed',
-          loaded: result.agents.length,
+          loaded: this.agents.length,
           unscoped: scope === '',
-          keptPrevious: true,
-        };
-        return false;
-      }
-      if (result.firstPageFailed) {
-        if (this.memberScope === scope) {
-          // Nothing new arrived: the graph already shown for this scope stays.
-          this.incomplete = {
-            reason: 'failed',
-            loaded: 0,
-            unscoped: scope === '',
-            keptPrevious: true,
-          };
-        } else {
-          this.showError(result.error.message || 'Failed to load agents');
-        }
-        return false;
-      }
+        }),
+        keptPrevious: true,
+      };
+      return false;
+    }
+    if (result.error && result.firstPageFailed) {
+      this.showError(result.error.message || 'Failed to load agents');
+      return false;
     }
     const reason = result.capped ? 'capped' : result.error ? 'failed' : null;
     this.adopt(
       result.agents,
       scope,
-      reason === null && result.complete,
       reason
         ? { reason, loaded: result.agents.length, unscoped: scope === '', keptPrevious: false }
         : null,
@@ -429,20 +457,17 @@ export class AgentGraphPage extends LitElement {
     this.error = message;
     this.agents = [];
     this.memberScope = null;
-    this.complete = false;
     this.incomplete = null;
   }
 
   private adopt(
     agents: Agent[],
     scope: string,
-    complete: boolean,
     incomplete: GraphIncomplete | null,
     stale: boolean
   ): void {
     this.agents = agents;
     this.memberScope = scope;
-    this.complete = complete;
     this.incomplete = incomplete;
     this.stale = stale;
     this.error = null;
@@ -462,8 +487,7 @@ export class AgentGraphPage extends LitElement {
     this.probeController = null;
     this.reloading = false;
     if (stateManager.isAgentSetComplete('compact')) {
-      if (this.memberScope !== '' || !this.complete) this.adoptHeldSet();
-      this.loading = false;
+      this.adoptHeldSet();
       return;
     }
     if (target === '' && this.cappedAll) {
@@ -471,9 +495,8 @@ export class AgentGraphPage extends LitElement {
       this.adopt(
         Array.from(kept.members.values()),
         '',
-        false,
         { reason: 'capped', loaded: kept.loaded, unscoped: true, keptPrevious: false },
-        this.stale
+        kept.stale
       );
       this.loading = false;
       return;
@@ -558,11 +581,11 @@ export class AgentGraphPage extends LitElement {
 
   /** The banner text of an incomplete graph. */
   private incompleteText(i: GraphIncomplete): string {
-    if (i.reason === 'capped') {
-      const text = `Graph incomplete: ${cappedTotalText(i.loaded)}`;
-      return i.unscoped ? `${text} · narrow with a project filter` : text;
-    }
-    const text = failedTotalText(i.loaded);
+    let text =
+      i.reason === 'capped'
+        ? `Graph incomplete: ${cappedTotalText(i.loaded)}`
+        : failedTotalText(i.loaded);
+    if (i.reason === 'capped' && i.unscoped) text += ' · narrow with a project filter';
     return i.keptPrevious ? `${text} · showing the previous graph` : text;
   }
 
@@ -573,7 +596,12 @@ export class AgentGraphPage extends LitElement {
       ${i
         ? html`<div class="graph-banner graph-incomplete" role="status" style=${BANNER_STYLE}>
             <span>${this.incompleteText(i)}</span>
-            <sl-button size="small" ?disabled=${this.reloading} @click=${() => this.onReload()}>
+            <sl-button
+              size="small"
+              ?disabled=${this.reloading}
+              ?loading=${this.reloading}
+              @click=${() => this.onReload()}
+            >
               Retry
             </sl-button>
           </div>`
@@ -581,7 +609,12 @@ export class AgentGraphPage extends LitElement {
       ${this.stale
         ? html`<div class="graph-banner graph-stale" role="status" style=${BANNER_STYLE}>
             <span>Graph may be stale</span>
-            <sl-button size="small" ?disabled=${this.reloading} @click=${() => this.onReload()}>
+            <sl-button
+              size="small"
+              ?disabled=${this.reloading}
+              ?loading=${this.reloading}
+              @click=${() => this.onReload()}
+            >
               Refresh
             </sl-button>
           </div>`
@@ -642,6 +675,7 @@ export class AgentGraphPage extends LitElement {
                   focusId=${this.focusId}
                   orientation=${this.orientation}
                   filterKey=${this.projectFilter}
+                  .markMissingAncestors=${this.incomplete !== null}
                   @orientation-change=${this.onOrientationChange}
                 ></scion-agent-tree-view>
               `}
