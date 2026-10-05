@@ -169,8 +169,8 @@ func isClosed(ch <-chan struct{}) bool {
 
 // TestWSStreamCloseWaitsForPeer: after CloseWithCode the stream has ended
 // and StreamClose is sent at once, but the link stays open, discarding
-// what the peer still sends, until the peer closes it or the close wait
-// on the clock has passed.
+// what the peer still sends, until the peer closes it, sends its own
+// StreamClose, or the close wait on the clock has passed.
 func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 	const wait = 5 * time.Second
 	window, err := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: 4}}})
@@ -186,6 +186,19 @@ func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 			name: "peer closes after reading StreamClose",
 			finish: func(_ *testing.T, _ *clock.Fake, c *peerConn) {
 				c.closePeer()
+			},
+		},
+		{
+			// Deterministic form of the simultaneous close: the peer's own
+			// StreamClose arrives during the wait (the unbuffered send
+			// returns once it has been read) and ends it at once.
+			name: "peer sends its own StreamClose",
+			finish: func(t *testing.T, _ *clock.Fake, c *peerConn) {
+				b, err := proto.Marshal(closeFrame(conduit.CloseNormal, ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.in <- b
 			},
 		},
 		{
