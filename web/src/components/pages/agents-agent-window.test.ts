@@ -2337,6 +2337,47 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(fake.requests.length).toBe(before);
     });
 
+    for (const { state, count } of [
+      { state: 'small', count: 30 },
+      { state: 'held', count: 600 },
+    ] as const) {
+      it(`a force delete accepted with a 202 keeps the ${state} row in place before any live flush and sends no list request`, async () => {
+        const fake: Fake = {
+          agents: deletableAgents(count),
+          requests: [],
+          deletion: deletingView(),
+          deletes: [],
+          deleteUnreachable: true,
+        };
+        stubFake(fake);
+        if (state === 'held') localStorage.setItem('scion-filter-agents-mode', 'project');
+        const el = await mount();
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe(state);
+        const id = win.items[2].id;
+        const agentIds = internals(el).agents.map((a) => a.id);
+        const itemIds = win.items.map((a) => a.id);
+        const before = fake.requests.length;
+
+        await internals(el).handleAgentAction(id, 'delete', altClick);
+
+        // Before the store's coalesced flush: the row is neither removed
+        // nor moved.
+        expect(fake.deletes).toEqual([`/api/v1/agents/${id}`, `/api/v1/agents/${id}?force=true`]);
+        expect(internals(el).agents.map((a) => a.id)).toEqual(agentIds);
+        expect(win.items.map((a) => a.id)).toEqual(itemIds);
+        expect(fake.requests.length).toBe(before);
+
+        await flushLive(el);
+        expect(internals(el).agents.map((a) => a.id)).toEqual(agentIds);
+        expect(win.items.map((a) => a.id)).toEqual(itemIds);
+        expect(shownDeletion(el, id)).toBe('deleting');
+        expect(win.updatesAvailable).toBe(false);
+        await settle(el);
+        expect(fake.requests.length).toBe(before);
+      });
+    }
+
     it('a delete answered 200 still leaves the held set at once and sends the lifecycle refresh', async () => {
       const fake: Fake = { agents: deletableAgents(30), requests: [], deletes: [] };
       stubFake(fake);
