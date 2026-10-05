@@ -591,7 +591,7 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			dayTotals[increment.End.Format("2006-01-02")] += increment.Value
+			dayTotals[increment.End.UTC().Format("2006-01-02")] += increment.Value
 		}
 	}
 
@@ -638,7 +638,7 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			seriesDayTotals[label][increment.End.Format("2006-01-02")] += increment.Value
+			seriesDayTotals[label][increment.End.UTC().Format("2006-01-02")] += increment.Value
 		}
 	}
 

@@ -50,7 +50,7 @@ func init() {
 	resumeCmd.Flags().BoolVarP(&attach, "attach", "a", false, "Attach to the agent TTY after starting")
 	resumeCmd.Flags().BoolVar(&forceResume, "force", false, "Resume an agent in the error phase (e.g. after a host crash), continuing its previous session")
 
-	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 
 	// Template resolution flags for Hub mode (Section 9.4)
 	resumeCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
@@ -60,6 +60,10 @@ func init() {
 	// Telemetry override flags
 	resumeCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")
 	resumeCmd.Flags().BoolVar(&disableTelemetry, "disable-telemetry", false, "Explicitly disable telemetry for this agent")
+
+	// Hub launch wait flags
+	resumeCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Hub mode: return once the Hub accepts the agent, without waiting for it to be running")
+	resumeCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// Inline config flag
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")

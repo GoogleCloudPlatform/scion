@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/require"
@@ -102,6 +103,26 @@ func TestCreateAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 	require.Empty(t, listProjectAgents(t, s, project.ID), "no agent may be persisted when failing closed")
 }
 
+// The web and CLI show the 412 message verbatim, so it must name the broker,
+// the user-facing mode label, why it lacks support and which brokers work —
+// not tell users to upgrade a Cloud Run or Substrate broker.
+func TestCreateAgent_EmptyPerAgent_412MessageNamesBrokerAndAlternatives(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "msg", false)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "msg-agent",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	msg := decodeErrorMessage(t, rec.Body.Bytes())
+	require.Equal(t, "broker "+broker.Name+" "+brokerLacksEmptyPerAgentDetail, msg)
+	require.Contains(t, msg, `"Empty directory per agent"`)
+	require.Contains(t, msg, "Cloud Run and Substrate brokers")
+	require.Contains(t, msg, "pick a Docker, Podman, Apple or Kubernetes broker")
+	require.NotContains(t, msg, "upgrade the broker")
+}
+
 func TestCreateAgent_EmptyPerAgent_NoSharedWorkspaceOrStorage(t *testing.T) {
 	srv, s := testServer(t)
 	project, _ := newEmptyPerAgentHandlerProject(t, s, "cap", true)
@@ -138,7 +159,7 @@ func TestCreateAgent_EmptyPerAgent_IgnoresWorkspaceFiles(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Contains(t, resp.Warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+	require.Contains(t, resp.Warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 	require.Empty(t, resp.UploadURLs, "no bootstrap upload for empty-per-agent")
 
 	agents := listProjectAgents(t, s, project.ID)

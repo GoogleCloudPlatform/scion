@@ -15,8 +15,6 @@
 package runtime
 
 import (
-	"errors"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -145,24 +143,24 @@ type MountDescriptor struct {
 // SelectWorkspaceBackend returns the appropriate WorkspaceBackend based on
 // configuration and workspace sharing mode. The selection rules (design §3.1):
 //
-//   - nfsBackend when cfg.Backend == "nfs" AND mode is SharedPlain or WorktreePerAgent.
+//   - nfsBackend when cfg.Backend == "nfs" AND mode is SharedPlain, WorktreePerAgent
+//     or EmptyPerAgent. For EmptyPerAgent the resolved path is still the
+//     project's workspace path; the caller mounts the agent's own directory
+//     next to it (<project>/agents/<agent name>/workspace) and must never
+//     mount the resolved path itself (design #2703 P3).
 //   - cloudrunVolumeBackend when cfg.Backend == "cloudrun-volume" AND mode is SharedPlain or WorktreePerAgent.
 //   - gkeSharedVolumeBackend when cfg.Backend == "gke-shared-volume" AND mode is SharedPlain or WorktreePerAgent.
 //   - localBackend otherwise — including ClonePerAgent even when Backend is a shared type
-//     (the deliberate node-local escape hatch).
+//     (the deliberate node-local escape hatch), and EmptyPerAgent on
+//     gke-shared-volume and cloudrun-volume (Cloud Run rejects the mode at
+//     the runtime).
 //   - Backend empty or "local" always yields localBackend.
-//   - EmptyPerAgent yields localBackend for every backend, including nfs,
-//     gke-shared-volume and cloudrun-volume: its private per-agent directory
-//     is node-local (or pod-local EmptyDir on K8s). Callers must first reject
-//     it on NFS storage with CheckWorkspaceBackendMode (fail closed until
-//     design #2703 P3); gke-shared-volume and cloudrun-volume are not gated
-//     here (Cloud Run rejects the mode at the runtime).
 func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) WorkspaceBackend {
 	if cfg != nil {
 		switch cfg.Backend {
 		case "nfs":
 			switch mode {
-			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
+			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent, store.SharingModeEmptyPerAgent:
 				return NewNFSBackend(cfg.NFS)
 			}
 		case "cloudrun-volume":
@@ -179,22 +177,4 @@ func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.Wor
 	}
 	// Backend empty, "local", nil config, or ClonePerAgent → local.
 	return NewLocalBackend()
-}
-
-// ErrEmptyPerAgentNFSUnsupported is returned by CheckWorkspaceBackendMode
-// for an empty-per-agent agent on a broker whose workspace storage is NFS.
-var ErrEmptyPerAgentNFSUnsupported = errors.New("empty-per-agent workspaces are not yet supported on NFS workspace storage " +
-	"(server.workspace_storage.backend=nfs); use a broker with local workspace storage " +
-	"until NFS per-agent support lands (design #2703 P3)")
-
-// CheckWorkspaceBackendMode reports whether mode can be provisioned with the
-// configured workspace storage. It fails closed for EmptyPerAgent on NFS:
-// SelectWorkspaceBackend would route it to localBackend, so the agent would
-// silently get a node-local directory instead of the NFS-backed per-agent
-// directory the operator configured (design #2703 P2).
-func CheckWorkspaceBackendMode(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) error {
-	if mode == store.SharingModeEmptyPerAgent && cfg != nil && cfg.Backend == "nfs" {
-		return ErrEmptyPerAgentNFSUnsupported
-	}
-	return nil
 }

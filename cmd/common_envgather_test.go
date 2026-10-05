@@ -210,7 +210,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = startAgentViaHub(hubCtx, "test-agent", "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, "test-agent", "", false, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "env-gather failed")
 	assert.True(t, deleteCalled, "expected provisioning agent to be deleted on env-gather failure")
@@ -283,7 +283,7 @@ func TestStartAgentViaHub_GlobalProjectSkipsWorkspaceBootstrap(t *testing.T) {
 		IsGlobal:    true,
 	}
 
-	err = startAgentViaHub(hubCtx, "global-agent", "hello", false, nil)
+	err = startAgentViaHub(nil, hubCtx, "global-agent", "hello", false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, captured)
 	assert.Empty(t, captured.WorkspaceFiles)

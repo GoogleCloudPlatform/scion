@@ -236,6 +236,15 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_id").
 			Optional().
 			Default(""),
+		// run_id is the identity of the agent's current or most recent run
+		// (ptone/scion#2550): minted by the Hub for every create, start and
+		// restart dispatch, persisted before the broker call, and carried
+		// on the runtime entry as the scion.run_id label. A delete sends it
+		// so the broker never removes a different run of the same name. ""
+		// for rows that have not been dispatched since run IDs existed.
+		field.String("run_id").
+			Optional().
+			Default(""),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -336,6 +345,22 @@ func (Agent) Fields() []ent.Field {
 		field.String("deletion_request").
 			Optional().
 			Default(""),
+
+		// --- Run intent ---
+		// run_intent records whether the user (or the system acting for the
+		// user) wants this agent running: "running" or "stopped". NULL means
+		// unknown; nothing treats a NULL intent as wanting the agent to run.
+		// It is written only by AgentStore.SetRunIntent and RevertRunIntent
+		// (and the one-time boot backfill), never by UpdateAgent or
+		// CreateAgent, and writing it never bumps state_version.
+		field.String("run_intent").
+			Optional().
+			Nillable(),
+		// run_intent_at is the store-clock time of the last run_intent
+		// write. It strictly increases per row, so it orders intent writes.
+		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -369,6 +394,8 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Lookup of agents on a broker by run intent.
+		index.Fields("runtime_broker_id", "run_intent"),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

@@ -106,6 +106,8 @@ const (
 	FieldLaunchAsyncOptIn = "launch_async_opt_in"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldRunID holds the string denoting the run_id field in the database.
+	FieldRunID = "run_id"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -142,6 +144,10 @@ const (
 	FieldDeletionPrior = "deletion_prior"
 	// FieldDeletionRequest holds the string denoting the deletion_request field in the database.
 	FieldDeletionRequest = "deletion_request"
+	// FieldRunIntent holds the string denoting the run_intent field in the database.
+	FieldRunIntent = "run_intent"
+	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
+	FieldRunIntentAt = "run_intent_at"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -221,6 +227,7 @@ var Columns = []string{
 	FieldReincarnationUpdatedAt,
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
+	FieldRunID,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -239,6 +246,8 @@ var Columns = []string{
 	FieldDeletionError,
 	FieldDeletionPrior,
 	FieldDeletionRequest,
+	FieldRunIntent,
+	FieldRunIntentAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -282,6 +291,8 @@ var (
 	DefaultLaunchAsyncOptIn bool
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultRunID holds the default value on creation for the "run_id" field.
+	DefaultRunID string
 	// DefaultLaunchState holds the default value on creation for the "launch_state" field.
 	DefaultLaunchState string
 	// DefaultLaunchEndReason holds the default value on creation for the "launch_end_reason" field.
@@ -587,6 +598,11 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
 }
 
+// ByRunID orders the results by the run_id field.
+func ByRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunID, opts...).ToFunc()
+}
+
 // ByLaunchState orders the results by the launch_state field.
 func ByLaunchState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchState, opts...).ToFunc()
@@ -675,6 +691,16 @@ func ByDeletionPrior(opts ...sql.OrderTermOption) OrderOption {
 // ByDeletionRequest orders the results by the deletion_request field.
 func ByDeletionRequest(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeletionRequest, opts...).ToFunc()
+}
+
+// ByRunIntent orders the results by the run_intent field.
+func ByRunIntent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntent, opts...).ToFunc()
+}
+
+// ByRunIntentAt orders the results by the run_intent_at field.
+func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

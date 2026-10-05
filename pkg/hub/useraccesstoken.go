@@ -40,17 +40,32 @@ const (
 )
 
 var (
-	ErrInvalidUAT        = errors.New("invalid access token")
-	ErrUATExpired        = errors.New("access token expired")
-	ErrUATRevoked        = errors.New("access token revoked")
-	ErrInvalidUATFormat  = errors.New("invalid token format")
-	ErrUATLimitExceeded  = errors.New("token limit exceeded")
-	ErrInvalidUATScope   = errors.New("invalid token scope")
-	ErrUATExpiryTooLong  = errors.New("token expiry exceeds maximum (1 year)")
-	ErrUATExpiryPast     = errors.New("token expiry must be in the future")
-	ErrUATNameRequired   = errors.New("token name is required")
+	ErrInvalidUAT       = errors.New("invalid access token")
+	ErrUATExpired       = errors.New("access token expired")
+	ErrUATRevoked       = errors.New("access token revoked")
+	ErrInvalidUATFormat = errors.New("invalid token format")
+	ErrUATLimitExceeded = errors.New("token limit exceeded")
+	ErrInvalidUATScope  = errors.New("invalid token scope")
+	ErrUATExpiryTooLong = errors.New("token expiry exceeds maximum (1 year)")
+	ErrUATExpiryPast    = errors.New("token expiry must be in the future")
+	ErrUATNameRequired  = errors.New("token name is required")
+	ErrUATScopeEmpty    = errors.New("at least one scope is required")
+
+	// ErrUATProjectIDEmpty is returned when a token request names neither
+	// an explicit boundary nor a project ID. Its message names the project
+	// ID shorthand that most clients send; the HTTP response also carries
+	// details field "boundary" and reason "boundary_required".
 	ErrUATProjectIDEmpty = errors.New("project ID is required")
-	ErrUATScopeEmpty     = errors.New("at least one scope is required")
+
+	// ErrUATBoundaryRequired is the boundary name for ErrUATProjectIDEmpty:
+	// the same error value. A missing boundary is never read as a hub
+	// boundary.
+	ErrUATBoundaryRequired = ErrUATProjectIDEmpty
+
+	// ErrUATBoundaryInvalid is returned when a token request names a
+	// boundary that is not a valid project or hub boundary, or names a
+	// project ID that disagrees with its boundary.
+	ErrUATBoundaryInvalid = errors.New("token boundary is invalid")
 
 	// ErrUATScopeViolation is returned when the issuer does not hold all
 	// requested scopes in the target project.
@@ -212,12 +227,49 @@ type TokenMetadata struct {
 // so a future field (e.g. a hub-vs-project boundary kind) can be added
 // without growing a positional argument list.
 type CreateTokenParams struct {
-	UserID    string
-	Name      string
+	UserID string
+	Name   string
+	// Boundary is the credential boundary the token is issued under. A
+	// zero Boundary with a non-empty ProjectID is the project boundary for
+	// that project. A zero Boundary with an empty ProjectID is rejected
+	// with ErrUATBoundaryRequired; it never means hub.
+	Boundary TokenBoundary
+	// ProjectID is the project-boundary shorthand. When Boundary is also
+	// set, ProjectID must be empty or name Boundary's project.
 	ProjectID string
 	Scopes    []string
 	ExpiresAt *time.Time
 	Metadata  TokenMetadata
+}
+
+// resolveTokenBoundary returns the boundary a token request names, from
+// either the explicit boundary or the project ID shorthand. A request that
+// names neither is rejected; a request whose two forms disagree, or whose
+// boundary is not valid, is rejected. A project ID that is present but
+// blank, in either form, is invalid.
+func resolveTokenBoundary(boundary TokenBoundary, projectID string) (TokenBoundary, error) {
+	if isBlankPresent(projectID) || isBlankPresent(boundary.ProjectID) {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	if boundary == (TokenBoundary{}) {
+		if projectID == "" {
+			return TokenBoundary{}, ErrUATBoundaryRequired
+		}
+		return TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, nil
+	}
+	if !boundary.Valid() {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	if projectID != "" && (boundary.Kind != BoundaryKindProject || boundary.ProjectID != projectID) {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	return boundary, nil
+}
+
+// isBlankPresent reports whether v is non-empty but contains only white
+// space.
+func isBlankPresent(v string) bool {
+	return v != "" && strings.TrimSpace(v) == ""
 }
 
 // CreateToken generates a new user access token with issuer ceiling,
@@ -245,8 +297,9 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	if params.Name == "" {
 		return "", nil, ErrUATNameRequired
 	}
-	if params.ProjectID == "" {
-		return "", nil, ErrUATProjectIDEmpty
+	boundary, err := resolveTokenBoundary(params.Boundary, params.ProjectID)
+	if err != nil {
+		return "", nil, err
 	}
 	// Bounded validation of name/purpose/labels at issuance. Metadata is
 	// immutable afterward, so this is the only place it is checked.
@@ -305,11 +358,10 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, ErrUATProjectForbidden
 	}
 	principal := principalContextForIdentity(identity)
-	boundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: params.ProjectID}
 	eligibility, err := s.authz.CanMintSelector(ctx, principal, boundary, expanded)
 	if err != nil {
 		s.logger.Warn("RS4: CanMintSelector failed",
-			"user_id", params.UserID, "project_id", params.ProjectID, "error", err)
+			"user_id", params.UserID, "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
 	}
 	for _, result := range eligibility {
@@ -383,7 +435,8 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 			Name:                 params.Name,
 			Prefix:               prefix,
 			KeyHash:              hashStr,
-			ProjectID:            params.ProjectID,
+			BoundaryKind:         string(boundary.Kind),
+			ProjectID:            boundary.ProjectID,
 			Scopes:               expanded,
 			CeilingVersion:       ceiling.Version,
 			CeilingPermissionIDs: ceiling.PermissionIDs,
@@ -405,8 +458,12 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 
 		// B3/G3: Atomic audit — commit or roll back with the token.
 		scopesJSON, _ := json.Marshal(expanded)
-		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
-			token.ID, string(scopesJSON), params.ProjectID)
+		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"boundary_kind":%q}`,
+			token.ID, string(scopesJSON), string(boundary.Kind))
+		if boundary.Kind == BoundaryKindProject {
+			afterSummary = fmt.Sprintf(`{"token_id":%q,"scopes":%s,"boundary_kind":%q,"project_id":%q}`,
+				token.ID, string(scopesJSON), string(boundary.Kind), boundary.ProjectID)
+		}
 		// Record that purpose/label metadata was set and which label keys
 		// were used, without recording label or purpose values in audit
 		// (values are issuer-supplied and unbounded-trust text).

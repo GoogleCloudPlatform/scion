@@ -668,5 +668,41 @@ func Spec() []TableFixture {
 				"update_time":        baseTime,
 			},
 		}},
+
+		// ---- Conduit session registry (relay_instances is the FK parent of
+		// conduit_sessions; conduit_principal_epochs is standalone) ----
+		{Table: "relay_instances", Rows: []row{
+			{ // NULL public_endpoint: internal-only relay
+				"instance_id": "relay-fixture-1", "generation": baseTime.UnixMilli(),
+				"internal_endpoint": "http://relay-fixture-1:9811",
+				"started_at":        baseTime, "last_seen": baseTime, "draining": false,
+			},
+		}},
+		{Table: "conduit_sessions", Rows: []row{
+			{ // agent session: project + exec_scope set, unicode capabilities JSON
+				"session_id":     "cs000000-0000-0000-0000-000000000001",
+				"principal_kind": "agent", "principal_id": agentID, "project_id": projectID,
+				"relay_instance_id": "relay-fixture-1", "relay_generation": baseTime.UnixMilli(),
+				"transport": "ws", "endpoint_incarnation": "inc-fixture-1",
+				"exec_scope": "scope-fixture-1", "connection_epoch": 1, "draining": false,
+				"capabilities": `{"stream_kinds":["pty"],"rpc":["exec"],"endpoint_incarnation":"inc-fixture-1",` +
+					`"exec_scope":"scope-fixture-1","transport_limits":{"max_frame":1048576,"idle_timeout_s":60},` +
+					`"incarnation_source":"launch_id","note":"naïve café 北京 😀"}`,
+				"connected_at": baseTime, "last_seen": baseTime,
+			},
+			{ // broker session: NULL project_id and exec_scope, default-ish capabilities
+				"session_id":     "cs000000-0000-0000-0000-000000000002",
+				"principal_kind": "broker", "principal_id": brokerID, "project_id": nil,
+				"relay_instance_id": "relay-fixture-1", "relay_generation": baseTime.UnixMilli(),
+				"transport": "ws", "endpoint_incarnation": "binc-fixture-1",
+				"exec_scope": nil, "connection_epoch": 1, "draining": true,
+				"capabilities": `{}`,
+				"connected_at": baseTime, "last_seen": baseTime,
+			},
+		}},
+		{Table: "conduit_principal_epochs", Rows: []row{
+			{"id": 1, "principal_kind": "agent", "principal_id": agentID, "epoch": 1},
+			{"id": 2, "principal_kind": "broker", "principal_id": brokerID, "epoch": 1},
+		}},
 	}
 }

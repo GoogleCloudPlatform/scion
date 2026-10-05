@@ -34,7 +34,7 @@ test('@static mobile projects report pointer:coarse and hover:none', async ({ pa
   expect(media.hoverNone, `${testInfo.project.name}: hover:none`).toBe(isMobileProject);
 });
 
-test('@static viewport meta has interactive-widget and no zoom-disabling attributes', async ({
+test('@static viewport meta has viewport-fit=cover, interactive-widget and no zoom-disabling attributes', async ({
   page,
 }) => {
   await openChatRail(page);
@@ -43,10 +43,8 @@ test('@static viewport meta has interactive-widget and no zoom-disabling attribu
   );
 
   expect(content).toContain('width=device-width');
+  expect(content).toContain('viewport-fit=cover');
   expect(content).toContain('interactive-widget=resizes-content');
   expect(content).not.toContain('maximum-scale');
   expect(content).not.toContain('user-scalable');
-  // viewport-fit=cover needs safe-area-inset padding added at the same time
-  // it ships, so it is not part of this frame-only pass.
-  expect(content).not.toContain('viewport-fit');
 });

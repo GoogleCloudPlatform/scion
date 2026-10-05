@@ -27,6 +27,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
@@ -61,6 +63,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -152,6 +155,8 @@ func checkColumn(t, c string) error {
 			brokersecret.Table:             brokersecret.ValidColumn,
 			brokersetting.Table:            brokersetting.ValidColumn,
 			chatlinkcode.Table:             chatlinkcode.ValidColumn,
+			conduitprincipalepoch.Table:    conduitprincipalepoch.ValidColumn,
+			conduitsession.Table:           conduitsession.ValidColumn,
 			conversation.Table:             conversation.ValidColumn,
 			conversationparticipant.Table:  conversationparticipant.ValidColumn,
 			decisionaudit.Table:            decisionaudit.ValidColumn,
@@ -186,6 +191,7 @@ func checkColumn(t, c string) error {
 			projectcontributor.Table:       projectcontributor.ValidColumn,
 			projectprestarthook.Table:      projectprestarthook.ValidColumn,
 			projectsyncstate.Table:         projectsyncstate.ValidColumn,
+			relayinstance.Table:            relayinstance.ValidColumn,
 			rolebinding.Table:              rolebinding.ValidColumn,
 			roledefinition.Table:           roledefinition.ValidColumn,
 			runtimebroker.Table:            runtimebroker.ValidColumn,

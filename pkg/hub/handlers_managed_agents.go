@@ -211,6 +211,22 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	var newPhase string
 	var actionErr error
 
+	// Record the run intent before acting, as the broker-backed lifecycle
+	// paths do. A stop whose action fails keeps intent stopped.
+	var intent store.RunIntent
+	switch action {
+	case "start", "restart":
+		intent = store.RunIntentRunning
+	case "stop":
+		intent = store.RunIntentStopped
+	}
+	if intent != "" {
+		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
+			writeRunIntentError(w, err, agent.ID)
+			return
+		}
+	}
+
 	switch action {
 	case "start":
 		newPhase = string("running")

@@ -579,6 +579,7 @@ const (
 	DenialCredentialInsufficient  DenialCode = "credential_insufficient"
 	DenialUserSuspended           DenialCode = "user_suspended"
 	DenialResourceNotFound        DenialCode = "not_found"
+	DenialConflict                DenialCode = "conflict"
 )
 
 // TestRef references an executable test that proves part of the contract.

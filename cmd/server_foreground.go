@@ -145,6 +145,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if enableHub {
+		if err := validateHubWorkspaceStorage(cfg); err != nil {
+			return err
+		}
+	}
 
 	// 3. Resolve admin mode settings
 	adminMode := cfg.AdminMode
@@ -178,7 +183,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// In hosted mode, materialize any missing harness configs from the
 		// binary's embedded catalog. This ensures newly added harness configs
 		// from binary updates are available on disk without a full InitGlobal.
-		// Force=false preserves any operator-customized configs.
+		// Force=false refreshes bundle-owned files (config.yaml and the
+		// provisioner scripts) but preserves other operator files.
 		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
 			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
 		}
@@ -945,6 +951,25 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	return cleanups, requestLogger, messageLogger, nil
 }
 
+// validateHubWorkspaceStorage fails hub startup when server.workspace_storage
+// cannot be used: an unknown backend, nfs without shares, a volume backend
+// without volume_name, or an invalid subpath_root. Without it the hub would
+// quietly fall back to ephemeral local project paths and only readiness
+// would notice. A broker-only process never calls this: it only logs
+// startup warnings (brokerNFSConfig, brokerWorkspaceStorageWarning).
+func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	// Defaults are applied during config load; applying them again is
+	// idempotent and keeps this check independent of the load path.
+	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
+	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
+		return fmt.Errorf("invalid server.workspace_storage: %w", err)
+	}
+	return nil
+}
+
 // loadAndReconcileConfig loads the server configuration file and reconciles
 // it with command-line flags and workstation defaults.
 func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
@@ -1348,12 +1373,20 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 
 	s := entadapter.NewCompositeStore(entClient)
 
+	// Repair SQLite tables whose timestamps the driver cannot scan BEFORE
+	// migrateStore: Migrate reads tables through ent and fails, fatally, on
+	// such rows, so this cannot move into runBootDataMigrations. It uses raw
+	// SQL only, snapshots the database before writing, and is a no-op on
+	// Postgres and on a store with nothing to repair.
+	tsRepair := repairUnreadableTimestamps(ctx, s)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, cfg, s); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
+	markUTCTimestampRepairComplete(ctx, s, tsRepair)
 
 	runBootDataMigrations(ctx, s)
 
@@ -2233,18 +2266,33 @@ func initOperationalSettingsWithRetry(ctx context.Context, cfg *config.GlobalCon
 //  1. Acquires advisory lock "hub_settings_seed"
 //  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
 //  3. Releases the lock
-//  4. Calls Refresh to load sections, then applySnapshot
-//  5. Logs any env-overridden Layer-1 keys as a WARN
+//  4. Calls Refresh to load sections
+//  5. Retires stored runtime-profile timezone values (hub.RetireProfileTimezones)
+//  6. Applies the snapshot
+//  7. Logs any env-overridden Layer-1 keys as a WARN
 func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	// The runtime-profile timezone was removed. Scan the settings file for
+	// leftover profiles.<name>.timezone keys (a raw map walk; the struct
+	// field is gone) so the seed material can drop them and the retirement
+	// step below can report or migrate them.
+	tzScan, err := config.ScanSettingsFileProfileTimezones(globalDir)
+	if err != nil {
+		slog.Warn("Could not scan the settings file for removed runtime-profile timezones", "file", tzScan.Path, "error", err)
+	}
+
 	settingStore, ok := s.(store.HubSettingStore)
 	if !ok {
 		log.Println("WARNING: store does not implement HubSettingStore; skipping operational settings init")
+		_ = hub.RetireProfileTimezones(ctx, nil, hub.ProfileTimezoneRetireInput{File: tzScan}, slog.Default())
 		return nil
 	}
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
 	bootstrapKoanf := config.LoadBootstrapKoanf()
+	// Seed material never carries the removed key, so the every-boot sync
+	// cannot write it back into a seeded profiles row.
+	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
 
 	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
 	// Layer-1 settings (these should use SCION_SEED_* instead).
@@ -2283,6 +2331,17 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	}
 	if len(changed) > 0 {
 		log.Printf("Operational settings loaded from DB: %v", changed)
+	}
+
+	// Retire stored runtime-profile timezone values once settings are
+	// loaded and seeded, before the snapshot is applied and before the
+	// dispatcher is wired. Non-fatal: a failure leaves the values in place
+	// (nothing reads them) and the next start retries.
+	if err := hub.RetireProfileTimezones(ctx, ops, hub.ProfileTimezoneRetireInput{
+		DBTier: hubSrv.IsPostgres(),
+		File:   tzScan,
+	}, slog.Default()); err != nil {
+		slog.Error("Retiring runtime-profile timezones failed; will retry at the next start", "error", err)
 	}
 
 	snap := ops.Snapshot()
@@ -2654,7 +2713,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // impure half, factored out so a test can call it directly -- as many times
 // as it likes, with a captured logf -- without the once-per-process guard
 // making every call after the first a no-op. It loads global settings the
-// same env-free, global-only way the Start path does (config.LoadGlobalSettings,
+// same env-free, global-only way the Start path does (config.LoadGlobalSettingsWithOverlay,
 // never LoadEffectiveSettings, so this can never be influenced by a
 // project's own settings.yaml) and forwards to logSharedDirStorageStartup.
 //
@@ -2665,7 +2724,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // request/agent-start actually needs it, so this is the heads-up an
 // operator sees before that happens.
 func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
-	globalSettings, _, gErr := config.LoadGlobalSettings()
+	globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 	if gErr != nil {
 		if config.GlobalSettingsMentions("shared_dir_storage") {
 			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
@@ -2673,10 +2732,60 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 		}
 		return
 	}
-	if globalSettings == nil || globalSettings.Server == nil {
+	if globalSettings == nil {
 		return
 	}
-	logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	if globalSettings.Server != nil {
+		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	}
+	logSharedDirStorageOverridesStartup(globalSettings, logf)
+}
+
+// logSharedDirStorageOverridesStartup logs one line per profile whose
+// shared-dir storage backend comes from a profile or runtime entry
+// shared_dir_storage_backend override, and a warning per invalid override.
+// It checks configuration only and never touches the filesystem: an nfs
+// override whose export is not mounted on this host is reported when an
+// agent using it starts, not here, so a missing mount never affects startup
+// or agents that use the local backend. Overrides set through the hub's
+// settings API after startup are not in this summary; they apply to the
+// next agent start.
+func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil {
+		return
+	}
+	var global *config.V1SharedDirStorageConfig
+	if gs.Server != nil {
+		global = gs.Server.SharedDirStorage
+	}
+	for _, e := range config.ValidateSharedDirStorageBackends(gs.Runtimes, gs.Profiles, global) {
+		logf("Warning: %s", e.Error())
+	}
+	names := make([]string, 0, len(gs.Profiles))
+	for name := range gs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cfg, source := gs.ResolveSharedDirStorage(name)
+		if cfg == nil || source == config.SharedDirStorageGlobalSource {
+			continue
+		}
+		line := fmt.Sprintf("shared_dir_storage for profile %s: backend=%s (from %s)", name, sharedDirBackendLabel(cfg), source)
+		if summary := cfg.ResolvedLayoutSummary(); summary != "" {
+			line = fmt.Sprintf("shared_dir_storage for profile %s: %s (from %s)", name, summary, source)
+		}
+		logf("%s", line)
+	}
+}
+
+// sharedDirBackendLabel is the backend a resolved config selects, with
+// nil and "" shown as local.
+func sharedDirBackendLabel(cfg *config.V1SharedDirStorageConfig) string {
+	if cfg != nil && cfg.Backend == "nfs" {
+		return "nfs"
+	}
+	return "local"
 }
 
 // logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
@@ -2965,6 +3074,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
 			log.Printf("WARNING: %s", nfsWarning)
+		}
+		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
+			log.Printf("WARNING: %s", warning)
 		}
 	}
 

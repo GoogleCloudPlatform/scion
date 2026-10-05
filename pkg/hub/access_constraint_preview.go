@@ -1730,7 +1730,7 @@ func (ps *PreviewService) generateWarnings(
 			warnings = append(warnings, PreviewWarning{
 				Code:     WarningCodeScheduledActivation,
 				Severity: "info",
-				Message:  fmt.Sprintf("constraint will activate at %s", ts.Until.Format(time.RFC3339)),
+				Message:  fmt.Sprintf("constraint will activate at %s", ts.Until.UTC().Format(time.RFC3339)),
 			})
 			break
 		}

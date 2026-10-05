@@ -18,6 +18,8 @@ interface AuthMeFixture {
   body?: Record<string, unknown>;
 }
 
+// An admin server-config response that still carries runtime-profile zones.
+// The page must never request it.
 function makeServerConfig(): Record<string, unknown> {
   return {
     schema_version: '1',
@@ -117,7 +119,7 @@ function patchCalls(): Array<[unknown, RequestInit]> {
 
 // ── Tests ──
 
-describe('scion-page-profile-settings — timezone', () => {
+describe('scion-page-profile-settings — no agent timezone section', () => {
   let element: AnyEl = null;
 
   beforeAll(async () => {
@@ -131,97 +133,25 @@ describe('scion-page-profile-settings — timezone', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows the active profile timezone', async () => {
-    element = await createComponent(createFetchHandler({}));
-    expect(shadowText(element)).toContain('Agent timezone');
-    expect(shadowText(element)).toContain('"local"');
-    const input = element.shadowRoot.querySelector('.timezone-row sl-input');
-    expect(input.value).toBe('UTC');
-  });
-
-  it('hides the section when server config is not readable', async () => {
-    element = await createComponent(
-      createFetchHandler({ status: 403, body: { error: { message: 'forbidden' } } })
+  function requestedPaths(): string[] {
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    return (fetchMock.mock.calls as Array<[unknown]>).map(([url]) =>
+      typeof url === 'string' ? url : url instanceof URL ? url.pathname : (url as Request).url
     );
+  }
+
+  // The runtime-profile timezone was removed from the hub, so the page must
+  // neither show its old section nor read admin server config, even when
+  // the endpoint is readable and still returns a profile with a zone.
+  it('makes no admin server-config request and renders no Agent timezone section', async () => {
+    element = await createComponent(createFetchHandler({}));
+
+    expect(requestedPaths().length).toBeGreaterThan(0);
+    expect(requestedPaths().filter((p) => p.includes('/api/v1/admin/server-config'))).toEqual([]);
+    expect(patchCalls().filter(([url]) => String(url).includes('/admin/'))).toEqual([]);
     expect(shadowText(element)).not.toContain('Agent timezone');
     expect(element.shadowRoot.querySelector('.timezone-row')).toBeNull();
-  });
-
-  it('hides the section when there is no active profile', async () => {
-    element = await createComponent(
-      createFetchHandler({ body: { schema_version: '1', profiles: {} } })
-    );
-    expect(element.shadowRoot.querySelector('.timezone-row')).toBeNull();
-  });
-
-  it('saves only the active profile timezone and preserves everything else', async () => {
-    let captured: Record<string, unknown> | null = null;
-    element = await createComponent(
-      createFetchHandler({}, (body) => {
-        captured = body;
-        return { status: 200, body: { status: 'saved' } };
-      })
-    );
-
-    element._timezoneInput = '  America/Los_Angeles  ';
-    await element._saveTimezone();
-    await element.updateComplete;
-
-    expect(captured).toEqual({
-      profiles: {
-        local: {
-          runtime: 'docker',
-          timezone: 'America/Los_Angeles',
-          image_registry: 'reg.example',
-        },
-        remote: { runtime: 'kubernetes', timezone: 'Europe/Berlin' },
-      },
-    });
-    expect(shadowText(element)).toContain('Timezone updated.');
-  });
-
-  it('removes the timezone key when cleared', async () => {
-    let captured: { profiles: Record<string, Record<string, unknown>> } | null = null;
-    element = await createComponent(
-      createFetchHandler({}, (body) => {
-        captured = body as typeof captured;
-        return { status: 200, body: { status: 'saved' } };
-      })
-    );
-
-    element._timezoneInput = '';
-    await element._saveTimezone();
-
-    expect(captured).not.toBeNull();
-    expect(captured!.profiles.local).toEqual({ runtime: 'docker', image_registry: 'reg.example' });
-    expect('timezone' in captured!.profiles.local).toBe(false);
-  });
-
-  it('rejects an unknown timezone without calling the API', async () => {
-    element = await createComponent(createFetchHandler({}));
-
-    element._timezoneInput = 'Mars/Olympus_Mons';
-    await element._saveTimezone();
-    await element.updateComplete;
-
-    expect(patchCalls()).toHaveLength(0);
-    expect(shadowText(element)).toContain('is not a recognized IANA timezone name');
-  });
-
-  it('surfaces the backend error message on failure', async () => {
-    element = await createComponent(
-      createFetchHandler({}, () => ({
-        status: 422,
-        body: { error: { message: 'profile "local": invalid timezone' } },
-      }))
-    );
-
-    element._timezoneInput = 'Asia/Tokyo';
-    await element._saveTimezone();
-    await element.updateComplete;
-
-    expect(shadowText(element)).toContain('profile "local": invalid timezone');
-    expect(shadowText(element)).not.toContain('Timezone updated.');
+    expect(shadowText(element)).toContain('Display timezone');
   });
 });
 
@@ -310,7 +240,7 @@ describe('scion-page-profile-settings — display timezone', () => {
     return picker.shadowRoot.querySelector('sl-input').getAttribute('value');
   }
 
-  it('is visible to every signed-in user, independent of the Agent timezone section', async () => {
+  it('is visible to every signed-in user, including one who cannot read server config', async () => {
     element = await createComponent(
       createFetchHandler({ status: 403 }, undefined, { body: makeAuthMe() })
     );

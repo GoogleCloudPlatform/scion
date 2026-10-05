@@ -21,8 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -117,6 +120,71 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// startAttemptedDetails returns the error details for a failure inside
+// Manager.Start, so the hub knows the broker acted on the request (see
+// api.BrokerErrorDetailStartAttempted).
+func startAttemptedDetails(runID string) map[string]interface{} {
+	d := map[string]interface{}{api.BrokerErrorDetailStartAttempted: true}
+	if runID != "" {
+		d[api.BrokerErrorDetailRunID] = runID
+	}
+	return d
+}
+
+// startFailureDetails is startAttemptedDetails plus the run the runtime
+// holds for the agent now (api.BrokerErrorDetailCurrentRunID), when
+// currentRunID can report one. mgr is the manager the start went to.
+func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) map[string]interface{} {
+	d := startAttemptedDetails(runID)
+	if current, ok := s.currentRunID(ctx, mgr, id, projectID); ok {
+		d[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	return d
+}
+
+// currentRunID reports the scion.run_id of the agent's runtime entry after
+// a failed start. It re-lists, under the request's ctx, allManagers(ctx)
+// plus mgr (the one the start went to), scoped to projectID the way a
+// delete resolves its target (collectAgentCandidates). allManagers honours
+// a recorded runtime type on ctx (ptone/scion#2748): a restart carries one,
+// so the list is limited to runtimes of the recorded type plus mgr; a
+// start carries none, so every registered runtime is listed. Either way it
+// sees what a later delete under the same ctx rules would see, including a
+// previous entry left on another listed runtime.
+//
+//   - One container entry: its run, or "" when it carries no run label.
+//   - Entries of more than one run: "", so the hub's next delete resolves
+//     by name, as before run IDs. Name resolution fails closed (409) only
+//     on ambiguity among the runtimes that delete itself lists; an entry
+//     on a runtime outside its recorded type is not seen.
+//   - No container entry on any runtime (file-only entries do not count):
+//     ok is false. The hub then keeps the run it minted, so a delayed delete
+//     cannot remove a same-name agent created later.
+//   - Any List failure: ok is false; the hub falls back as for an older
+//     broker.
+func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
+	managers := s.allManagers(ctx)
+	if mgr != nil && !slices.Contains(managers, mgr) {
+		managers = append(managers, mgr)
+	}
+	cands, err := s.collectAgentCandidates(ctx, managers, id, projectID,
+		"Agent start failed: could not re-list the agent to report its current run")
+	if err != nil {
+		return "", false
+	}
+	current, found := "", false
+	for _, c := range cands {
+		if c.entry.ContainerID == "" {
+			continue
+		}
+		if found && c.entry.RunID != current {
+			return "", true
+		}
+		current, found = c.entry.RunID, true
+	}
+	return current, found
+}
+
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
 	code := ErrCodeNotFound
@@ -148,8 +216,14 @@ func Forbidden(w http.ResponseWriter) {
 		"Insufficient permissions", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-func MethodNotAllowed(w http.ResponseWriter) {
+// MethodNotAllowed writes a 405 Method Not Allowed response. RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header listing the methods
+// the target resource supports. The signature requires at least one method,
+// so a bare call does not compile; hack/check-method-not-allowed.sh remains
+// as a backstop for helpers that keep a variadic-only signature.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed,
 		"Method not allowed", nil)
 }
