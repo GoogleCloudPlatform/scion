@@ -352,10 +352,14 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 // broker is not "probably fine" just because it's not the default type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
-		if s.runtime == nil {
+		// Read under s.mu: SwapRuntime replaces s.runtime concurrently.
+		s.mu.RLock()
+		def := s.runtime
+		s.mu.RUnlock()
+		if def == nil {
 			return nil, false
 		}
-		return s.runtime, true
+		return def, true
 	}
 	aux, found := s.findAuxiliaryRuntimeByType(rtType)
 	if !found || aux.Runtime == nil {
