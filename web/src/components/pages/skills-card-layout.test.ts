@@ -61,8 +61,10 @@ describe('skill card layout', () => {
     const container = document.createElement('div');
     render(
       page.renderSkillCard({
-        ...{ id: 's1', scope: 'project', updated: new Date().toISOString() },
+        id: 's1',
         name,
+        scope: 'project',
+        updated: new Date().toISOString(),
       }),
       container
     );

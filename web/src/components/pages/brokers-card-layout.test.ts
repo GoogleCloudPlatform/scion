@@ -61,18 +61,31 @@ describe('broker card layout', () => {
     const container = document.createElement('div');
     render(
       page.renderBrokerCard({
-        ...{
-          id: 'b1',
-          status: 'online',
-          version: '1.0.0',
-          lastHeartbeat: new Date().toISOString(),
-        },
+        id: 'b1',
+        status: 'online',
+        version: '1.0.0',
+        lastHeartbeat: new Date().toISOString(),
         name,
       }),
       container
     );
     const span = container.querySelector('.resource-name > span');
     expect(span?.textContent?.trim()).toBe(name);
+  });
+
+  it('keeps the broker type badge inside the wrapping span', () => {
+    const container = document.createElement('div');
+    render(
+      page.renderBrokerCard({
+        id: 'b2',
+        name: 'hosted_broker',
+        status: 'online',
+        lastHeartbeat: new Date().toISOString(),
+        labels: { 'scion.io/broker-type': 'hosted' },
+      }),
+      container
+    );
+    expect(container.querySelector('.resource-name > span .broker-type-badge')).not.toBeNull();
   });
 
   it('lets a long unbroken name wrap instead of spilling past the card', () => {
