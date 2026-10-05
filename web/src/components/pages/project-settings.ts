@@ -1677,7 +1677,7 @@ export class ScionPageProjectSettings extends LitElement {
         ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
         compact
         sectionTitle="Members"
-        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+        sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
       ></scion-project-members-editor>
       ${this.renderResourcesSection()}
       ${this.renderMessagingPolicySection()}

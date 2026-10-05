@@ -72,7 +72,7 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfi
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 	brokerID := tid("broker-optout-profiles")
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
@@ -124,7 +124,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	brokerID := tid("broker-optout-rereg")
 
 	supporting := &runtime.MockRuntime{NameFunc: func() string { return "optout" }}
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings, nil)
 	require.NoError(t, err)
 	before, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	require.True(t, before.Capabilities.Attach, "precondition: first registration with an attach-capable runtime records Attach=true")
 
 	optOut := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings, nil)
 	require.NoError(t, err)
 	require.Equal(t, brokerID, effectiveID, "precondition: second registration must take the update branch for the same record")
 

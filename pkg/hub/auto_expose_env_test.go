@@ -342,7 +342,7 @@ func TestApplyStartExtras_HubAgentDefaults(t *testing.T) {
 	_, ok := payload["hubAgentDefaults"]
 	assert.False(t, ok, "no hubAgentDefaults key without a value")
 
-	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(ptrBool(false))})
+	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(ptrBool(false), nil)})
 	blob, err := json.Marshal(payload)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"hubAgentDefaults":{"autoExposePorts":false}}`, string(blob))
