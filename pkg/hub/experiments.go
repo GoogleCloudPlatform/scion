@@ -101,3 +101,21 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 		next(w, r)
 	}
 }
+
+// dispatchExperimentNames are the server-layer experiments whose state the
+// hub sends to brokers with each agent dispatch, because they change what
+// the broker does.
+var dispatchExperimentNames = []string{experiments.K8sNFSHome}
+
+// dispatchExperiments returns the dispatch experiments that are enabled
+// now, resolved from one snapshot, or nil when none is.
+func (s *Server) dispatchExperiments() []string {
+	snap := s.experimentsSnapshot()
+	var out []string
+	for _, name := range dispatchExperimentNames {
+		if s.experimentEnabledIn(snap, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}

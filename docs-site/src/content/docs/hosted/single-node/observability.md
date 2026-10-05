@@ -140,7 +140,7 @@ Each harness integrates with `sciontool`'s telemetry pipeline differently depend
 
 - **Claude Code (logs-first route)**: Claude Code emits structured OTLP log records (scope `com.anthropic.claude_code.events`) rather than spans or metrics. The `sciontool` receiver normalizes Claude's event names to the canonical `agent.*` namespace (e.g. `user_prompt` → `agent.user.prompt`) and **unconditionally redacts** all Claude log bodies to protect prompt privacy, regardless of the configured filter policy. When Claude is the active harness and telemetry is enabled, the broker propagates the telemetry backend configuration (`gcp` or `otlp`) via the `SCION_TELEMETRY_CLOUD_PROVIDER` environment variable to `sciontool` to prevent accidental metrics export before credentials are available.
 
-- **Gemini CLI**: Telemetry comes primarily from harness hook events and session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
+- **Gemini CLI**: The harness provisioner points Gemini CLI's native OTel (logs and metrics) at the local `sciontool` receiver over gRPC on `4317`, so it passes through redaction and identity stamping. Its usage (`gen_ai.api.calls`, `scion.usage.tokens`) is derived from the native `gemini_cli.api_response` and `gemini_cli.api_error` log events — see the usage source description under [Automated Metrics Collection](/scion/hosted/single-node/metrics/#automated-metrics-collection). Session metrics still come from session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
 
 - **Copilot and Grok Build**: The harness provisioner always points the native OTel exporter at the local `sciontool` receiver (Copilot over HTTP on `4318`, Grok Build over gRPC on `4317`), never directly at `SCION_OTEL_ENDPOINT`, so their telemetry passes through redaction and identity stamping. `SCION_COPILOT_OTEL_ENDPOINT` and `SCION_GROK_BUILD_OTEL_ENDPOINT` override the endpoint for local debugging only; they bypass redaction entirely. See [Supported Harnesses](/scion/supported-harnesses/).
 
@@ -148,7 +148,7 @@ Each harness integrates with `sciontool`'s telemetry pipeline differently depend
 When a harness provisioner configures native telemetry, the variables that control it are reserved: `CLAUDE_CODE_ENABLE_TELEMETRY`, `GEMINI_TELEMETRY_*`, `COPILOT_OTEL_*`, `GROK_TELEMETRY_*`, `GROK_EXTERNAL_OTEL`, and `OTEL_*`. If the runtime environment (for example, Project or Broker env on the Hub) sets any of them to a value other than the one the provisioner generated, the agent fails to start with a `native telemetry policy conflict` error naming the key.
 :::
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` into all agent containers to enable harness-aware telemetry attribution.
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion injects `SCION_HARNESS` into every agent container, and `SCION_MODEL` when the agent's configuration names a model, to enable harness-aware telemetry attribution (see [Native Metrics Pipeline](/scion/hosted/single-node/metrics/#native-metrics-pipeline) for how a missing model is labelled).
 
 ## Agent Logs
 

@@ -142,6 +142,7 @@ func TestSkillResolutionFailed_StatusMapping(t *testing.T) {
 		{"timeout maps to 504", agent.SkillErrCodeTimeout, "", http.StatusGatewayTimeout, ""},
 		{"upstream_unavailable maps to 502", agent.SkillErrCodeUpstreamUnavailable, "", http.StatusBadGateway, ""},
 		{"unreachable maps to 502", agent.SkillErrCodeUnreachable, "", http.StatusBadGateway, ""},
+		{"hub forbidden maps to 403", "forbidden", "", http.StatusForbidden, ""},
 		{"uncategorized resolve_failed stays 500", "resolve_failed", "", http.StatusInternalServerError, ""},
 		{"empty code stays 500", "", "", http.StatusInternalServerError, ""},
 		{"hub-originated storage_error stays 500", "storage_error", "", http.StatusInternalServerError, ""},

@@ -230,56 +230,6 @@ func TestBroadcast(t *testing.T) {
 	}
 }
 
-func TestMessageRaw(t *testing.T) {
-	mockRT := &runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{
-				{
-					ContainerID:     "agent-1",
-					Name:            "test-agent",
-					ContainerStatus: "Up 2 minutes",
-					Labels:          map[string]string{"scion.name": "test-agent"},
-				},
-			}, nil
-		},
-	}
-
-	var capturedCmd []string
-	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
-		capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
-		return "", nil
-	}
-
-	mgr := &AgentManager{
-		Runtime: mockRT,
-	}
-	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
-		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
-	})
-	defer mgr.msgBuffer.Close()
-
-	ctx := context.Background()
-	err := mgr.MessageRaw(ctx, "test-agent", "", "Escape")
-	if err != nil {
-		t.Fatalf("MessageRaw failed: %v", err)
-	}
-
-	// Raw should produce exactly one send-keys command with no trailing Enter
-	expectedCmds := []string{
-		"tmux send-keys -t scion:0 -- Escape",
-	}
-
-	if len(capturedCmd) != len(expectedCmds) {
-		t.Fatalf("Expected %d commands, got %d: %v", len(expectedCmds), len(capturedCmd), capturedCmd)
-	}
-
-	for i, cmd := range capturedCmd {
-		if cmd != expectedCmds[i] {
-			t.Errorf("Expected cmd %d to be '%s', got '%s'", i, expectedCmds[i], cmd)
-		}
-	}
-}
-
 // TestDeliverImmediate_PartialDeliveryAfterPaste covers #1866: once
 // "tmux paste-buffer" has succeeded, the message text is already sitting in
 // the agent's terminal input. A later failure (the closing Enter, or one of

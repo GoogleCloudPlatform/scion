@@ -154,7 +154,7 @@ func TestDeletionInfo_MatchesStoreJSON(t *testing.T) {
 	}
 
 	now := time.Date(2026, 10, 3, 10, 0, 0, 0, time.UTC)
-	in := store.DeletionInfo{State: "failed", Code: "in_doubt", Error: "e", Soft: true, Claim: 7, StartedAt: now, LeaseExpiresAt: &now, ExpiresAt: &now}
+	in := store.DeletionInfo{State: "failed", Code: "in_doubt", Error: "e", Soft: true, Claim: 7, StartedAt: now, LeaseExpiresAt: &now, ExpiresAt: &now, Stage: store.DeletionStageFinalizing}
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
 	var out DeletionInfo

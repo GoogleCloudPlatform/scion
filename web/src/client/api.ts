@@ -26,6 +26,7 @@
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
+import { recordHubDateHeader } from '../shared/hub-clock.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -89,11 +90,14 @@ export function _resetSuspendedState(): void {
 
 export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
+  const sentMs = Date.now();
   const response = await fetch(path, {
     ...options,
     credentials: 'include',
   });
   const elapsed = performance.now() - start;
+  // Hub clock estimate for the delete lease flip (ptone/scion#2952).
+  recordHubDateHeader(response.headers?.get?.('date'), sentMs, Date.now());
 
   if (elapsed > API_SLOW_THRESHOLD_MS) {
     console.warn(

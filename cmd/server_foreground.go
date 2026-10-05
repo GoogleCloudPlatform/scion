@@ -1840,6 +1840,12 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
 		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
 		Workstation:                  !hostedMode,
+		StartClaim: hub.StartClaimSettings{
+			LeaseTTL:              cfg.Hub.StartClaimLeaseTTL,
+			MaxDuration:           cfg.Hub.StartMaxDuration,
+			UnconfirmedHold:       cfg.Hub.StartUnconfirmedHold,
+			CreateUnconfirmedHold: cfg.Hub.StartCreateUnconfirmedHold,
+		},
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,
 			DisplayName: cfg.Auth.DisplayName,
@@ -2739,6 +2745,48 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
 	}
 	logSharedDirStorageOverridesStartup(globalSettings, logf)
+	logHomeStorageStartup(globalSettings, logf)
+}
+
+// logHomeStorageStartup logs a warning for each invalid home storage value
+// and each home_storage_backend "nfs" on a non-Kubernetes entry, and one
+// line per profile whose resolved home storage is nfs. It checks
+// configuration only; it never fails startup and never touches the export.
+// A broker host mount needed by the broker leaf mode is checked when an
+// agent using it starts, so a missing mount never affects startup or
+// agents on other runtimes. The hub.k8s_nfs_home experiment is decided by
+// the hub at each dispatch and is not shown here.
+func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil {
+		return
+	}
+	if gs.Server != nil {
+		if err := gs.Server.HomeStorage.Validate(); err != nil {
+			logf("Warning: %v", err)
+		}
+	}
+	for _, e := range config.ValidateHomeStorageOverrides(gs.Runtimes, gs.Profiles) {
+		logf("Warning: %s", e.Error())
+	}
+	for _, w := range config.HomeStorageIgnoredWarnings(gs.Runtimes, gs.Profiles) {
+		logf("Warning: %s", w)
+	}
+	names := make([]string, 0, len(gs.Profiles))
+	for name := range gs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		r := gs.ResolveHomeStorage(name)
+		if r.Backend != config.HomeStorageBackendNFS {
+			continue
+		}
+		rt := gs.Profiles[name].Runtime
+		if entry, ok := gs.Runtimes[rt]; ok && !config.IsKubernetesRuntimeEntry(rt, entry) {
+			continue
+		}
+		logf("home_storage for profile %s: backend=nfs (from %s), leaf=%s", name, r.BackendSource, r.Leaf)
+	}
 }
 
 // logSharedDirStorageOverridesStartup logs one line per profile whose
@@ -2946,7 +2994,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
 
-		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
+		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage())
 		if regErr != nil {
 			// ERROR, not a warning: the co-located broker is how this process
 			// runs agents. Losing it silently left the Hub reporting healthy
@@ -3067,9 +3115,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// settings only, like shared_dir_storage: a project picked up from the
 	// working directory does not decide what the broker mounts.
 	var brokerNFS *config.V1NFSConfig
+	var workspaceStorageBackend string
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
+		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
@@ -3098,6 +3148,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
+		WorkspaceStorageBackend:       workspaceStorageBackend,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
