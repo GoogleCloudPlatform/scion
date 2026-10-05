@@ -250,7 +250,9 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// a distinct signal instead of an indistinguishable "healthy". A
 			// separate key rather than a qualified workspace_storage value,
 			// because handleReadyz compares that value to "healthy" exactly
-			// and would 503 the pod on any suffix.
+			// and would 503 the pod on any suffix, and, since
+			// workspace_storage is critical, would also make /healthz
+			// unhealthy.
 			//
 			// A non-critical key, so this makes /healthz report "degraded"
 			// (up, with a named problem), never "unhealthy"; see
