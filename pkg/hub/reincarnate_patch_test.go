@@ -399,6 +399,23 @@ func TestReincarnatePatch_RoleRefusals(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
+	t.Run("self lowering still needs the new role's scopes", func(t *testing.T) {
+		// Create runs CanDelegate for an agent granting a role, so a self
+		// --role does too: a token with only the lifecycle scope holds none
+		// of readonly's scopes and cannot delegate it, even though readonly
+		// is below the agent's stored role.
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil) // baseline
+		before := snapshotAgent(t, s, agent.ID)
+		self := agentIdentityFor(agent.ID, project.ID, ScopeAgentLifecycle)
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Role: "readonly"})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+	})
+
 	t.Run("requester cannot delegate the new role", func(t *testing.T) {
 		// The coordinator's stored role is full, so create's lattice admits
 		// a full role; its token carries only baseline scopes, so
