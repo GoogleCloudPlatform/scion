@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -526,13 +527,36 @@ func linkCheckHandlers() []linkCheckHandler {
 			require.NoError(t, e.store.DeleteChannelLink(context.Background(), luChannel))
 			e.commands.HandleSetup(e.session, asUser(luCommand("setup"), u))
 		}},
-		{"setup project select", func(_ *testing.T, e *linkedUserEnv, u string) {
-			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
-				CustomID: "setup:proj:" + luProject,
-			}), u)
-			e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
-		}},
+		luButton("setup project select", "setup:proj:"+luProject),
+		luButton("setup default agent button", "setup:dflt:worker"),
+		luButton("set channel default button", "default:set:worker"),
+		luButton("clear channel default button", "default:none"),
+		luButton("set thread default button", "default:set:worker:thread-9"),
+		luButton("clear thread default button", "default:none:thread-9"),
+		luButton("settings observe button", "settings:observe:"+luChannel),
+		luButton("settings state change button", "settings:statechange:"+luChannel),
+		luButton("notifications on button", "notif:on:worker"),
+		luButton("notifications off button", "notif:off:worker"),
 	}
+}
+
+// luButton returns a linkCheckHandler that presses the button customID.
+func luButton(name, customID string) linkCheckHandler {
+	return linkCheckHandler{name, func(_ *testing.T, e *linkedUserEnv, u string) {
+		i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+			CustomID: customID,
+		}), u)
+		e.callback.Dispatch(e.session, i, customID, nil)
+	}}
+}
+
+// useWriteCountingStore routes the handlers' store writes through a
+// writeCountingStore over the env's current store.
+func (e *linkedUserEnv) useWriteCountingStore() *writeCountingStore {
+	ws := &writeCountingStore{Store: e.store}
+	e.commands.store = ws
+	e.callback.store = ws
+	return ws
 }
 
 func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
@@ -556,11 +580,13 @@ func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
 				if u.mapping != nil {
 					require.NoError(t, e.store.CreateUserMapping(context.Background(), u.mapping))
 				}
+				ws := e.useWriteCountingStore()
 
 				h.run(t, e, luOtherUser)
 
 				assert.Empty(t, e.hub.snapshot(), "no hub call without a linked account")
 				assert.Zero(t, cs.reads(), "no agent cache read without a linked account")
+				assert.Zero(t, ws.writeCount(), "no write without a linked account")
 				bodies := e.discord.allBodies()
 				assert.Contains(t, bodies, jsonText(t, u.want))
 				for _, other := range []string{msgLinkAccountFirst, msgReRegisterForEmail} {
@@ -636,12 +662,34 @@ func TestHandlers_LinkLookupFailureAsksToRetry(t *testing.T) {
 			e.linkChannel(t)
 			cs := e.useCountingStore(t)
 			cs.userMappingError = assert.AnError
+			ws := e.useWriteCountingStore()
 
 			h.run(t, e, luDiscordUser)
 
 			assert.Empty(t, e.hub.snapshot())
 			assert.Zero(t, cs.reads())
+			assert.Zero(t, ws.writeCount())
 			assert.Contains(t, e.discord.allBodies(), msgAccountLookupFailed)
+		})
+	}
+
+	// Autocomplete can only answer with choices, so a failed lookup gives an
+	// empty choice list rather than the retry reply.
+	for _, focused := range []string{"agent", "template"} {
+		t.Run("autocomplete "+focused, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			cs := e.useCountingStore(t)
+			cs.userMappingError = assert.AnError
+
+			e.commands.HandleAutocomplete(e.session, luAutocomplete("status", focused))
+
+			assert.Empty(t, e.hub.snapshot())
+			assert.Zero(t, cs.reads())
+			assert.Equal(t, 1, cs.lookups())
+			bodies := e.discord.allBodies()
+			assert.Contains(t, bodies, `"type":8`, "an autocomplete result is sent")
+			assert.NotContains(t, bodies, "worker")
 		})
 	}
 }
@@ -1153,4 +1201,64 @@ func TestSettingsButtons_ActOnTheChannelTheyArePressedIn(t *testing.T) {
 		assert.True(t, observe(t, e, luChannel))
 		assert.False(t, observe(t, e, otherChannel))
 	})
+}
+
+func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
+	ctx := context.Background()
+	users := []struct {
+		name string
+		user string
+		want string
+	}{
+		{name: "linked", user: luDiscordUser, want: luPrincipal},
+		{name: "no link", user: luOtherUser, want: "discord:" + luOtherUser},
+	}
+
+	pending := &PendingAskUser{
+		RequestID: "req-1",
+		ChannelID: luChannel,
+		AgentSlug: "worker",
+		ProjectID: luProject,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	for _, u := range users {
+		t.Run("button/"+u.name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			var got *messages.StructuredMessage
+			e.callback.deliverInbound = func(_ string, msg *messages.StructuredMessage) *hubError {
+				got = msg
+				return nil
+			}
+			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{}), u.user)
+
+			require.Nil(t, e.callback.deliverAskUserResponse(ctx, i, pending, "yes"))
+
+			require.NotNil(t, got)
+			assert.Equal(t, u.want, got.Sender)
+		})
+		t.Run("modal/"+u.name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			req := *pending
+			require.NoError(t, e.store.CreatePendingAskUser(ctx, &req))
+			var got *messages.StructuredMessage
+			deliver := func(_ string, msg *messages.StructuredMessage) *hubError {
+				got = msg
+				return nil
+			}
+			i := asUser(luInteraction(discordgo.InteractionModalSubmit, discordgo.ModalSubmitInteractionData{
+				CustomID: "ask:modal:" + pending.RequestID,
+				Components: []discordgo.MessageComponent{
+					&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						&discordgo.TextInput{CustomID: "response", Value: "yes"},
+					}},
+				},
+			}), u.user)
+
+			HandleModalSubmit(e.session, i, e.store, deliver, nil)
+
+			require.NotNil(t, got)
+			assert.Equal(t, u.want, got.Sender)
+		})
+	}
 }

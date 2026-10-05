@@ -1317,7 +1317,8 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Look up the sender's link once; it decides both the agent refresh and
-	// the sender identity below.
+	// the sender identity below. A failed lookup deliberately gets the
+	// register prompt below, not the retry reply.
 	senderMapping := lookupUserMapping(ctx, store, b.log, m.Author.ID)
 
 	// Get project agents (with cache refresh) — only needed for legacy path.

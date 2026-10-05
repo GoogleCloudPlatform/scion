@@ -449,8 +449,10 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 	// Resolve the sender identity from Discord user → Scion identity.
 	discordUserID := interactionUserID(i)
 	sender := "discord:" + discordUserID
-	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil && mapping != nil && mapping.ScionEmail != "" {
-		sender = "user:" + mapping.ScionEmail
+	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil {
+		if principal := principalForMapping(mapping); principal != "" {
+			sender = principal
+		}
 	}
 
 	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)

@@ -1871,11 +1871,11 @@ const msgReRegisterForEmail = "Your linked account has no email address. Please 
 // msgAccountLookupFailed is the reply sent when the link lookup itself fails.
 const msgAccountLookupFailed = "Something went wrong looking up your account. Please try again."
 
-// lookupUserMapping returns the Discord user's link, or nil when the user is
-// unknown, unlinked, or the lookup fails; a failed lookup is logged.
-func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, discordUserID string) *DiscordUserMapping {
+// getUserMapping returns the Discord user's link, or nil when the user is
+// unknown or unlinked. A failed lookup is logged and its error returned.
+func getUserMapping(ctx context.Context, store Store, log *slog.Logger, discordUserID string) (*DiscordUserMapping, error) {
 	if store == nil || discordUserID == "" {
-		return nil
+		return nil, nil
 	}
 	mapping, err := store.GetUserMapping(ctx, discordUserID)
 	if err != nil {
@@ -1883,8 +1883,19 @@ func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, disco
 			log = slog.Default()
 		}
 		log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
-		return nil
+		return nil, err
 	}
+	return mapping, nil
+}
+
+// lookupUserMapping returns the Discord user's link, or nil when the user is
+// unknown, unlinked, or the lookup fails; a failed lookup is logged.
+//
+// A failed lookup is deliberately treated like no link: callers on the
+// legacy channel message path reply with the register prompt, not the retry
+// reply that requirePrincipal sends.
+func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, discordUserID string) *DiscordUserMapping {
+	mapping, _ := getUserMapping(ctx, store, log, discordUserID)
 	return mapping
 }
 
@@ -1895,18 +1906,10 @@ func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, disco
 // cases it returns false, and callers return without reading agents or
 // calling the hub.
 func requirePrincipal(ctx context.Context, store Store, log *slog.Logger, discordUserID string, reply func(string)) (principal string, ok bool) {
-	var mapping *DiscordUserMapping
-	if store != nil && discordUserID != "" {
-		var err error
-		mapping, err = store.GetUserMapping(ctx, discordUserID)
-		if err != nil {
-			if log == nil {
-				log = slog.Default()
-			}
-			log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
-			reply(msgAccountLookupFailed)
-			return "", false
-		}
+	mapping, err := getUserMapping(ctx, store, log, discordUserID)
+	if err != nil {
+		reply(msgAccountLookupFailed)
+		return "", false
 	}
 	if mapping == nil {
 		reply(msgLinkAccountFirst)
