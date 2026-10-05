@@ -118,7 +118,7 @@ describe('AgentStore delta probe', () => {
     expect(h.feeds[0].getAgent('a3')?.name).toBe('a3');
   });
 
-  it('requests one compact page of the most recently updated rows', async () => {
+  it('requests one compact page of the most recently active rows', async () => {
     const h = await loaded([row('a1', 1)]);
     await tick();
     const probe = h.server.requests.find((p) => p.includes('sort='));
@@ -450,13 +450,13 @@ describe('AgentStore delta probe', () => {
   });
 
   it('stops at a full page without a next cursor', async () => {
-    const h = await loaded([]);
-    h.server.agents.push(
-      ...Array.from({ length: AGENT_PROBE_LIMIT }, (_, i) => row(`n${i}`, 100 + i))
-    );
+    const h = await loaded([row('a0', 0)]);
+    // Every row is newer than the last probe's newest, and a0 is gone.
+    h.server.agents = Array.from({ length: AGENT_PROBE_LIMIT }, (_, i) => row(`n${i}`, 100 + i));
     await tick();
     expect(h.server.probes()).toBe(1);
-    expect(h.server.walks()).toBe(1);
+    // The count finds a0 gone.
+    expect(h.server.walks()).toBe(2);
     expect(h.store.peek(HUB)?.agents).toHaveLength(AGENT_PROBE_LIMIT);
   });
 
