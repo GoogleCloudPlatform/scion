@@ -494,10 +494,14 @@ export const listPageStyles = css`
 
   /* ── Page header ─────────────────────────────────────────────────── */
 
+  /* The actions wrap below the title, and among themselves, once the row
+     is too narrow for them (a phone), rather than running off the side. */
   .header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
   }
 
@@ -510,6 +514,7 @@ export const listPageStyles = css`
 
   .header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.75rem;
   }
@@ -518,7 +523,9 @@ export const listPageStyles = css`
 
   .resource-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    /* A column never wider than the page, which is under 320px on a
+       320px phone once padded. */
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 1.5rem;
   }
 

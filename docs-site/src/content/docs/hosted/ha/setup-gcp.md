@@ -586,7 +586,8 @@ Where "global settings" lives depends on your deployment mode:
 
 - **File-only mode** (no database configured): this is `~/.scion/settings.yaml` on the
   broker host, as shown above.
-- **Hosted mode with a database** (the Cloud Run + Cloud SQL setup in this guide): as
+- **Broker in the same process as a database-backed Hub** (the Cloud Run + Cloud SQL
+  setup in this guide, which starts the Hub and the Runtime Broker together): as
   §3c below explains, `runtimes` and `profiles` are persisted to the database on first
   boot and the database then takes over as the source of truth for those sections —
   editing the `settings.yaml` secret afterward and redeploying has no effect on them,
@@ -596,6 +597,9 @@ Where "global settings" lives depends on your deployment mode:
   effect — a mapping added only to the `settings.yaml` secret after first boot is
   silently ignored, and every `assign` dispatch then fails with "no mapping" even though
   the file looks correct.
+- **Standalone Runtime Broker** (running in a separate process from the Hub, even when the Hub
+  uses a database): the broker reads only its own `~/.scion/settings.yaml`; the Hub
+  database's `runtimes` and `profiles` do not apply to it.
 
 A Kubernetes dispatch with GCP identity mode `assign` whose GSA has no entry here fails
 at dispatch time with an actionable error naming this setting — it does not fall back to

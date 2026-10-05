@@ -84,7 +84,7 @@ func init() {
 		},
 		{
 			Name:       "lifecycle",
-			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files"},
+			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 			New:        func() any { return &LifecycleSettings{} },
 		},
 		{
@@ -356,10 +356,14 @@ func compileSchemas() {
 		"lifecycle": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"auto_suspend_stalled":     getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
-				"stalled_threshold":        getSchemaProperty(root, "server", "hub", "stalled_threshold"),
-				"soft_delete_retention":    getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
-				"soft_delete_retain_files": getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
+				"auto_suspend_stalled":          getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
+				"stalled_threshold":             getSchemaProperty(root, "server", "hub", "stalled_threshold"),
+				"soft_delete_retention":         getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
+				"soft_delete_retain_files":      getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
+				"start_claim_lease_ttl":         getSchemaProperty(root, "server", "hub", "start_claim_lease_ttl"),
+				"start_max_duration":            getSchemaProperty(root, "server", "hub", "start_max_duration"),
+				"start_unconfirmed_hold":        getSchemaProperty(root, "server", "hub", "start_unconfirmed_hold"),
+				"start_create_unconfirmed_hold": getSchemaProperty(root, "server", "hub", "start_create_unconfirmed_hold"),
 			},
 			"additionalProperties": false,
 		},

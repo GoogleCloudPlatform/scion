@@ -526,7 +526,7 @@ func panicOutcome(ref api.SkillReference, p any) refOutcome {
 	slog.Error("github: panic during skill resolution",
 		"uri", ref.URI, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 	return refOutcome{rerr: &ResolveError{
-		URI: ref.URI, Code: "resolve_failed",
+		URI: ref.URI, Code: SkillErrCodeResolveFailed,
 		Message: "internal error during GitHub skill resolution",
 	}}
 }
@@ -538,7 +538,7 @@ func (r *GitHubSkillResolver) resolveRef(ctx context.Context, ghRef *GitHubSkill
 	if err == nil {
 		return refOutcome{skill: resolved}
 	}
-	code := "resolve_failed"
+	code := SkillErrCodeResolveFailed
 	var retryAfter string
 	var rl *GitHubRateLimitError
 	var rerr *githubResolveError
@@ -640,7 +640,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, refreshAllowed, accept, fetch)
 		if err != nil {
-			return nil, withRateLimitRef(err, ghRef.Raw)
+			return nil, withRateLimitRef(withCallerRef(err, ghRef.Raw), ghRef.Raw)
 		}
 		resolved = skill
 	} else {
@@ -651,10 +651,14 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		resolved = skill
 	}
 
-	// Always carry this call's alias over, matching the pre-cache behavior:
-	// a cache or in-flight hit may have been produced for a different ref
-	// sharing this URI and credential, with a different As.
+	// Always carry this call's per-ref fields over: a cache or in-flight hit
+	// may have been produced for a different ref sharing this URI and
+	// credential, with a different As, Scope or Optional. Scope decides
+	// which skill wins a name collision and Optional how a failure is
+	// reported, so neither may come from another caller's ref.
 	resolved.As = ref.As
+	resolved.Scope = ref.Scope
+	resolved.Optional = ref.Optional
 
 	// A skill loaded from the on-disk cache has no file content, so install
 	// downloads its files. Record this call's URI (it names the secret to
@@ -665,6 +669,31 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		resolved.githubCredentialRef = ghRef.Raw
 	}
 	return &resolved, nil
+}
+
+// refStageError is a fetchOne failure at one stage (resolving the ref or
+// listing the skill directory) for one caller's spelling of a ref. The
+// failure cache keeps only stage and err (see rememberedFailure), since ref
+// can name a secret that belongs to that caller.
+type refStageError struct {
+	stage string
+	ref   string
+	err   error
+}
+
+func (e *refStageError) Error() string { return e.stage + " for " + e.ref + ": " + e.err.Error() }
+
+func (e *refStageError) Unwrap() error { return e.err }
+
+// withCallerRef returns a remembered failure (see rememberedFailure) with
+// ref, this caller's own spelling of the ref, put back into the message.
+// Other errors are returned unchanged.
+func withCallerRef(err error, ref string) error {
+	var rf *rememberedFailure
+	if errors.As(err, &rf) && rf.stage != "" {
+		return &refStageError{stage: rf.stage, ref: ref, err: rf.err}
+	}
+	return err
 }
 
 // withRateLimitRef returns err as a *GitHubRateLimitError naming ref when err
@@ -697,12 +726,12 @@ func (r *GitHubSkillResolver) cooldownRetryAfter(rl *GitHubRateLimitError) strin
 func (r *GitHubSkillResolver) fetchOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference, token string) (ResolvedSkill, error) {
 	commitSHA, err := r.resolveCommitSHA(ctx, ghRef, token)
 	if err != nil {
-		return ResolvedSkill{}, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
+		return ResolvedSkill{}, &refStageError{stage: "failed to resolve ref", ref: ghRef.Raw, err: err}
 	}
 
 	contents, err := r.listContents(ctx, ghRef, commitSHA, token)
 	if err != nil {
-		return ResolvedSkill{}, fmt.Errorf("failed to list skill contents for %s: %w", ghRef.Raw, err)
+		return ResolvedSkill{}, &refStageError{stage: "failed to list skill contents", ref: ghRef.Raw, err: err}
 	}
 
 	if len(contents) == 0 {
@@ -995,6 +1024,10 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 		return nil, &githubResolveError{
 			code: SkillErrCodeNotFound,
 			msg:  fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
+			// The listing at this commit named the file, so a 404 here is an
+			// upstream inconsistency (for example raw content lagging a
+			// push), not a missing ref; it is not remembered.
+			fileMissingAfterListing: true,
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1054,6 +1087,10 @@ type githubResolveError struct {
 	msg        string
 	retryAfter string
 	err        error
+	// fileMissingAfterListing marks a not_found for a file download that the
+	// directory listing at the same commit named. cacheableFailure does not
+	// remember these.
+	fileMissingAfterListing bool
 }
 
 func (e *githubResolveError) Error() string { return e.msg }
@@ -1108,11 +1145,13 @@ func retryAfterDuration(resp *http.Response) (time.Duration, bool) {
 	if ra == "" {
 		return 0, false
 	}
-	seconds, err := strconv.Atoi(ra)
-	if err != nil || seconds < 0 {
+	seconds, ok := parseRetryAfterSeconds(ra)
+	if !ok || seconds < 0 {
 		return 0, false
 	}
-	return time.Duration(seconds) * time.Second, true
+	// Saturate rather than overflow: a huge value must still read as longer
+	// than githubMaxBackoff.
+	return secondsUpTo(seconds, time.Duration(math.MaxInt64)), true
 }
 
 // cancelOnCloseBody ties a per-attempt context's cancel func to the lifetime
@@ -1176,6 +1215,11 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 // canceled". Separately, when the server's own Retry-After exceeds
 // githubMaxBackoff, doWithRetry fails fast rather than sleeping the capped
 // backoff and retrying.
+//
+// Each failed attempt is also recorded as the latest cause of the shared
+// fetch running under ctx (see recordAttemptCause), so a caller that stops
+// waiting for that fetch on its own deadline can report it. A non-retryable
+// response clears it again: the fetch has moved past that failure.
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration, token string) (*http.Response, error) {
 	identity := GitHubCooldownIdentity(token)
 	var lastResp *http.Response
@@ -1269,10 +1313,17 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 			lastErr = err
 			lastResp = nil
+			recordAttemptCause(ctx, &githubResolveError{
+				code: classifyNetworkError(err),
+				msg:  fmt.Sprintf("%s %s got no response", noun, req.URL.Path),
+			})
 			continue
 		}
 
 		if !isRetryableResponse(resp) {
+			// This request got its answer, so the fetch is no longer
+			// retrying past any earlier failure.
+			recordAttemptCause(ctx, nil)
 			return resp, nil
 		}
 
@@ -1284,6 +1335,11 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 		_ = resp.Body.Close()
 		lastResp = resp
 		lastErr = nil
+		recordAttemptCause(ctx, &githubResolveError{
+			code:       classifyRetryCause(resp, nil),
+			retryAfter: resp.Header.Get("Retry-After"),
+			msg:        fmt.Sprintf("%s %s failed (status %d)", noun, req.URL.Path, resp.StatusCode),
+		})
 	}
 
 	// The only way to reach here is attempt == githubMaxRetries having just
@@ -1335,12 +1391,8 @@ func isRetryableResponse(resp *http.Response) bool {
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if seconds, err := strconv.Atoi(ra); err == nil && seconds >= 0 {
-				d := time.Duration(seconds) * time.Second
-				if d > githubMaxBackoff {
-					d = githubMaxBackoff
-				}
-				return d
+			if seconds, ok := parseRetryAfterSeconds(ra); ok && seconds >= 0 {
+				return secondsUpTo(seconds, githubMaxBackoff)
 			}
 		}
 	}
