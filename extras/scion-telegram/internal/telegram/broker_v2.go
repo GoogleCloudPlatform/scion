@@ -1908,6 +1908,19 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
 	}
 
+	// A sender the hub denies (including a link it no longer accepts) is
+	// not routed by any path, including replies to the bot.
+	if isForbiddenHubError(agentsErr) {
+		if !b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
+			replyTo := ""
+			if tgMsg.MessageID != 0 {
+				replyTo = strconv.FormatInt(tgMsg.MessageID, 10)
+			}
+			listUnavailable(replyTo)
+		}
+		return
+	}
+
 	b.mu.RLock()
 	botUsername := ""
 	if b.botInfo != nil {
@@ -1993,12 +2006,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				}
 				errorType := "default_agent_not_found"
 				if agentsErr != nil {
-					// Keyed per error kind and sender so one user's reply
-					// does not suppress a different reply to another user.
-					errorType = "agent_list_unavailable:" + agentListErrorKind(agentsErr)
-					if tgMsg.From != nil {
-						errorType += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
-					}
+					errorType = agentListSuppressKey(agentsErr, tgMsg.From)
 				}
 				if !b.shouldSuppressError(chatID, threadID, errorType) {
 					replyTo := ""
@@ -2884,6 +2892,17 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	}
 
 	return agentSlugs(agents), link, nil
+}
+
+// agentListSuppressKey returns the repeated-reply suppression key for an
+// agent-list failure, keyed per error kind and sender so one user's reply
+// does not suppress a different reply to another user.
+func agentListSuppressKey(err error, sender *TGUser) string {
+	key := "agent_list_unavailable:" + agentListErrorKind(err)
+	if sender != nil {
+		key += ":" + strconv.FormatInt(sender.ID, 10)
+	}
+	return key
 }
 
 // agentListErrorKind names the kind of agent-list failure, for keying
