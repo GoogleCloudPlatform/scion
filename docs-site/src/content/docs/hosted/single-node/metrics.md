@@ -192,7 +192,7 @@ To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment
 
 All metrics and traces emitted by Scion are enriched with context-aware OpenTelemetry resource attributes to allow for precise filtering and aggregation in your cloud backend:
 
-- `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
+- `scion.harness`: The type of harness running the agent (e.g., `gemini-cli`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
 - `scion.broker.name`: The name of the Runtime Broker executing the agent, when available.
 - `scion.project.id`: The authoritative ID of the agent's parent project, when available.
