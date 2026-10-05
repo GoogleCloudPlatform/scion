@@ -17,14 +17,17 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
@@ -135,10 +138,19 @@ func (c bearerCoverage) hasPrefix(prefix string) bool {
 //     "/api/v1/projects/" is covered segment by segment, plus the project
 //     resource itself).
 //
-// Limitation: the other prefix dispatchers (users/, groups/, templates/,
-// skills/, harness-configs/, runtime-brokers/, gcp-service-accounts/,
-// admin/*) are covered by prefix. A new action segment on one of them is
-// caught only when its pattern is added to route metadata or the catalog.
+// Limitations:
+//   - Coverage is checked per path, not per method. A route metadata key
+//     without a method, every agent and project sub-route and every
+//     exemption match a record on the same path whatever its method, so a
+//     new method on a covered path needs a method-level check to be caught.
+//   - The other prefix dispatchers (users/, groups/, templates/, skills/,
+//     harness-configs/, runtime-brokers/, gcp-service-accounts/, admin/*)
+//     are covered by prefix. A new action segment on one of them is caught
+//     only when its pattern is added to route metadata or the catalog.
+//   - Project sub-routes are enumerated by first segment only. A new
+//     second-level branch inside a listed project segment (for example
+//     settings/<name> or metrics/<name>) is caught only when its pattern is
+//     added to route metadata or the catalog.
 func TestBearerDisposition_EveryRoutePatternCovered(t *testing.T) {
 	c := newBearerCoverage()
 	var uncovered []string
@@ -407,6 +419,72 @@ func TestProjectSubRoutes_UnlistedSegmentIsNotFound(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodGet, path, nil)
 		if strings.Contains(rec.Body.String(), unlisted) {
 			t.Errorf("GET %s: listed segment answered as unlisted", path)
+		}
+	}
+}
+
+// projectRecordedPaths returns every HTTP-like catalog and pending entry
+// point under /api/v1/projects/{id}/, as method and pattern pairs.
+func projectRecordedPaths() [][2]string {
+	var out [][2]string
+	add := func(kind authzop.EntryPointKind, method, pattern string) {
+		if !bearerHTTPLikeKinds[kind] {
+			return
+		}
+		rest, ok := strings.CutPrefix(pattern, "/api/v1/projects/{")
+		if !ok {
+			return
+		}
+		if _, sub, ok := strings.Cut(rest, "}/"); !ok || sub == "" {
+			return
+		}
+		out = append(out, [2]string{method, pattern})
+	}
+	for _, spec := range authzop.Catalog {
+		for _, ep := range spec.EntryPoints {
+			add(ep.Kind, ep.Method, ep.Pattern)
+		}
+	}
+	for _, pe := range authzop.PendingBearerDispositions {
+		add(pe.Kind, pe.Method, pe.Pattern)
+	}
+	return out
+}
+
+// TestProjectSubRoutes_EveryRecordedPathReachesItsBranch requires every
+// catalog and pending entry point under /api/v1/projects/{id}/ to reach a
+// dispatch branch in handleProjectRoutes: sent through the server with
+// its own method, the response is neither the unlisted-segment 404 nor
+// the project resource 404 that a sub-path with no dispatch branch gets.
+// Together with TestBearerDisposition_EveryRoutePatternCovered this keeps
+// projectSubRouteTable and the dispatcher equal.
+func TestProjectSubRoutes_EveryRecordedPathReachesItsBranch(t *testing.T) {
+	srv, _ := testServer(t)
+	notDispatched := []string{"Project route not found", "Project resource not found"}
+
+	paths := projectRecordedPaths()
+	if len(paths) == 0 {
+		t.Fatal("no catalog or pending entry point under /api/v1/projects/{id}/")
+	}
+	for _, mp := range paths {
+		method, pattern := mp[0], mp[1]
+		i := 0
+		path := bearerPlaceholder.ReplaceAllStringFunc(pattern, func(string) string {
+			i++
+			return fmt.Sprintf("live-%d", i)
+		})
+		// Streaming handlers hold the request open; the deadline ends them.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		req := httptest.NewRequest(method, path, nil).WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		cancel()
+		body := rec.Body.String()
+		for _, msg := range notDispatched {
+			if rec.Code == http.StatusNotFound && strings.Contains(body, msg) {
+				t.Errorf("%s %s: got 404 %q; the pattern reaches no dispatch branch in handleProjectRoutes", method, pattern, msg)
+			}
 		}
 	}
 }
