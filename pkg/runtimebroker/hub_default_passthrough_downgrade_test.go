@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -324,8 +325,10 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnUnresolvableRuntime(
 // TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag covers the
 // start/restart shape directly: no Config struct at all (Config is nil on
 // these paths), the flag and mode arrive as resolvedEnv values instead — the
-// same struct-or-env precedence SCION_METADATA_MODE itself already has. The
-// Kubernetes branch is covered by
+// same struct-or-env precedence SCION_METADATA_MODE itself already has.
+// Operation is opHTTPStart, as startAgent passes, so buildStartContext also
+// runs its saved-profile lookup (none is saved here, so the project's
+// active profile applies). The Kubernetes branch is covered by
 // TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag.
 func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
@@ -350,7 +353,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 		HTTPRequest: r,
-		Operation:   opCreate,
+		Operation:   opHTTPStart,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +395,7 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *t
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 		HTTPRequest: r,
-		Operation:   opCreate,
+		Operation:   opHTTPStart,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -528,18 +531,20 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 }
 
 // TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers
-// covers the re-check that runs after startAgent resolves the agent's own
-// saved profile — a later, more specific resolution than the one
-// buildStartContext itself sees. The project's active profile resolves to
-// docker, matching the broker's own default, so buildStartContext's own
-// resolution does not downgrade; this agent's saved profile resolves to a
-// different runtime that is neither a local-container runtime nor
-// Kubernetes ("other" — see
+// covers the start path end to end when the agent's saved profile resolves
+// to a runtime that is neither a local-container runtime nor Kubernetes
+// ("other" — see
 // TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
-// below for the Kubernetes carve-out), and the re-check that runs after that
-// second resolution must still downgrade to block. Removing the downgrade
-// call after that second resolution (handlers.go) makes this test fail; the
-// earlier, first-resolution check alone is not enough here.
+// below for the Kubernetes carve-out): the env the runtime actually starts
+// with must carry block. The project's active profile resolves to docker,
+// matching the broker's own default.
+//
+// Both downgrade call sites see the saved profile here. buildStartContext
+// reads it itself on non-create operations and downgrades, and startAgent's
+// later re-check (recheckHubDefaultPassthrough, handlers.go) resolves the
+// same profile. So this test fails only if both call sites are removed; it
+// does not pin either one alone. The re-check is pinned on its own by
+// TestRecheckHubDefaultPassthrough below.
 func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "other")
 	var capturedEnv []string
@@ -629,8 +634,104 @@ func TestDowngradeUnverifiedHubDefaultPassthrough_NilEnv(t *testing.T) {
 	downgradeUnverifiedHubDefaultPassthrough(nil, nil, store.GCPMetadataModePassthrough, true, "other")
 }
 
+// TestRecheckHubDefaultPassthrough pins the handler-side re-check
+// (recheckHubDefaultPassthrough, handlers.go) on its own. startAgent and
+// restartAgent call it after their own manager resolution, and it reads
+// the mode and the RequireLocalRuntime flag from env, not from arguments.
+// The SavedProfileDiffers tests cannot isolate it, because
+// buildStartContext already downgrades for those fixtures; this test calls
+// it directly, so making the re-check a no-op fails the "downgrade" cases.
+func TestRecheckHubDefaultPassthrough(t *testing.T) {
+	blockBundle := map[string]string{
+		"SCION_METADATA_MODE": store.GCPMetadataModeBlock,
+		"SCION_METADATA_PORT": "18380",
+		"GCE_METADATA_HOST":   "localhost:18380",
+		"GCE_METADATA_ROOT":   "localhost:18380",
+	}
+	flagged := func() map[string]string {
+		return map[string]string{
+			"SCION_METADATA_MODE":                  store.GCPMetadataModePassthrough,
+			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+		}
+	}
+
+	tests := []struct {
+		name          string
+		env           map[string]string
+		withCls       bool
+		runtimeType   string
+		wantDowngrade bool
+	}{
+		{name: "flagged on other runtime downgrades", env: flagged(), withCls: true, runtimeType: "other", wantDowngrade: true},
+		{name: "flagged on error runtime downgrades", env: flagged(), withCls: true, runtimeType: "error", wantDowngrade: true},
+		{name: "flagged with nil classifications downgrades", env: flagged(), runtimeType: "other", wantDowngrade: true},
+		{name: "flagged on docker kept", env: flagged(), withCls: true, runtimeType: "docker"},
+		{name: "flagged on podman kept", env: flagged(), withCls: true, runtimeType: "podman"},
+		{name: "flagged on kubernetes kept", env: flagged(), withCls: true, runtimeType: "kubernetes"},
+		{
+			name: "unflagged passthrough kept",
+			env: map[string]string{
+				"SCION_METADATA_MODE": store.GCPMetadataModePassthrough,
+			},
+			withCls:     true,
+			runtimeType: "other",
+		},
+		{
+			name: "flag not exactly true kept",
+			env: map[string]string{
+				"SCION_METADATA_MODE":                  store.GCPMetadataModePassthrough,
+				"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "false",
+			},
+			withCls:     true,
+			runtimeType: "other",
+		},
+		{
+			name: "flagged non-passthrough mode kept",
+			env: map[string]string{
+				"SCION_METADATA_MODE":                  store.GCPMetadataModeAssign,
+				"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+			},
+			withCls:     true,
+			runtimeType: "other",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := maps.Clone(tt.env)
+			var envCls map[string]api.EnvKind
+			if tt.withCls {
+				envCls = map[string]api.EnvKind{}
+			}
+
+			recheckHubDefaultPassthrough(tt.env, envCls, tt.runtimeType)
+
+			if !tt.wantDowngrade {
+				if !maps.Equal(tt.env, before) {
+					t.Errorf("expected env unchanged, got %v (was %v)", tt.env, before)
+				}
+				if len(envCls) != 0 {
+					t.Errorf("expected no classifications written, got %v", envCls)
+				}
+				return
+			}
+			for key, want := range blockBundle {
+				if got := tt.env[key]; got != want {
+					t.Errorf("env[%s] = %q, want %q", key, got, want)
+				}
+				if envCls != nil && envCls[key] != api.EnvKindPlain {
+					t.Errorf("envCls[%s] = %q, want %q", key, envCls[key], api.EnvKindPlain)
+				}
+			}
+		})
+	}
+}
+
 // TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers is
-// the restart-path twin of the start-path test above.
+// the restart-path twin of
+// TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers,
+// with the same coverage: buildStartContext and restartAgent's re-check
+// both downgrade here, so the test fails only if both are removed.
+// TestRecheckHubDefaultPassthrough pins the re-check on its own.
 func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "other")
 	var capturedEnv []string
