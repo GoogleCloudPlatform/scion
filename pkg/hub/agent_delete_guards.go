@@ -223,6 +223,25 @@ func deleteInProgressRefusal(agentID string) *startRefusal {
 	}
 }
 
+// deletedDuringCreateMessage is the message of the 409 a synchronous create
+// answers when a delete won the race (writeDeletedDuringCreate).
+const deletedDuringCreateMessage = "agent was deleted while it was being created"
+
+// writeDeletedDuringCreate writes the 409 delete_in_progress answer to a
+// synchronous create whose agent was deleted, or is held by a delete, by the
+// time the dispatch returned (ptone/scion#3099). The code is the one start
+// and restart answer when they lose to a delete mid-dispatch
+// (deleteClaimedDuringDispatch), and is the same whether the delete still
+// holds the row or has finished. The body carries no agent; warnings (the
+// outcome of the compensating delete of a run that landed) go in details.
+func writeDeletedDuringCreate(w http.ResponseWriter, agentID string, warnings []string) {
+	details := map[string]interface{}{"agentId": agentID}
+	if len(warnings) > 0 {
+		details["warnings"] = warnings
+	}
+	writeError(w, http.StatusConflict, ErrCodeDeleteInProgress, deletedDuringCreateMessage, details)
+}
+
 // deleteClaimedDuringDispatch returns the delete_in_progress refusal when a
 // start or restart dispatch failed because a delete claimed the agent after
 // the start gate passed: beginRun's run-ID write is refused once a delete
