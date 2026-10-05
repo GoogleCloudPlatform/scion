@@ -113,25 +113,20 @@ Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the valu
 
 #### Configuration
 
-To enable the external OIDC login provider, add the `oidc_login` section to your Hub's static `settings.yaml` bootstrap file:
+To enable the external OIDC login provider, add the `oidc_login` section under `server` in your Hub's static `settings.yaml` bootstrap file:
 
 ```yaml
-oidc_login:
-  enabled: true
-  display_name: "Corporate SSO"                         # Text shown on the login button
-  issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
-  client_id: "scion-client"                              # Client ID registered with the provider
-  client_secret: "secret-value"                          # Client secret (can be empty for public clients)
-  scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
+server:
+  oidc_login:
+    enabled: true
+    display_name: "Corporate SSO"                         # Text shown on the login button
+    issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
+    client_id: "scion-client"                              # Client ID registered with the provider
+    client_secret: "secret-value"                          # Client secret (can be empty for public clients)
+    scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
 ```
 
-Alternatively, you can configure these settings via environment variables at startup:
-- `SCION_SERVER_OIDC_LOGIN_ENABLED="true"`
-- `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME="Corporate SSO"`
-- `SCION_SERVER_OIDC_LOGIN_ISSUER_URL="https://sso.example.com/auth/realms/main"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_ID="scion-client"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET="secret-value"`
-- `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
+These keys cannot be set through `SCION_SERVER_*` environment variables. Names such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one.
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
 If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
