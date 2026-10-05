@@ -2427,12 +2427,16 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// A request without a path keeps the path stored for an existing
-	// provider, unless that path is the broker's global directory for a
-	// project other than the global project, which is cleared. A broker
-	// that is not yet a provider gets no path.
+	// provider when checkProviderLocalPath accepts it for this project, and
+	// clears it otherwise. A broker that is not yet a provider gets no path.
+	// A store error reading the provider fails the request before any write.
 	localPath := cleanPath
 	if localPath == "" {
-		localPath = s.registerProviderLocalPath(ctx, target, broker.ID, "", false)
+		localPath, err = s.registerProviderLocalPath(ctx, target, broker.ID, "", false)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	// Create provider record

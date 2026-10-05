@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -149,6 +151,71 @@ func TestProviderLocalPath_EmptyPathClearsStoredGlobalDirPath(t *testing.T) {
 	provider, err := f.store.GetProjectProvider(ctx, f.project.ID, f.ownBroker.ID)
 	require.NoError(t, err)
 	assert.Empty(t, provider.LocalPath, "the stored global-directory path is cleared")
+}
+
+// A provider-add without a path keeps a stored path only when
+// checkProviderLocalPath accepts it for the project; a stored path it
+// refuses is cleared.
+func TestProviderLocalPath_EmptyPathKeepsOnlyAcceptedStoredPath(t *testing.T) {
+	valid := filepath.Join(t.TempDir(), "checkout", ".scion")
+	tests := []struct {
+		name   string
+		stored string
+		want   string
+	}{
+		{name: "relative stored path is cleared", stored: "relative/checkout/.scion", want: ""},
+		{name: "restricted-prefix stored path is cleared", stored: "/usr/local/checkout/.scion", want: ""},
+		{name: "accepted stored path is kept", stored: valid, want: valid},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := brokerAssocSetup(t, fmt.Sprintf("localpath-stored-%d", i))
+			ctx := context.Background()
+			require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: f.project.ID, BrokerID: f.ownBroker.ID, BrokerName: f.ownBroker.Name,
+				LocalPath: tc.stored, Status: store.BrokerStatusOnline, LinkedBy: f.projectOwner.ID,
+			}))
+
+			rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+				AddProviderRequest{BrokerID: f.ownBroker.ID})
+
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			provider, err := f.store.GetProjectProvider(ctx, f.project.ID, f.ownBroker.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, provider.LocalPath)
+		})
+	}
+}
+
+// A provider-add without a path fails with 500 and writes nothing when the
+// stored provider cannot be read.
+func TestProviderLocalPath_EmptyPathProviderReadErrorFailsClosed(t *testing.T) {
+	f := brokerAssocSetup(t, "localpath-read-error")
+	ctx := context.Background()
+	stored := filepath.Join(t.TempDir(), "checkout", ".scion")
+	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: f.ownBroker.ID, BrokerName: f.ownBroker.Name,
+		LocalPath: stored, Status: store.BrokerStatusOnline, LinkedBy: f.projectOwner.ID,
+	}))
+
+	f.srv.store = &providerReadFailsStore{Store: f.store, err: errors.New("db unavailable")}
+	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
+		AddProviderRequest{BrokerID: f.ownBroker.ID})
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	provider, err := f.store.GetProjectProvider(ctx, f.project.ID, f.ownBroker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stored, provider.LocalPath, "the stored path is kept")
+}
+
+// providerReadFailsStore fails every GetProjectProvider call.
+type providerReadFailsStore struct {
+	store.Store
+	err error
+}
+
+func (s *providerReadFailsStore) GetProjectProvider(ctx context.Context, projectID, brokerID string) (*store.ProjectProvider, error) {
+	return nil, s.err
 }
 
 // A broker that is not yet a provider gets no path from a request without one.

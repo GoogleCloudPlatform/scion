@@ -1621,7 +1621,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		broker = providedBroker
 
 		// Add as project provider.
-		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		localPath, err := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -1725,7 +1729,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
 
 		// Add as project provider.
-		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		localPath, err := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		// The embedded path does not call authorizeBrokerProvide: the caller
 		// either created this broker (and owns it) or passed
 		// brokerRemintTargetAuthorized above (creator, or super-admin with an

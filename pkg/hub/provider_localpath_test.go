@@ -338,13 +338,19 @@ func TestRegisterProviderLocalPath_NewProjectCheckedAgainstAssignedSlug(t *testi
 	ctx := context.Background()
 
 	lost := &store.Project{ID: tid("gd-race-lost"), Name: "global (1)", Slug: "global-1"}
-	assert.Empty(t, srv.registerProviderLocalPath(ctx, lost, "broker-1", brokerGlobalDir, true))
+	got, err := srv.registerProviderLocalPath(ctx, lost, "broker-1", brokerGlobalDir, true)
+	require.NoError(t, err)
+	assert.Empty(t, got)
 
 	won := &store.Project{ID: tid("gd-race-won"), Name: "global", Slug: "global"}
-	assert.Equal(t, brokerGlobalDir, srv.registerProviderLocalPath(ctx, won, "broker-1", brokerGlobalDir, true))
+	got, err = srv.registerProviderLocalPath(ctx, won, "broker-1", brokerGlobalDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, brokerGlobalDir, got)
 
 	other := &store.Project{ID: tid("gd-race-other"), Name: "web-app", Slug: "web-app"}
-	assert.Equal(t, "/srv/web-app/.scion", srv.registerProviderLocalPath(ctx, other, "broker-1", "/srv/web-app/.scion", true))
+	got, err = srv.registerProviderLocalPath(ctx, other, "broker-1", "/srv/web-app/.scion", true)
+	require.NoError(t, err)
+	assert.Equal(t, "/srv/web-app/.scion", got)
 }
 
 // add-provider fails the request when it cannot load the project for the
