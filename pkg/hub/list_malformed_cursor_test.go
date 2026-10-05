@@ -56,6 +56,13 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		ID: projectID, Name: "Cursor Project", Slug: "cursor-project",
 	}))
 
+	scheduleID := uuid.NewString()
+	require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+		ID: scheduleID, ProjectID: projectID, Name: "cursor-schedule", CronExpr: "0 0 * * *",
+		EventType: "message", Payload: "{}", Status: store.ScheduleStatusActive,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}))
+
 	agentID := uuid.NewString()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Slug: "cursor-agent", Name: "Cursor Agent", ProjectID: projectID,
@@ -108,6 +115,7 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		"schedules":             {path: "/api/v1/projects/" + projectID + "/schedules"},
 		// UUID cursor.
 		"scheduled events": {path: "/api/v1/projects/" + projectID + "/scheduled-events"},
+		"schedule history": {path: "/api/v1/projects/" + projectID + "/schedules/" + scheduleID + "/history"},
 		"admin invites":    {path: "/api/v1/admin/invites"},
 		// decodeConstraintCursor, read from ?pageToken.
 		"access constraints": {path: "/api/v1/admin/access-constraints", param: "pageToken"},
