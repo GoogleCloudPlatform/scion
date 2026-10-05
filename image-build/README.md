@@ -227,6 +227,30 @@ is a deliberate subset — see its own header — and is not part of this set).
 Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
+## GKE Hub Image (`cloudbuild-hub-gke.yaml`)
+
+The `deploy/helm/scion-hub` chart runs the hub with `runAsNonRoot` as uid 1000,
+so it needs the non-root `hub-gke` stage of the repo-root `Dockerfile`, not the
+root-running `scion-hub` image above. `cloudbuild-hub-gke.yaml` builds that
+stage (linux/amd64, web UI embedded) and pushes only
+`$_REGISTRY/scion-hub-gke:$_SHORT_SHA`. It is not one of the `build-images.sh`
+targets; submit it directly from the repo root:
+
+```bash
+gcloud builds submit \
+  --config=image-build/cloudbuild-hub-gke.yaml \
+  --ignore-file=image-build/gcloudignore-omni \
+  --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
+  .
+```
+
+`--ignore-file` is required because the default `.gcloudignore` drops the web
+source the Dockerfile builds. No moving tag is pushed: repointing one needs an
+explicit ACK, and the chart prefers pinning the image by digest (`image.digest`
+over `image.tag`). Locally, `docker build --target hub-gke .` builds the same
+image; `docker build .` with no `--target` still builds the root-running
+runtime image.
+
 ## Package Registries
 
 By default the images install packages from the public npm registry and PyPI. On
