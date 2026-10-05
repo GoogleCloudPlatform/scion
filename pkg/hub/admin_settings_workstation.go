@@ -192,9 +192,8 @@ func presentBodyLeaves(obj map[string]json.RawMessage, t reflect.Type, prefix []
 // explicit zero such as dev_mode:false over a stored true included, is a
 // change the hub will not make, so the PUT must reject it rather than
 // report "saved". Layer-0 leaves are classified first, so they are
-// layer0_rejected even under the unpersisted lists (server.shared_dir_storage);
-// only unclassified leaves under those lists are left to
-// rejectUnpersistedKeys.
+// layer0_rejected even if listed as unpersisted; only unclassified leaves
+// under those lists are left to rejectUnpersistedKeys.
 func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSettings, rawBody []byte) (layer0, unclassified []string, err error) {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(rawBody, &top) != nil {
@@ -212,8 +211,8 @@ func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSet
 		// Error-code precedence follows the registry classification, not
 		// the unpersisted lists: a Layer-0 leaf is layer0_rejected whether
 		// or not extractKoanfKeysFromRequest maps it (server.shared_dir_storage
-		// is Layer-0 but unmapped today; a later mapping must not change the
-		// code). Unclassified leaves under the lists are left to
+		// was unmapped before the NFS agent-home work mapped it; the code did
+		// not change). Unclassified leaves under the lists are left to
 		// rejectUnpersistedKeys.
 		_, l0, u := opsettings.ClassifyKeys([]string{requestPathKoanfKey(l.path)})
 		switch {

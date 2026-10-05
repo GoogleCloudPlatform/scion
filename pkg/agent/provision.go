@@ -1033,8 +1033,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	_, agentDirStatErr := os.Lstat(agentDir)
+	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	if newAgentDir {
+		// A new agent chooses its home storage at its first start; see
+		// resolveHomeStorage.
+		if err := markHomeStoragePending(agentDir); err != nil {
+			return "", "", nil, fmt.Errorf("failed to record the agent's home storage: %w", err)
+		}
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)

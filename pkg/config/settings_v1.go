@@ -1002,9 +1002,12 @@ type V1ServerConfig struct {
 	// directories, independent of WorkspaceStorage (design
 	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
 	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
-	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// HomeStorage selects where the agent home of Kubernetes agents lives.
+	// See V1HomeStorageConfig.
+	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
+	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1239,6 +1242,18 @@ type V1ServerHubConfig struct {
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
 	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
+	// StartClaimLeaseTTL is the lease of a start claim; the holder renews it
+	// every third of this (e.g., "90s"; 30s to 5m).
+	StartClaimLeaseTTL string `json:"start_claim_lease_ttl,omitempty" yaml:"start_claim_lease_ttl,omitempty" koanf:"start_claim_lease_ttl"`
+	// StartMaxDuration is the hard deadline on any agent start, including a
+	// wait for another hub node (e.g., "12m"; minimum 11m).
+	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
+	// StartUnconfirmedHold is the longest a start whose outcome is unknown
+	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
+	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
+	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
@@ -1246,8 +1261,8 @@ type V1ServerHubConfig struct {
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
-	// Today it only sets the reaper's staleness window (8x this value); it
-	// will also be sent to the broker once the async dispatch path lands.
+	// It is sent to the broker with each asynchronous create and sets the
+	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
@@ -1696,7 +1711,7 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 
 // ValidateSubPathRoot rejects a subpath_root that would produce a
 // confusing error or an unsafe path-component chain once joined with the
-// project ID and shared-dir name (round 6 review nit #6). An absolute
+// project ID and shared-dir name. An absolute
 // value (e.g. "/projects") produces a leading empty path component when
 // the resulting relative path is split on "/", which the component walk in
 // pkg/agent/shared_dir_storage_unix.go then reports as a confusing
@@ -2080,6 +2095,14 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents whose profile uses this runtime entry. A profile's
+	// own value wins over it. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents whose profile uses this runtime entry.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -2315,6 +2338,14 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents using this profile. It wins over the same key on
+	// the profile's runtime entry. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents using this profile.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// KubernetesServiceAccountMappings overrides, per GSA email, the
 	// runtime-level mapping of the same name for agents created under this
 	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and
@@ -2537,10 +2568,14 @@ func versionedEnvKeyMapper(s string) string {
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"start_create_unconfirmed_hold",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
+	"start_unconfirmed_hold",
+	"start_claim_lease_ttl",
 	"soft_delete_retention",
 	"missing_agent_grace",
+	"start_max_duration",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -2851,6 +2886,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MissingAgentGrace != "" {
 			if d, err := time.ParseDuration(v1.Hub.MissingAgentGrace); err == nil {
 				gc.Hub.MissingAgentGrace = d
+			}
+		}
+		for _, f := range []struct {
+			v   string
+			dst *time.Duration
+		}{
+			{v1.Hub.StartClaimLeaseTTL, &gc.Hub.StartClaimLeaseTTL},
+			{v1.Hub.StartMaxDuration, &gc.Hub.StartMaxDuration},
+			{v1.Hub.StartUnconfirmedHold, &gc.Hub.StartUnconfirmedHold},
+			{v1.Hub.StartCreateUnconfirmedHold, &gc.Hub.StartCreateUnconfirmedHold},
+		} {
+			if f.v == "" {
+				continue
+			}
+			if d, err := time.ParseDuration(f.v); err == nil {
+				*f.dst = d
 			}
 		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
@@ -3177,6 +3228,18 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if gc.Hub.StartClaimLeaseTTL > 0 {
+		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
+	}
+	if gc.Hub.StartMaxDuration > 0 {
+		v1Hub.StartMaxDuration = gc.Hub.StartMaxDuration.String()
+	}
+	if gc.Hub.StartUnconfirmedHold > 0 {
+		v1Hub.StartUnconfirmedHold = gc.Hub.StartUnconfirmedHold.String()
+	}
+	if gc.Hub.StartCreateUnconfirmedHold > 0 {
+		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

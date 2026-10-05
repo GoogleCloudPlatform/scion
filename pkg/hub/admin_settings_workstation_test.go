@@ -927,8 +927,8 @@ func TestSystemStructWriters_KeepConcurrentTokenWrite(t *testing.T) {
 }
 
 // On a hosted hub a Layer-0 leaf is layer0_rejected whether or not the key
-// is mapped by extractKoanfKeysFromRequest (server.shared_dir_storage is
-// unmapped until the kr-nfshome stack lands); an echo is still ignored.
+// is mapped by extractKoanfKeysFromRequest (server.shared_dir_storage, now
+// mapped by the NFS agent-home work); an echo is still ignored.
 func TestHosted_PutServerConfig_SharedDirStorageIsLayer0(t *testing.T) {
 	settingsPath := tempSettingsHome(t)
 	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0o644); err != nil {

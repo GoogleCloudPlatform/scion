@@ -463,6 +463,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// home_storage_backend and home_storage_leaf on runtime and profile
+	// entries, and server.home_storage, must hold known values.
+	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+	if req.Server != nil {
+		if err := req.Server.HomeStorage.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// shared_dir_storage_backend on runtime and profile entries must be
 	// "local" or "nfs", and "nfs" needs a complete
 	// server.shared_dir_storage.nfs block (from this request, else the
@@ -622,11 +635,13 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
-// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
-// saved and ignored at agent start; this is the same rule as config
-// validate. Used by both the file-mode and DB-mode PUT handlers.
+// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
+// non-Kubernetes runtime. The value is saved and ignored at agent start;
+// this is the same rule as config validate. Used by both the file-mode and
+// DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}

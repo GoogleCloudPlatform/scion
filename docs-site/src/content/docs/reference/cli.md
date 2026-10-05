@@ -95,6 +95,41 @@ until the agent is deleted with force=true or purged; until then, use a new
 name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
 
+### `scion create`
+
+Provisions a new agent without starting it. Scion writes the agent's
+directory, workspace and `prompt.md`, and the agent stays in phase `created`
+with no container. It is not started even when you pass a task. Run
+`scion start <agent-name>` to start it.
+
+The output says that the agent is provisioned but not started, and gives the
+`scion start` command. If a Hub created the agent record but the runtime broker
+could not provision it, the output shows the provisioning warning and says the
+agent was not fully provisioned; `scion start` retries provisioning and starts
+the agent. With `--format json`, `details.started` is `false`,
+`details.provisioned` says whether the agent was provisioned, and
+`details.startCommand` holds the start command.
+
+**Usage:** `scion create <agent-name> [task] [flags]`
+
+- **Arguments:**
+    - `<agent-name>`: Unique name for the agent instance.
+    - `[task]`: (Optional) The task, written to `prompt.md` for when the agent starts.
+- **Flags:**
+    - `-t, --type <string>`: Template to use.
+    - `-i, --image <string>`: Override container image.
+    - `-b, --branch <string>`: Git branch to use for the agent workspace.
+    - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
+    - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
+    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
+    - `--broker <string>`: Preferred runtime broker ID or name.
+    - `--label <key=value>`: Label for the agent (repeatable).
+    - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
+    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
+    - `--service-account <string>`: GCP service account ID to assign (Hub mode).
+    - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior in Hub mode.
+
 ### `scion stop`
 
 Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's
@@ -368,6 +403,7 @@ Deletes an agent, removing its container, home directory, and worktree.
 - **Flags:**
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).
     - `--stopped`: Delete all agents with stopped containers.
+    - `-f, --force`: Remove the agent from the Hub even when its runtime broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the broker (containers, worktrees) may need separate cleanup on that broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). In local mode (no Hub), `--force` has no effect and the CLI prints a warning; the local delete already removes the container.
 
 ### `scion sync`
 

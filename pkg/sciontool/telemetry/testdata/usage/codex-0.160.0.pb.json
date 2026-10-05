@@ -1,0 +1,1251 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex_exec"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "rust"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.160.0"
+            }
+          },
+          {
+            "key": "env",
+            "value": {
+              "stringValue": "test"
+            }
+          },
+          {
+            "key": "host.name",
+            "value": {
+              "stringValue": "scrubbed-host"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "0.31.0"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "codex_otel.log_only"
+          },
+          "logRecords": [
+            {
+              "observedTimeUnixNano": "1791157591114271482",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.api_request"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "14"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "500"
+                  }
+                },
+                {
+                  "key": "error.message",
+                  "value": {
+                    "stringValue": "http 500"
+                  }
+                },
+                {
+                  "key": "attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "auth.header_attached",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.header_name",
+                  "value": {
+                    "stringValue": "authorization"
+                  }
+                },
+                {
+                  "key": "auth.retry_after_unauthorized",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "endpoint",
+                  "value": {
+                    "stringValue": "/responses"
+                  }
+                },
+                {
+                  "key": "auth.env_openai_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_enabled",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_name",
+                  "value": {
+                    "stringValue": "configured"
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_present",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_refresh_token_url_override_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:46:31.114Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:756"
+            },
+            {
+              "observedTimeUnixNano": "1791157591333551698",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.api_request"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "1"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "attempt",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "auth.header_attached",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.header_name",
+                  "value": {
+                    "stringValue": "authorization"
+                  }
+                },
+                {
+                  "key": "auth.retry_after_unauthorized",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "endpoint",
+                  "value": {
+                    "stringValue": "/responses"
+                  }
+                },
+                {
+                  "key": "auth.env_openai_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_enabled",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_name",
+                  "value": {
+                    "stringValue": "configured"
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_present",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_refresh_token_url_override_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:46:31.333Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:756"
+            },
+            {
+              "observedTimeUnixNano": "1791157591334338963",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.sse_event"
+                  }
+                },
+                {
+                  "key": "event.kind",
+                  "value": {
+                    "stringValue": "response.completed"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:46:31.334Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:1039"
+            },
+            {
+              "observedTimeUnixNano": "1791157591336224298",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.sse_event"
+                  }
+                },
+                {
+                  "key": "event.kind",
+                  "value": {
+                    "stringValue": "response.completed"
+                  }
+                },
+                {
+                  "key": "input_token_count",
+                  "value": {
+                    "stringValue": "1500"
+                  }
+                },
+                {
+                  "key": "output_token_count",
+                  "value": {
+                    "stringValue": "80"
+                  }
+                },
+                {
+                  "key": "cached_token_count",
+                  "value": {
+                    "intValue": "1000"
+                  }
+                },
+                {
+                  "key": "cache_write_token_count",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "reasoning_token_count",
+                  "value": {
+                    "intValue": "20"
+                  }
+                },
+                {
+                  "key": "tool_token_count",
+                  "value": {
+                    "stringValue": "1580"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:46:31.336Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:1103"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.160.0"
+            }
+          },
+          {
+            "key": "host.name",
+            "value": {
+              "stringValue": "scrubbed-host"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex_exec"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "0.31.0"
+            }
+          },
+          {
+            "key": "env",
+            "value": {
+              "stringValue": "test"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "rust"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "codex_otel.log_only"
+          },
+          "logRecords": [
+            {
+              "observedTimeUnixNano": "1791157739111787973",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.api_request"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "13"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "auth.header_attached",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.header_name",
+                  "value": {
+                    "stringValue": "authorization"
+                  }
+                },
+                {
+                  "key": "auth.retry_after_unauthorized",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "endpoint",
+                  "value": {
+                    "stringValue": "/responses"
+                  }
+                },
+                {
+                  "key": "auth.env_openai_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_enabled",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_name",
+                  "value": {
+                    "stringValue": "configured"
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_present",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_refresh_token_url_override_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:48:59.111Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:756"
+            },
+            {
+              "observedTimeUnixNano": "1791157739113512733",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.sse_event"
+                  }
+                },
+                {
+                  "key": "event.kind",
+                  "value": {
+                    "stringValue": "response.completed"
+                  }
+                },
+                {
+                  "key": "error.message",
+                  "value": {
+                    "stringValue": "stream disconnected before completion: stream closed before response.completed"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:48:59.113Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:1090"
+            },
+            {
+              "observedTimeUnixNano": "1791157739330804881",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.api_request"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "16"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "auth.header_attached",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.header_name",
+                  "value": {
+                    "stringValue": "authorization"
+                  }
+                },
+                {
+                  "key": "auth.retry_after_unauthorized",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "endpoint",
+                  "value": {
+                    "stringValue": "/responses"
+                  }
+                },
+                {
+                  "key": "auth.env_openai_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_enabled",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_name",
+                  "value": {
+                    "stringValue": "configured"
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_present",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_refresh_token_url_override_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:48:59.330Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:756"
+            },
+            {
+              "observedTimeUnixNano": "1791157739331211557",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.sse_event"
+                  }
+                },
+                {
+                  "key": "event.kind",
+                  "value": {
+                    "stringValue": "response.completed"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:48:59.331Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:1039"
+            },
+            {
+              "observedTimeUnixNano": "1791157739331866196",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.sse_event"
+                  }
+                },
+                {
+                  "key": "event.kind",
+                  "value": {
+                    "stringValue": "response.completed"
+                  }
+                },
+                {
+                  "key": "input_token_count",
+                  "value": {
+                    "stringValue": "1500"
+                  }
+                },
+                {
+                  "key": "output_token_count",
+                  "value": {
+                    "stringValue": "80"
+                  }
+                },
+                {
+                  "key": "cached_token_count",
+                  "value": {
+                    "intValue": "1000"
+                  }
+                },
+                {
+                  "key": "cache_write_token_count",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "reasoning_token_count",
+                  "value": {
+                    "intValue": "20"
+                  }
+                },
+                {
+                  "key": "tool_token_count",
+                  "value": {
+                    "stringValue": "1580"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:48:59.331Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:1103"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "0.31.0"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "rust"
+            }
+          },
+          {
+            "key": "env",
+            "value": {
+              "stringValue": "test"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex_exec"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.160.0"
+            }
+          },
+          {
+            "key": "host.name",
+            "value": {
+              "stringValue": "scrubbed-host"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "codex_otel.log_only"
+          },
+          "logRecords": [
+            {
+              "observedTimeUnixNano": "1791157759035171912",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "severityText": "INFO",
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.api_request"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "12"
+                  }
+                },
+                {
+                  "key": "error.message",
+                  "value": {
+                    "stringValue": "error sending request"
+                  }
+                },
+                {
+                  "key": "attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "auth.header_attached",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.header_name",
+                  "value": {
+                    "stringValue": "authorization"
+                  }
+                },
+                {
+                  "key": "auth.retry_after_unauthorized",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "endpoint",
+                  "value": {
+                    "stringValue": "/responses"
+                  }
+                },
+                {
+                  "key": "auth.env_openai_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "auth.env_codex_api_key_enabled",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_name",
+                  "value": {
+                    "stringValue": "configured"
+                  }
+                },
+                {
+                  "key": "auth.env_provider_key_present",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "auth.env_refresh_token_url_override_present",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-04T23:49:19.035Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.160.0"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "xterm-256color"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.1-codex"
+                  }
+                }
+              ],
+              "eventName": "event otel/src/events/session_telemetry.rs:756"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

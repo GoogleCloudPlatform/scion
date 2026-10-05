@@ -98,6 +98,12 @@ type Layer1Snapshot struct {
 	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
 	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
 
+	// Start claim timing (durations as strings; empty keeps the startup value)
+	StartClaimLeaseTTL         string
+	StartMaxDuration           string
+	StartUnconfirmedHold       string
+	StartCreateUnconfirmedHold string
+
 	// Maintenance
 	AdminMode          bool
 	MaintenanceMessage string
@@ -837,6 +843,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
 	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
+	snap.StartClaimLeaseTTL = k.String("server.hub.start_claim_lease_ttl")
+	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
+	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
+	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
 
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
@@ -1004,6 +1014,18 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		snap.TelemetryConfig = gc.TelemetryConfig
 	}
 
+	// Start claim timing: applied on reload in file mode too.
+	durStr := func(d time.Duration) string {
+		if d > 0 {
+			return d.String()
+		}
+		return ""
+	}
+	snap.StartClaimLeaseTTL = durStr(gc.Hub.StartClaimLeaseTTL)
+	snap.StartMaxDuration = durStr(gc.Hub.StartMaxDuration)
+	snap.StartUnconfirmedHold = durStr(gc.Hub.StartUnconfirmedHold)
+	snap.StartCreateUnconfirmedHold = durStr(gc.Hub.StartCreateUnconfirmedHold)
+
 	// GitHub App (non-secret)
 	snap.GitHubAppID = gc.GitHubApp.AppID
 	snap.GitHubAPIBaseURL = gc.GitHubApp.APIBaseURL
@@ -1153,6 +1175,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		} else {
 			slog.Warn("invalid stalled_threshold duration, keeping current value", "value", snap.StalledThreshold, "error", err)
 		}
+	}
+
+	// Start claim timing. The base is the startup value, so removing a
+	// setting reverts to it.
+	sc, scWarns := parseStartClaimSettings(s.config.StartClaim, snap.StartClaimLeaseTTL, snap.StartMaxDuration, snap.StartUnconfirmedHold, snap.StartCreateUnconfirmedHold)
+	for _, w := range scWarns {
+		slog.Warn("start claim setting: " + w)
+	}
+	if s.setStartClaimSettings(sc) {
+		applied = append(applied, "start_claim")
 	}
 
 	// User access mode

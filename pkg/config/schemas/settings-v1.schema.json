@@ -72,6 +72,7 @@
         "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "shared_dir_storage": { "$ref": "#/$defs/serverSharedDirStorage" },
+        "home_storage": { "$ref": "#/$defs/serverHomeStorage" },
         "log_level": {
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
@@ -538,6 +539,16 @@
           "type": "string",
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "home_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Kubernetes only. Agent home storage backend for agents whose profile uses this runtime entry. Overrides server.home_storage.backend; a profile value wins over this. nfs keeps the home on the export of the resolved shared_dir_storage. Ignored, with a warning, on other runtimes. Read from the global settings file only."
+        },
+        "home_storage_leaf": {
+          "type": "string",
+          "enum": ["", "pod", "broker"],
+          "description": "Kubernetes only. How the agent home directory is created on the export for agents whose profile uses this runtime entry: pod (an init container) or broker (through the broker's mount of the export). Overrides server.home_storage.leaf; a profile value wins over this."
         },
         "kubernetes_service_account_mappings": {
           "type": "object",
@@ -1021,6 +1032,16 @@
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
         },
+        "home_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Kubernetes only. Agent home storage backend for agents using this profile. Wins over the runtime entry's value and server.home_storage.backend. nfs keeps the home on the export of the resolved shared_dir_storage. Ignored, with a warning, on other runtimes. Read from the global settings file only."
+        },
+        "home_storage_leaf": {
+          "type": "string",
+          "enum": ["", "pod", "broker"],
+          "description": "Kubernetes only. How the agent home directory is created on the export for agents using this profile: pod (an init container) or broker (through the broker's mount of the export). Wins over the runtime entry's value and server.home_storage.leaf."
+        },
         "kubernetes_service_account_mappings": {
           "type": "object",
           "propertyNames": {
@@ -1159,21 +1180,45 @@
           "x-env-var": "SCION_SERVER_HUB_STALLEDTHRESHOLD",
           "x-since": "1"
         },
+        "start_claim_lease_ttl": {
+          "type": "string",
+          "description": "Lease of the claim every agent start holds; the holder renews it every third of this. Default '90s', allowed 30s to 5m.",
+          "x-env-var": "SCION_SERVER_HUB_STARTCLAIMLEASETTL",
+          "x-since": "1"
+        },
+        "start_max_duration": {
+          "type": "string",
+          "description": "Hard deadline on any agent start, including a wait for another hub node. Default '12m', minimum 11m.",
+          "x-env-var": "SCION_SERVER_HUB_STARTMAXDURATION",
+          "x-since": "1"
+        },
+        "start_unconfirmed_hold": {
+          "type": "string",
+          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '13m', minimum 12m40s.",
+          "x-env-var": "SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD",
+          "x-since": "1"
+        },
+        "start_create_unconfirmed_hold": {
+          "type": "string",
+          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '5m', allowed 3m up to start_unconfirmed_hold.",
+          "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
+          "x-since": "1"
+        },
         "async_agent_launch": {
           "type": "boolean",
-          "description": "Reserved: no create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch, off by default; a launch is non-blocking only when this is on AND the client request also opts in (acceptAsyncLaunch). Restart required to change.",
+          "description": "Turns on asynchronous agent create, off by default. A create is asynchronous only when this is on AND the client request also opts in (acceptAsyncLaunch); other requests, provision-only creates and reprovisioning stay synchronous, as do creates sent to a broker without async launch support. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
           "x-since": "1"
         },
         "launch_timeout": {
           "type": "string",
-          "description": "Reserved: not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state (e.g. '5m'). Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
           "x-since": "1"
         },
         "launch_keepalive_seconds": {
           "type": "integer",
-          "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
+          "description": "Broker keepalive interval, in seconds, sent to the broker with each asynchronous create. A launch with no broker report for 8x this value is ended. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
           "x-since": "1"
         },
@@ -1438,6 +1483,20 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "serverHomeStorage": {
+      "type": "object",
+      "description": "Agent home storage for Kubernetes agents. Global-only, Layer-0 (restart to apply). A runtime entry or profile can override backend and leaf with home_storage_backend and home_storage_leaf. Requires the hub.k8s_nfs_home experiment.",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["", "local", "nfs"], "default": "local" },
+        "leaf": { "type": "string", "enum": ["", "pod", "broker"], "default": "pod" },
+        "stop_grace_seconds": { "type": "integer", "minimum": 0, "default": 30, "description": "Termination grace period of pods with an NFS home." },
+        "termination_wait_seconds": { "type": "integer", "minimum": 0, "default": 15, "description": "Extra time, beyond the grace period, a start waits for the agent's previous pod to stop." },
+        "skeleton_max_bytes": { "type": "integer", "minimum": 0, "default": 268435456, "description": "Largest image home skeleton copied into a new home." },
+        "allow_incomplete_phases": { "type": "boolean", "default": false, "description": "Development only. Allows the nfs backend before the feature is complete." }
       },
       "additionalProperties": false
     },

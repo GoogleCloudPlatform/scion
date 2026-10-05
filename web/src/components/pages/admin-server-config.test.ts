@@ -2059,6 +2059,87 @@ describe('scion-page-admin-server-config', () => {
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
     });
   });
+  describe('home storage on runtimes and profiles', () => {
+    function homeConfig() {
+      return makeBaseConfig({
+        runtimes: {
+          k8s: { type: 'kubernetes', home_storage_backend: 'nfs', home_storage_leaf: 'broker' },
+        },
+        profiles: {
+          gke: { runtime: 'k8s', home_storage_backend: 'nfs', home_storage_leaf: 'pod' },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows the current values on the runtime and profile cards', async () => {
+      element = await createComponent(createFetchHandler(homeConfig()));
+      const backends = queryAll(element, 'sl-select.home-storage-backend');
+      expect(backends.map((s) => s.getAttribute('value'))).toEqual(['nfs', 'nfs']);
+      const leaves = queryAll(element, 'sl-select.home-storage-leaf');
+      expect(leaves.map((s) => s.getAttribute('value'))).toEqual(['broker', 'pod']);
+    });
+
+    it('editing another profile field keeps both keys in the PUT payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
+        | (HTMLElement & { value: string })
+        | null;
+      expect(registry).not.toBeNull();
+      registry!.value = 'registry.example.com/team';
+      registry!.dispatchEvent(new Event('sl-input'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('pod');
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.runtimes.k8s.home_storage_leaf).toBe('broker');
+    });
+
+    it('changing and clearing the selects updates the payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeLeaf, profileLeaf] = queryAll(
+        element,
+        'sl-select.home-storage-leaf'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      runtimeLeaf.value = '';
+      runtimeLeaf.dispatchEvent(new Event('sl-change'));
+      profileLeaf.value = 'broker';
+      profileLeaf.dispatchEvent(new Event('sl-change'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('broker');
+      expect('home_storage_leaf' in capturedPayload!.runtimes.k8s).toBe(false);
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+    });
+  });
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
     const maskedServer = {
       notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
