@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -521,4 +523,114 @@ func TestConfigure_AgentCacheTTL(t *testing.T) {
 func TestAgentCacheTTLsFitWithinRetention(t *testing.T) {
 	assert.LessOrEqual(t, 3*defaultAgentCacheTTL, agentCacheRetention)
 	assert.LessOrEqual(t, 3*maxAgentCacheTTL, agentCacheRetention)
+}
+
+// webhookListStub stands in for Discord's REST API: it serves
+// GET /channels/{id}/webhooks from webhooks and records every request.
+type webhookListStub struct {
+	mu       sync.Mutex
+	webhooks map[string][]*discordgo.Webhook // channelID -> webhooks
+	fail     bool
+	requests []string // "METHOD path"
+}
+
+func (w *webhookListStub) RoundTrip(req *http.Request) (*http.Response, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.requests = append(w.requests, req.Method+" "+req.URL.Path)
+	respond := func(status int, body string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}
+	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
+	// .../channels/{id}/webhooks
+	if req.Method == http.MethodGet && len(parts) >= 3 && parts[len(parts)-1] == "webhooks" && parts[len(parts)-3] == "channels" {
+		if w.fail {
+			return respond(http.StatusInternalServerError, `{"message":"boom"}`)
+		}
+		body, _ := json.Marshal(w.webhooks[parts[len(parts)-2]])
+		if string(body) == "null" {
+			body = []byte("[]")
+		}
+		return respond(http.StatusOK, string(body))
+	}
+	return respond(http.StatusNotFound, `{"message":"not found"}`)
+}
+
+func (w *webhookListStub) snapshot() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.requests...)
+}
+
+func newWebhookListManager(t *testing.T, stub *webhookListStub) *WebhookManager {
+	t.Helper()
+	session, err := discordgo.New("Bot test-token")
+	require.NoError(t, err)
+	session.Client = &http.Client{Transport: stub}
+	session.MaxRestRetries = 0
+	session.State = discordgo.NewState()
+	session.State.User = &discordgo.User{ID: "BOT123"}
+	return NewWebhookManager(session, discardLogger())
+}
+
+func TestWebhookManagerOwns_CacheMiss(t *testing.T) {
+	ours := &discordgo.Webhook{ID: "wh-ours", Name: webhookName, User: &discordgo.User{ID: "BOT123"}}
+	foreign := &discordgo.Webhook{ID: "wh-foreign", Name: "Other Bot", User: &discordgo.User{ID: "OTHER"}}
+	lookalike := &discordgo.Webhook{ID: "wh-lookalike", Name: webhookName, User: &discordgo.User{ID: "OTHER"}}
+
+	assertNoWrites := func(t *testing.T, stub *webhookListStub) {
+		t.Helper()
+		for _, r := range stub.snapshot() {
+			assert.True(t, strings.HasPrefix(r, http.MethodGet+" "), "only reads are made, got %s", r)
+		}
+	}
+
+	t.Run("own webhook is recognised and cached", func(t *testing.T) {
+		stub := &webhookListStub{webhooks: map[string][]*discordgo.Webhook{"C1": {foreign, ours}}}
+		wm := newWebhookListManager(t, stub)
+
+		assert.True(t, wm.owns("C1", "wh-ours"))
+		assert.True(t, wm.owns("C1", "wh-ours"))
+		assert.False(t, wm.owns("C1", "wh-foreign"), "another webhook in the same channel is not ours")
+		assert.Len(t, stub.snapshot(), 1, "the list is read once, then the cache answers")
+		assert.Equal(t, "wh-ours", wm.cache["C1"].ID)
+		assertNoWrites(t, stub)
+	})
+
+	t.Run("foreign webhook is not ours and the miss is remembered", func(t *testing.T) {
+		stub := &webhookListStub{webhooks: map[string][]*discordgo.Webhook{"C1": {foreign, lookalike}}}
+		wm := newWebhookListManager(t, stub)
+
+		assert.False(t, wm.owns("C1", "wh-foreign"))
+		assert.False(t, wm.owns("C1", "wh-lookalike"), "a webhook with our name but another owner is not ours")
+		requests := len(stub.snapshot())
+		assert.False(t, wm.owns("C1", "wh-foreign"))
+		assert.Len(t, stub.snapshot(), requests, "a remembered miss makes no request")
+		assert.NotContains(t, wm.cache, "C1", "nothing is cached without our webhook")
+		assertNoWrites(t, stub)
+	})
+
+	t.Run("list error is not ours", func(t *testing.T) {
+		stub := &webhookListStub{fail: true}
+		wm := newWebhookListManager(t, stub)
+
+		assert.False(t, wm.owns("C1", "wh-ours"))
+		assert.NotContains(t, wm.cache, "C1")
+		assertNoWrites(t, stub)
+		require.NotEmpty(t, stub.snapshot(), "the list was requested")
+	})
+
+	t.Run("misses are bounded", func(t *testing.T) {
+		stub := &webhookListStub{}
+		wm := newWebhookListManager(t, stub)
+		for i := 0; i < maxOwnMisses+10; i++ {
+			wm.rememberMiss(fmt.Sprintf("C:%d", i))
+		}
+		assert.LessOrEqual(t, len(wm.ownMisses), maxOwnMisses)
+	})
 }

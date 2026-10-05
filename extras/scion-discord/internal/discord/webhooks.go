@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -30,7 +31,18 @@ type WebhookManager struct {
 
 	mu    sync.RWMutex
 	cache map[string]*discordgo.Webhook // channelID -> webhook
+
+	// ownMisses remembers, per "channelID:webhookID", when a lookup found
+	// the webhook is not ours, so repeated checks skip Discord's API.
+	ownMissMu sync.Mutex
+	ownMisses map[string]time.Time
 }
+
+// ownMissTTL is how long a webhook found not to be ours is remembered.
+const ownMissTTL = 5 * time.Minute
+
+// maxOwnMisses bounds the remembered misses.
+const maxOwnMisses = 1000
 
 // NewWebhookManager creates a new WebhookManager.
 func NewWebhookManager(session *discordgo.Session, log *slog.Logger) *WebhookManager {
@@ -115,9 +127,15 @@ func (wm *WebhookManager) owns(channelID, webhookID string) bool {
 		return wh.ID == webhookID
 	}
 
+	missKey := channelID + ":" + webhookID
+	if wm.recentMiss(missKey) {
+		return false
+	}
+
 	webhooks, err := wm.session.ChannelWebhooks(channelID)
 	if err != nil {
 		wm.log.Debug("Failed to list channel webhooks", "channel_id", channelID, "error", err)
+		wm.rememberMiss(missKey)
 		return false
 	}
 	botUserID := ""
@@ -131,10 +149,44 @@ func (wm *WebhookManager) owns(channelID, webhookID string) bool {
 				wm.cache[channelID] = wh
 			}
 			wm.mu.Unlock()
+			if wh.ID != webhookID {
+				wm.rememberMiss(missKey)
+			}
 			return wh.ID == webhookID
 		}
 	}
+	wm.rememberMiss(missKey)
 	return false
+}
+
+// recentMiss reports whether key was found not to be ours within
+// ownMissTTL.
+func (wm *WebhookManager) recentMiss(key string) bool {
+	wm.ownMissMu.Lock()
+	defer wm.ownMissMu.Unlock()
+	at, ok := wm.ownMisses[key]
+	return ok && time.Since(at) < ownMissTTL
+}
+
+// rememberMiss records that key was found not to be ours, keeping at most
+// maxOwnMisses entries.
+func (wm *WebhookManager) rememberMiss(key string) {
+	wm.ownMissMu.Lock()
+	defer wm.ownMissMu.Unlock()
+	if wm.ownMisses == nil {
+		wm.ownMisses = make(map[string]time.Time)
+	}
+	if len(wm.ownMisses) >= maxOwnMisses {
+		for k, at := range wm.ownMisses {
+			if time.Since(at) >= ownMissTTL {
+				delete(wm.ownMisses, k)
+			}
+		}
+		if len(wm.ownMisses) >= maxOwnMisses {
+			wm.ownMisses = make(map[string]time.Time)
+		}
+	}
+	wm.ownMisses[key] = time.Now()
 }
 
 // invalidate removes a cached webhook for a channel, forcing re-discovery

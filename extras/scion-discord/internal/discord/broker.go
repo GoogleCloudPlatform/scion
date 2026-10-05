@@ -2210,16 +2210,12 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 	if webhooks == nil {
 		return false
 	}
-	channels := []string{m.ChannelID}
+	// Threads use their parent channel's webhook.
+	channelID := m.ChannelID
 	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
-		channels = append(channels, parentID)
+		channelID = parentID
 	}
-	for _, ch := range channels {
-		if webhooks.owns(ch, ref.WebhookID) {
-			return true
-		}
-	}
-	return false
+	return webhooks.owns(channelID, ref.WebhookID)
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to
