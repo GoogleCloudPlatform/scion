@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"maps"
 	"testing"
 	"time"
@@ -273,4 +274,45 @@ func TestEnvCleanup_AutoExposeNormalizationLeavesInlineTZToTZCleanup(t *testing.
 	assert.True(t, got.AppliedConfig.ExplicitTimezoneLegacy)
 	assert.NotContains(t, inlineEnv(got), agentTZEnvKey)
 	assert.NotContains(t, inlineEnv(got), aeKey)
+}
+
+// projectLookupStore makes GetProject fail with err.
+type projectLookupStore struct {
+	store.Store
+	err error
+}
+
+func (s *projectLookupStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	return nil, s.err
+}
+
+// TestEnvCleanup_AutoExposeNormalizationProjectLookup covers the project
+// lookup: a project that no longer exists contributes no tier, as at
+// reincarnate, while any other lookup failure skips the agent so the next run
+// retries it instead of dropping the project tier.
+func TestEnvCleanup_AutoExposeNormalizationProjectLookup(t *testing.T) {
+	t.Run("project gone", func(t *testing.T) {
+		_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+			appliedEnv:   map[string]string{"KEEP": "1"},
+			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+			createInputs: explicitKeep(),
+		})
+		log := runAECleanup(t, &projectLookupStore{Store: s, err: store.ErrNotFound}, nil)
+		assert.Contains(t, log, "RE-DERIVE agent="+agent.ID)
+		got := reloadAgent(t, s, agent.ID)
+		assert.NotContains(t, inlineEnv(got), aeKey)
+		assert.NotContains(t, got.AppliedConfig.Env, aeKey)
+	})
+	t.Run("lookup error skips the agent", func(t *testing.T) {
+		_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
+			appliedEnv:   map[string]string{"KEEP": "1"},
+			inlineEnv:    map[string]string{"KEEP": "1", aeKey: "true"},
+			createInputs: explicitKeep(),
+		})
+		log := runAECleanup(t, &projectLookupStore{Store: s, err: errors.New("db down")}, nil)
+		assert.Contains(t, log, "WARN agent="+agent.ID+" - skipped auto-expose normalization")
+		got := reloadAgent(t, s, agent.ID)
+		assert.Equal(t, "true", inlineEnv(got)[aeKey])
+		assert.Equal(t, agent.StateVersion, got.StateVersion)
+	})
 }
