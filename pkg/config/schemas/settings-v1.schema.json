@@ -1754,8 +1754,8 @@
         "type": { "type": "string", "description": "Channel type." },
         "params": {
           "type": "object",
-          "additionalProperties": { "type": ["string", "number", "boolean"] },
-          "description": "Channel-specific parameters (e.g. webhook URL). Numbers and booleans load as their string form."
+          "additionalProperties": { "type": "string" },
+          "description": "Channel-specific parameters (e.g. webhook URL). Values must be strings: the hub decodes the seeded channels strictly."
         },
         "filter_types": { "type": "array", "items": { "type": "string" } },
         "filter_urgent_only": { "type": "boolean" }
@@ -1850,7 +1850,7 @@
         "enabled": { "type": "boolean", "default": false },
         "token_lifetime": {
           "type": ["string", "integer"],
-          "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
+          "pattern": "^([-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
           "description": "Validity of issued identity tokens as a Go duration (e.g. \"15m\", the default) or integer nanoseconds."
         }
       },
@@ -1867,8 +1867,8 @@
           "items": { "$ref": "#/$defs/serverTrustedIssuer" }
         },
         "algorithms": { "type": "array", "items": { "type": "string", "enum": ["RS256", "ES256"] } },
-        "refresh_interval": { "type": "string", "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"1h\"." },
-        "debounce_interval": { "type": "string", "pattern": "^(0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"30s\"." }
+        "refresh_interval": { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"1h\". Empty means the default." },
+        "debounce_interval": { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"30s\". Empty means the default." }
       },
       "additionalProperties": false
     },

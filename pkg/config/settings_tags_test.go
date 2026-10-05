@@ -42,6 +42,7 @@ var settingsTagAllowList = map[string]string{}
 // (ptone/scion#3022). The pkg/api types reached from settings had no koanf
 // tags, so koanf fell back to case-insensitive Go field names and dropped
 // every multi-word key, e.g. volumes[].read_only and shared_dirs[].read_only.
+// An exported field must carry a non-empty json tag (or json:"-").
 func TestVersionedSettings_TagsAgree(t *testing.T) {
 	var problems []string
 	matched := map[string]bool{}
@@ -64,7 +65,10 @@ func TestVersionedSettings_TagsAgree(t *testing.T) {
 			j := tagName(f, "json")
 			y := tagName(f, "yaml")
 			k := tagName(f, "koanf")
-			if j != "-" && (j != y || j != k) {
+			// Every exported field needs an explicit json name (or "-"):
+			// with all three tags empty they would trivially "agree" while
+			// koanf and yaml fall back to the Go field name.
+			if j != "-" && (j == "" || j != y || j != k) {
 				key := tp.PkgPath()[strings.LastIndex(tp.PkgPath(), "/")+1:] + "." + tp.Name() + "." + f.Name
 				if _, ok := settingsTagAllowList[key]; ok {
 					matched[key] = true

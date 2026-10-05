@@ -215,7 +215,7 @@ func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 		{"runtimes.*.cloudrun unknown field", "runtimes:\n  cr:\n    type: cloudrun\n    cloudrun:\n      region: us-central1\n", "runtimes/cr/cloudrun"},
 		{"runtimes.*.cloudrun_instances unknown field", "runtimes:\n  cri:\n    type: cloudrun-instances\n    cloudrun_instances:\n      location: us-central1\n", "runtimes/cri/cloudrun_instances"},
 		{"runtimes.*.cloudrun_sandbox unknown field", "runtimes:\n  crs:\n    type: cloudrun-sandbox\n    cloudrun_sandbox:\n      bin: x\n", "runtimes/crs/cloudrun_sandbox"},
-		{"shared_dirs entry without name", "shared_dirs:\n  - read_only: true\n", "name"},
+		{"shared_dirs entry without name", "shared_dirs:\n  - read_only: true\n", "shared_dirs/0"},
 		{"shared_dirs invalid name", "shared_dirs:\n  - name: Build_Cache\n", "shared_dirs/0/name"},
 		{"federation trusted issuer without issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - jwks_url: https://x\n", "server/federation/trusted_issuers/0"},
 		{"federation trusted issuer empty issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: \"\"\n", "trusted_issuers/0/issuer_url"},
@@ -223,6 +223,8 @@ func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 		{"federation unsupported algorithm", "server:\n  federation:\n    algorithms: [HS256]\n", "server/federation/algorithms/0"},
 		{"federation refresh_interval without unit", "server:\n  federation:\n    refresh_interval: \"3600\"\n", "server/federation/refresh_interval"},
 		{"federation debounce_interval not a duration", "server:\n  federation:\n    debounce_interval: soon\n", "server/federation/debounce_interval"},
+		{"oidc token_lifetime empty", "server:\n  oidc:\n    token_lifetime: \"\"\n", "server/oidc/token_lifetime"},
+		{"notification params number", "server:\n  notification_channels:\n    - type: webhook\n      params:\n        retries: 3\n", "server/notification_channels/0/params/retries"},
 		{"oidc token_lifetime quoted integer", "server:\n  oidc:\n    token_lifetime: \"900000000000\"\n", "server/oidc/token_lifetime"},
 		{"server.shared_dir_storage.nfs.auto_mount (ignored there)", "server:\n  shared_dir_storage:\n    nfs:\n      auto_mount: true\n", "server/shared_dir_storage/nfs"},
 	}
@@ -245,8 +247,11 @@ func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 
 // TestValidateSettings_DurationsAndWeakMapValues covers values the loader
 // accepts and the schema must therefore accept too: Go duration strings
-// (and integer nanoseconds for token_lifetime), and unquoted numbers and
-// booleans in map[string]string values, which decode to their string form.
+// (time.ParseDuration accepts "0", "-0" and "+0"; an empty federation
+// interval means the default), integer nanoseconds for token_lifetime, and
+// unquoted numbers and booleans in plugin config, which decode weakly to
+// their string form. Notification params are string-only (see the reject
+// cases): the hub decodes seeded channels strictly.
 func TestValidateSettings_DurationsAndWeakMapValues(t *testing.T) {
 	tests := []struct {
 		name string
@@ -258,7 +263,10 @@ func TestValidateSettings_DurationsAndWeakMapValues(t *testing.T) {
 		{"federation intervals", "server:\n  federation:\n    refresh_interval: 1h30m\n    debounce_interval: 500ms\n"},
 		{"federation interval 0", "server:\n  federation:\n    refresh_interval: \"0\"\n"},
 		{"plugin config number and boolean", "server:\n  plugins:\n    broker:\n      nats:\n        config:\n          port: 4222\n          tls: true\n          url: nats://x\n"},
-		{"notification params number", "server:\n  notification_channels:\n    - type: webhook\n      params:\n        retries: 3\n        verbose: false\n"},
+		{"federation intervals empty (default)", "server:\n  federation:\n    refresh_interval: \"\"\n    debounce_interval: \"\"\n"},
+		{"federation intervals signed zero", "server:\n  federation:\n    refresh_interval: \"-0\"\n    debounce_interval: \"+0\"\n"},
+		{"token_lifetime signed zero", "server:\n  oidc:\n    token_lifetime: \"-0\"\n"},
+		{"token_lifetime plus zero", "server:\n  oidc:\n    token_lifetime: \"+0\"\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -57,8 +57,9 @@ var schemaDriftAllowList = map[string]string{
 	"type-union: server.oidc.token_lifetime": "time.Duration: Go duration string or integer nanoseconds",
 	// map[string]string values decode weakly (WeaklyTypedInput), so an
 	// unquoted number or boolean loads as its string form.
-	"type-union: server.plugins.broker.*.config.*":         "weakly decoded map[string]string value",
-	"type-union: server.notification_channels.[].params.*": "weakly decoded map[string]string value",
+	// (Notification params are deliberately string-only: the hub decodes
+	// seeded channels strictly, so a number there would drop them all.)
+	"type-union: server.plugins.broker.*.config.*": "weakly decoded map[string]string value",
 }
 
 // TestSettingsSchema_NoDriftFromGoTypes walks the Go settings types reachable

@@ -29,24 +29,18 @@ import (
 // section schema and its settings-v1.schema.json counterpart, keyed as
 // reported by TestSectionSchemas_MatchRootSchema. Each entry says why.
 var sectionSchemaDiffAllowList = map[string]string{
-	// The settings file loader decodes map[string]string weakly, so the
-	// root schema accepts unquoted numbers and booleans. A DB section doc
-	// is decoded with encoding/json into map[string]string, where a number
-	// fails, so the section keeps string-only values.
-	"notifications.notification_channels.[].params.*: type [string], root [boolean number string]": "DB docs decode strictly",
-
 	// Pre-existing: the hand-written map-of-objects section schemas are
 	// looser than the root defs. Tightening them changes which PUT
-	// server-config bodies are accepted, so it is left to a separate change.
-	"harness_configs.*.auth_selected_type: enum [], root [api-key auth-file none oauth-token vertex-ai]":                         "section looser than root; pre-existing",
-	"harness_configs.*.name: pattern <nil>, root ^[a-zA-Z0-9][a-zA-Z0-9_-]*$":                                                    "section looser than root; pre-existing",
-	"profiles.*.harness_overrides.*.auth_selected_type: enum [], root [api-key auth-file oauth-token vertex-ai]":                 "section looser than root; pre-existing",
-	"runtimes.*.type: enum [], root [cloudrun cloudrun-instances cloudrun-sandbox container docker kubernetes podman substrate]": "section looser than root; pre-existing",
+	// server-config bodies are accepted; tracked in ptone/scion#3053.
+	"harness_configs.*.auth_selected_type: enum [], root [api-key auth-file none oauth-token vertex-ai]":                         "section looser than root; ptone/scion#3053",
+	"harness_configs.*.name: pattern <nil>, root ^[a-zA-Z0-9][a-zA-Z0-9_-]*$":                                                    "section looser than root; ptone/scion#3053",
+	"profiles.*.harness_overrides.*.auth_selected_type: enum [], root [api-key auth-file oauth-token vertex-ai]":                 "section looser than root; ptone/scion#3053",
+	"runtimes.*.type: enum [], root [cloudrun cloudrun-instances cloudrun-sandbox container docker kubernetes podman substrate]": "section looser than root; ptone/scion#3053",
 
 	// Pre-existing: the profiles section schema accepts profiles.*.env, but
-	// V1ProfileConfig has no env field, so the value is dropped when the
-	// doc decodes. Left to the env-source work rather than changed here.
-	"profiles.*.env: missing from root schema": "section-only key with no Go field; pre-existing",
+	// V1ProfileConfig has no env field, so a PUT carrying it gets a 200 and
+	// the value is dropped when the doc decodes. Tracked in ptone/scion#3048.
+	"profiles.*.env: missing from root schema": "section-only key with no Go field; ptone/scion#3048",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema
@@ -56,6 +50,15 @@ var sectionSchemaDiffAllowList = map[string]string{
 // type, enum and pattern. Sections derived from the root schema pass by
 // construction; this pins the hand-written ones, and catches a derived
 // section whose root property went missing.
+//
+// Limits (what this test does not compare):
+//   - only "type", "enum" and "pattern"; not minLength/maxLength,
+//     minimum/maximum, "required" or "additionalProperties": false;
+//   - "items" and "additionalProperties" sub-schemas only when both sides
+//     declare them as objects;
+//   - root properties missing from a section are not reported, since a
+//     section may deliberately be a subset (github_app omits its secret
+//     fields).
 func TestSectionSchemas_MatchRootSchema(t *testing.T) {
 	raw, err := config.GetSettingsSchemaJSON("1")
 	if err != nil {
@@ -245,5 +248,35 @@ func (c *schemaComparer) compare(path string, secV, rootV interface{}) {
 		if rap, ok := root["additionalProperties"].(map[string]interface{}); ok {
 			c.compare(path+".*", ap, rap)
 		}
+	}
+}
+
+// TestSchemaInfo_SelfContained checks that the schemas served by
+// GET /admin/server-config/schema carry no unresolved $ref: they are served
+// without the root $defs, so every reference must be inlined.
+func TestSchemaInfo_SelfContained(t *testing.T) {
+	info := SchemaInfo()
+	if info == nil {
+		t.Fatal("SchemaInfo() returned nil")
+	}
+	for name, sec := range info {
+		data, err := json.Marshal(sec.Schema)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		if strings.Contains(string(data), `"$ref"`) {
+			t.Errorf("%s: served schema has an unresolved $ref: %s", name, data)
+		}
+	}
+	// The sections that used to carry refs are expanded, not emptied.
+	for _, name := range []string{"telemetry", "federation"} {
+		data, _ := json.Marshal(info[name].Schema)
+		if !strings.Contains(string(data), `"properties"`) {
+			t.Errorf("%s: served schema lost its properties: %s", name, data)
+		}
+	}
+	fed, _ := json.Marshal(info["federation"].Schema)
+	if !strings.Contains(string(fed), `"issuer_url"`) {
+		t.Errorf("federation: trusted_issuers items not inlined: %s", fed)
 	}
 }

@@ -545,7 +545,14 @@ func compileSchemas() {
 		"federation": schemaObject(getSchemaProperty(root, "server", "federation")),
 	}
 
-	rawSchemas = sectionSchemaMap
+	// SchemaInfo serves self-contained schemas: inline every local $ref so
+	// a client does not need the root $defs. Compilation below still uses
+	// sectionSchemaMap with the $defs attached.
+	rawSchemas = make(map[string]map[string]interface{}, len(sectionSchemaMap))
+	for name, def := range sectionSchemaMap {
+		inlined, _ := inlineRefs(root, def, nil).(map[string]interface{})
+		rawSchemas[name] = inlined
+	}
 
 	for i := range Registry {
 		s := &Registry[i]
@@ -637,6 +644,50 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 		}
 	}
 	return map[string]interface{}{}
+}
+
+// inlineRefs returns a deep copy of v with every local "#/$defs/..." $ref
+// replaced by the referenced definition (sibling keywords such as
+// description are kept, and win over the definition's). stack holds the
+// definitions being expanded; a recursive reference is left as a $ref
+// rather than expanded forever.
+func inlineRefs(root map[string]interface{}, v interface{}, stack []string) interface{} {
+	switch node := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(node))
+		if ref, ok := node["$ref"].(string); ok && strings.HasPrefix(ref, "#/$defs/") {
+			recursive := false
+			for _, s := range stack {
+				if s == ref {
+					recursive = true
+				}
+			}
+			if def, ok := resolveRef(root, ref).(map[string]interface{}); ok && !recursive {
+				expanded, _ := inlineRefs(root, def, append(stack, ref)).(map[string]interface{})
+				for k, val := range expanded {
+					out[k] = val
+				}
+				for k, val := range node {
+					if k != "$ref" {
+						out[k] = inlineRefs(root, val, stack)
+					}
+				}
+				return out
+			}
+		}
+		for k, val := range node {
+			out[k] = inlineRefs(root, val, stack)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(node))
+		for i, val := range node {
+			out[i] = inlineRefs(root, val, stack)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // schemaObject asserts a getSchemaProperty result is a schema object. A
