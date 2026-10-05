@@ -1606,11 +1606,15 @@ authDone:
 	}
 
 	// The agent's workspace placement, reported to the hub on every start
-	// that gets here (so a re-provision refreshes it): on the shared NFS
-	// export exactly when the nfs workspace backend served the workspace
-	// above (the project's shared checkout, a worktree, or the agent's own
-	// directory for clone-per-agent and empty-per-agent); otherwise not.
-	workspacePlacement := workspacePlacementFor(workspaceBackendName)
+	// that gets here (so a re-provision refreshes it). See
+	// workspacePlacementFor for when the workspace is on the export.
+	workspacePlacement := workspacePlacementFor(workspacePlacementInput{
+		Backend:       workspaceBackendName,
+		Kubernetes:    isKubernetesRuntime(m.Runtime.Name()),
+		PVClaimName:   nfsPVClaimName,
+		ClonePerAgent: opts.GitClone != nil && store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent,
+		AgentDirName:  nfsAgentDirName,
+	})
 
 	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
 	// else its runtime entry's (applied below under the template/agent
@@ -1947,13 +1951,44 @@ authDone:
 	}, nil
 }
 
-// workspacePlacementFor maps the workspace backend a start resolved ("" for
-// the local backend) to the placement reported to the hub.
-func workspacePlacementFor(workspaceBackendName string) string {
-	if workspaceBackendName == "nfs" {
-		return api.WorkspacePlacementExport
+// workspacePlacementInput is what a start resolved about its workspace.
+type workspacePlacementInput struct {
+	// Backend is the workspace backend that served the workspace ("" for
+	// the local backend).
+	Backend string
+	// Kubernetes is true on a Kubernetes runtime.
+	Kubernetes bool
+	// PVClaimName is the NFS PV claim the pod mounts the workspace from;
+	// "" when the share has no pv_name.
+	PVClaimName string
+	// ClonePerAgent is true when the agent was dispatched as a git
+	// clone-per-agent workspace.
+	ClonePerAgent bool
+	// AgentDirName is the agent's own directory on the export, when one
+	// was chosen (clone-per-agent and empty-per-agent on Kubernetes).
+	AgentDirName string
+}
+
+// workspacePlacementFor returns the placement reported to the hub: on the
+// shared NFS export only when the workspace is actually mounted from it.
+// Other runtimes bind-mount the nfs backend's host path, so the nfs backend
+// alone is enough. On Kubernetes the pod mounts the export only through a PV
+// claim (without one it gets an EmptyDir), and a clone-per-agent workspace
+// is on the export only in its own agent directory, which also needs the
+// claim.
+func workspacePlacementFor(in workspacePlacementInput) string {
+	if in.Backend != "nfs" {
+		return api.WorkspacePlacementLocal
 	}
-	return api.WorkspacePlacementLocal
+	if in.Kubernetes {
+		if in.PVClaimName == "" {
+			return api.WorkspacePlacementLocal
+		}
+		if in.ClonePerAgent && in.AgentDirName == "" {
+			return api.WorkspacePlacementLocal
+		}
+	}
+	return api.WorkspacePlacementExport
 }
 
 // writeAgentTokenFile writes the agent's hub credential to the canonical token

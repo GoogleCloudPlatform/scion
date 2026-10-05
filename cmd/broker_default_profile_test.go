@@ -35,3 +35,17 @@ func TestBrokerRegistrationDefaultProfile(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "", *got)
 }
+
+// The running broker's heartbeat omits the default profile when its
+// settings failed to load, instead of clearing the hub's value.
+func TestBrokerHeartbeatDefaultProfile(t *testing.T) {
+	assert.Nil(t, brokerHeartbeatDefaultProfile(&config.Settings{ActiveProfile: "k8s"}, false))
+
+	got := brokerHeartbeatDefaultProfile(&config.Settings{ActiveProfile: "k8s"}, true)
+	require.NotNil(t, got)
+	assert.Equal(t, "k8s", *got)
+
+	got = brokerHeartbeatDefaultProfile(&config.Settings{}, true)
+	require.NotNil(t, got)
+	assert.Equal(t, "", *got)
+}

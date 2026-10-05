@@ -102,8 +102,9 @@ type HeartbeatService struct {
 	workspaceStorage func() *api.BrokerWorkspaceStorage
 
 	// defaultProfile, when set, returns the broker's default (active)
-	// profile name, reported on every heartbeat. Nil omits the field.
-	defaultProfile func() string
+	// profile name, reported on every heartbeat. A nil func, or a nil
+	// result (unknown), omits the field.
+	defaultProfile func() *string
 
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
@@ -326,8 +327,10 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
 	}
 	if s.defaultProfile != nil {
-		name := s.defaultProfile()
-		heartbeat.DefaultProfile = &name
+		if name := s.defaultProfile(); name != nil {
+			v := *name
+			heartbeat.DefaultProfile = &v
+		}
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that

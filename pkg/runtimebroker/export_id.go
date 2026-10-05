@@ -33,12 +33,19 @@ import (
 // export identity marker. A hung NFS mount must not stall the heartbeat.
 const exportIDReadTimeout = 5 * time.Second
 
+// exportIDCacheTTL bounds how long the last successfully read export ID is
+// reported while a newer read is still in flight.
+const exportIDCacheTTL = 2 * time.Minute
+
 // exportIDMarkerMaxBytes bounds how much of the marker file is read.
 const exportIDMarkerMaxBytes = 256
 
 // readOrCreateExportID returns the export identity UUID stored in the marker
-// file <dir>/.scion-export-id, creating dir and the marker with a fresh UUID
-// when the marker does not exist. Creation is race-free across brokers
+// file <dir>/.scion-export-id, creating the marker with a fresh UUID when it
+// does not exist. dir itself is never created: a missing sub-path root (a
+// fresh export with no workspaces yet, or a mount that went away and left
+// the bare mountpoint) is an error, so nothing is ever written to the
+// broker's local disk under the mountpoint. Creation is race-free across brokers
 // sharing the export: the UUID is written to a private temporary file which
 // is then hard-linked to the marker name, so exactly one broker's link
 // succeeds and every other broker reads the winner's UUID. A marker that
@@ -48,9 +55,6 @@ func readOrCreateExportID(dir string) (string, error) {
 	id, err := readExportIDMarker(marker)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return id, err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create export identity directory %s: %w", dir, err)
 	}
 	tmp, err := os.CreateTemp(dir, api.ExportIDMarkerName+".tmp-*")
 	if err != nil {
@@ -114,22 +118,46 @@ func exportIDMarkerDir(nfs *config.V1NFSConfig) (string, error) {
 }
 
 // exportIDProbe reads the export identity marker with a deadline, running
-// at most one read at a time: while a read is stuck (a hung mount), callers
-// get "" at once instead of starting another. The zero value is ready.
+// at most one read at a time. While a read is in flight (a concurrent
+// descriptor build, or a hung mount) callers get the last successfully read
+// ID if it is younger than exportIDCacheTTL, else "", at once instead of
+// starting another read. A failed read clears the cached ID. The zero value
+// is ready.
 type exportIDProbe struct {
 	mu       sync.Mutex
 	inflight bool
-	// read is the marker reader; nil uses readOrCreateExportID. Tests set it.
+	last     string
+	lastAt   time.Time
+	// read is the marker reader; nil uses readOrCreateExportID. now is the
+	// clock; nil uses time.Now. Tests set them.
 	read func(dir string) (string, error)
+	now  func() time.Time
 }
 
-// get returns the export ID read from dir, or "" when the read fails, is
-// still in progress from an earlier call, or takes longer than timeout.
+func (p *exportIDProbe) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// cachedLocked returns the last good ID if it is still fresh. p.mu is held.
+func (p *exportIDProbe) cachedLocked() string {
+	if p.last != "" && p.clock().Sub(p.lastAt) < exportIDCacheTTL {
+		return p.last
+	}
+	return ""
+}
+
+// get returns the export ID read from dir. When the read fails it returns
+// "". When an earlier read is still in flight, or this read takes longer
+// than timeout, it returns the cached last good ID (see exportIDProbe).
 func (p *exportIDProbe) get(dir string, timeout time.Duration) string {
 	p.mu.Lock()
 	if p.inflight {
+		cached := p.cachedLocked()
 		p.mu.Unlock()
-		return ""
+		return cached
 	}
 	p.inflight = true
 	read := p.read
@@ -147,6 +175,11 @@ func (p *exportIDProbe) get(dir string, timeout time.Duration) string {
 		id, err := read(dir)
 		p.mu.Lock()
 		p.inflight = false
+		if err != nil {
+			p.last = ""
+		} else {
+			p.last, p.lastAt = id, p.clock()
+		}
 		p.mu.Unlock()
 		done <- result{id, err}
 	}()
@@ -159,6 +192,8 @@ func (p *exportIDProbe) get(dir string, timeout time.Duration) string {
 		}
 		return r.id
 	case <-timer.C:
-		return ""
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cachedLocked()
 	}
 }

@@ -292,7 +292,6 @@ func (d *HTTPAgentDispatcher) applyAcceptedLaunchResponse(ctx context.Context, a
 	d.forgetRuntimeTarget(ctx, agent)
 	if resp != nil && resp.Agent != nil {
 		applyBrokerAgentConfig(agent, resp.Agent)
-		d.recordWorkspacePlacement(ctx, agent, resp.Agent.WorkspacePlacement)
 	}
 }
 

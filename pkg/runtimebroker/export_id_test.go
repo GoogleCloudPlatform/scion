@@ -34,6 +34,7 @@ import (
 // broker or another one seeing the same directory, return that UUID.
 func TestReadOrCreateExportID_CreatesOnceThenReads(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "share", "projects")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
 
 	id, err := readOrCreateExportID(dir)
 	require.NoError(t, err)
@@ -52,7 +53,7 @@ func TestReadOrCreateExportID_CreatesOnceThenReads(t *testing.T) {
 
 // Brokers racing to create the marker all end up with the same UUID.
 func TestReadOrCreateExportID_ConcurrentCreatorsAgree(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "projects")
+	dir := t.TempDir()
 	const n = 16
 	ids := make([]string, n)
 	errs := make([]error, n)
@@ -84,8 +85,69 @@ func TestReadOrCreateExportID_InvalidMarkerIsNotOverwritten(t *testing.T) {
 	require.Equal(t, "not-a-uuid\n", string(got))
 }
 
-// A read that outlives the timeout reports "", and while it is still stuck
-// later calls report "" at once without starting another read.
+// The sub-path root is never created: a missing directory is an error and
+// nothing is written (a mount that went away must not get a marker on the
+// broker's local disk under the bare mountpoint).
+func TestReadOrCreateExportID_MissingDirIsNotCreated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "share", "projects")
+	_, err := readOrCreateExportID(dir)
+	require.Error(t, err)
+	require.NoDirExists(t, dir)
+	require.NoDirExists(t, filepath.Dir(dir))
+}
+
+// A last good ID is reported while a newer read is in flight (a concurrent
+// descriptor build, or a hung mount), until it is older than the TTL; a
+// failed read clears it.
+func TestExportIDProbe_CachesLastGoodWhileInflight(t *testing.T) {
+	const good = "22222222-2222-2222-2222-222222222222"
+	now := time.Unix(1_000_000, 0)
+	var release chan struct{}
+	var fail atomic.Bool
+	p := &exportIDProbe{
+		now: func() time.Time { return now },
+		read: func(string) (string, error) {
+			if release != nil {
+				<-release
+			}
+			if fail.Load() {
+				return "", os.ErrPermission
+			}
+			return good, nil
+		},
+	}
+	waitIdle := func() {
+		require.Eventually(t, func() bool {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			return !p.inflight
+		}, time.Second, time.Millisecond)
+	}
+
+	require.Equal(t, good, p.get("d", time.Second))
+
+	release = make(chan struct{})
+	require.Equal(t, good, p.get("d", 20*time.Millisecond), "a slow read reports the cached ID")
+	require.Equal(t, good, p.get("d", time.Second), "a call during the in-flight read reports the cached ID")
+	now = now.Add(exportIDCacheTTL)
+	require.Equal(t, "", p.get("d", time.Second), "a cached ID older than the TTL is not reported")
+	close(release)
+	waitIdle()
+
+	release = nil
+	require.Equal(t, good, p.get("d", time.Second))
+	fail.Store(true)
+	require.Equal(t, "", p.get("d", time.Second))
+	waitIdle()
+	release = make(chan struct{})
+	require.Equal(t, "", p.get("d", 20*time.Millisecond), "a failed read clears the cache")
+	close(release)
+	waitIdle()
+}
+
+// With nothing cached, a read that outlives the timeout reports "", and
+// while it is still stuck later calls report "" at once without starting
+// another read.
 func TestExportIDProbe_TimeoutAndSingleInflight(t *testing.T) {
 	release := make(chan struct{})
 	var calls atomic.Int32
@@ -115,6 +177,7 @@ func healthyShareServer(t *testing.T, healthy bool) (*Server, string) {
 	t.Helper()
 	cfg := twoShareNFSConfig()
 	cfg.MountRoot = t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cfg.MountRoot, "primary", "projects"), 0o755))
 	s := &Server{config: ServerConfig{WorkspaceStorageBackend: "nfs", NFSConfig: cfg}}
 	s.nfsMountReconciler = NewNFSMountReconciler(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.nfsMountReconciler.setStatus("primary", filepath.Join(cfg.MountRoot, "primary"), healthy, "test")
@@ -152,15 +215,22 @@ func TestHeartbeat_ReportsDefaultProfile(t *testing.T) {
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Nil(t, hb.buildHeartbeat(context.Background()).DefaultProfile)
 
-	hb.defaultProfile = func() string { return "k8s" }
+	name := "k8s"
+	hb.defaultProfile = func() *string { return &name }
 	got := hb.buildHeartbeat(context.Background()).DefaultProfile
 	require.NotNil(t, got)
 	require.Equal(t, "k8s", *got)
 
-	hb.defaultProfile = func() string { return "" }
+	empty := ""
+	hb.defaultProfile = func() *string { return &empty }
 	got = hb.buildHeartbeat(context.Background()).DefaultProfile
 	require.NotNil(t, got)
 	require.Equal(t, "", *got)
+
+	// Unknown (the broker's settings failed to load): omitted, so the hub
+	// keeps its stored value.
+	hb.defaultProfile = func() *string { return nil }
+	require.Nil(t, hb.buildHeartbeat(context.Background()).DefaultProfile)
 }
 
 // HubConnection.Start wires the configured default profile into the
@@ -171,7 +241,8 @@ func TestHubConnectionStart_HeartbeatReportsDefaultProfile(t *testing.T) {
 	cfg := srv.config
 	cfg.HeartbeatEnabled = true
 	cfg.ControlChannelEnabled = false
-	cfg.DefaultProfile = "gke"
+	gke := "gke"
+	cfg.DefaultProfile = &gke
 	srv.config = cfg
 
 	srv.hubMu.RLock()

@@ -176,9 +176,10 @@ type ServerConfig struct {
 	WorkspaceStorageBackend string
 
 	// DefaultProfile is the broker's default (active) profile name from its
-	// global settings (active_profile), reported to the hub on every
-	// heartbeat. "" means the settings name no active profile.
-	DefaultProfile string
+	// settings (active_profile), reported to the hub on every heartbeat. A
+	// pointer to "" reports that the settings name no active profile; nil
+	// (settings failed to load) omits it, so the hub keeps its value.
+	DefaultProfile *string
 
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.

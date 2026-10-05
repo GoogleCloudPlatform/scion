@@ -304,6 +304,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// Load settings early so both Hub and Broker can use project-level hub.endpoint.
 	brokerSettings, err := config.LoadSettings("")
+	brokerSettingsLoaded := err == nil
 	if err != nil {
 		log.Printf("Warning: failed to load settings: %v", err)
 		brokerSettings = &config.Settings{}
@@ -512,7 +513,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := requireImageRegistryForBroker(); err != nil {
 			return err
 		}
-		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
+		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, brokerSettingsLoaded, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
 		}
 	}
@@ -2934,7 +2935,7 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 	return rt, nil
 }
 
-func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
+func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, brokerSettingsLoaded bool, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
 	if err != nil {
 		return err
@@ -3152,7 +3153,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
 		WorkspaceStorageBackend:       workspaceStorageBackend,
-		DefaultProfile:                brokerSettings.ActiveProfile,
+		DefaultProfile:                brokerHeartbeatDefaultProfile(brokerSettings, brokerSettingsLoaded),
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

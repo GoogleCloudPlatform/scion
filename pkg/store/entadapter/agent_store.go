@@ -1512,9 +1512,6 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	return tx.Commit()
 }
 
-// UpdateAgentExposedPorts applies a partial exposed-port update without using
-// the whole-record optimistic-lock path. Port registration must not race with
-// high-frequency status writes.
 // SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
 func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
 	uid, err := parseUUID(agentID)
@@ -1534,6 +1531,9 @@ func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, pl
 	return nil
 }
 
+// UpdateAgentExposedPorts applies a partial exposed-port update without using
+// the whole-record optimistic-lock path. Port registration must not race with
+// high-frequency status writes.
 func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, ports []store.ExposedPort) error {
 	uid, err := parseUUID(id)
 	if err != nil {

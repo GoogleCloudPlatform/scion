@@ -206,14 +206,36 @@ func TestAgentLaunchReport_SucceededRecordsWorkspacePlacement(t *testing.T) {
 	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
 	require.NoError(t, err)
 
+	placement := func() string {
+		t.Helper()
+		got, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		return got.WorkspacePlacement
+	}
+
+	// A succeeded report the store rejects (a stale launch ID) records nothing.
 	rec := postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
+		LaunchID: "stale-launch", InstanceID: "i1", State: "succeeded",
+		Agent: &RemoteAgentInfo{ID: agent.ID, WorkspacePlacement: api.WorkspacePlacementLocal},
+	})
+	require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "", placement(), "a rejected report must not record a placement")
+
+	rec = postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: "succeeded",
 		Agent: &RemoteAgentInfo{ID: agent.ID, WorkspacePlacement: api.WorkspacePlacementExport},
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, api.WorkspacePlacementExport, got.WorkspacePlacement)
+	assert.Equal(t, api.WorkspacePlacementExport, placement())
+
+	// The same report again is not applied (duplicate): it records nothing.
+	rec = postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "succeeded",
+		Agent: &RemoteAgentInfo{ID: agent.ID, WorkspacePlacement: api.WorkspacePlacementLocal},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"applied"`, "the repeat must not be applied")
+	assert.Equal(t, api.WorkspacePlacementExport, placement(), "a report the store did not apply must not record a placement")
 }
 
 // A move dry run between brokers whose heartbeats carried no marker or

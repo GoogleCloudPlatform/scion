@@ -74,8 +74,8 @@ func (s *Server) workspaceStorageDescriptor() *api.BrokerWorkspaceStorage {
 }
 
 // defaultProfile returns the broker's default (active) profile name, as
-// reported on every heartbeat.
-func (s *Server) defaultProfile() string {
+// reported on every heartbeat, or nil when it is unknown.
+func (s *Server) defaultProfile() *string {
 	return s.config.DefaultProfile
 }
 
