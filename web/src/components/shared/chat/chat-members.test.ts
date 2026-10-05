@@ -103,8 +103,8 @@ describe('scion-chat-members agent tooltip', () => {
   });
 
   it('renders a detail message holding markup as text, not HTML', async () => {
-    // The detail message is free text the agent reports; the hub list now
-    // carries it to the members of every readable project.
+    // The detail message is free text the agent reports, so it must render
+    // as text whatever it holds.
     await import('@shoelace-style/shoelace/dist/components/tooltip/tooltip.js');
     const message = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
     const el = await mount([agent({ detailMessage: message })]);
