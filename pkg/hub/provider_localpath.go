@@ -94,7 +94,9 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 // written by project register.
 //
 //   - A new project, or a broker that is not yet a provider, takes the
-//     requested path.
+//     requested path. For a new project it is checked again against the
+//     slug actually assigned; a global-directory path it may not hold is
+//     dropped.
 //   - A stored path that is the broker's global directory for a project
 //     other than the global project is replaced by the requested path, or
 //     cleared when the request has none, so re-running provide repairs it.
@@ -105,6 +107,15 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 // requestedPath must already have passed validateProviderLocalPath.
 func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) string {
 	if created {
+		// The request was checked against the slug register expected to
+		// assign. A concurrent register can take that slug first, so check
+		// again against the slug the new project actually got, and drop a
+		// global-directory path it may not hold.
+		if err := validateProviderLocalPath(project.Name, project.Slug, requestedPath); err != nil {
+			s.projectsLogger().Warn("dropping provider local path for new project",
+				"project_id", project.ID, "slug", project.Slug, "error", err.Error())
+			return ""
+		}
 		return requestedPath
 	}
 	existing, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)

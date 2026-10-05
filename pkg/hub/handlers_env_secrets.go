@@ -2388,11 +2388,16 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 				return
 			}
 		}
-		if target, err := s.store.GetProject(ctx, projectID); err == nil {
-			if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
-				ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
-				return
-			}
+		// The global-directory check needs the project; a lookup failure
+		// fails the request rather than skipping the check.
+		target, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
+			return
 		}
 		info, err := os.Stat(cleanPath)
 		if err != nil || !info.IsDir() {

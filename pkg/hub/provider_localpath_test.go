@@ -15,10 +15,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -324,4 +327,43 @@ func TestProjectRegister_NewGitProjectNamedGlobalRejectsGlobalDir(t *testing.T) 
 		"path":      brokerGlobalDir,
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
+// A project created by register is checked again against the slug it was
+// actually assigned: when a concurrent register took the global slug first,
+// the new project ("global-1") does not keep the global-dir path.
+func TestRegisterProviderLocalPath_NewProjectCheckedAgainstAssignedSlug(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	lost := &store.Project{ID: tid("gd-race-lost"), Name: "global (1)", Slug: "global-1"}
+	assert.Empty(t, srv.registerProviderLocalPath(ctx, lost, "broker-1", brokerGlobalDir, true))
+
+	won := &store.Project{ID: tid("gd-race-won"), Name: "global", Slug: "global"}
+	assert.Equal(t, brokerGlobalDir, srv.registerProviderLocalPath(ctx, won, "broker-1", brokerGlobalDir, true))
+
+	other := &store.Project{ID: tid("gd-race-other"), Name: "web-app", Slug: "web-app"}
+	assert.Equal(t, "/srv/web-app/.scion", srv.registerProviderLocalPath(ctx, other, "broker-1", "/srv/web-app/.scion", true))
+}
+
+// add-provider fails the request when it cannot load the project for the
+// global-dir check, instead of skipping the check.
+func TestAddProvider_ProjectLookupErrorFailsClosed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := newLocalPathTestBroker(t, s, "gd-lookup-broker")
+	project := &store.Project{ID: tid("gd-lookup-project"), Name: "gd-lookup-project", Slug: "gd-lookup-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	projectRoot := t.TempDir()
+
+	srv.store = &flakyProjectStore{Store: s, err: errors.New("db unavailable")}
+	body, err := json.Marshal(map[string]interface{}{"brokerId": broker.ID, "localPath": projectRoot})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/providers", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.addProjectProvider(w, req, project.ID)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	_, err = s.GetProjectProvider(ctx, project.ID, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no provider may be written when the check could not run")
 }
