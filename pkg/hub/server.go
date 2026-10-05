@@ -29,6 +29,7 @@ import (
 	mathrand "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -603,6 +604,9 @@ type StartExtras struct {
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
 	Workspace            WorkspaceDispatchSpec
+	// RunID is the run identity the hub minted for this start or restart;
+	// the broker labels the new runtime entry with it (ptone/scion#2550).
+	RunID string
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
@@ -634,6 +638,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.RunID != "" {
+		payload["runId"] = extras.RunID
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
@@ -674,7 +681,10 @@ type RuntimeBrokerClient interface {
 	// resolvedEnv carries fresh auth tokens and identity vars so the restarted
 	// container retains Hub connectivity.
 	// extras carries the dispatch metadata described on StartExtras.
-	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error
+	// RestartAgent returns the broker's response body when it sent one
+	// (nil when the body is empty or undecodable; the restart still
+	// succeeded), so the dispatcher can adopt the run ID it reports.
+	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error)
 
 	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
 	// brokerID is used for HMAC authentication lookup.
@@ -684,8 +694,8 @@ type RuntimeBrokerClient interface {
 	// DeleteAgent deletes an agent from a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
-	// softDelete and deletedAt are passed as query params for broker-side marking.
-	DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error
+	// opts carries the query params (see DeleteAgentOptions).
+	DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error
 
 	// MessageAgent sends a message to an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -717,6 +727,41 @@ type RuntimeBrokerClient interface {
 	// projectID is passed to enable NFS subtree cleanup (keyed by project ID).
 	// 404 responses are tolerated for idempotency.
 	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error
+}
+
+// DeleteAgentOptions carries the optional parameters of a broker agent delete.
+// SoftDelete and DeletedAt are passed as query params for broker-side
+// marking. RunID, when non-empty, is sent as runId: the broker then deletes
+// only the runtime entry labelled with that run and answers 404 (an
+// idempotent success) when only a different run holds the name
+// (ptone/scion#2550).
+type DeleteAgentOptions struct {
+	DeleteFiles  bool
+	RemoveBranch bool
+	SoftDelete   bool
+	DeletedAt    time.Time
+	RunID        string
+}
+
+// deleteAgentQuery renders opts (and the context's linked-project path) as
+// the query string both broker transports send, without a leading
+// separator.
+func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOptions) string {
+	query := fmt.Sprintf("deleteFiles=%t&removeBranch=%t", opts.DeleteFiles, opts.RemoveBranch)
+	if projectID != "" {
+		query += "&projectId=" + url.QueryEscape(projectID)
+	}
+	query += deleteProjectPathQuery(ctx)
+	if opts.RunID != "" {
+		query += "&runId=" + url.QueryEscape(opts.RunID)
+	}
+	if opts.SoftDelete {
+		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
+	}
+	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
+	// for every other existing-agent operation, so both transports send it
+	// beside runId.
+	return withRecordedRuntimeQuery(ctx, query)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
@@ -753,6 +798,11 @@ type RemoteCreateAgentRequest struct {
 	NoAuth bool `json:"noAuth,omitempty"`
 	// Attach indicates the agent should start in interactive attach mode (not detached).
 	Attach bool `json:"attach,omitempty"`
+	// RunID is the run identity the hub minted for this create; the broker
+	// labels the runtime entry with it (scion.run_id) so a later delete can
+	// target exactly this run (ptone/scion#2550). Empty for provision-only
+	// requests, which create no runtime entry.
+	RunID string `json:"runId,omitempty"`
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
@@ -996,6 +1046,10 @@ type RemoteAgentInfo struct {
 	// hub-only env drop warnings (for example a broker-local TZ that was
 	// ignored). Older brokers omit it.
 	Warnings []string `json:"warnings,omitempty"`
+	// RunID mirrors runtimebroker.AgentResponse.RunID: the run identity of
+	// the runtime entry the broker created or found (ptone/scion#2550).
+	// Older brokers omit it.
+	RunID string `json:"runId,omitempty"`
 }
 
 // Server is the Hub API HTTP server.
@@ -1124,9 +1178,8 @@ type Server struct {
 	// keysTargetLimiter is keyed per target agent. Both must allow a
 	// request; they are separate from chatSendLimiter's aggregate DM
 	// allowance (keys must not charge or evade it) and are shared by the
-	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
-	// in New and read without the lock; nil-safe. In-memory and per-Hub
-	// instance, not a distributed quota service (contract §5): N Hub
+	// /keys routes. Set once in New and read without the lock; nil-safe.
+	// In-memory and per-Hub instance, not a distributed quota service (contract §5): N Hub
 	// replicas behind a load balancer allow N times the configured rate in
 	// aggregate, and a Hub restart resets both buckets to full.
 	keysPrincipalLimiter *keysRateLimiter

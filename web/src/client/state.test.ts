@@ -134,3 +134,36 @@ describe('StateManager user-scoped notification subject', () => {
     expect(subjects).toContain('user.me.notification');
   });
 });
+
+describe('StateManager agent-feed scope', () => {
+  const subjectsFor = (
+    sm: StateManager,
+    scope: Parameters<StateManager['setScope']>[0]
+  ): string[] =>
+    (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
+
+  it('subscribes the agent-feed scope to exactly the cross-project agent subject', () => {
+    const sm = new StateManager();
+    expect(subjectsFor(sm, { type: 'agent-feed' })).toEqual(['project.*.agent.>']);
+
+    sm.setCurrentUserId('me');
+
+    // No per-user notification subject: the view connection already holds it.
+    expect(subjectsFor(sm, { type: 'agent-feed' })).toEqual(['project.*.agent.>']);
+  });
+
+  it('treats a repeated agent-feed scope as unchanged', () => {
+    const sm = new StateManager();
+    const connect = vi.fn();
+    (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
+      connect;
+
+    sm.setScope({ type: 'agent-feed' });
+    const generation = sm.scopeGeneration;
+    sm.setScope({ type: 'agent-feed' });
+
+    expect(sm.scopeGeneration).toBe(generation);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledWith(['project.*.agent.>']);
+  });
+});

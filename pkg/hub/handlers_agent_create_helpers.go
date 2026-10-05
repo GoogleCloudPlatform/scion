@@ -725,19 +725,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
 	// template-env fill above so the project tier can overwrite a template
 	// value. The hub default is never written here; see resolveAutoExposeEnv.
-	// Explicit keys come from the CreateInputs snapshot every create path
-	// takes before derivation; a config without one falls back to
-	// InlineConfig.Env, which nothing on these paths writes derived keys to.
+	// Explicit keys come from explicitEnvOf.
 	if agent.AppliedConfig != nil {
-		var explicitEnv map[string]string
-		if ci := agent.AppliedConfig.CreateInputs; ci != nil {
-			if ci.InlineConfig != nil {
-				explicitEnv = ci.InlineConfig.Env
-			}
-		} else if agent.AppliedConfig.InlineConfig != nil {
-			explicitEnv = agent.AppliedConfig.InlineConfig.Env
-		}
-		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnv)
+		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnvOf(agent.AppliedConfig))
 	}
 
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
@@ -792,6 +782,26 @@ func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, 
 		ac.Env = make(map[string]string)
 	}
 	ac.Env[api.EnvAutoExposePorts] = strconv.FormatBool(enabled)
+}
+
+// explicitEnvOf returns the requester's explicit env for ac: the
+// CreateInputs snapshot every create path takes before derivation, or, for a
+// config without CreateInputs, InlineConfig.Env, which holds explicit keys
+// only. The returned map is not a copy.
+func explicitEnvOf(ac *store.AgentAppliedConfig) map[string]string {
+	if ac == nil {
+		return nil
+	}
+	if ci := ac.CreateInputs; ci != nil {
+		if ci.InlineConfig != nil {
+			return ci.InlineConfig.Env
+		}
+		return nil
+	}
+	if ac.InlineConfig != nil {
+		return ac.InlineConfig.Env
+	}
+	return nil
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
@@ -1125,7 +1135,7 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
@@ -1134,6 +1144,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
@@ -1218,7 +1230,7 @@ func (s *Server) handleExistingAgent(
 			}
 			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				writeErrorFromErr(w, err, "")
+				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
@@ -1227,6 +1239,8 @@ func (s *Server) handleExistingAgent(
 					return res
 				}
 				switch {
+				case errors.Is(err, store.ErrDeleteInProgress):
+					deleteInProgressRefusal(existingAgent.ID).write(w)
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
 				case writeEmptyPerAgentCapabilityError(w, err):
@@ -1344,7 +1358,7 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
@@ -1352,6 +1366,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
@@ -1448,18 +1464,66 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		brokerSummaries = append([]RuntimeBrokerSummary{*defaultBrokerSummary}, brokerSummaries...)
 	}
 
+	// Every error response below lists only the brokers the caller may use
+	// for this project (online providers that pass canDispatchToBroker),
+	// default first. Computed only on error paths: it costs a dispatch check
+	// per online provider.
+	usableBrokers := func() []RuntimeBrokerSummary {
+		return s.usableBrokerSummaries(ctx, brokerSummaries, availableBrokers)
+	}
+
 	// Case 1: Explicit runtime broker specified
 	if requestedBrokerID != "" {
-		// Check if the requested broker is a provider to this project (by ID, Name, or Slug)
+
+		// acceptProvider resolves to an existing provider of this project,
+		// refusing it with 503 if its broker record shows it offline. If the
+		// broker record cannot be read (rec == nil), let it through, as
+		// brokerReachable does.
+		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
+			if rec != nil && !s.brokerRecordReachable(rec) {
+				// The broker exists but is offline: refuse at resolution,
+				// before any agent row is created (ptone/scion#2715).
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", rec.ID,
+					"status", rec.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
+				return "", store.ErrNotFound
+			}
+			return brokerID, nil
+		}
+
+		// Check if the requested broker is a provider to this project. Match
+		// the ID exactly and the name/slug case-insensitively, the same way
+		// findBrokerByIDOrSlug does, so a case variant of an existing
+		// provider never falls through to the auto-link path below (which
+		// would rewrite the provider row).
+		matchedID := ""
 		for _, p := range allProviders {
-			if p.BrokerID == requestedBrokerID || p.BrokerName == requestedBrokerID {
-				return p.BrokerID, nil
+			if p.BrokerID == requestedBrokerID || strings.EqualFold(p.BrokerName, requestedBrokerID) {
+				matchedID = p.BrokerID
+				break
 			}
-			// Fetch broker to check slug
-			broker, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-			if err == nil && broker.Slug == requestedBrokerID {
-				return broker.ID, nil
+		}
+		var matched *store.RuntimeBroker
+		var matchedErr error
+		if matchedID != "" {
+			matched, matchedErr = s.store.GetRuntimeBroker(ctx, matchedID)
+		} else {
+			// Slug lives on the broker record, so fetch per provider only
+			// when ID and name did not match.
+			for _, p := range allProviders {
+				b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
+				if err == nil && b.Slug != "" && strings.EqualFold(b.Slug, requestedBrokerID) {
+					matchedID, matched = b.ID, b
+					break
+				}
 			}
+		}
+		if matchedID != "" {
+			if matchedErr != nil {
+				matched = nil
+			}
+			return acceptProvider(matchedID, matched)
 		}
 
 		// Broker is not yet a provider — try to auto-link it.
@@ -1468,6 +1532,17 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
+			// The lookup can find a broker that already is a provider even
+			// though the passes above missed it, e.g. by its current name
+			// after a rename (provider rows keep the name from link time).
+			// Treat that as the provider match: never re-link (the upsert
+			// would rewrite the provider row) or require project update.
+			for _, p := range allProviders {
+				if p.BrokerID == broker.ID {
+					return acceptProvider(broker.ID, broker)
+				}
+			}
+
 			// Linking a new provider (and possibly setting it as the project
 			// default) changes where the project's agents may run, so it
 			// requires the same authorization as the providers-add endpoint:
@@ -1487,6 +1562,16 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				return "", store.ErrNotFound
 			}
 
+			// Do not link (or dispatch to) a broker that exists but is
+			// offline: 503 before anything is written (ptone/scion#2715).
+			if !s.brokerRecordReachable(broker) {
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
+					"status", broker.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
+				return "", store.ErrNotFound
+			}
+
 			provider := &store.ProjectProvider{
 				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
@@ -1497,7 +1582,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
 				return "", store.ErrNotFound
 			}
 			slog.Info("Auto-linked broker as project provider",
@@ -1514,11 +1599,14 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			return broker.ID, nil
 		}
 
-		// Broker doesn't exist at all
+		// Broker doesn't exist at all (not by ID, name or slug). This is a
+		// 404, not a 503: nothing is unavailable, the name is simply wrong
+		// (ptone/scion#2715). The message lists the brokers the caller can
+		// actually dispatch to for this project.
 		slog.Warn("Requested broker not found during agent creation",
 			"requestedBrokerID", requestedBrokerID, "project_id", project.ID,
 			"providerCount", len(allProviders))
-		RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+		RuntimeBrokerNotFound(w, requestedBrokerID, usableBrokers())
 		return "", store.ErrNotFound
 	}
 
@@ -1535,10 +1623,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 		}
 		// Default broker is not available or not dispatchable
-		if len(availableBrokers) > 0 {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", brokerSummaries)
+		if usable := usableBrokers(); len(usable) > 0 {
+			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", usable)
 		} else {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", brokerSummaries)
+			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", usable)
 		}
 		return "", store.ErrNotFound
 	}
@@ -1569,7 +1657,11 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
 			return allProviders[0].BrokerID, nil
 		}
-		NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", brokerSummaries)
+		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	}
 
@@ -1583,13 +1675,20 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 	switch len(dispatchable) {
 	case 0:
-		NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", brokerSummaries)
+		if len(availableBrokers) > 0 {
+			// Online brokers exist, but none the caller may use.
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else if len(allProviders) == 0 {
+			NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "None of this project's runtime brokers are online", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	case 1:
 		return dispatchable[0].ID, nil
 	default:
 		// Multiple dispatchable brokers - require explicit selection
-		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", brokerSummaries)
+		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", usableBrokers())
 		return "", store.ErrNotFound
 	}
 }
@@ -1689,6 +1788,22 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 	return availableBrokers, nil
 }
 
+// usableBrokerSummaries filters summaries (already default-first) down to the
+// brokers the caller may dispatch to, preserving order. available is the
+// project's online providers that summaries was built from.
+func (s *Server) usableBrokerSummaries(ctx context.Context, summaries []RuntimeBrokerSummary, available []store.RuntimeBroker) []RuntimeBrokerSummary {
+	usable := make([]RuntimeBrokerSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		for i := range available {
+			if available[i].ID == summary.ID && s.canDispatchToBroker(ctx, &available[i]) {
+				usable = append(usable, summary)
+				break
+			}
+		}
+	}
+	return usable
+}
+
 // findBrokerByIDOrSlug looks up a runtime broker by ID, slug, or name.
 func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*store.RuntimeBroker, error) {
 	// Try by ID first
@@ -1701,6 +1816,19 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	broker, err = s.store.GetRuntimeBrokerByName(ctx, identifier)
 	if err == nil {
 		return broker, nil
+	}
+
+	// Try by slug (case-insensitive, matching the hub-default lookup). The
+	// store has no slug index for brokers; the broker table is small, so a
+	// bounded scan is fine (same pattern as broker_quota.go).
+	result, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	for i := range result.Items {
+		if result.Items[i].Slug != "" && strings.EqualFold(result.Items[i].Slug, identifier) {
+			return &result.Items[i], nil
+		}
 	}
 
 	return nil, store.ErrNotFound

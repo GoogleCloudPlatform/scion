@@ -71,6 +71,7 @@ func setupProvisionCmd(t *testing.T, workspace, modeFlag, cloneURL string) {
 	t.Setenv("SCION_AGENT_SLUG", "")
 	t.Setenv("SCION_AGENT_BRANCH", "")
 	t.Setenv(provision.ChownBestEffortEnv, "")
+	t.Setenv(provisionStateDirEnv, "")
 	// Worktree mode sets GIT_CONFIG_* for its git commands; restore them.
 	for _, key := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
 		t.Setenv(key, "")
@@ -450,7 +451,7 @@ func TestRunProvision_WorktreeMode_DeleteThenRecreateSameName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := provision.RemoveMountedWorktree(context.Background(), workspace, "agent-1", 30*time.Second); err != nil {
+	if err := provision.RemoveMountedWorktree(context.Background(), workspace, "", "agent-1", 30*time.Second); err != nil {
 		t.Fatalf("remove on delete: %v", err)
 	}
 	if _, err := os.Lstat(provision.WorktreePath(workspace, "agent-1")); !os.IsNotExist(err) {

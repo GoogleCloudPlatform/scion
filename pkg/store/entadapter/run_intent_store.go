@@ -68,9 +68,21 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 	if isPG {
 		q = q.ForUpdate()
 	}
-	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt).Only(ctx)
+	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt,
+		agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).Only(ctx)
 	if err != nil {
 		return "", time.Time{}, mapError(err)
+	}
+	// A running intent is refused, like SetAgentRunID's run-ID write, on a
+	// row a delete holds or a soft-deleted row: that start fails with
+	// ErrDeleteInProgress before dispatch, so the intent must not say
+	// running (ptone/scion#2550). The delete claim is a write to this row,
+	// so the row lock (Postgres) or the serialised write transaction
+	// (SQLite) orders it with this read. Stopped intents are always
+	// recorded: the delete engine records one itself.
+	if intent == store.RunIntentRunning &&
+		(current.DeletedAt != nil || store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, time.Now())) {
+		return "", time.Time{}, store.ErrDeleteInProgress
 	}
 	var prior store.RunIntent
 	if current.RunIntent != nil {
@@ -136,9 +148,16 @@ func (s *AgentStore) RevertRunIntent(ctx context.Context, agentID string, from s
 	if isPG {
 		q = q.ForUpdate()
 	}
-	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt).Only(ctx)
+	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt,
+		agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).Only(ctx)
 	if err != nil {
 		return false, mapError(err)
+	}
+	// As in SwapRunIntent, a revert to running does not apply to a row a
+	// delete holds or a soft-deleted row (ptone/scion#2550).
+	if to == store.RunIntentRunning &&
+		(current.DeletedAt != nil || store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, time.Now())) {
+		return false, nil
 	}
 	// Compare in Go rather than with a SQL time equality, which depends on
 	// each backend's timestamp encoding.
