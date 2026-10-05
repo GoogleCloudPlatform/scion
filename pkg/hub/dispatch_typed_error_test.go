@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -57,6 +59,10 @@ type ownerErrDispatcher struct {
 	lifecycleTestDispatcher
 	err         error
 	beforeStart func()
+	// createResult, when set, is what create returns (with a nil error).
+	createResult *CreateDispatchResult
+	// finalizeErr, when set, is what finalize_env returns instead of err.
+	finalizeErr error
 }
 
 func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
@@ -80,10 +86,16 @@ func (d *ownerErrDispatcher) DispatchCheckAgentPrompt(ctx context.Context, a *st
 }
 func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, a *store.Agent) (*CreateDispatchResult, error) {
 	_, _ = d.lifecycleTestDispatcher.DispatchAgentCreateWithGather(ctx, a)
+	if d.createResult != nil {
+		return d.createResult, nil
+	}
 	return nil, d.err
 }
 func (d *ownerErrDispatcher) DispatchFinalizeEnv(ctx context.Context, a *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
 	_, _ = d.lifecycleTestDispatcher.DispatchFinalizeEnv(ctx, a, env)
+	if d.finalizeErr != nil {
+		return nil, d.finalizeErr
+	}
 	return nil, d.err
 }
 
@@ -408,6 +420,37 @@ func TestDispatchFailureError_EnvelopeFallbacks(t *testing.T) {
 		assert.True(t, strings.HasPrefix(err.Error(), "dispatch start failed: "))
 	})
 
+	t.Run("env still missing", func(t *testing.T) {
+		reqs := &RemoteEnvRequirementsResponse{AgentID: "a", Needs: []string{"K"}}
+		result := dispatchFailureResult(fmt.Errorf("dispatch finalize_env: %w", &ErrEnvStillMissing{Requirements: reqs}))
+		err := dispatchFailureError(row(result))
+		var missing *ErrEnvStillMissing
+		require.ErrorAs(t, err, &missing)
+		assert.Equal(t, reqs, missing.Requirements)
+	})
+
+	t.Run("env still missing without needs falls back", func(t *testing.T) {
+		assert.Empty(t, dispatchFailureResult(&ErrEnvStillMissing{Requirements: &RemoteEnvRequirementsResponse{}}))
+		for _, result := range []string{
+			`{"envStillMissing":{"agentId":"a","needs":[]}}`,
+			`{"envStillMissing":null}`,
+		} {
+			err := dispatchFailureError(row(result))
+			assert.EqualError(t, err, "dispatch start failed: dispatch start: boom")
+			var missing *ErrEnvStillMissing
+			assert.False(t, errors.As(err, &missing))
+		}
+	})
+
+	t.Run("broker error wins over env still missing", func(t *testing.T) {
+		result := dispatchFailureResult(errors.Join(typedSkillError(), &ErrEnvStillMissing{Requirements: &RemoteEnvRequirementsResponse{Needs: []string{"K"}}}))
+		err := dispatchFailureError(row(result))
+		var se *brokerStatusError
+		require.ErrorAs(t, err, &se)
+		var missing *ErrEnvStillMissing
+		assert.False(t, errors.As(err, &missing))
+	})
+
 	t.Run("no envelope for non-HTTP status", func(t *testing.T) {
 		assert.Empty(t, dispatchFailureResult(&brokerStatusError{StatusCode: 0, Body: "x"}))
 		assert.Empty(t, dispatchFailureResult(errors.New("plain")))
@@ -471,4 +514,132 @@ func TestAgentDeleteEngine_DeferredTypedFailureClassifies(t *testing.T) {
 			assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored")
 		})
 	}
+}
+
+// An error phase after the executor completed the row (the broker accepted
+// the start and the container then failed) is the outcome at once: there is
+// no failed row to wait for.
+func TestCrossNodeStart_ErrorPhaseOnDoneRowReturnsAtOnce(t *testing.T) {
+	f := newCrossNodeFixture(t, nil, true)
+	go func() {
+		require.Eventually(t, func() bool {
+			ds, _ := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
+			if len(ds) != 0 {
+				return false
+			}
+			ds2, _ := f.store.HasCompletedBrokerDispatchSince(context.Background(), f.agent.ID, "start", time.Time{})
+			return ds2
+		}, 5*time.Second, 5*time.Millisecond, "the start row never completed")
+		errored := *f.agent
+		errored.Phase = string(state.PhaseError)
+		f.events.PublishAgentStatus(context.Background(), &errored)
+	}()
+	began := time.Now()
+	err := f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered error phase during start")
+	assert.Less(t, time.Since(began), 2*time.Second, "an error phase on a done row waited for the grace")
+}
+
+// A cross-node finalize_env that still lacks required keys returns the same
+// *ErrEnvStillMissing a direct finalize returns, with its requirements.
+func TestCrossNodeFinalizeEnv_RelaysEnvStillMissing(t *testing.T) {
+	reqs := &RemoteEnvRequirementsResponse{AgentID: "a", Required: []string{"A", "B"}, Needs: []string{"B"}}
+	f := newCrossNodeFixture(t, nil, true)
+	f.ownerDisp.finalizeErr = &ErrEnvStillMissing{Requirements: reqs}
+
+	_, err := f.requester.deferredFinalizeEnv(crossNodeCtx(t), f.agent, map[string]string{"A": "v"})
+	require.Error(t, err)
+	var missing *ErrEnvStillMissing
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, reqs, missing.Requirements)
+
+	// The handler's answer for it is the single-node 422.
+	rec := httptest.NewRecorder()
+	MissingEnvVars(rec, missing.Requirements.Needs, nil)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	code, details := errorBody(t, rec)
+	assert.Equal(t, ErrCodeMissingEnvVars, code)
+	assert.Equal(t, []interface{}{"B"}, details["missingKeys"])
+}
+
+// A cross-node create whose as_needed second pass is still partial returns
+// the remaining needs for the CLI to gather, as a direct create does.
+func TestCrossNodeCreate_AsNeededPartialReturnsRemainingNeeds(t *testing.T) {
+	const hubID = "hub-as-needed"
+	f := newCrossNodeFixture(t, nil, true)
+	// The requester's own broker client defers create as well.
+	f.requester.client = &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
+	f.requester.SetHubID(hubID)
+	require.NoError(t, f.store.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID:            uuid.NewString(),
+		Key:           "AS_NEEDED_KEY",
+		Value:         "resolved",
+		Scope:         store.ScopeHub,
+		ScopeID:       hubID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	}))
+	f.ownerDisp.createResult = envReqsResult(&RemoteEnvRequirementsResponse{
+		AgentID: f.agent.ID, Required: []string{"AS_NEEDED_KEY", "USER_KEY"}, Needs: []string{"AS_NEEDED_KEY", "USER_KEY"},
+	})
+	remaining := &RemoteEnvRequirementsResponse{AgentID: f.agent.ID, Required: []string{"AS_NEEDED_KEY", "USER_KEY"}, Needs: []string{"USER_KEY"}}
+	f.ownerDisp.finalizeErr = &ErrEnvStillMissing{Requirements: remaining}
+
+	res, err := f.requester.DispatchAgentCreateWithGather(crossNodeCtx(t), f.agent)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotNil(t, res.EnvRequirements())
+	assert.Equal(t, []string{"USER_KEY"}, res.EnvRequirements().Needs)
+	assert.Equal(t, map[string]string{"AS_NEEDED_KEY": "resolved"}, f.ownerDisp.lastFinalizeEnv, "the as_needed value was sent to the owner")
+}
+
+// crossNodeHandlerServer is a hub server whose dispatcher defers every
+// lifecycle op to an owner node running the real reconcileBroker.
+func crossNodeHandlerServer(t *testing.T, ownerErr error, phase state.Phase) (*Server, *store.Agent) {
+	t.Helper()
+	srv, s := testServer(t)
+	bus := NewChannelEventPublisher()
+	t.Cleanup(bus.Close)
+	srv.events = bus
+
+	owner := &Server{
+		store:             s,
+		instanceID:        "hub-owner-" + uuid.NewString()[:8],
+		agentLifecycleLog: slog.Default(),
+		events:            bus,
+	}
+	owner.SetDispatcher(&ownerErrDispatcher{err: ownerErr})
+	owner.execDispatch = owner.executeDispatch
+	owner.deliverMsg = owner.deliverMessage
+
+	requester := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}, false, slog.Default())
+	requester.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	requester.SetCrossNodeDeps(bus, ownerSignalBus{owner: owner})
+	srv.SetDispatcher(requester)
+
+	agent := setupBrokerAgentInPhase(t, s, "xnode-"+string(phase), phase)
+	return srv, agent
+}
+
+// The lifecycle handler answers a cross-node start the broker rejected with
+// the broker's typed error, as it does for a direct start.
+func TestCrossNodeStartHandler_RelaysTypedSkillError(t *testing.T) {
+	srv, agent := crossNodeHandlerServer(t, typedSkillError(), state.PhaseStopped)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionStart), nil)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	code, details := errorBody(t, rec)
+	assert.Equal(t, skillResolutionErrorCode, code)
+	assert.Equal(t, "rate_limited", details["cause"])
+}
+
+// The lifecycle handler answers a cross-node stop the broker rejected with
+// runtime_unavailable as the retryable 503 with the broker's Retry-After.
+func TestCrossNodeStopHandler_RelaysRuntimeUnavailable(t *testing.T) {
+	srv, agent := crossNodeHandlerServer(t, typedRuntimeUnavailableError(), state.PhaseRunning)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionStop), nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "17", rec.Header().Get("Retry-After"))
+	code, _ := errorBody(t, rec)
+	assert.Equal(t, brokerCodeRuntimeUnavailable, code)
 }

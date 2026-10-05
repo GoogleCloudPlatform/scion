@@ -41,26 +41,40 @@ type dispatchBrokerError struct {
 	RetryAfter string `json:"retryAfter,omitempty"`
 }
 
-// dispatchFailureEnvelope is the JSON shape of a failed row's result.
+// dispatchFailureEnvelope is the JSON shape of a failed row's result. It
+// carries the typed failures the originating node's callers act on:
+// BrokerError is the broker's HTTP error answer; EnvStillMissing is the
+// requirements of an *ErrEnvStillMissing (a finalize that still lacks
+// required env keys). When both are present BrokerError wins.
 type dispatchFailureEnvelope struct {
-	BrokerError *dispatchBrokerError `json:"brokerError,omitempty"`
+	BrokerError     *dispatchBrokerError           `json:"brokerError,omitempty"`
+	EnvStillMissing *RemoteEnvRequirementsResponse `json:"envStillMissing,omitempty"`
 }
 
 // dispatchFailureResult returns the result to record on a failed dispatch row
-// for execErr: the broker error envelope when execErr carries the broker's
-// HTTP error answer, else "". The body is cut to maxBrokerErrorBodyBytes, the
-// same bound the HTTP transport applies when it reads an error body.
+// for execErr: an envelope carrying the broker's HTTP error answer and/or the
+// still-missing env requirements found in execErr's chain, else "". The
+// broker body is cut to maxBrokerErrorBodyBytes, the same bound the HTTP
+// transport applies when it reads an error body.
 func dispatchFailureResult(execErr error) string {
+	var env dispatchFailureEnvelope
 	var se *brokerStatusError
-	if !errors.As(execErr, &se) || !isHTTPErrorStatus(se.StatusCode) {
+	if errors.As(execErr, &se) && isHTTPErrorStatus(se.StatusCode) {
+		env.BrokerError = &dispatchBrokerError{
+			Status:     se.StatusCode,
+			Code:       se.brokerErrorCode(),
+			Body:       cutBrokerErrorBody(se.Body),
+			RetryAfter: se.RetryAfter,
+		}
+	}
+	var missing *ErrEnvStillMissing
+	if errors.As(execErr, &missing) && hasEnvNeeds(missing.Requirements) {
+		env.EnvStillMissing = missing.Requirements
+	}
+	if env.BrokerError == nil && env.EnvStillMissing == nil {
 		return ""
 	}
-	out, err := json.Marshal(dispatchFailureEnvelope{BrokerError: &dispatchBrokerError{
-		Status:     se.StatusCode,
-		Code:       se.brokerErrorCode(),
-		Body:       cutBrokerErrorBody(se.Body),
-		RetryAfter: se.RetryAfter,
-	}})
+	out, err := json.Marshal(env)
 	if err != nil {
 		return ""
 	}
@@ -68,25 +82,45 @@ func dispatchFailureResult(execErr error) string {
 }
 
 // dispatchFailureError returns the error for a failed dispatch row. When the
-// row carries a valid broker error envelope the broker's error is rebuilt and
-// wrapped, so errors.As finds the same *brokerStatusError a direct dispatch
-// returns. Otherwise the row's error text is returned, as before.
+// row carries a valid envelope the typed failure is rebuilt and wrapped, so
+// errors.As finds the same *brokerStatusError or *ErrEnvStillMissing a
+// direct dispatch returns. Otherwise the row's error text is returned, as
+// before.
 func dispatchFailureError(d *store.BrokerDispatch) error {
-	if se := brokerErrorFromResult(d.Result); se != nil {
+	env := decodeDispatchFailure(d.Result)
+	if se := brokerErrorFromEnvelope(env); se != nil {
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, se)
+	}
+	if env != nil && hasEnvNeeds(env.EnvStillMissing) {
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &ErrEnvStillMissing{Requirements: env.EnvStillMissing})
 	}
 	return fmt.Errorf("dispatch %s failed: %s", d.Op, d.Error)
 }
 
-// brokerErrorFromResult decodes a failed row's result into the broker's
-// error, or returns nil when the result is empty, not an envelope, or has a
-// status outside 400-599.
-func brokerErrorFromResult(result string) *brokerStatusError {
+// decodeDispatchFailure decodes a failed row's result, or returns nil when it
+// is empty or not an envelope.
+func decodeDispatchFailure(result string) *dispatchFailureEnvelope {
 	if result == "" {
 		return nil
 	}
 	var env dispatchFailureEnvelope
-	if err := json.Unmarshal([]byte(result), &env); err != nil || env.BrokerError == nil {
+	if err := json.Unmarshal([]byte(result), &env); err != nil {
+		return nil
+	}
+	return &env
+}
+
+// brokerErrorFromResult decodes a failed row's result into the broker's
+// error, or returns nil when the result has no valid broker error.
+func brokerErrorFromResult(result string) *brokerStatusError {
+	return brokerErrorFromEnvelope(decodeDispatchFailure(result))
+}
+
+// brokerErrorFromEnvelope rebuilds the broker's error from status, body and
+// retryAfter, or returns nil when there is none or its status is outside
+// 400-599.
+func brokerErrorFromEnvelope(env *dispatchFailureEnvelope) *brokerStatusError {
+	if env == nil || env.BrokerError == nil {
 		return nil
 	}
 	be := env.BrokerError
@@ -94,6 +128,12 @@ func brokerErrorFromResult(result string) *brokerStatusError {
 		return nil
 	}
 	return &brokerStatusError{StatusCode: be.Status, Body: be.Body, RetryAfter: be.RetryAfter}
+}
+
+// hasEnvNeeds reports whether reqs names at least one still-missing key; a
+// still-missing answer without one is not carried.
+func hasEnvNeeds(reqs *RemoteEnvRequirementsResponse) bool {
+	return reqs != nil && len(reqs.Needs) > 0
 }
 
 func isHTTPErrorStatus(code int) bool { return code >= 400 && code <= 599 }

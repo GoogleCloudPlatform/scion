@@ -95,9 +95,10 @@ var (
 // alone does not end the wait.
 //
 //   - success phase: return nil.
-//   - error phase: return the row's failure if it is failed; otherwise wait
-//     up to lifecycleErrorPhaseGrace for it to fail, then return the
-//     generic error-phase error.
+//   - error phase: return the row's failure if it is failed. While the row
+//     is still pending or in_progress, wait up to lifecycleErrorPhaseGrace
+//     for it to fail, then return the generic error-phase error. For any
+//     other row state (done, or unreadable) return that error at once.
 //   - done event: read the row; return its failure if it is failed, else
 //     keep waiting (the executor's write may have lost its CAS). The rolling
 //     window is not reset.
@@ -119,14 +120,22 @@ func waitForLifecycleOutcome(
 	doneSubject := "broker.dispatch." + dispatchID + ".done"
 	errorPhaseErr := fmt.Errorf("agent entered error phase during %s", op)
 
-	// rowFailure returns the dispatch row's failure, or nil while the row is
-	// not failed (or cannot be read; a later read retries).
-	rowFailure := func() error {
+	// readRow returns the dispatch row's state and, when it is failed, its
+	// failure. A row that cannot be read reports state "" (a later read
+	// retries).
+	readRow := func() (string, error) {
 		d, err := st.GetBrokerDispatch(ctx, dispatchID)
-		if err != nil || d.State != store.DispatchStateFailed {
-			return nil
+		if err != nil {
+			return "", nil
 		}
-		return dispatchFailureError(d)
+		if d.State != store.DispatchStateFailed {
+			return d.State, nil
+		}
+		return d.State, dispatchFailureError(d)
+	}
+	rowFailure := func() error {
+		_, err := readRow()
+		return err
 	}
 
 	timer := time.NewTimer(lifecycleRollingTimeout)
@@ -173,8 +182,15 @@ func waitForLifecycleOutcome(
 			if status.Phase != "error" {
 				return nil
 			}
-			if err := rowFailure(); err != nil {
+			rowState, err := readRow()
+			if err != nil {
 				return err
+			}
+			if rowState != store.DispatchStatePending && rowState != store.DispatchStateInProgress {
+				// The executor has finished without failing the row (the
+				// broker accepted the op), or the row cannot be read: the
+				// error phase is the outcome.
+				return errorPhaseErr
 			}
 			if grace == nil {
 				graceTimer = time.NewTimer(lifecycleErrorPhaseGrace)
