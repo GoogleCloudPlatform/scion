@@ -17,16 +17,22 @@
 package hub
 
 // Property-style test over the workstation server-config PUT (review
-// phase4-r4 B): bodies are generated from combinations of Layer-0 / file-only
-// leaves (zero, non-zero, null, absent) and block nulls, against several seed
-// files, and every response must satisfy:
+// phase4-r4 B, oracle made independent in r5 N1).
 //
-//	(i)   every sent leaf is reflected in the settings the hub loads, or the
-//	      request returned 4xx naming keys (and wrote nothing);
-//	(ii)  every leaf not sent (and not under a sent null) is unchanged,
-//	      including the effective CORS switch when a cors block is created;
-//	(iii) broker_id/broker_token survive;
-//	(iv)  a pure echo of the GET body writes nothing.
+// Bodies are generated from combinations of Layer-0 / file-only leaves
+// (zero, non-zero, null, absent) and block nulls against several seed files.
+// Every generated value is valid, so every PUT must return 200. The oracle
+// does not use the implementation's own model: for each body it builds the
+// expected settings.yaml by plain map edits on the seed (set the value as
+// sent; null deletes, except that a null on a block holding the hub-owned
+// broker identity keeps it; creating a cors block without enabled keeps the
+// current CORS switch, read from the real loader), then loads the actual
+// file and the expected file with the real loaders (config.LoadGlobalConfig,
+// the hub's server config, and config.LoadVersionedSettings, the settings
+// the rest of scion reads) and requires identical results. It also checks:
+//
+//	(iii) the loaded broker ID and token are unchanged;
+//	(iv)  a pure echo of the GET body leaves the file bytes identical.
 
 import (
 	"encoding/json"
@@ -35,6 +41,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -51,16 +58,26 @@ type propLeaf struct {
 }
 
 var propLeaves = []propLeaf{
+	{[]string{"server", "mode"}, "", "workstation"},
 	{[]string{"server", "log_format"}, "", "json"},
 	{[]string{"server", "log_level"}, "", "debug"},
 	{[]string{"server", "hub", "port"}, 0, 9999},
 	{[]string{"server", "hub", "cors", "enabled"}, false, true},
 	{[]string{"server", "hub", "cors", "allowed_origins"}, []string{}, []string{"https://x.example"}},
+	{[]string{"server", "hub", "cors", "allowed_methods"}, []string{}, []string{"GET"}},
+	{[]string{"server", "hub", "cors", "allowed_headers"}, []string{}, []string{"X-A"}},
 	{[]string{"server", "broker", "auto_provide"}, false, true},
 	{[]string{"server", "broker", "port"}, 0, 9800},
+	{[]string{"server", "broker", "cors", "enabled"}, false, true},
+	{[]string{"server", "broker", "cors", "allowed_origins"}, []string{}, []string{"https://b.example"}},
 	{[]string{"server", "auth", "dev_mode"}, false, true},
+	{[]string{"server", "auth", "dev_token"}, "", "tok-x"},
 	{[]string{"server", "storage", "bucket"}, "", "bkt"},
+	{[]string{"server", "secrets", "gcp_replication_locations"}, []string{}, []string{"us-central1"}},
 	{[]string{"server", "message_broker", "enabled"}, false, true},
+	{[]string{"server", "message_broker", "types"}, []string{}, []string{"inprocess"}},
+	{[]string{"server", "native_chat", "enabled"}, false, true},
+	{[]string{"server", "scheduler", "max_concurrency"}, 0, 4},
 	{[]string{"active_profile"}, "", "dev"},
 	{[]string{"workspace_path"}, "", "/ws"},
 	{[]string{"auto_inject_gcloud_adc"}, false, true},
@@ -70,6 +87,7 @@ var propLeaves = []propLeaf{
 var propBlockNulls = [][]string{
 	{"server", "storage"},
 	{"server", "hub", "cors"},
+	{"server", "broker", "cors"},
 	{"server", "broker"},
 	{"server"},
 }
@@ -88,6 +106,7 @@ active_profile: local
 workspace_path: /work
 auto_inject_gcloud_adc: true
 server:
+  mode: workstation
   log_format: text
   log_level: info
   hub:
@@ -96,20 +115,31 @@ server:
       enabled: true
       allowed_origins:
         - https://a.example
+      allowed_methods: [GET, POST]
   broker:
     enabled: true
     port: 9810
     auto_provide: false
     broker_id: b-1
     broker_token: tok-1
+    cors:
+      enabled: false
   auth:
     dev_mode: true
+    dev_token: s3cret
   storage:
     provider: gcs
     bucket: my-bucket
+  secrets:
+    gcp_replication_locations: [europe-west1]
   message_broker:
     enabled: true
     type: inprocess
+    types: [inprocess]
+  native_chat:
+    enabled: false
+  scheduler:
+    max_concurrency: 8
 `,
 	"empty-blocks": `schema_version: "1"
 server:
@@ -125,7 +155,7 @@ server:
 
 type propSent struct {
 	path  []string
-	value interface{} // nil means JSON null
+	value interface{}
 	null  bool
 }
 
@@ -151,25 +181,6 @@ func propBody(sent []propSent) string {
 	return string(b)
 }
 
-// propTyped decodes settings bytes into VersionedSettings.
-func propTyped(t *testing.T, data []byte) *config.VersionedSettings {
-	t.Helper()
-	var vs config.VersionedSettings
-	if err := yamlv3.Unmarshal(data, &vs); err != nil {
-		t.Fatalf("decode: %v\n%s", err, data)
-	}
-	return &vs
-}
-
-func propValueAt(vs *config.VersionedSettings, path []string) reflect.Value {
-	v, _ := valueAtJSONPath(reflect.ValueOf(vs).Elem(), path)
-	return v
-}
-
-func propEquivalent(a reflect.Value, b interface{}) bool {
-	return jsonValuesEquivalent(a, reflect.ValueOf(b))
-}
-
 // propBodies returns every single-leaf body (zero, non-zero, null) and every
 // block null, plus n random combinations of up to 5 leaves.
 func propBodies(rng *rand.Rand, n int) [][]propSent {
@@ -186,9 +197,8 @@ func propBodies(rng *rand.Rand, n int) [][]propSent {
 	}
 	for i := 0; i < n; i++ {
 		k := 1 + rng.Intn(5)
-		perm := rng.Perm(len(propLeaves))[:k]
 		var body []propSent
-		for _, idx := range perm {
+		for _, idx := range rng.Perm(len(propLeaves))[:k] {
 			l := propLeaves[idx]
 			switch rng.Intn(3) {
 			case 0:
@@ -199,13 +209,16 @@ func propBodies(rng *rand.Rand, n int) [][]propSent {
 				body = append(body, propSent{path: l.path, null: true})
 			}
 		}
-		// A JSON object cannot carry both a leaf and a null on one of its
-		// ancestors; keep the first of any such conflict.
+		if rng.Intn(4) == 0 {
+			body = append(body, propSent{path: propBlockNulls[rng.Intn(len(propBlockNulls))], null: true})
+		}
 		out = append(out, dedupePropBody(body))
 	}
 	return out
 }
 
+// dedupePropBody drops entries that conflict with an earlier one (a JSON
+// object cannot carry both a leaf and a null on one of its ancestors).
 func dedupePropBody(body []propSent) []propSent {
 	var out []propSent
 	for _, s := range body {
@@ -222,13 +235,247 @@ func dedupePropBody(body []propSent) []propSent {
 	return out
 }
 
-func propUnderSentNull(path []string, sent []propSent) bool {
-	for _, s := range sent {
-		if s.null && pathHasPrefixPath(path, s.path) {
-			return true
+// --- Reference model: plain map edits on the seed ---
+
+func refMapAt(m map[string]interface{}, path []string) (map[string]interface{}, bool) {
+	cur := m
+	for _, k := range path {
+		next, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+func refSet(m map[string]interface{}, path []string, v interface{}) {
+	cur := m
+	for _, k := range path[:len(path)-1] {
+		next, ok := cur[k].(map[string]interface{})
+		if !ok {
+			next = map[string]interface{}{}
+			cur[k] = next
+		}
+		cur = next
+	}
+	cur[path[len(path)-1]] = v
+}
+
+// refDelete removes path; when hub-owned keys live under it, it removes
+// everything else and keeps them (the documented null semantics).
+func refDelete(m map[string]interface{}, path []string) {
+	parent, ok := refMapAt(m, path[:len(path)-1])
+	if !ok {
+		return
+	}
+	last := path[len(path)-1]
+	var keep [][]string
+	for _, owned := range hubOwnedBrokerPaths {
+		if len(owned) > len(path) && pathHasPrefixPath(owned, path) {
+			keep = append(keep, owned[len(path):])
 		}
 	}
-	return false
+	if len(keep) == 0 {
+		delete(parent, last)
+		return
+	}
+	block, ok := parent[last].(map[string]interface{})
+	if !ok {
+		delete(parent, last)
+		return
+	}
+	refKeepOnly(block, keep)
+}
+
+func refKeepOnly(block map[string]interface{}, keep [][]string) {
+	for k, v := range block {
+		var sub [][]string
+		whole := false
+		for _, kp := range keep {
+			if kp[0] == k {
+				if len(kp) == 1 {
+					whole = true
+				} else {
+					sub = append(sub, kp[1:])
+				}
+			}
+		}
+		switch {
+		case whole:
+		case len(sub) > 0:
+			if child, ok := v.(map[string]interface{}); ok {
+				refKeepOnly(child, sub)
+			} else {
+				delete(block, k)
+			}
+		default:
+			delete(block, k)
+		}
+	}
+}
+
+// propReference builds the expected settings file for body sent on seed.
+// corsOn holds the CORS switches of the seed as the real loader sees them.
+func propReference(t *testing.T, seed string, sent []propSent, hubCORSOn, brokerCORSOn bool) []byte {
+	t.Helper()
+	m := map[string]interface{}{}
+	if strings.TrimSpace(seed) != "" {
+		if err := yamlv3.Unmarshal([]byte(seed), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m == nil {
+			m = map[string]interface{}{}
+		}
+	}
+	sentPaths := map[string]bool{}
+	for _, s := range sent {
+		sentPaths[strings.Join(s.path, ".")] = true
+	}
+	for _, block := range []struct {
+		path    []string
+		current bool
+	}{{[]string{"server", "hub", "cors"}, hubCORSOn}, {[]string{"server", "broker", "cors"}, brokerCORSOn}} {
+		_, exists := refMapAt(m, block.path)
+		creates := false
+		for _, s := range sent {
+			if !s.null && len(s.path) > len(block.path) && pathHasPrefixPath(s.path, block.path) {
+				creates = true
+			}
+		}
+		if !exists && creates && !sentPaths[strings.Join(block.path, ".")+".enabled"] {
+			refSet(m, append(append([]string{}, block.path...), "enabled"), block.current)
+		}
+	}
+	for _, s := range sent {
+		if s.null {
+			refDelete(m, s.path)
+		} else {
+			refSet(m, s.path, s.value)
+		}
+	}
+	if _, ok := m["schema_version"]; !ok && len(m) > 0 {
+		m["schema_version"] = "1"
+	}
+	out, err := yamlv3.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// propLoaded is what the real loaders produce from the global settings file.
+type propLoaded struct {
+	Server   *config.GlobalConfig
+	Settings *config.VersionedSettings
+}
+
+func propLoad(t *testing.T, globalDir string) propLoaded {
+	t.Helper()
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig: %v", err)
+	}
+	vs, err := config.LoadVersionedSettings(globalDir)
+	if err != nil {
+		t.Fatalf("LoadVersionedSettings: %v", err)
+	}
+	return propLoaded{Server: gc, Settings: vs}
+}
+
+// propPrune turns a decoded JSON value into its canonical form: empty
+// arrays and maps become nil and keys holding nil are dropped, recursively.
+// Scalars are kept as they are, so false, 0 and "" stay distinct from an
+// absent key (a *bool such as auto_provide must keep false).
+func propPrune(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		out := map[string]interface{}{}
+		for k, c := range t {
+			if p := propPrune(c); p != nil {
+				out[k] = p
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []interface{}:
+		if len(t) == 0 {
+			return nil
+		}
+		out := make([]interface{}, len(t))
+		for i, c := range t {
+			out[i] = propPrune(c)
+		}
+		return out
+	}
+	return v
+}
+
+// propDiff lists the JSON paths where two loaded results differ, after
+// propPrune. Paths in ignore (loader-path artifacts) are skipped.
+func propDiff(a, b interface{}, ignore map[string]bool) []string {
+	var am, bm interface{}
+	ab, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	_ = json.Unmarshal(ab, &am)
+	_ = json.Unmarshal(bb, &bm)
+	am, bm = propPrune(am), propPrune(bm)
+	var out []string
+	var walk func(p string, x, y interface{})
+	walk = func(p string, x, y interface{}) {
+		if ignore[p] {
+			return
+		}
+		xm, xok := x.(map[string]interface{})
+		ym, yok := y.(map[string]interface{})
+		if xok || yok {
+			keys := map[string]bool{}
+			for k := range xm {
+				keys[k] = true
+			}
+			for k := range ym {
+				keys[k] = true
+			}
+			for k := range keys {
+				walk(p+"."+k, xm[k], ym[k])
+			}
+			return
+		}
+		if !reflect.DeepEqual(x, y) {
+			out = append(out, fmt.Sprintf("%s: %v != %v", p, x, y))
+		}
+	}
+	walk("", am, bm)
+	sort.Strings(out)
+	return out
+}
+
+// propDiffPaths returns the set of paths where a and b differ.
+func propDiffPaths(a, b interface{}) map[string]bool {
+	out := map[string]bool{}
+	for _, d := range propDiff(a, b, nil) {
+		out[d[:strings.Index(d, ":")]] = true
+	}
+	return out
+}
+
+// propHasServerKey reports whether settings bytes have a non-null server
+// key, which decides whether LoadGlobalConfig reads settings.yaml or falls
+// back to its legacy path.
+func propHasServerKey(data []byte) bool {
+	var m map[string]interface{}
+	_ = yamlv3.Unmarshal(data, &m)
+	return m["server"] != nil
+}
+
+// propBrokerIdentity returns the loaded broker ID and token.
+func propBrokerIdentity(vs *config.VersionedSettings) [2]string {
+	if vs == nil || vs.Server == nil || vs.Server.Broker == nil {
+		return [2]string{}
+	}
+	return [2]string{vs.Server.Broker.BrokerID, vs.Server.Broker.BrokerToken}
 }
 
 func TestWorkstation_PutServerConfig_Property(t *testing.T) {
@@ -245,147 +492,83 @@ func TestWorkstation_PutServerConfig_Property(t *testing.T) {
 		seed := propSeeds[seedName]
 		t.Run(seedName, func(t *testing.T) {
 			settingsPath := tempSettingsHome(t)
+			globalDir := filepath.Dir(settingsPath)
 			srv, _, _ := newSQLiteHubInMode(t, true, nil)
-			write := func() {
-				if seed == "" {
+			writeFile := func(data string) {
+				if data == "" {
 					_ = os.Remove(settingsPath)
 					return
 				}
-				if err := os.WriteFile(settingsPath, []byte(seed), 0o644); err != nil {
+				if err := os.WriteFile(settingsPath, []byte(data), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			read := func() []byte {
-				data, err := os.ReadFile(settingsPath)
-				if err != nil {
-					return nil
-				}
-				return data
+			read := func() string {
+				data, _ := os.ReadFile(settingsPath)
+				return string(data)
 			}
 
+			// Loader-path artifacts, measured from the real loader: what
+			// differs between no server key (legacy path) and an empty one.
+			// They are ignored only when exactly one of the actual and the
+			// expected file has a server key, e.g. when the hub skipped an
+			// edit that changes nothing but the reference still writes it.
+			writeFile("")
+			noServer := propLoad(t, globalDir)
+			writeFile("schema_version: \"1\"\nserver: {}\n")
+			emptyServer := propLoad(t, globalDir)
+			artifactsServer := propDiffPaths(noServer.Server, emptyServer.Server)
+			artifactsSettings := propDiffPaths(noServer.Settings, emptyServer.Settings)
+
+			writeFile(seed)
+			seedLoaded := propLoad(t, globalDir)
+
 			// (iv) a pure echo of the GET body writes nothing.
-			write()
 			getRR := httptest.NewRecorder()
 			srv.handleAdminServerConfig(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
 			before := read()
 			if rr := putServerConfig(t, srv, getRR.Body.String()); rr.Code != http.StatusOK {
 				t.Fatalf("echo: %d %s", rr.Code, rr.Body.String())
 			}
-			if after := read(); string(after) != string(before) {
+			if after := read(); after != before {
 				t.Errorf("(iv) echo rewrote settings.yaml:\n%s", after)
 			}
 			cases++
 
 			for _, sent := range bodies {
-				write()
-				before := read()
-				beforeTyped := propTyped(t, before)
-				beforeEff, err := config.SettingsFileEffective(before)
-				if err != nil {
-					t.Fatal(err)
-				}
+				cases++
+				writeFile(seed)
 				body := propBody(sent)
 				rr := putServerConfig(t, srv, body)
-				after := read()
-				cases++
-
+				// Every generated value is valid: a 4xx is a false rejection.
 				if rr.Code != http.StatusOK {
-					// (i) a 4xx must name keys and write nothing.
-					var resp struct {
-						Keys  []string    `json:"keys"`
-						Error interface{} `json:"error"`
-					}
-					_ = json.Unmarshal(rr.Body.Bytes(), &resp)
-					if rr.Code < 400 || rr.Code >= 500 || len(resp.Keys) == 0 {
-						t.Errorf("%s: %d without naming keys: %s", body, rr.Code, rr.Body.String())
-					}
-					if string(after) != string(before) {
-						t.Errorf("%s: rejected PUT wrote settings.yaml", body)
-					}
+					t.Errorf("%s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
 					continue
 				}
+				actualBytes := []byte(read())
+				actual := propLoad(t, globalDir)
 
-				afterTyped := propTyped(t, after)
-				afterEff, err := config.SettingsFileEffective(after)
-				if err != nil {
-					t.Fatal(err)
-				}
+				ref := propReference(t, seed, sent, seedLoaded.Server.Hub.CORSEnabled, seedLoaded.Server.RuntimeBroker.CORSEnabled)
+				writeFile(string(ref))
+				expected := propLoad(t, globalDir)
 
-				// (i) every sent leaf is reflected.
-				for _, s := range sent {
-					got := propValueAt(afterTyped, s.path)
-					switch {
-					case s.null && strings.Join(s.path, ".") != "server" && strings.Join(s.path, ".") != "server.broker":
-						if !propEquivalent(got, nil) {
-							t.Errorf("%s: (i) %s should be cleared, got %v", body, strings.Join(s.path, "."), got)
-						}
-					case !s.null:
-						if !propEquivalent(got, s.value) {
-							t.Errorf("%s: (i) %s = %v, sent %v", body, strings.Join(s.path, "."), got, s.value)
-						}
-					}
+				var ignoreServer, ignoreSettings map[string]bool
+				if propHasServerKey(actualBytes) != propHasServerKey(ref) {
+					ignoreServer, ignoreSettings = artifactsServer, artifactsSettings
 				}
-				// Effective checks for the leaves whose meaning the loader
-				// changes (cors switch and lists, koanf-merged top keys).
-				for _, s := range sent {
-					if s.null {
-						continue
-					}
-					switch strings.Join(s.path, ".") {
-					case "server.hub.cors.enabled":
-						if afterEff.Server.Hub.CORSEnabled != s.value.(bool) {
-							t.Errorf("%s: (i) effective hub CORS = %v, sent %v", body, afterEff.Server.Hub.CORSEnabled, s.value)
-						}
-					case "server.hub.cors.allowed_origins":
-						if fmt.Sprint(afterEff.Server.Hub.CORSAllowedOrigins) != fmt.Sprint(s.value) {
-							t.Errorf("%s: (i) effective origins = %v, sent %v", body, afterEff.Server.Hub.CORSAllowedOrigins, s.value)
-						}
-					case "active_profile":
-						if afterEff.ActiveProfile != s.value.(string) {
-							t.Errorf("%s: (i) effective active_profile = %q, sent %q", body, afterEff.ActiveProfile, s.value)
-						}
-					case "workspace_path":
-						if afterEff.WorkspacePath != s.value.(string) {
-							t.Errorf("%s: (i) effective workspace_path = %q, sent %q", body, afterEff.WorkspacePath, s.value)
-						}
-					}
+				if d := propDiff(actual.Server, expected.Server, ignoreServer); len(d) > 0 {
+					t.Errorf("%s: loaded server config differs from the reference:\n  %s", body, strings.Join(d, "\n  "))
 				}
-
-				// (ii) every unsent leaf is unchanged.
-				sentPaths := map[string]bool{}
-				for _, s := range sent {
-					sentPaths[strings.Join(s.path, ".")] = true
+				if d := propDiff(actual.Settings, expected.Settings, ignoreSettings); len(d) > 0 {
+					t.Errorf("%s: loaded settings differ from the reference:\n  %s", body, strings.Join(d, "\n  "))
 				}
-				for _, l := range propLeaves {
-					if sentPaths[strings.Join(l.path, ".")] || propUnderSentNull(l.path, sent) {
-						continue
-					}
-					// cors.enabled is checked on the effective switch below:
-					// creating the block writes the current value (on), which
-					// differs from the typed zero of the absent block.
-					if strings.Join(l.path, ".") == "server.hub.cors.enabled" && (beforeTyped.Server == nil || beforeTyped.Server.Hub == nil || beforeTyped.Server.Hub.CORS == nil) {
-						continue
-					}
-					b, a := propValueAt(beforeTyped, l.path), propValueAt(afterTyped, l.path)
-					if !jsonValuesEquivalent(b, a) {
-						t.Errorf("%s: (ii) unsent %s changed %v -> %v", body, strings.Join(l.path, "."), b, a)
-					}
-				}
-				if !sentPaths["server.hub.cors.enabled"] && !propUnderSentNull([]string{"server", "hub", "cors", "enabled"}, sent) &&
-					afterEff.Server.Hub.CORSEnabled != beforeEff.Server.Hub.CORSEnabled {
-					t.Errorf("%s: (ii) effective hub CORS changed %v -> %v without enabled being sent",
-						body, beforeEff.Server.Hub.CORSEnabled, afterEff.Server.Hub.CORSEnabled)
-				}
-
-				// (iii) hub-owned broker identity survives.
-				for _, p := range hubOwnedBrokerPaths {
-					b, a := propValueAt(beforeTyped, p), propValueAt(afterTyped, p)
-					if !jsonValuesEquivalent(b, a) {
-						t.Errorf("%s: (iii) %s changed %v -> %v", body, strings.Join(p, "."), b, a)
-					}
+				// (iii) the hub-owned broker identity survives.
+				if a, b := propBrokerIdentity(actual.Settings), propBrokerIdentity(seedLoaded.Settings); a != b {
+					t.Errorf("%s: (iii) broker identity changed: %v -> %v", body, b, a)
 				}
 			}
 		})
 	}
-	t.Logf("property cases: %d (bodies per seed: %d + 1 echo, seeds: %d)", cases, len(bodies), len(propSeeds))
+	t.Logf("property cases: %d (bodies per seed: %d + 1 echo, seeds: %d, leaves: %d, block nulls: %d)",
+		cases, len(bodies), len(propSeeds), len(propLeaves), len(propBlockNulls))
 }
