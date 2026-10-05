@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -72,6 +73,9 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 		wantID            string
 		wantGlobal        bool
 		wantErr           string
+		// wantNoGlobalLookup fails the case if the hub Global project is
+		// looked up.
+		wantNoGlobalLookup bool
 	}
 
 	cases := []testCase{
@@ -140,6 +144,15 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 			wantID:          globalLocalID,
 			wantGlobal:      true,
 		},
+		{
+			// Only an explicit global target looks up the hub Global
+			// project; without a flag the ID stays empty.
+			name:               "no flag, no project ID anywhere, hub has Global",
+			hubHasGlobal:       true,
+			wantID:             "",
+			wantGlobal:         true,
+			wantNoGlobalLookup: true,
+		},
 		// --- ptone/scion#3124: -g global with no project ID anywhere ---
 		{
 			name:         "-g global, no env project, hub Global project",
@@ -172,6 +185,7 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var globalLookups atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
@@ -181,6 +195,7 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 					var projects []hubclient.Project
 					switch q := r.URL.Query(); {
 					case q.Get("slug") == "global" && tc.hubHasGlobal:
+						globalLookups.Add(1)
 						projects = append(projects, hubclient.Project{ID: hubGlobalProjectID, Name: "Global", Slug: "global"})
 					case q.Get("name") != "" && tc.hubHasNamedGlobal:
 						projects = append(projects, hubclient.Project{ID: "hub-named-global-id", Name: "Global", Slug: "global-team"})
@@ -267,6 +282,9 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 			}
 			if hubCtx.IsGlobal != tc.wantGlobal {
 				t.Errorf("EnsureHubReady(%q).IsGlobal = %v, want %v", flag, hubCtx.IsGlobal, tc.wantGlobal)
+			}
+			if n := globalLookups.Load(); tc.wantNoGlobalLookup && n != 0 {
+				t.Errorf("EnsureHubReady(%q) looked up the hub Global project %d time(s), want none", flag, n)
 			}
 		})
 	}
