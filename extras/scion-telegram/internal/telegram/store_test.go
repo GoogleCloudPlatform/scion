@@ -383,6 +383,10 @@ func TestStore_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
 	testProjectAgentsExpiredNotServed(t, newTestStore(t))
 }
 
+func TestStore_ProjectAgents_EmptyUserNotServed(t *testing.T) {
+	testProjectAgentsEmptyUserNotServed(t, newTestStore(t))
+}
+
 func TestStore_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -539,6 +543,17 @@ func testProjectAgentsExpiredNotServed(t *testing.T, store Store) {
 	kept, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-2")
 	require.NoError(t, err)
 	assert.NotNil(t, kept, "a row within retention is served")
+}
+
+// testProjectAgentsEmptyUserNotServed checks that a row stored under an
+// empty user is never returned.
+func testProjectAgentsEmptyUserNotServed(t *testing.T, store Store) {
+	t.Helper()
+	rawAgentCache(t, store).insert(t, "", "proj-1", time.Now())
+
+	got, err := store.GetProjectAgents(context.Background(), "", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "no list without a user")
 }
 
 // testProjectAgentsDropsProjectKeyedCache checks that a list cached per

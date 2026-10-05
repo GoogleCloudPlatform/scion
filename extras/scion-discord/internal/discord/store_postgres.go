@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS discord_conversation_context (
 
 -- The agent-list cache was keyed by project only; it is now keyed by user
 -- and project. The old table only held a cache, so it is dropped.
+-- TODO: remove this DROP one release after the per-user cache ships.
 DROP TABLE IF EXISTS discord_project_agents;
 
 CREATE TABLE IF NOT EXISTS discord_user_project_agents (

@@ -205,6 +205,10 @@ func TestPostgres_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
 	testProjectAgentsEviction(t, newCleanPostgresStore(t))
 }
 
+func TestPostgres_ProjectAgents_EmptyUserNotServed(t *testing.T) {
+	testProjectAgentsEmptyUserNotServed(t, newCleanPostgresStore(t))
+}
+
 func TestPostgres_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
 	testProjectAgentsExpiredNotServed(t, newCleanPostgresStore(t))
 }
@@ -224,7 +228,7 @@ func TestPostgres_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
 	store := newCleanPostgresStore(t)
 
 	var oldTables int
-	require.NoError(t, db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'discord_project_agents'`).Scan(&oldTables))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'discord_project_agents'`).Scan(&oldTables))
 	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
 	testProjectAgentsDropsProjectKeyedCache(t, store)
 }
