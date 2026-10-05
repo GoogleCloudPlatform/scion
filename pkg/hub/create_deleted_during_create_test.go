@@ -21,8 +21,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,4 +151,62 @@ func TestSyncCreate_ProvisionOnly_NoDelete_Answers201(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Agent)
 	assert.Equal(t, sent.ID, resp.Agent.ID)
+}
+
+// Provision-only with a delete that holds the row but has not finished
+// (a live deleting lease) when the broker provision answers: 409 too.
+func TestSyncCreate_ProvisionOnly_DeleteClaimed_Answers409(t *testing.T) {
+	srv, s, project, client, _ := newRunBrokerServer(t)
+	pub := recordCreatedEvents(t, srv)
+
+	var sent *RemoteCreateAgentRequest
+	client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		sent = req
+		claimForTest(t, s, req.ID, store.DeletionStateDeleting, time.Minute)
+		return &RemoteAgentResponse{
+			Agent:   &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: string(state.PhaseCreated)},
+			Created: true,
+		}, nil, nil
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "held-provision", "projectId": project.ID, "provisionOnly": true,
+	})
+	require.NotNil(t, sent, "dispatch ran: %d %s", rec.Code, rec.Body.String())
+	requireDeletedDuringCreate(t, rec, sent.ID)
+	assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
+	assert.Equal(t, store.DeletionStateDeleting, mustGetAgent(t, s, sent.ID).DeletionState, "the claim is untouched")
+}
+
+// The hub's re-reads fail after the broker answered (a database outage):
+// the create cannot tell whether a delete won, so it treats the agent as
+// live, as the created publish does, and answers 201 with the agent. A
+// transient store error must not tell a client a live agent is gone.
+func TestSyncCreate_ReReadFails_Answers201(t *testing.T) {
+	srv, s, project, client, broker := newRunBrokerServer(t)
+	pub := recordCreatedEvents(t, srv)
+	fs := &failingGetStore{Store: s}
+	srv.store = fs
+
+	var sent *RemoteCreateAgentRequest
+	client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		sent = req
+		broker.land(req.RunID)
+		// The handler's store fails from here on; the dispatcher's own
+		// store (used by the compensation check) is unaffected.
+		fs.fail = true
+		return syncRunningAnswer(req), nil, nil
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "reread-fails", "projectId": project.ID, "task": "do it",
+	})
+	require.NotNil(t, sent, "dispatch ran: %d %s", rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	assert.Equal(t, sent.ID, resp.Agent.ID, "the agent body is returned")
+	assert.Equal(t, 1, pub.count("created"), "created is published: %v", pub.kinds())
+	assert.Empty(t, broker.deletes, "no compensating delete")
 }
