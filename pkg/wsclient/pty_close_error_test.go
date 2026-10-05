@@ -166,6 +166,27 @@ func TestBuildWebSocketURL_KeepsEndpointPathPrefix(t *testing.T) {
 	}
 }
 
+func TestJoinEndpointPath(t *testing.T) {
+	tests := []struct {
+		prefix, apiPath, want string
+	}{
+		{"", "/api/v1/x", "/api/v1/x"},
+		{"", "api/v1/x", "/api/v1/x"},
+		{"/", "/api/v1/x", "/api/v1/x"},
+		{"/", "api/v1/x", "/api/v1/x"},
+		{"/scion", "/api/v1/x", "/scion/api/v1/x"},
+		{"/scion", "api/v1/x", "/scion/api/v1/x"},
+		{"/scion/", "/api/v1/x", "/scion/api/v1/x"},
+		{"/scion/", "api/v1/x", "/scion/api/v1/x"},
+		{"/a/b//", "//api/v1/x", "/a/b/api/v1/x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.prefix+"+"+tc.apiPath, func(t *testing.T) {
+			assert.Equal(t, tc.want, joinEndpointPath(tc.prefix, tc.apiPath))
+		})
+	}
+}
+
 func TestConnect_PrefixedEndpointDialsPrefixedPath(t *testing.T) {
 	var gotPath string
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}

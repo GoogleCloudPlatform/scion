@@ -254,10 +254,12 @@ func (c *PTYClient) buildWebSocketURL() (string, error) {
 	return u.String(), nil
 }
 
-// joinEndpointPath appends an API path to the endpoint's own path prefix,
-// dropping a trailing slash on the prefix so the result never has "//".
+// joinEndpointPath appends an API path to the endpoint's own path prefix.
+// It strips any slashes at the end of the prefix and the start of apiPath,
+// then joins them with exactly one "/", so the result never has "//"
+// whether or not either side carries a slash.
 func joinEndpointPath(prefix, apiPath string) string {
-	return strings.TrimSuffix(prefix, "/") + apiPath
+	return strings.TrimRight(prefix, "/") + "/" + strings.TrimLeft(apiPath, "/")
 }
 
 // Run starts the PTY session and blocks until it ends.
