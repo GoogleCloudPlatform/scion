@@ -29,8 +29,34 @@ func nfsHomeTestConfig(nfs bool) RunConfig {
 		Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/telemetry.json", Value: "c", Source: "user",
 	})
 	if nfs {
-		cfg.HomeStorageBackend = HomeStorageNFS
+		cfg = withTestHomeStorage(cfg)
 	}
+	return cfg
+}
+
+const (
+	testHomeAgentID   = "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
+	testHomeProjectID = "4f1d2c3b-5a69-4e70-8b91-a2b3c4d5e6f7"
+	testHomeStartID   = "start-1"
+)
+
+// withTestHomeStorage makes cfg an NFS-home pod config with pod leaf mode,
+// the home on claim "home-pvc", and a start ID label as Run sets it.
+func withTestHomeStorage(cfg RunConfig) RunConfig {
+	cfg.HomeStorageBackend = HomeStorageNFS
+	cfg.HomeStorage = &HomeStorageRealization{
+		PVClaimName: "home-pvc", SubPathRoot: "projects", ProjectID: testHomeProjectID,
+		AgentSlug: "a", AgentID: testHomeAgentID, Leaf: "pod", GID: 1000,
+		StopGraceSeconds: 30, TerminationWaitSeconds: 15, SkeletonMaxBytes: 1024,
+	}
+	labels := map[string]string{}
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	if labels[labelStartID] == "" {
+		labels[labelStartID] = testHomeStartID
+	}
+	cfg.Labels = labels
 	return cfg
 }
 
@@ -75,7 +101,7 @@ func TestBuildPod_NFSHomeVersusPlainPod(t *testing.T) {
 	// Mounts: no mount inside the home in either pod; the memory dir only on
 	// the NFS-home pod.
 	assertNoMountsUnderHome(t, plain, "/home/scion")
-	assertNoMountsUnderHome(t, nfs, "/home/scion")
+	assertOnlyHomeMount(t, nfs, "/home/scion")
 	for _, pod := range []*corev1.Pod{plain, nfs} {
 		assertStagingMount(t, pod, "agent-secrets")
 		assertStagingMount(t, pod, "auth-files")
@@ -123,23 +149,14 @@ func TestBuildPod_NFSHomeVersusPlainPod(t *testing.T) {
 			t.Errorf("nfs %s = %q, want %q", k, ne[k], v)
 		}
 	}
-	var links []k8sHomeLink
-	if err := json.Unmarshal([]byte(ne["SCION_HOME_LINKS"]), &links); err != nil {
-		t.Fatalf("SCION_HOME_LINKS is not JSON: %v", err)
-	}
-	if !reflect.DeepEqual(links, rt.k8sHomeLinks(nfsCfg)) {
-		t.Errorf("SCION_HOME_LINKS = %+v, want %+v", links, rt.k8sHomeLinks(nfsCfg))
-	}
-	for _, s := range nfsCfg.ResolvedSecrets {
-		if strings.Contains(ne["SCION_HOME_LINKS"], s.Value) && len(s.Value) > 1 {
-			t.Errorf("SCION_HOME_LINKS contains the value of %s", s.Name)
-		}
+	if _, ok := ne["SCION_HOME_LINKS"]; ok {
+		t.Error("the agent container must not receive SCION_HOME_LINKS; only home-prepare does")
 	}
 }
 
 func TestBuildPod_NFSHomeWithoutSecretsJSON(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
-	cfg := RunConfig{Name: "a", Image: "i", UnixUsername: "scion", HomeStorageBackend: HomeStorageNFS}
+	cfg := withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: "scion"})
 	pod, err := rt.buildPod("default", cfg)
 	if err != nil {
 		t.Fatalf("buildPod: %v", err)
@@ -148,8 +165,11 @@ func TestBuildPod_NFSHomeWithoutSecretsJSON(t *testing.T) {
 	if _, ok := env["SCION_SECRETS_FILE"]; ok {
 		t.Error("SCION_SECRETS_FILE set without a secrets.json")
 	}
-	if env["SCION_HOME_LINKS"] != "[]" {
-		t.Errorf("SCION_HOME_LINKS = %q, want []", env["SCION_HOME_LINKS"])
+	if _, ok := env["SCION_HOME_LINKS"]; ok {
+		t.Error("the agent container must not receive SCION_HOME_LINKS")
+	}
+	if prep := pod.Spec.InitContainers[len(pod.Spec.InitContainers)-1]; containerEnv(prep)["SCION_HOME_LINKS"] != "[]" {
+		t.Errorf("home-prepare SCION_HOME_LINKS = %q, want []", containerEnv(prep)["SCION_HOME_LINKS"])
 	}
 }
 
@@ -165,7 +185,7 @@ func TestBuildPod_NFSHomeRejectsMountsUnderHome(t *testing.T) {
 	if _, err := rt.buildPod("default", cfg); err != nil {
 		t.Fatalf("plain pod with a volume inside the home: %v", err)
 	}
-	cfg.HomeStorageBackend = HomeStorageNFS
+	cfg = withTestHomeStorage(cfg)
 	_, err := rt.buildPod("default", cfg)
 	if err == nil {
 		t.Fatal("expected a volume inside the home to be rejected")
@@ -191,7 +211,9 @@ func TestBuildPod_HomeStorageBackendValues(t *testing.T) {
 		{"nfs", "", "requires a container user name"},
 		{"gcs", "scion", `unsupported home storage backend "gcs"`},
 	} {
-		_, err := rt.buildPod("default", RunConfig{Name: "a", Image: "i", UnixUsername: tc.user, HomeStorageBackend: tc.backend})
+		cfg := withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: tc.user})
+		cfg.HomeStorageBackend = tc.backend
+		_, err := rt.buildPod("default", cfg)
 		if tc.wantErr == "" && err != nil {
 			t.Errorf("%q/%q: %v", tc.backend, tc.user, err)
 		}
@@ -317,14 +339,30 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 		if err := os.Symlink(other, ssh); err != nil {
 			t.Fatal(err)
 		}
-		for _, skipped := range []bool{false, true} {
-			out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": skipped})
-			if err == nil {
-				t.Fatalf("skipped=%v: expected verification to fail", skipped)
-			}
-			if want := "home file check failed at " + ssh + ": parent directory is a symbolic link"; !strings.Contains(out, want) {
-				t.Errorf("skipped=%v: output = %q, want %q", skipped, out, want)
-			}
+		out, err := runLinkVerify(t, home, links, nil)
+		if err == nil {
+			t.Fatal("expected verification to fail")
+		}
+		if want := "home file check failed at " + ssh + ": parent directory is a symbolic link"; !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+		// The link step skips a target behind a linked parent; such a
+		// target is not checked.
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped target behind a linked parent refused: %v %s", err, out)
+		}
+	})
+
+	t.Run("recorded_skip_directory_or_missing", func(t *testing.T) {
+		home, links := setup(t)
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped missing target refused: %v %s", err, out)
+		}
+		if err := os.Mkdir(filepath.Join(home, ".ssh/id_rsa"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped directory target refused: %v %s", err, out)
 		}
 	})
 
@@ -361,12 +399,11 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 			}
 		}, false, "symbolic link does not point to the staged file"},
 		{"missing", func(*testing.T, string, string) {}, false, "missing"},
-		{"skip_recorded_but_directory", func(t *testing.T, target, _ string) {
+		{"directory", func(t *testing.T, target, _ string) {
 			if err := os.Mkdir(target, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, true, "expected a symbolic link to the staged file or a user file, found a directory"},
-		{"skip_recorded_but_missing", func(*testing.T, string, string) {}, true, "missing"},
+		}, false, "expected a symbolic link to the staged file"},
 	}
 	for _, tc := range fails {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,10 +462,10 @@ func TestPlaceK8sHomeFiles_LinkModeVerifiesOnly(t *testing.T) {
 	if strings.Contains(cmds[1], "place ") || strings.Contains(cmds[1], "cp ") {
 		t.Errorf("link mode ran a copy: %q", cmds[1])
 	}
-	if !strings.Contains(cmds[1], "check '/home/scion/.gemini/oauth_creds.json' '/run/scion/agent-secrets/GEMINI_OAUTH' 1") {
-		t.Errorf("recorded skip not passed: %q", cmds[1])
+	if strings.Contains(cmds[1], "/home/scion/.gemini/oauth_creds.json") {
+		t.Errorf("recorded skip was checked: %q", cmds[1])
 	}
-	if !strings.Contains(cmds[1], "check '/home/scion/.ssh/id_rsa' '/run/scion/agent-secrets/SSH_KEY' 0") {
+	if !strings.Contains(cmds[1], "check '/home/scion/.ssh/id_rsa' '/run/scion/agent-secrets/SSH_KEY'\n") {
 		t.Errorf("link check missing: %q", cmds[1])
 	}
 
@@ -555,6 +592,13 @@ func TestRun_NFSHomeExcludesLinksAndVerifies(t *testing.T) {
 				if tc.failVerify && strings.Contains(joined, "check ") {
 					return "", fmt.Errorf("exec failed: exit 1 (stderr: home file check failed at /home/scion/.ssh/id_rsa: missing)")
 				}
+				if joined == "cat "+k8sHomeModeFile {
+					pod, err := clientset.CoreV1().Pods("default").Get(context.Background(), "nfs-agent", metav1.GetOptions{})
+					if err != nil {
+						return "", err
+					}
+					return `{"mode":"seed-over","start_id":"` + pod.Labels[labelStartID] + `"}`, nil
+				}
 				return "", nil
 			}
 			rt.homeSync = func(_ context.Context, _, _, _, _ string, ex []string) error {
@@ -592,7 +636,7 @@ func TestRun_NFSHomeExcludesLinksAndVerifies(t *testing.T) {
 				}
 				return
 			}
-			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".scion/secrets.json", ".config/gcloud/application_default_credentials.json"}
+			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".scion/secrets.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs"}
 			if !sameStrings(excludes, wantEx) {
 				t.Errorf("sync excludes = %v, want %v", excludes, wantEx)
 			}
@@ -638,4 +682,24 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// assertOnlyHomeMount fails unless the only agent container mount at or
+// under home is the home volume itself, at home.
+func assertOnlyHomeMount(t *testing.T, pod *corev1.Pod, home string) {
+	t.Helper()
+	found := 0
+	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+		if vm.MountPath != home && !strings.HasPrefix(vm.MountPath, home+"/") {
+			continue
+		}
+		if vm.MountPath == home && (vm.Name == k8sHomeVolume || vm.Name == "workspace") && strings.HasSuffix(vm.SubPath, "/home-"+testHomeAgentID) {
+			found++
+			continue
+		}
+		t.Errorf("volume %q is mounted inside the home at %q", vm.Name, vm.MountPath)
+	}
+	if found != 1 {
+		t.Errorf("home volume mounted %d times at %s, want once", found, home)
+	}
 }

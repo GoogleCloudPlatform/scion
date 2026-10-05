@@ -2793,6 +2793,9 @@ func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string
 		if err := gs.Server.HomeStorage.Validate(); err != nil {
 			logf("Warning: %v", err)
 		}
+		for _, w := range config.HomeStorageWindowWarnings(gs.Server.HomeStorage) {
+			logf("Warning: %s", w)
+		}
 	}
 	for _, e := range config.ValidateHomeStorageOverrides(gs.Runtimes, gs.Profiles) {
 		logf("Warning: %s", e.Error())
