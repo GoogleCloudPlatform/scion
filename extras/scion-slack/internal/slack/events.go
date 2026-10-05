@@ -383,7 +383,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 	if mapping.ScionEmail == "" {
 		s.log.Warn("Message blocked: user has no linked Scion email",
 			"slack_user_id", userID, "slack_username", mapping.SlackUsername)
-		_, _ = s.client.PostEphemeral(channelID, userID, slackapi.MsgOptionText(staleAccountLinkText, false))
+		_, _ = s.client.PostEphemeral(channelID, userID, slackapi.MsgOptionText(missingEmailLinkText, false))
 		return
 	}
 	sender := "user:" + mapping.ScionEmail
@@ -417,7 +417,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		result, he := s.deliverRoutedInbound(link.ProjectID, agentSlug, msg)
 		if he != nil {
 			s.client.PostEphemeral(channelID, userID,
-				slackapi.MsgOptionText(he.userFacingMessage(), false))
+				slackapi.MsgOptionText(he.userFacingMessage(mapping.ScionEmail), false))
 			return
 		}
 
@@ -503,7 +503,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 
 	if he := s.deliverInbound(topic, msg); he != nil {
 		s.client.PostEphemeral(channelID, userID,
-			slackapi.MsgOptionText(he.userFacingMessage(), false))
+			slackapi.MsgOptionText(he.userFacingMessage(mapping.ScionEmail), false))
 	}
 }
 

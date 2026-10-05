@@ -229,7 +229,7 @@ func TestHandleSetup_LinkWithoutEmailAsksToReRegister(t *testing.T) {
 	f.run(t, "setup")
 
 	assert.Empty(t, f.hub.recorded())
-	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 func TestHandleSetup_StaleAccountLinkShowsReRegisterText(t *testing.T) {
@@ -251,7 +251,7 @@ func TestHandleAgents_LinkWithoutEmailAsksToReRegister(t *testing.T) {
 	f.run(t, "agents")
 
 	assert.Empty(t, f.hub.recorded(), "no hub request without a linked Scion email")
-	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 func TestHandleStatus_LinkWithoutEmailAsksToReRegister(t *testing.T) {
@@ -262,7 +262,7 @@ func TestHandleStatus_LinkWithoutEmailAsksToReRegister(t *testing.T) {
 	f.run(t, "status alpha")
 
 	assert.Empty(t, f.hub.recorded(), "no hub request without a linked Scion email")
-	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 func TestHandleStatus_WithoutLinkedAccountAsksToRegister(t *testing.T) {
@@ -384,7 +384,7 @@ func TestHandleMsg_LinkWithoutEmailAsksToReRegister(t *testing.T) {
 
 	assert.False(t, delivered, "no message is sent without a linked Scion email")
 	assert.Empty(t, f.hub.recorded())
-	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 func TestHandleMsg_SendsAsTheLinkedUser(t *testing.T) {

@@ -69,11 +69,11 @@ func TestHubErrorUserFacingMessage_InboundDenials(t *testing.T) {
 		{"sender not active", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "sender identity is not active"}, staleAccountLinkText},
 		{"linked user not found", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "on-behalf-of principal not found"}, staleAccountLinkText},
 		{"other forbidden", &hubError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "Insufficient permissions"}, "You don't have permission to message this agent."},
-		{"message denied", &hubError{StatusCode: http.StatusForbidden, Code: "message_denied", Message: "Message delivery denied"}, "You don't have permission to message this agent. Ask a project owner."},
+		{"message denied", &hubError{StatusCode: http.StatusForbidden, Code: "message_denied", Message: "Message delivery denied"}, "Your Scion account (alice@example.com) doesn't have permission to message this agent. Ask a project owner."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, tt.he.userFacingMessage())
+			assert.Equal(t, tt.want, tt.he.userFacingMessage("alice@example.com"))
 		})
 	}
 }
@@ -106,4 +106,13 @@ func TestDeniedActionPhrase(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, deniedActionPhrase(tt.action, tt.resourceType))
 	}
+}
+
+func TestHubErrorUserFacingMessage_MessageDeniedWithoutEmail(t *testing.T) {
+	he := &hubError{StatusCode: http.StatusForbidden, Code: "message_denied"}
+	assert.Equal(t, "Your Scion account doesn't have permission to message this agent. Ask a project owner.", he.userFacingMessage(""))
+}
+
+func TestMissingEmailLinkText(t *testing.T) {
+	assert.Equal(t, "Your Slack link has no Scion account email. Run `/scion unregister`, then `/scion register`.", missingEmailLinkText)
 }

@@ -84,7 +84,9 @@ func (e *hubError) Error() string {
 	return fmt.Sprintf("hub error %d (%s): %s", e.StatusCode, e.Code, e.Message)
 }
 
-func (e *hubError) userFacingMessage() string {
+// userFacingMessage returns the text shown for a failed message delivery.
+// email is the sender's linked Scion account email, or "" when unknown.
+func (e *hubError) userFacingMessage(email string) string {
 	switch e.Code {
 	case "agent_not_found":
 		return "Target agent not found. Use `/scion agents` to see available agents."
@@ -94,7 +96,10 @@ func (e *hubError) userFacingMessage() string {
 		}
 		return "You don't have permission to message this agent."
 	case "message_denied":
-		return "You don't have permission to message this agent. Ask a project owner."
+		if email == "" {
+			return "Your Scion account doesn't have permission to message this agent. Ask a project owner."
+		}
+		return fmt.Sprintf("Your Scion account (%s) doesn't have permission to message this agent. Ask a project owner.", email)
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
 	case "transport_error":

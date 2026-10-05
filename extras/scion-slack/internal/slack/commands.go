@@ -319,7 +319,7 @@ func handleMsg(
 	}
 
 	if he := deliverInbound(topic, hubMsg); he != nil {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, he.userFacingMessage())
+		postEphemeral(client, cmd.ChannelID, cmd.UserID, he.userFacingMessage(email))
 		return
 	}
 
@@ -720,7 +720,7 @@ func handleAskOption(
 		if he := deliverInbound(topic, msg); he != nil {
 			// The request stays open so the user can answer again.
 			log.Error("Failed to deliver ask-user option response", "request_id", requestID, "error", he)
-			postEphemeral(client, pending.ChannelID, callback.User.ID, he.userFacingMessage())
+			postEphemeral(client, pending.ChannelID, callback.User.ID, he.userFacingMessage(email))
 			return
 		}
 	}
@@ -813,7 +813,7 @@ func requireLinkedUser(ctx context.Context, client *slackapi.Client, store Store
 		return "", false
 	}
 	if mapping.ScionEmail == "" {
-		postEphemeral(client, channelID, slackUserID, staleAccountLinkText)
+		postEphemeral(client, channelID, slackUserID, missingEmailLinkText)
 		return "", false
 	}
 	return mapping.ScionEmail, true

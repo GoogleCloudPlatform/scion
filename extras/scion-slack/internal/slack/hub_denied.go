@@ -11,6 +11,10 @@ import (
 // user's linked Scion account (the account was removed or deactivated).
 const staleAccountLinkText = "Your linked Scion account is no longer active. Run `/scion unregister`, then `/scion register`."
 
+// missingEmailLinkText is shown when the Slack user's link has no Scion
+// account email, so requests cannot be made as that user.
+const missingEmailLinkText = "Your Slack link has no Scion account email. Run `/scion unregister`, then `/scion register`."
+
 // isStaleAccountLink reports whether a denied request was rejected because
 // the linked Scion account is unknown to the hub or no longer active.
 func (e *hubError) isStaleAccountLink() bool {

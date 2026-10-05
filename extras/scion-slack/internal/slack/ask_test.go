@@ -109,7 +109,7 @@ func TestAskAnswer_LinkWithoutEmailAsksToReRegister(t *testing.T) {
 			p.answer(f, d)
 
 			assert.Empty(t, d.msgs, "no answer is sent without a linked Scion email")
-			assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+			assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 			assert.False(t, f.askResponded(t), "the question stays open")
 		})
 	}
@@ -142,7 +142,7 @@ func TestAskAnswer_DeliveryErrorIsShownAndQuestionStaysOpen(t *testing.T) {
 			p.answer(f, d)
 
 			require.Len(t, d.msgs, 1)
-			assert.Equal(t, "You don't have permission to message this agent. Ask a project owner.", f.slack.lastText(t))
+			assert.Equal(t, "Your Scion account (alice@example.com) doesn't have permission to message this agent. Ask a project owner.", f.slack.lastText(t))
 			assert.False(t, f.askResponded(t), "the user can answer again")
 		})
 	}
