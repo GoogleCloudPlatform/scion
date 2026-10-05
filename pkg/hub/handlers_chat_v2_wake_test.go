@@ -325,9 +325,9 @@ func TestChatV2Wake_Wake_ExtendsWriteDeadlineAndBoundsResume(t *testing.T) {
 	deadlines := append([]time.Time(nil), rec.deadlines...)
 	rec.mu.Unlock()
 	require.Len(t, deadlines, 1, "the wake path must set the write deadline once")
-	assert.False(t, deadlines[0].Before(start.Add(chatWakeWriteBudget)))
-	assert.Greater(t, chatWakeWriteBudget, chatWakeResumeBudget+chatWakeDeliveryBudget)
-	assert.Greater(t, chatWakeWriteBudget, 60*time.Second, "must outlast the default WriteTimeout")
+	assert.False(t, deadlines[0].Before(start.Add(chatWakeWriteBudget(1))))
+	assert.Greater(t, chatWakeWriteBudget(1), chatWakeResumeBudget+chatWakeDeliveryBudget)
+	assert.Greater(t, chatWakeWriteBudget(1), 60*time.Second, "must outlast the default WriteTimeout")
 
 	disp.mu.Lock()
 	defer disp.mu.Unlock()
@@ -347,4 +347,109 @@ func TestChatV2Wake_PlainSend_LeavesWriteDeadline(t *testing.T) {
 	f.srv.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
 	assert.Empty(t, rec.deadlines)
+}
+
+// postRecorded posts a send through a deadline-recording writer.
+func (f *chatWakeFixture) postRecorded(t *testing.T, payload map[string]any) *deadlineRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, f.path(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// The wake write budget grows with each recipient's dispatch budget.
+func TestChatWakeWriteBudget_ScalesWithRecipients(t *testing.T) {
+	assert.Equal(t, chatWakeResumeBudget+chatWakeDeliveryBudget+chatWakeWriteSlack, chatWakeWriteBudget(1))
+	assert.Equal(t, chatWakeWriteBudget(1), chatWakeWriteBudget(0))
+	assert.Equal(t, chatWakeWriteBudget(1)+2*chatWakeDeliveryBudget, chatWakeWriteBudget(3))
+}
+
+// A wake send that also @mentions a secondary gets a deadline covering
+// both recipients' dispatch budgets.
+func TestChatV2Wake_Wake_DeadlineCoversMentionFanOut(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	second := &store.Agent{
+		ID: tid("chat-wake-second"), ProjectID: f.proj.ID, Name: "Second",
+		Slug: "chat-wake-second", Phase: string(state.PhaseRunning),
+		RuntimeBrokerID: f.agent.RuntimeBrokerID, OwnerID: DevUserID, CreatedBy: DevUserID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, f.s.CreateAgent(t.Context(), second))
+	f.markReadySoon()
+
+	start := time.Now()
+	rec := f.postRecorded(t, map[string]any{"content": "hi @chat-wake-second", "wake": true})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+	require.Len(t, rec.deadlines, 1)
+	assert.False(t, rec.deadlines[0].Before(start.Add(chatWakeWriteBudget(2))),
+		"deadline %v must cover two dispatch budgets", rec.deadlines[0].Sub(start))
+	assert.Len(t, f.disp.getMessageCalls(), 2, "primary and mention are both delivered")
+}
+
+// The woken message is dated at delivery, not at request time.
+func TestChatV2Wake_Wake_DatesMessageAfterWake(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.markReadySoon()
+	start := time.Now()
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "wake": true})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+	m, err := f.s.GetMessage(t.Context(), decodeWakeResp(t, rec)["id"].(string))
+	require.NoError(t, err)
+	// The readiness poll ticks every 500ms, so the wake takes at least that.
+	assert.False(t, m.CreatedAt.Before(start.Add(400*time.Millisecond)),
+		"created %v after request start", m.CreatedAt.Sub(start))
+}
+
+// A retry with the idempotency key of a send still running is told so
+// (409 send_in_progress) and sends nothing.
+func TestChatV2Wake_IdempotencyKeyInFlight_Conflict(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-in-flight")
+	require.Equal(t, IdempotencyNew, begin)
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-in-flight"})
+	require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeSendInProgress)
+	assert.Empty(t, f.disp.getMessageCalls())
+	assert.Equal(t, 0, f.countThreadMessages(t))
+}
+
+// A retry after the send finished returns the same message and its
+// stored dispatch outcome, without sending again.
+func TestChatV2Wake_IdempotencyRetry_ReturnsOutcome(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.markReadySoon()
+	payload := map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-retry"}
+	first := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusCreated, first.Code, "body=%s", first.Body.String())
+	firstID := decodeWakeResp(t, first)["id"]
+
+	retry := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusOK, retry.Code, "body=%s", retry.Body.String())
+	resp := decodeWakeResp(t, retry)
+	assert.Equal(t, firstID, resp["id"])
+	assert.Equal(t, "dispatched", resp["dispatchState"])
+	assert.Len(t, f.disp.getStartCalls(), 1)
+	assert.Len(t, f.disp.getMessageCalls(), 1)
+	assert.Equal(t, 1, f.countThreadMessages(t))
+}
+
+// A send that ends without a message (a failed wake) releases its key, so
+// a retry may try again.
+func TestChatV2Wake_IdempotencyKeyReleasedAfterFailedWake(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.disp.startReturnErr = assert.AnError
+	payload := map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-failed"}
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body=%s", rec.Body.String())
+
+	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-failed")
+	assert.Equal(t, IdempotencyNew, begin, "the key must be free after a send without a message")
 }

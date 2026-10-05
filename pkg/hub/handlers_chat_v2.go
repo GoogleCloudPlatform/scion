@@ -1017,23 +1017,51 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Idempotency check (#1055) ---
 	// If the client supplied an idempotency key, check whether a message with
 	// that key from this sender was already created recently. If so, return
-	// the existing message ID (200 OK) instead of creating a duplicate.
+	// the existing message ID (200 OK) instead of creating a duplicate. A
+	// send with the key that is still running (a wake can take minutes)
+	// answers 409 send_in_progress, so a client retrying after a dropped
+	// connection waits for the outcome instead of sending twice.
+	idempotencyRecorded := false
 	if body.IdempotencyKey != "" {
-		if existingID, ok := s.chatIdempotency.Check(user.ID(), body.IdempotencyKey); ok {
-			// Idempotency hit: return the existing message ID.
-			// We return the minimal response (ID + current content) rather than
-			// re-fetching the stored message, because the client already received
-			// the full 201 response on the original send. This response only
-			// signals "your message was already accepted."
+		existingID, begin := s.chatIdempotency.Begin(user.ID(), body.IdempotencyKey)
+		if begin == IdempotencyInFlight {
+			writeError(w, http.StatusConflict, ErrCodeSendInProgress,
+				"A send with this idempotency key is still in progress", nil)
+			return
+		}
+		if begin == IdempotencyNew {
+			// Release the key if this send ends without a message, so a
+			// retry may send.
+			defer func() {
+				if !idempotencyRecorded {
+					s.chatIdempotency.Abandon(user.ID(), body.IdempotencyKey)
+				}
+			}()
+		}
+		if begin == IdempotencyDone {
+			// Idempotency hit: return the existing message ID with the
+			// stored row's dispatch outcome. The client may never have seen
+			// the original 201 (a retry after a dropped connection), so it
+			// must learn whether the message was delivered or failed. The
+			// lookup is best-effort: without the row the response stays
+			// minimal, signalling only "your message was already accepted."
 			senderRef := "user:" + user.ID()
 			if email := user.Email(); email != "" {
 				senderRef = "user:" + email
 			}
-			writeJSON(w, http.StatusOK, chatMessageResponse{
+			resp := chatMessageResponse{
 				ID:      existingID,
 				Content: content,
 				Sender:  senderRef,
-			})
+			}
+			if stored, err := s.store.GetMessage(ctx, existingID); err == nil && stored != nil {
+				resp.DispatchState = stored.DispatchState
+				if stored.DispatchFailureReason != nil {
+					resp.DispatchFailureReason = *stored.DispatchFailureReason
+					resp.DispatchFailureCode = dispatchFailureCodeFromReason(*stored.DispatchFailureReason)
+				}
+			}
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 	}
@@ -1158,6 +1186,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	recordIdempotency := func(messageID string) {
 		if body.IdempotencyKey != "" {
 			s.chatIdempotency.Record(user.ID(), body.IdempotencyKey, messageID)
+			idempotencyRecorded = true
 		}
 	}
 
@@ -1373,21 +1402,29 @@ const (
 	// chatWakeResumeBudget bounds a chat v2 wake (resume dispatch plus the
 	// up-to-30s readiness wait in wakeAgentForDM).
 	chatWakeResumeBudget = 90 * time.Second
-	// chatWakeDeliveryBudget is the primary dispatch bound in
-	// sendAgentRouted (dispatchWithBrokerRetry's 30s timeout).
+	// chatWakeDeliveryBudget is the per-recipient dispatch bound in
+	// sendAgentRouted: the primary and each @mention secondary get their
+	// own 30s dispatch timeout, one after another.
 	chatWakeDeliveryBudget = 30 * time.Second
 	// chatWakeWriteSlack covers persistence and the response write.
 	chatWakeWriteSlack = 30 * time.Second
-	// chatWakeWriteBudget is the write deadline a wake request gets: it
-	// ends only after the resume and delivery budgets have both run out.
-	chatWakeWriteBudget = chatWakeResumeBudget + chatWakeDeliveryBudget + chatWakeWriteSlack
 )
 
+// chatWakeWriteBudget is the write deadline a wake request routed to
+// recipients agents (primary plus mentions) gets: it ends only after the
+// resume budget and every recipient's delivery budget have run out.
+func chatWakeWriteBudget(recipients int) time.Duration {
+	if recipients < 1 {
+		recipients = 1
+	}
+	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
+}
+
 // extendWriteDeadlineForWake moves the connection's write deadline past
-// the server-wide WriteTimeout to chatWakeWriteBudget from now. A
-// ResponseWriter without deadline support is logged and ignored.
-func extendWriteDeadlineForWake(w http.ResponseWriter) {
-	deadline := time.Now().Add(chatWakeWriteBudget)
+// the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
+// now. A ResponseWriter without deadline support is logged and ignored.
+func extendWriteDeadlineForWake(w http.ResponseWriter, recipients int) {
+	deadline := time.Now().Add(chatWakeWriteBudget(recipients))
 	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil {
 		slog.Debug("chat wake: SetWriteDeadline not applied", "error", err)
 	}
@@ -1707,7 +1744,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// one bounded budget covering the resume, readiness and delivery,
 		// so the client always receives the outcome instead of a dropped
 		// connection after the message was in fact delivered.
-		extendWriteDeadlineForWake(w)
+		extendWriteDeadlineForWake(w, len(agents))
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
@@ -1725,6 +1762,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			storeMsg.DispatchFailureReason = nil
 			dispatchFailureCode = ""
 		}
+		// The wake took a while: date the message (and everything sent
+		// after it, mentions included) at delivery, not at request time.
+		now = time.Now().UTC()
+		storeMsg.CreatedAt = now
+		msg.Timestamp = now.Format(time.RFC3339)
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)

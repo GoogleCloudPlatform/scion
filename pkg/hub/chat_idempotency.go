@@ -34,11 +34,25 @@ type idempotencyCacheKey struct {
 	idempotencyKey string
 }
 
-// chatIdempotencyEntry stores a cached idempotency result.
+// chatIdempotencyEntry stores a cached idempotency result. An empty
+// messageID marks a send that Begin admitted and that has not finished.
 type chatIdempotencyEntry struct {
 	messageID string
 	expiresAt time.Time
 }
+
+// IdempotencyBeginResult is the outcome of ChatIdempotencyCache.Begin.
+type IdempotencyBeginResult int
+
+const (
+	// IdempotencyNew: the key is unseen; the caller owns the send and must
+	// end it with Record (a message was created) or Abandon (none was).
+	IdempotencyNew IdempotencyBeginResult = iota
+	// IdempotencyDone: a send with this key already created a message.
+	IdempotencyDone
+	// IdempotencyInFlight: a send with this key is still running.
+	IdempotencyInFlight
+)
 
 // ChatIdempotencyCache is a lightweight in-memory cache keyed by
 // (senderID, idempotencyKey). Entries expire after 5 minutes.
@@ -79,7 +93,56 @@ func (c *ChatIdempotencyCache) Check(senderID, idempotencyKey string) (string, b
 		delete(c.entries, key)
 		return "", false
 	}
+	if entry.messageID == "" {
+		return "", false // admitted by Begin, not finished
+	}
 	return entry.messageID, true
+}
+
+// Begin admits a send for (senderID, idempotencyKey). It returns the
+// existing message ID when a send with the key already finished
+// (IdempotencyDone), IdempotencyInFlight while one is still running, and
+// otherwise marks the key in flight and returns IdempotencyNew. A retry of
+// a long send (for example a wake whose connection dropped) can thus learn
+// the outcome instead of sending twice. An empty key is always new and
+// never marked.
+func (c *ChatIdempotencyCache) Begin(senderID, idempotencyKey string) (string, IdempotencyBeginResult) {
+	if idempotencyKey == "" {
+		return "", IdempotencyNew
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	if len(c.entries) > idempotencyCacheCleanupThreshold && now.After(c.nextCleanup) {
+		c.cleanExpiredLocked(now)
+		c.nextCleanup = now.Add(chatIdempotencyTTL)
+	}
+
+	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
+	if entry, ok := c.entries[key]; ok && !now.After(entry.expiresAt) {
+		if entry.messageID == "" {
+			return "", IdempotencyInFlight
+		}
+		return entry.messageID, IdempotencyDone
+	}
+	c.entries[key] = chatIdempotencyEntry{expiresAt: now.Add(chatIdempotencyTTL)}
+	return "", IdempotencyNew
+}
+
+// Abandon releases a key Begin marked in flight when the send ended
+// without creating a message, so a retry may send. A finished key is
+// left alone.
+func (c *ChatIdempotencyCache) Abandon(senderID, idempotencyKey string) {
+	if idempotencyKey == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := idempotencyCacheKey{senderID: senderID, idempotencyKey: idempotencyKey}
+	if entry, ok := c.entries[key]; ok && entry.messageID == "" {
+		delete(c.entries, key)
+	}
 }
 
 // Record stores a (senderID, idempotencyKey) -> messageID mapping.

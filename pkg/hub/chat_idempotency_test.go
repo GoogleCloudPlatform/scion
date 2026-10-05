@@ -86,3 +86,42 @@ func TestChatIdempotencyCache_ExpiresAfterTTL(t *testing.T) {
 		t.Fatal("expected expired entry to be cleaned up")
 	}
 }
+
+func TestChatIdempotencyCache_BeginRecordAbandon(t *testing.T) {
+	c := NewChatIdempotencyCache()
+
+	if _, r := c.Begin("u", "k"); r != IdempotencyNew {
+		t.Fatalf("first Begin = %v, want new", r)
+	}
+	if _, r := c.Begin("u", "k"); r != IdempotencyInFlight {
+		t.Fatalf("second Begin = %v, want in flight", r)
+	}
+	if _, ok := c.Check("u", "k"); ok {
+		t.Fatal("Check must not report an unfinished send")
+	}
+	c.Record("u", "k", "msg-1")
+	if id, r := c.Begin("u", "k"); r != IdempotencyDone || id != "msg-1" {
+		t.Fatalf("Begin after Record = %q %v, want msg-1 done", id, r)
+	}
+	// Abandon leaves a finished key alone.
+	c.Abandon("u", "k")
+	if id, ok := c.Check("u", "k"); !ok || id != "msg-1" {
+		t.Fatalf("Check after Abandon of finished key = %q %v", id, ok)
+	}
+
+	// Abandon frees an unfinished key.
+	c.Begin("u", "k2")
+	c.Abandon("u", "k2")
+	if _, r := c.Begin("u", "k2"); r != IdempotencyNew {
+		t.Fatalf("Begin after Abandon = %v, want new", r)
+	}
+}
+
+func TestChatIdempotencyCache_BeginEmptyKeyNeverMarked(t *testing.T) {
+	c := NewChatIdempotencyCache()
+	for i := 0; i < 2; i++ {
+		if _, r := c.Begin("u", ""); r != IdempotencyNew {
+			t.Fatalf("empty key Begin = %v, want new", r)
+		}
+	}
+}
