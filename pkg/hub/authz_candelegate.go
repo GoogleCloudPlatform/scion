@@ -28,7 +28,8 @@ import (
 //
 //   - Role binding creation (admin): wired in handlers_roles.go:createRoleBinding.
 //   - Project membership: wired in handlers_project_members.go (add/update/delete).
-//   - Group membership: wired in handlers_groups.go:addGroupMember.
+//   - Group membership: wired in handlers_groups.go:authorizeGroupMemberGrant
+//     (addGroupMember, and createGroup when a parent group is given).
 //   - Agent delegation: wired in handlers_agents_core.go:createAgentInProject.
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
 //   - Policy routes: removed in CO1 cutover.

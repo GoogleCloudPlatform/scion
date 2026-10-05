@@ -137,6 +137,44 @@ function threadCalls(requests: TrackedRequest[]): string[] {
     .map((p) => decodeURIComponent(p.split('/').at(-2) ?? ''));
 }
 
+interface ChatListFetch {
+  path: string;
+  pageMounted: boolean;
+}
+
+/**
+ * Records each spaces/DMs fetch the app sends and whether the chat page was
+ * in the document at that moment. The fixture starts the unread counter
+ * before it mounts the page, so a pair sent at counter start precedes the
+ * mount; a pair sent from the page's own load (or a later idle refresh)
+ * does not.
+ */
+async function trackChatListFetches(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __chatListFetches: ChatListFetch[] };
+    w.__chatListFetches = [];
+    const original = window.fetch;
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const path = new URL(url, location.href).pathname;
+      if (path === '/api/v1/chat/spaces' || path === '/api/v1/chat/dms') {
+        w.__chatListFetches.push({
+          path,
+          pageMounted: document.querySelector('scion-page-chat') !== null,
+        });
+      }
+      return original.call(this, input, init);
+    };
+  });
+}
+
+function chatListFetches(page: Page): Promise<ChatListFetch[]> {
+  return page.evaluate(
+    () => (window as unknown as { __chatListFetches: ChatListFetch[] }).__chatListFetches
+  );
+}
+
 /** Milliseconds from navigation start until the rail shows project names. */
 async function waitForRailNames(page: Page): Promise<number> {
   const handle = await page.waitForFunction(
@@ -168,6 +206,7 @@ test('a cold /chat startup makes one spaces and one DMs request and no collapsed
 }) => {
   await setupApiMocks(page);
   const requests = await routeSlowChatLists(page);
+  await trackChatListFetches(page);
   await page.goto('/e2e/chat-palette/fixture.html?unread=1', { waitUntil: 'domcontentloaded' });
 
   // Recorded for the report, not asserted: it includes the fixture's own
@@ -190,6 +229,14 @@ test('a cold /chat startup makes one spaces and one DMs request and no collapsed
 
   expect.soft(countPath(requests, '/api/v1/chat/spaces')).toBe(1);
   expect.soft(countPath(requests, '/api/v1/chat/dms')).toBe(1);
+  // On a chat route the counter sends the pair at start, before the page
+  // mounts, and the page and rail share it rather than sending their own.
+  const listFetches = await chatListFetches(page);
+  expect(listFetches.map((f) => f.path).sort()).toEqual([
+    '/api/v1/chat/dms',
+    '/api/v1/chat/spaces',
+  ]);
+  expect(listFetches.every((f) => !f.pageMounted)).toBe(true);
   // The members sidebar walks the hub's agents once: the re-parse after
   // rail-loaded joins the finished walk instead of starting another.
   expect.soft(countPath(requests, '/api/v1/agents')).toBe(1);

@@ -43,7 +43,6 @@ import {
   canLifecycle,
   canMessageAgent,
   isTerminalAvailable,
-  getAgentDisplayStatus,
   isAgentRunning,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
@@ -54,7 +53,7 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -1205,6 +1204,7 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-quick-message-dialog
         agentId=${this.agentId}
         agentName=${this.agent.name || ''}
+        userId=${this.currentUserId}
         ?open=${this.quickMessageOpen}
         @sl-request-close=${() => {
           this.quickMessageOpen = false;
@@ -1336,10 +1336,7 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="header-title">
             <sl-icon name="cpu"></sl-icon>
             <h1>${agent.name}</h1>
-            <scion-status-badge
-              status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${stateLabel(getAgentDisplayStatus(agent))}
-            ></scion-status-badge>
+            ${agentStatusBadge(agent)}
             <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
@@ -1573,11 +1570,11 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="info-item">
             <span class="info-label">Phase</span>
             <span class="info-value">
-              <scion-status-badge
-                status=${agent.phase as StatusType}
-                label=${agent.phase}
-                size="small"
-              ></scion-status-badge>
+              ${agentStatusBadge(agent, {
+                status: agent.phase,
+                label: agent.phase,
+                size: 'small',
+              })}
               <scion-deletion-badge
                 .deletion=${this.deletionLease.view(agent)}
                 size="small"

@@ -985,20 +985,11 @@ const (
 // createNotifySubscription creates a notification subscription for the given agent
 // if notify is true and a subscriber has been identified.
 func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectID, notifySubscriberType, notifySubscriberID, createdBy string) {
-	if notifySubscriberID == "" {
+	sub := newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy)
+	if sub == nil {
 		return
 	}
-	sub := &store.NotificationSubscription{
-		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeAgent,
-		AgentID:           agentID,
-		SubscriberType:    notifySubscriberType,
-		SubscriberID:      notifySubscriberID,
-		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
-		CreatedAt:         time.Now(),
-		CreatedBy:         createdBy,
-	}
+	sub.AgentID = agentID
 	if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 		s.agentLifecycleLog.Warn("Failed to create notification subscription",
 			"agent_id", agentID, "subscriber", notifySubscriberID, "error", err)
@@ -1006,6 +997,25 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 		s.agentLifecycleLog.Debug("Created notification subscription",
 			"subscriptionID", sub.ID, "agent_id", agentID,
 			"subscriberType", notifySubscriberType, "subscriberID", notifySubscriberID)
+	}
+}
+
+// newNotifySubscription builds the agent-scoped notification subscription a
+// create with notify=true records, without its AgentID. It returns nil when
+// there is no subscriber.
+func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy string) *store.NotificationSubscription {
+	if notifySubscriberID == "" {
+		return nil
+	}
+	return &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		SubscriberType:    notifySubscriberType,
+		SubscriberID:      notifySubscriberID,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         createdBy,
 	}
 }
 
@@ -1328,7 +1338,15 @@ func (s *Server) handleExistingAgent(
 		// fall-through create below mints a credential for the new agent
 		// row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
+		// The row delete runs as a hard-delete lifecycle transaction, so the
+		// agent's delegation edges are deactivated, the hard-delete hooks run
+		// and the agent_hard_delete audit record is written atomically with it.
+		if err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
+				return err
+			}
+			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
+		}); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
