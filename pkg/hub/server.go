@@ -203,9 +203,9 @@ type ServerConfig struct {
 	// actually run, so New() rejects it and falls back to the default.
 	LaunchTimeout time.Duration
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
-	// (design §3.7). Today it only sets the reaper's staleness window (8x
-	// this value); it will also be sent to the broker as
-	// launchKeepaliveSeconds once the async dispatch path lands. Default 15.
+	// (design §3.7). It is sent to the broker as launchKeepaliveSeconds in
+	// each asynchronous create request, and sets the reaper's staleness
+	// window (8x this value). Default 15.
 	LaunchKeepaliveSeconds int
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
