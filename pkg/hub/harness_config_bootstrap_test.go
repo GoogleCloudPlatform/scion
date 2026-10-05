@@ -677,3 +677,36 @@ func TestImportHarnessConfigsFromWorkspace_Reimport(t *testing.T) {
 		t.Fatalf("expected 1 harness-config after re-import, got %d", result.TotalCount)
 	}
 }
+
+func TestBootstrapHarnessConfigsFromDir_SkipsBackupAndTempFiles(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml":                       "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+		"dialect.yaml":                      "dialect: claude\n",
+		"config.yaml.bak.20261003T193320Z":  "old\n",
+		"provision.py.bak.20261003T193320Z": "old\n",
+		".provision.py.tmp-123456":          "partial\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range hc.Files {
+		got = append(got, f.Path)
+	}
+	want := []string{"config.yaml", "dialect.yaml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("manifest files = %v, want %v", got, want)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 objects in storage, got %d", len(stor.objects))
+	}
+}

@@ -128,7 +128,17 @@ vi.mock('../../utils/toast.js', () => ({
   showToast: vi.fn(),
 }));
 
+// The shared delete helper, spied but running for real (pass-through), so
+// tests can prove the page delegates every delete to it.
+vi.mock('../../client/agent-delete.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/agent-delete.js')>();
+  return { ...actual, runAgentDelete: vi.fn(actual.runAgentDelete) };
+});
+
 await import('./agent-detail.js');
+import { runAgentDelete } from '../../client/agent-delete.js';
+import { showToast } from '../../utils/toast.js';
+import { START_BLOCKED_BY_DELETE_MESSAGE } from '../../shared/agent-deletion.js';
 import { DELETE_REDIRECT_DELAY_MS } from './agent-detail.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { setPreferredTimeZone } from '../../utils/time.js';
@@ -707,12 +717,23 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     return inner ? (inner.textContent ?? '').trim() : null;
   }
 
+  /** The failure banner's title under the header (phase 2), or null. */
+  function headerBanner(el: ScionPageAgentDetail): string | null {
+    const banner = el.shadowRoot?.querySelector('scion-deletion-banner');
+    const title = banner?.shadowRoot?.querySelector('.title');
+    return title ? (title.textContent ?? '').trim() : null;
+  }
+
   async function settle(el: ScionPageAgentDetail): Promise<void> {
     await el.updateComplete;
     const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge') as
       | (HTMLElement & { updateComplete: Promise<boolean> })
       | null;
     await badge?.updateComplete;
+    const banner = el.shadowRoot?.querySelector('scion-deletion-banner') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    await banner?.updateComplete;
   }
 
   it('202 keeps the page, shows Deleting…, hides actions; SSE deleted then redirects', async () => {
@@ -776,13 +797,17 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     } as Agent);
     fakeStateManager.notifyAgentsUpdated();
     await settle(el);
-    expect(headerBadge(el)).toBe('Delete failed: boom');
+    // Phase 2: the failure shows in the banner; the header badge is for a
+    // live delete only.
+    expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBe('Delete failed: boom');
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
 
     fakeStateManager.setAgent({ ...agent, deletion: null } as Agent);
     fakeStateManager.notifyAgentsUpdated();
     await settle(el);
     expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBeNull();
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
   });
 
@@ -803,7 +828,8 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
     vi.advanceTimersByTime(1);
     await settle(el);
-    expect(headerBadge(el)).toBe('Delete interrupted');
+    expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBe('Delete interrupted');
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
   });
 
@@ -848,5 +874,169 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
     await Promise.resolve();
     expect(navClicks).toEqual([{ path: '/agents' }]);
+  });
+});
+
+describe('scion-page-agent-detail phase 2: shared delete helper and failure banner (ptone/scion#2483)', () => {
+  type DeletionInfo = import('../../shared/types.js').DeletionInfo;
+  const base = { soft: false, claim: 1, startedAt: new Date().toISOString() };
+  const failed = (o: Partial<DeletionInfo>): DeletionInfo => ({ ...base, state: 'failed', ...o });
+  const actionable = (overrides: Partial<Agent> = {}): Agent =>
+    makeAgent({ _capabilities: { actions: ['read', 'lifecycle', 'delete'] }, ...overrides });
+  type Internals = { handleAction(action: string, e?: MouseEvent): Promise<void> };
+
+  type BannerEl = HTMLElement & { updateComplete: Promise<boolean> };
+  async function banner(el: ScionPageAgentDetail): Promise<BannerEl | null> {
+    await el.updateComplete;
+    const b = el.shadowRoot?.querySelector('scion-deletion-banner') as BannerEl | null;
+    await b?.updateComplete;
+    return b && !b.hasAttribute('hidden') ? b : null;
+  }
+  const text = (b: BannerEl, sel: string): string =>
+    (b.shadowRoot?.querySelector(sel)?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+  beforeEach(() => {
+    fakeStateManager.reset();
+    vi.mocked(runAgentDelete).mockClear();
+    vi.mocked(showToast).mockClear();
+    vi.mocked(showConfirm).mockClear();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+    if (originalLocationDescriptor) {
+      Object.defineProperty(window, 'location', originalLocationDescriptor);
+      originalLocationDescriptor = undefined;
+    }
+  });
+
+  it('Delete delegates to the shared helper; the page sends no DELETE itself', async () => {
+    stubLocation();
+    const el = await mount(actionable());
+    apiFetch.mockClear();
+    vi.mocked(runAgentDelete).mockResolvedValueOnce({ kind: 'deleted', forced: false });
+    const click = { altKey: true } as MouseEvent;
+    await (el as unknown as Internals).handleAction('delete', click);
+    expect(runAgentDelete).toHaveBeenCalledTimes(1);
+    expect(runAgentDelete).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: AGENT_ID, agentName: 'Test Agent', event: click })
+    );
+    expect(
+      apiFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'DELETE')
+    ).toEqual([]);
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(true); // page presentation
+  });
+
+  it('a failed outcome is toasted', async () => {
+    stubLocation();
+    const el = await mount(actionable());
+    vi.mocked(runAgentDelete).mockResolvedValueOnce({
+      kind: 'failed',
+      forced: false,
+      status: null,
+      code: '',
+      message: 'Failed to fetch',
+    });
+    await (el as unknown as Internals).handleAction('delete');
+    expect(showToast).toHaveBeenCalledWith('Failed to fetch');
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+  });
+
+  const codes: Array<[string, Partial<DeletionInfo>, string, boolean]> = [
+    ['runtime_error', { code: 'runtime_error', error: 'boom' }, 'Delete failed: boom', false],
+    ['conflict', { code: 'conflict' }, 'Delete failed: conflict', false],
+    ['abandoned', { code: 'abandoned' }, 'Delete interrupted', false],
+    [
+      'revoke_failed',
+      { code: 'revoke_failed', stage: 'finalizing' },
+      'Delete failed: could not revoke credentials',
+      true,
+    ],
+    [
+      'finalize_failed',
+      { code: 'finalize_failed', stage: 'finalizing' },
+      'Delete failed: could not finalize',
+      true,
+    ],
+    ['in_doubt', { code: 'in_doubt' }, 'Delete failed: outcome unknown', true],
+  ];
+  for (const [name, o, title, blocked] of codes) {
+    it(`${name}: the header banner shows "${title}" with Retry and Force`, async () => {
+      stubLocation();
+      const agent = actionable({ deletion: failed(o) });
+      const el = await mount(agent);
+      fakeStateManager.setAgent(agent);
+      const b = await banner(el);
+      expect(b).not.toBeNull();
+      expect(text(b!, '.title')).toBe(title);
+      expect(b!.shadowRoot?.querySelector('[role="alert"]')).not.toBeNull(); // live on detail
+      expect(b!.shadowRoot?.querySelector('.retry')?.getAttribute('aria-label')).toBe(
+        'Retry delete of Test Agent'
+      );
+      expect(b!.shadowRoot?.querySelector('.retry')).not.toBeNull();
+      expect(b!.shadowRoot?.querySelector('.force')).not.toBeNull();
+      if (blocked) {
+        expect(text(b!, '.detail')).toMatch(/starting this agent is blocked/i);
+        expect(text(b!, '.detail')).toMatch(/Force delete/);
+      }
+    });
+  }
+
+  it('a client-flipped abandoned view shows the banner at leaseExpiresAt', async () => {
+    stubLocation();
+    const T0 = Date.parse('2026-10-04T12:00:00Z');
+    const agent = actionable();
+    const el = await mount(agent);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: T0 });
+    fakeStateManager.setAgent({
+      ...agent,
+      deletion: { ...base, state: 'deleting', leaseExpiresAt: new Date(T0 + 20_000).toISOString() },
+    } as Agent);
+    fakeStateManager.notifyAgentsUpdated();
+    expect(await banner(el)).toBeNull(); // Force is absent while deleting
+    vi.advanceTimersByTime(20_000);
+    const b = await banner(el);
+    expect(b && text(b, '.title')).toBe('Delete interrupted');
+    expect(b!.shadowRoot?.querySelector('.force')).not.toBeNull();
+  });
+
+  it('Retry calls the helper without a confirm; Force with force:true', async () => {
+    stubLocation();
+    const agent = actionable({ deletion: failed({ code: 'in_doubt' }) });
+    const el = await mount(agent);
+    fakeStateManager.setAgent(agent);
+    const b = (await banner(el))!;
+    vi.mocked(runAgentDelete).mockResolvedValue({ kind: 'cancelled' });
+    (b.shadowRoot?.querySelector('.retry') as HTMLElement).click();
+    (b.shadowRoot?.querySelector('.force') as HTMLElement).click();
+    await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(2));
+    const [retry, force] = vi.mocked(runAgentDelete).mock.calls.map((c) => c[0]);
+    expect(retry).toMatchObject({ agentId: AGENT_ID, confirm: false });
+    expect(retry.force).toBeUndefined();
+    expect(force).toMatchObject({ agentId: AGENT_ID, force: true });
+    vi.mocked(runAgentDelete).mockReset();
+  });
+
+  it('Start answered 409 delete_in_progress shows the explanation', async () => {
+    stubLocation();
+    const agent = actionable({ phase: 'stopped', deletion: failed({ code: 'in_doubt' }) });
+    const el = await mount(agent);
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.endsWith('/start')
+          ? ({
+              ok: false,
+              status: 409,
+              json: () =>
+                Promise.resolve({
+                  error: { code: 'delete_in_progress', message: 'being deleted' },
+                }),
+            } as unknown as Response)
+          : ({ ok: false, status: 404, json: () => Promise.resolve({}) } as unknown as Response)
+      )
+    );
+    await (el as unknown as Internals).handleAction('start');
+    expect(showToast).toHaveBeenCalledWith(START_BLOCKED_BY_DELETE_MESSAGE);
   });
 });

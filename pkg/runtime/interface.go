@@ -114,6 +114,11 @@ type RunConfig struct {
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
 	// the volume mount — pod sees only its project subtree (design §9.4).
 	NFSSubPath string
+	// NFSSubPathRoot is workspace_storage.nfs.subpath_root, set when
+	// WorkspaceBackendName is "nfs". Empty means
+	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
+	// NFS export and host paths from it (via config.ResolveSubPathRoot).
+	NFSSubPathRoot string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the

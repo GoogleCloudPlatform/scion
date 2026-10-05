@@ -787,6 +787,9 @@ export class ScionChatThread extends LitElement {
         overflow-y: auto;
         overflow-x: hidden;
         overscroll-behavior: contain;
+        /* Set by the chat page's mobile panels; see chat.ts. Code blocks
+         * and tables are scrollers of their own, so they still pan sideways. */
+        touch-action: var(--chat-touch-action, auto);
         padding: 0.5rem 0;
         display: flex;
         flex-direction: column;

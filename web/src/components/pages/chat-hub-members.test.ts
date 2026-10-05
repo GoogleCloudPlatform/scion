@@ -98,6 +98,7 @@ interface ChatPage extends HTMLElement {
   _loadHubAgents(generation: number): Promise<void>;
   _handleAgentsUpdated(): void;
   _sidebarOwner: string;
+  handleRailLoaded(e: Event): void;
 }
 
 beforeAll(async () => {
@@ -273,6 +274,216 @@ describe('hub members: one load per view', () => {
       expect(ids(page.v2HumanMembers)).toEqual(['u1']);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
       expect(ids(page.v2Members)).toEqual(['u1', 'a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+});
+
+describe('hub members: after a finished walk', () => {
+  it('a join call (the re-parse after rail-loaded) walks neither list again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const usersBefore = usersRequests();
+      expect(usersBefore).toBeGreaterThan(0);
+
+      page.loadHubMembers();
+      page.loadHubMembers();
+      await settle();
+
+      expect(usersRequests()).toBe(usersBefore);
+      expect(storeWalks()).toBe(1);
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the fallback poll still walks the users (the agents come from the store)', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const usersBefore = usersRequests();
+      page.loadHubMembers({ refresh: true });
+      await settle();
+      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(storeWalks()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('returning to the hub view after a conversation walks the users again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const usersBefore = usersRequests();
+      page.v2Conversation = { projectId: 'p1' };
+      await settle();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(storeWalks()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it("a space's members load replaces the lists, so the next hub view walks the users again", async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const usersBefore = usersRequests();
+      await page.loadV2Members('p1');
+      page.loadHubMembers();
+      await settle();
+      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a failed users walk is not treated as finished', async () => {
+    let call = 0;
+    serveUsers(() => (++call === 1 ? new Response('', { status: 500 }) : usersPage(['u1'])));
+    const page = createPage();
+    harness.store.retain({ scope: 'hub' }, () => {});
+    await harness.connect();
+    page.loadHubMembers();
+    await settle();
+    expect(page.v2HumanMembers).toEqual([]);
+
+    page.loadHubMembers();
+    await settle();
+
+    expect(usersRequests()).toBe(2);
+    expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+  });
+});
+
+describe('hub members: hub presence fetch', () => {
+  function membersRequests(): number {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => /\/chat\/spaces\/[^/]+\/members$/.test(c[0])).length;
+  }
+
+  function railLoaded(page: ChatPage): void {
+    page.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: ['p1'],
+          spaces: [{ projectId: 'p1', projectSlug: 'p1', projectName: 'P1' }],
+        },
+      })
+    );
+  }
+
+  it('is fetched once per hub view, not again on every rail reload', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      railLoaded(page);
+      railLoaded(page);
+      await settle();
+      expect(membersRequests()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('waits for the hub users list when the rail loads first', async () => {
+    const users = deferred<Response>();
+    serveUsers(() => users.promise);
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      expect(membersRequests()).toBe(0);
+
+      users.resolve(usersPage(['u1']));
+      await settle();
+      expect(membersRequests()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a failed presence fetch is retried by the next rail load', async () => {
+    let members = 0;
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (/\/members$/.test(url)) {
+        return Promise.resolve(
+          ++members === 1 ? new Response('', { status: 500 }) : new Response('{}', { status: 200 })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      railLoaded(page);
+      await settle();
+      expect(membersRequests()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the fallback poll resyncs it', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      const before = membersRequests();
+      expect(before).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(membersRequests()).toBe(before + 1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a new hub view (after a conversation) fetches it again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      page.v2Conversation = { projectId: 'p1' };
+      await settle();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(membersRequests()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('is not fetched while a space holds the sidebar', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      await page.loadV2Members('p2');
+      const before = membersRequests();
+      // The route re-parse rail-loaded triggers is not under test here (on
+      // mobile the route names the expanded space).
+      (page as unknown as { parseV2Route: () => void }).parseV2Route = vi.fn();
+      railLoaded(page);
+      await settle();
+      expect(membersRequests()).toBe(before);
     } finally {
       unmount(page);
     }

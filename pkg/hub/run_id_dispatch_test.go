@@ -822,3 +822,58 @@ func TestDeleteClaimedDuringDispatch_PrecedesIncompleteCreate(t *testing.T) {
 		t.Errorf("run ID changed from %q to %q", before, got)
 	}
 }
+
+// A required-skill resolution failure from inside Manager.Start carries the
+// broker's start markers like any other start failure, so the run ID is
+// settled the same way: a marked failure keeps the minted ID, or records the
+// run the broker reports. The error still reaches the relay as a typed skill
+// failure. Without the markers the run would be reverted to the previous ID.
+func TestRunID_SkillResolutionFailureSettlesLikeStartFailure(t *testing.T) {
+	ctx := context.Background()
+	const minted, previous = "<minted>", "previous-run"
+	skillDetails := func(d map[string]interface{}) map[string]interface{} {
+		d["skill"] = "gh://owner/repo/my-skill@main"
+		d["cause"] = "not_found"
+		return d
+	}
+	for _, tc := range []struct {
+		name    string
+		restart bool
+		details map[string]interface{}
+		want    string
+	}{
+		{"start, marker only", false, skillDetails(startAttempted("r")), minted},
+		{"start, current = previous", false, skillDetails(startAttemptedAt("r", previous)), previous},
+		{"start, current = other", false, skillDetails(startAttemptedAt("r", "other-run")), "other-run"},
+		{"restart, marker only", true, skillDetails(startAttempted("r")), minted},
+		{"restart, current = previous", true, skillDetails(startAttemptedAt("r", previous)), previous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunIDFixture(t, "runid-skill")
+			if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, previous); err != nil {
+				t.Fatal(err)
+			}
+			f.client.returnErr = brokerEnvelope(t, http.StatusNotFound, skillResolutionErrorCode, tc.details)
+
+			var err error
+			var mintedID string
+			if tc.restart {
+				err = f.dispatcher.DispatchAgentRestart(ctx, f.agent)
+				mintedID = f.client.lastRestartExtras.RunID
+			} else {
+				err = f.dispatcher.DispatchAgentStart(ctx, f.agent, "", false)
+				mintedID = f.client.lastStartExtras.RunID
+			}
+			if !isSkillResolutionDispatchError(err) {
+				t.Fatalf("expected a typed skill resolution error, got %v", err)
+			}
+			want := tc.want
+			if want == minted {
+				want = mintedID
+			}
+			if got := f.storedRunID(t); got != want {
+				t.Errorf("stored run_id = %q, want %q", got, want)
+			}
+		})
+	}
+}

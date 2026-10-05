@@ -53,11 +53,15 @@ import {
   TIER_REASON,
   builtInOptionState,
   canEditRow,
+  addModeRoleReason,
+  builtInTierReason,
   canRemoveRow,
   customRoleState,
   defaultBuiltInForAdd,
   deriveDialogLock,
   describeCustomRoleError,
+  hasNonDirectSource,
+  isNonDirectSource,
   isCustomProjectRole,
   isEmptySelection,
   isLastOwnerByTier,
@@ -115,6 +119,10 @@ const HUB_OVERRIDE_CAPS: MembershipCapabilities = {
 
 const CEILING_REASON = 'actor lacks permission for delegation: agent.delete';
 
+/** The hub's credential-gate refusal (pkg/hub checkMembershipCredential). */
+const CREDENTIAL_CODE = 'credential_insufficient';
+const CREDENTIAL_REASON = 'membership mutations require an interactive session credential';
+
 function role(
   id: string,
   name: string,
@@ -138,13 +146,32 @@ const R_CEIL = role('r-ceil', 'project-agent-reaper', 'custom', {
 
 const OWNER_CATALOG = [R_OWNER, R_ADMIN, R_MEMBER, R_CEIL, R_MSG];
 
-/** What assignable-roles returns for a project admin. */
+/** The hub's custom-role authority refusal (pkg/hub governanceDecisionForChange). */
+const CUSTOM_AUTHORITY_DENIAL: Partial<AssignableProjectRole> = {
+  grantable: false,
+  reason: 'custom role changes require role-binding authority in this project (project owners)',
+  denialCode: 'role_assignment_forbidden',
+  details: { requiredPermission: 'role_binding.create' },
+};
+
+/** What assignable-roles returns for a project admin: the hub's own
+ *  governance strings and denial codes (pkg/hub checkBuiltInChangeGovernance). */
 const ADMIN_CATALOG = [
-  { ...R_OWNER, grantable: false, reason: 'requires project owner' },
-  { ...R_ADMIN, grantable: false, reason: 'requires project owner' },
+  {
+    ...R_OWNER,
+    grantable: false,
+    reason: 'actor role "project-admin" cannot add target role "project-owner"',
+    denialCode: 'target_role_protected',
+  },
+  {
+    ...R_ADMIN,
+    grantable: false,
+    reason: 'actor role "project-admin" cannot add target role "project-admin"',
+    denialCode: 'target_role_protected',
+  },
   R_MEMBER,
-  { ...R_CEIL, grantable: false, reason: 'custom role changes require role-binding authority' },
-  { ...R_MSG, grantable: false, reason: 'custom role changes require role-binding authority' },
+  { ...R_CEIL, ...CUSTOM_AUTHORITY_DENIAL },
+  { ...R_MSG, ...CUSTOM_AUTHORITY_DENIAL },
 ];
 
 function binding(
@@ -1598,6 +1625,206 @@ describe('Transfer Ownership', () => {
   it('is hidden without canTransfer', async () => {
     const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
     expect(q(el, 'sl-button[variant="warning"]')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source column (ptone/scion#2672 item 3)
+// ---------------------------------------------------------------------------
+
+describe('Source column', () => {
+  const VIA_GROUP: ProjectMemberGroup = {
+    ...DAVE,
+    bindings: DAVE.bindings.map((b) => ({
+      ...b,
+      source: 'group:g-eng',
+      sourceGroupName: 'Engineering',
+    })),
+  };
+
+  it('hasNonDirectSource is false while every binding is direct', () => {
+    expect(hasNonDirectSource(ALL_GROUPS)).toBe(false);
+    expect(hasNonDirectSource([])).toBe(false);
+    expect(hasNonDirectSource([VIA_GROUP])).toBe(true);
+  });
+
+  it('isNonDirectSource treats an empty source as direct', () => {
+    expect(isNonDirectSource({ source: 'direct' })).toBe(false);
+    expect(isNonDirectSource({ source: '' })).toBe(false);
+    expect(isNonDirectSource({ source: 'group:g-eng' })).toBe(true);
+    expect(
+      hasNonDirectSource([{ ...DAVE, bindings: DAVE.bindings.map((b) => ({ ...b, source: '' })) }])
+    ).toBe(false);
+  });
+
+  it('shows Direct for a binding with an empty source when the column is shown', async () => {
+    const EMPTY_SOURCE: ProjectMemberGroup = {
+      ...ALL_GROUPS[0],
+      bindings: ALL_GROUPS[0].bindings.map((b) => ({ ...b, source: '' })),
+    };
+    const groups = ALL_GROUPS.map((g) =>
+      g === DAVE ? VIA_GROUP : g === ALL_GROUPS[0] ? EMPTY_SOURCE : g
+    );
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    // Set the rows directly: loading normalizes an empty source to "direct",
+    // and this pins the row renderer's own predicate.
+    el.groups = groups;
+    await el.updateComplete;
+    const key = `${EMPTY_SOURCE.principalType}:${EMPTY_SOURCE.principalId}`;
+    expect(row(el, key).querySelector('.provenance-badge')?.textContent).toContain('Direct');
+  });
+
+  it('is hidden when every binding is direct', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    const headers = qa(el, 'thead th').map((th) => th.textContent?.trim());
+    expect(headers).not.toContain('Source');
+    expect(qa(el, '.provenance-badge')).toHaveLength(0);
+  });
+
+  it('is shown when at least one binding has a non-direct source', async () => {
+    const groups = ALL_GROUPS.map((g) => (g === DAVE ? VIA_GROUP : g));
+    const el = await mountEditor(groups, OWNER_CAPS);
+    const headers = qa(el, 'thead th').map((th) => th.textContent?.trim());
+    expect(headers).toContain('Source');
+    // Every row gets a cell, so columns stay aligned.
+    expect(qa(el, '.provenance-badge')).toHaveLength(groups.length);
+    const badge = (key: string) =>
+      row(el, key).querySelector('.provenance-badge')?.textContent?.replace(/\s+/g, ' ').trim();
+    expect(badge('user:u-dave')).toBe('Via group: Engineering');
+    expect(badge('user:u-alice')).toBe('Direct');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Add dialog per-role reasons (ptone/scion#2672 item 4)
+// ---------------------------------------------------------------------------
+
+describe('Add dialog per-role reasons', () => {
+  it('addModeRoleReason reports the catalog reason in Add mode only', () => {
+    const owner = ADMIN_CATALOG[0];
+    expect(addModeRoleReason(owner, 'add')).toBe(owner.reason);
+    expect(addModeRoleReason(owner, 'edit')).toBe('');
+    expect(addModeRoleReason(R_MEMBER, 'add')).toBe('');
+    expect(addModeRoleReason({ ...R_OWNER, grantable: false, reason: '' }, 'add')).toBe('');
+  });
+
+  it('builtInTierReason keys governance refusals off the denial code', () => {
+    // Governance codes read as the tier text, never the hub's machine string.
+    expect(builtInTierReason(ADMIN_CATALOG[0], 'add')).toBe(TIER_REASON);
+    expect(
+      builtInTierReason(
+        {
+          ...R_ADMIN,
+          grantable: false,
+          reason: 'only direct project owners can manage admin and owner roles',
+          denialCode: 'role_assignment_forbidden',
+        },
+        'add'
+      )
+    ).toBe(TIER_REASON);
+    // Other codes show the hub's reason, through describeCustomRoleError.
+    expect(
+      builtInTierReason(
+        { ...R_OWNER, grantable: false, reason: CREDENTIAL_REASON, denialCode: CREDENTIAL_CODE },
+        'add'
+      )
+    ).toBe(CREDENTIAL_REASON);
+    // In Edit mode the catalog does not apply.
+    expect(
+      builtInTierReason(
+        { ...R_OWNER, grantable: false, reason: CREDENTIAL_REASON, denialCode: CREDENTIAL_CODE },
+        'edit'
+      )
+    ).toBe(TIER_REASON);
+  });
+
+  it('admin Add dialog shows readable tier text for the hub governance refusal', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
+    el.openAddDialog();
+    await el.updateComplete;
+
+    // Built-in roles above the admin's tier stay visible and disabled, with
+    // the readable tier text rather than the hub's machine string.
+    for (const v of ['r-owner', 'r-admin']) {
+      expect(radio(el, v).hasAttribute('disabled')).toBe(true);
+      expect(radio(el, v).textContent).toContain(TIER_REASON);
+      expect(radio(el, v).textContent).not.toContain('cannot add target role');
+    }
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(false);
+  });
+
+  it('admin Add dialog shows the hub reason for a built-in refused for another cause', async () => {
+    const catalog = [
+      { ...R_OWNER, grantable: false, reason: CREDENTIAL_REASON, denialCode: CREDENTIAL_CODE },
+      ...ADMIN_CATALOG.slice(1),
+    ];
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, catalog);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(radio(el, 'r-owner').textContent).toContain(CREDENTIAL_REASON);
+    expect(radio(el, 'r-owner').textContent).not.toContain(TIER_REASON);
+  });
+
+  it('custom rows refused for lack of custom-role authority keep their description', async () => {
+    const catalog = ADMIN_CATALOG.map((r) =>
+      r.id === 'r-msg' ? { ...r, description: 'Send messages to project agents' } : r
+    );
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, catalog);
+    el.openAddDialog();
+    await el.updateComplete;
+
+    // The caption states the cause once.
+    const help = qa(el, '.custom-roles .form-help').map((p) => p.textContent?.trim());
+    expect(help).toContain(CUSTOM_TIER_CAPTION);
+    // Custom roles are listed (not omitted) and disabled; no row repeats the
+    // caption's cause, so each keeps its description.
+    for (const id of ['r-msg', 'r-ceil']) {
+      const cb = checkbox(el, id);
+      expect(cb).not.toBeNull();
+      expect(cb!.hasAttribute('disabled')).toBe(true);
+      expect(cb!.textContent).not.toContain('role-binding authority');
+    }
+    expect(checkbox(el, 'r-msg')!.textContent).toContain('Send messages to project agents');
+  });
+
+  it('custom rows refused for a different cause still show their reason', async () => {
+    const structural = {
+      ...R_OPS,
+      grantable: false,
+      reason:
+        'a custom role containing a role_binding.* permission cannot be granted through this endpoint',
+      denialCode: 'role_assignment_forbidden',
+      details: { roleDefinitionId: 'r-ops', roleName: 'project-ops' },
+    };
+    expect(customRoleState(structural, { caps: ADMIN_CAPS, held: false, mode: 'add' })).toEqual({
+      disabled: true,
+      reason: structural.reason,
+    });
+    expect(
+      customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: false, mode: 'add' })
+    ).toEqual({ disabled: true, reason: '' });
+
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, [...ADMIN_CATALOG, structural]);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(checkbox(el, 'r-ops')!.textContent).toContain(structural.reason);
+  });
+
+  it('falls back to the tier text when the catalog gives no reason', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, [R_OWNER, R_ADMIN, R_MEMBER]);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(radio(el, 'r-owner').textContent).toContain(TIER_REASON);
+  });
+
+  it('Edit mode keeps the tier text and leaves custom checkboxes without a reason', () => {
+    expect(customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: false })).toEqual({
+      disabled: true,
+      reason: '',
+    });
+    expect(
+      customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: true, mode: 'add' })
+    ).toEqual({ disabled: true, reason: '' });
   });
 });
 

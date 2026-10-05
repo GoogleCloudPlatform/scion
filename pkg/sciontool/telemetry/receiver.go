@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,9 @@ func (r *Receiver) Start(ctx context.Context) error {
 		return err
 	}
 	r.grpcGracefulDone, r.grpcForceDone = nil, nil
+	// Forget the previous run's addresses so a failed bind below never
+	// leaves BoundPorts reporting a port that is no longer listening.
+	r.grpcListenAddr, r.httpListenAddr = "", ""
 
 	// Start gRPC server
 	grpcAddr := fmt.Sprintf("127.0.0.1:%d", r.config.GRPCPort)
@@ -131,6 +135,7 @@ func (r *Receiver) Start(ctx context.Context) error {
 	httpLis, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		r.grpcServer.Stop()
+		r.grpcListenAddr = "" // no longer bound; BoundPorts falls back to config
 		return fmt.Errorf("failed to listen on HTTP port %d: %w", r.config.HTTPPort, err)
 	}
 	r.httpListenAddr = httpLis.Addr().String()
@@ -236,6 +241,32 @@ func (r *Receiver) waitGRPCShutdown(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// BoundPorts returns the gRPC and HTTP ports the receiver is actually
+// listening on. They differ from the configured ports when the config
+// requests port 0 (an ephemeral port). Before the first successful Start
+// (or after a Start that failed to bind) they fall back to the configured
+// ports. After Stop they report the ports of the last run.
+func (r *Receiver) BoundPorts() (grpcPort, httpPort int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return listenPort(r.grpcListenAddr, r.config.GRPCPort), listenPort(r.httpListenAddr, r.config.HTTPPort)
+}
+
+func listenPort(addr string, fallback int) int {
+	if addr == "" {
+		return fallback
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fallback
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fallback
+	}
+	return port
 }
 
 // IsRunning returns true if the receiver is running.

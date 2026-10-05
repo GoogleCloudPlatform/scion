@@ -1037,7 +1037,6 @@ func TestListTopics_ReturnsConversationID(t *testing.T) {
 
 	topics, err := s.ListTopics(ctx, "proj-list")
 	require.NoError(t, err)
-	// Should have the created topic plus a lazily-created #general.
 	var found bool
 	for _, tp := range topics {
 		if tp.ID == "topic-list-conv" {

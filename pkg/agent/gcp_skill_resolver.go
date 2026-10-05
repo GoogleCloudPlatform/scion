@@ -89,7 +89,7 @@ func (r *GCPSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 		resolved, err := r.resolveOne(ctx, gcpRef, ref)
 		if err != nil {
 			result.Errors = append(result.Errors, ResolveError{
-				URI: ref.URI, Code: "resolve_failed", Message: err.Error(),
+				URI: ref.URI, Code: SkillErrCodeResolveFailed, Message: err.Error(),
 			})
 			continue
 		}
