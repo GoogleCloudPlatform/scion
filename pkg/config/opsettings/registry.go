@@ -390,31 +390,13 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
-		"auto_expose_ports": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enabled": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
-		// quotas schema is hand-written — like auto_expose_ports, it has no
-		// $defs in settings-v1.schema.json.
-		"quotas": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
-		// agent_secrets schema is hand-written — like quotas, it has no
-		// $defs in settings-v1.schema.json.
-		"agent_secrets": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"user_scope_only": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
+		// auto_expose_ports, quotas, agent_secrets, project_defaults,
+		// github_app and federation are derived from settings-v1.schema.json
+		// so the section schema and the settings file schema cannot drift
+		// apart (the $defs are attached to every section at compile time).
+		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
+		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
+		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
@@ -448,8 +430,8 @@ func compileSchemas() {
 				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
 				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
 				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
-				"default_runtime_broker":                  map[string]interface{}{"type": "string"},
-				"default_timezone":                        map[string]interface{}{"type": "string"},
+				"default_runtime_broker":                  getSchemaProperty(root, "default_runtime_broker"),
+				"default_timezone":                        getSchemaProperty(root, "default_timezone"),
 				"default_gcp_identity_mode":               getSchemaProperty(root, "default_gcp_identity_mode"),
 				"default_gcp_identity_service_account_id": getSchemaProperty(root, "default_gcp_identity_service_account_id"),
 			},
@@ -464,30 +446,11 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
-		// Tech debt: github_app schema is hand-written — the canonical
-		// settings-v1.schema.json has no $defs for GitHub App fields. If a
-		// gitHubApp $def is added later, unify here.
-		"github_app": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"app_id":           map[string]interface{}{"type": "integer"},
-				"api_base_url":     map[string]interface{}{"type": "string"},
-				"webhooks_enabled": map[string]interface{}{"type": "boolean"},
-				"installation_url": map[string]interface{}{"type": "string"},
-				"private_key_path": map[string]interface{}{"type": "string"},
-			},
-			"additionalProperties": false,
-		},
-		"notifications": buildNotificationsSchema(),
-		// project_defaults schema is hand-written — like maintenance, it has
-		// no $defs in settings-v1.schema.json because it is runtime/DB state.
-		"project_defaults": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"default_scratchpad": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
+		// github_app omits private_key and webhook_secret: secret material
+		// stays in the secret backend and is never stored in the DB section.
+		"github_app":       withoutProperties(schemaObject(getSchemaProperty(root, "server", "github_app")), "private_key", "webhook_secret"),
+		"notifications":    buildNotificationsSchema(),
+		"project_defaults": schemaObject(getSchemaProperty(root, "project_defaults")),
 		// runtimes: map-of-objects — keys are runtime names, values are
 		// runtime config objects. additionalProperties validates each entry.
 		"runtimes": {
@@ -579,42 +542,7 @@ func compileSchemas() {
 				},
 			},
 		},
-		// federation schema is hand-written — federation config has no $defs
-		// in settings-v1.schema.json because it is a new Layer-1 section.
-		"federation": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enabled": map[string]interface{}{"type": "boolean"},
-				"trusted_issuers": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{
-						"type":     "object",
-						"required": []string{"issuer_url"},
-						"properties": map[string]interface{}{
-							"issuer_url":           map[string]interface{}{"type": "string", "minLength": 1},
-							"jwks_url":             map[string]interface{}{"type": "string"},
-							"expected_audience":    map[string]interface{}{"type": "string"},
-							"allowed_projects":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_root_users":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"default_scopes":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"issuer_type":          map[string]interface{}{"type": "string", "enum": []string{"hub", "service_account", "user"}},
-							"default_role":         map[string]interface{}{"type": "string"},
-							"allowed_emails":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_gcp_projects": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_domains":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-						},
-						"additionalProperties": false,
-					},
-				},
-				"algorithms": map[string]interface{}{
-					"type":  "array",
-					"items": map[string]interface{}{"type": "string", "enum": []string{"RS256", "ES256"}},
-				},
-				"refresh_interval":  map[string]interface{}{"type": "string"},
-				"debounce_interval": map[string]interface{}{"type": "string"},
-			},
-			"additionalProperties": false,
-		},
+		"federation": schemaObject(getSchemaProperty(root, "server", "federation")),
 	}
 
 	rawSchemas = sectionSchemaMap
@@ -709,6 +637,38 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 		}
 	}
 	return map[string]interface{}{}
+}
+
+// schemaObject asserts a getSchemaProperty result is a schema object. A
+// missing property yields an empty object, which
+// TestSectionSchemas_MatchRootSchema reports.
+func schemaObject(v interface{}) map[string]interface{} {
+	m, _ := v.(map[string]interface{})
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+// withoutProperties returns a copy of an object schema with the named
+// properties removed. The root schema maps are shared, so they are copied
+// rather than modified.
+func withoutProperties(node map[string]interface{}, names ...string) map[string]interface{} {
+	out := make(map[string]interface{}, len(node))
+	for k, v := range node {
+		out[k] = v
+	}
+	if props, ok := node["properties"].(map[string]interface{}); ok {
+		cp := make(map[string]interface{}, len(props))
+		for k, v := range props {
+			cp[k] = v
+		}
+		for _, n := range names {
+			delete(cp, n)
+		}
+		out["properties"] = cp
+	}
+	return out
 }
 
 func resolveRef(root map[string]interface{}, ref string) interface{} {
