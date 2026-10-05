@@ -883,20 +883,7 @@ func teamsUserIDOf(activity *Activity) string {
 // linkedUser returns the Scion account linked to the activity sender, or nil
 // when the sender has not registered.
 func (h *CommandHandler) linkedUser(ctx context.Context, activity *Activity) *TeamsUserMapping {
-	store := h.getStore()
-	teamsUserID := teamsUserIDOf(activity)
-	if store == nil || teamsUserID == "" {
-		return nil
-	}
-	mapping, err := store.GetUserMapping(ctx, teamsUserID)
-	if err != nil {
-		h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
-		return nil
-	}
-	if mapping == nil || mapping.ScionEmail == "" {
-		return nil
-	}
-	return mapping
+	return linkedUserByTeamsID(ctx, h.getStore(), teamsUserIDOf(activity), h.log)
 }
 
 // requireLinkedUser returns the sender's linked Scion account. When the

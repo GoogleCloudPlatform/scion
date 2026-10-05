@@ -785,6 +785,12 @@ func TestBroker_HandleMessage_CanonicalTopic(t *testing.T) {
 		LinkedAt:       time.Now(),
 		Active:         true,
 	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "aad-1",
+		ScionUserID: "scion-aad-1",
+		ScionEmail:  "aad-1@example.com",
+		LinkedAt:    time.Now(),
+	}))
 
 	activity := &Activity{
 		Type: "message",
@@ -843,6 +849,12 @@ func TestBroker_HandleMessage_ThreadSuffix(t *testing.T) {
 		LinkedAt:       time.Now(),
 		Active:         true,
 	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "aad-2",
+		ScionUserID: "scion-aad-2",
+		ScionEmail:  "aad-2@example.com",
+		LinkedAt:    time.Now(),
+	}))
 
 	// Inbound activity with thread suffix on conversation ID.
 	activity := &Activity{
@@ -899,4 +911,71 @@ func TestBroker_HandleMessage_NoChannelLink(t *testing.T) {
 	_, err := broker.HandleActivity(context.Background(), activity)
 	require.NoError(t, err)
 	assert.False(t, hubCalled, "hub should not be called when no channel link exists")
+}
+
+// linkDefaultAgentChannel links testActivity's conversation to proj-1 with
+// dev-1 as the default agent.
+func linkDefaultAgentChannel(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	require.NoError(t, broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		DefaultAgent:   "dev-1",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+}
+
+func TestBroker_HandleMessage_DeliversAsLinkedUser(t *testing.T) {
+	var payload inboundPayload
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestUser(t, broker)
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	require.NotNil(t, payload.Message)
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
+	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+	assert.Equal(t, "agent:dev-1", payload.Message.Recipient)
+	assert.Empty(t, ms.sent, "no reply expected on successful delivery")
+}
+
+func TestBroker_HandleMessage_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	assert.False(t, hubCalled, "hub should not be called for an unlinked user")
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "`register`")
+}
+
+func TestBroker_HandleMessage_DeliveryFailureIsReported(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"code":"internal_error","message":"boom"}}`))
+	})
+	linkTestUser(t, broker)
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.Error(t, err)
+
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "could not be delivered")
+	assert.Contains(t, ms.sent[0].Text, "dev-1")
 }

@@ -791,6 +791,15 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		msg.Recipient = "agent:" + agentSlug
 	}
 
+	// Deliver as the sender's linked Scion account. Unlinked senders get a
+	// register hint instead of a silent drop.
+	mapping := linkedUserByTeamsID(ctx, store, msg.SenderID, b.log)
+	if mapping == nil {
+		b.replyText(ctx, activity, unlinkedInboundHint)
+		return nil
+	}
+	msg.Sender = onBehalfOfUser(mapping)
+
 	// Update conversation context for routing replies back.
 	// Placed here (after link resolution) so link.ProjectID is available.
 	if msg.SenderID != "" {
@@ -822,6 +831,9 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 			"error", err,
 			"conversation_id", activity.Conversation.ID,
 		)
+		// The webhook has already acknowledged this activity, so report the
+		// failure in the conversation.
+		b.replyText(ctx, activity, inboundDeliveryFailureText(agentSlug))
 		return fmt.Errorf("deliver to hub: %w", err)
 	}
 
@@ -830,6 +842,43 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		"sender", msg.Sender,
 	)
 	return nil
+}
+
+// unlinkedInboundHint is sent when an unlinked user messages an agent.
+const unlinkedInboundHint = "Your message was not delivered. Link your Teams account to Scion first with the `register` command."
+
+// inboundDeliveryFailureText is sent when the hub rejects an inbound message.
+func inboundDeliveryFailureText(agentSlug string) string {
+	return fmt.Sprintf("Your message to **%s** could not be delivered. Please try again.", agentSlug)
+}
+
+// linkedUserByTeamsID returns the Scion account linked to teamsUserID, or nil
+// when there is no usable link.
+func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string, log *slog.Logger) *TeamsUserMapping {
+	if store == nil || teamsUserID == "" {
+		return nil
+	}
+	mapping, err := store.GetUserMapping(ctx, teamsUserID)
+	if err != nil {
+		log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
+		return nil
+	}
+	if mapping == nil || mapping.ScionEmail == "" {
+		return nil
+	}
+	return mapping
+}
+
+// replyText sends a plain-text message to the activity's conversation.
+func (b *TeamsBroker) replyText(ctx context.Context, activity *Activity, text string) {
+	if b.sender == nil {
+		b.log.Warn("Sender not initialized, cannot send reply")
+		return
+	}
+	reply := &Activity{Type: "message", Text: text}
+	if _, err := b.sender.sendActivity(ctx, activity.ServiceURL, activity.Conversation.ID, reply); err != nil {
+		b.log.Error("Failed to send reply", "error", err, "conversation_id", activity.Conversation.ID)
+	}
 }
 
 // stripThreadSuffix removes the ";messageid=..." suffix that Teams appends to
