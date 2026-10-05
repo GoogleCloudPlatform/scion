@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import type { User, Message } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 
@@ -71,6 +72,7 @@ export class ScionInboxTray extends LitElement {
     // Clear the previous user's state before this render, so no render pairs
     // the new user with the previous user's list.
     if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('messages')) this.announceCount();
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -100,6 +102,16 @@ export class ScionInboxTray extends LitElement {
     if (id === this.stateUserId) return;
     this.stateUserId = id;
     this.messages = [];
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'inbox', this.messages.length);
   }
 
   /**

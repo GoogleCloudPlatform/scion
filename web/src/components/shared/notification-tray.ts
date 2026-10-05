@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { isChatNotificationStatus } from '../../client/chat-notifications.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
@@ -95,6 +96,7 @@ export class ScionNotificationTray extends LitElement {
     // Clear the previous user's state before this render, so no render pairs
     // the new user with the previous user's list.
     if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('notifications')) this.announceCount();
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -129,6 +131,16 @@ export class ScionNotificationTray extends LitElement {
     this.notifications = [];
     this.seenIds = new Set();
     this.initialFetchDone = false;
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'notifications', this.notifications.length);
   }
 
   /**

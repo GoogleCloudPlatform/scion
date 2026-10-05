@@ -44,8 +44,8 @@ import type { User } from '../../shared/types.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
-import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
+import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
 import {
@@ -155,11 +155,11 @@ export class ScionHeader extends LitElement {
   @state()
   private graphPaletteAvailable = false;
 
-  /** Unread message count from the inbox tray (best-effort sync). */
+  /** Unread message count, from the inbox tray's count events. */
   @state()
   private inboxCount = 0;
 
-  /** Unacknowledged notification count from the notification tray. */
+  /** Unacknowledged notification count, from the notification tray's count events. */
   @state()
   private notificationCount = 0;
 
@@ -1228,13 +1228,13 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   // ----------------------------------------------------------------------
-  // COUPLING: inbox-tray.ts (.inbox-btn, .messages property)
-  //           notification-tray.ts (.bell-btn, .notifications property)
-  // If either tray renames these selectors or properties, update the
-  // references in openInboxTray(), openNotificationTray(),
-  // hideTrayTriggers(), and syncTrayCounts() below.
-  // TODO: Add public toggle() methods and unreadCount getters to the
-  // tray components so the header does not need to pierce shadow DOMs.
+  // COUPLING: inbox-tray.ts (.inbox-btn)
+  //           notification-tray.ts (.bell-btn)
+  // If either tray renames these selectors, update the
+  // references in openInboxTray(), openNotificationTray() and
+  // hideTrayTriggers() below. Badge counts arrive through TRAY_COUNT_EVENT.
+  // TODO: Add public toggle() methods to the tray components so the header
+  // does not need to pierce shadow DOMs.
   // ----------------------------------------------------------------------
 
   /**
@@ -1282,33 +1282,16 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Sync the header's badge counts with the tray components' internal state.
-   * The trays manage their own polling / SSE subscriptions -- we just read
-   * their array lengths after a short delay to let their fetch settle.
+   * Sets a badge count from a tray's count event. Each tray dispatches one
+   * whenever its list changes, so the badges follow the trays' lists, however
+   * long a fetch takes.
    */
-  private syncTrayCounts(): void {
-    // Delay initial sync to allow tray components to complete their first
-    // data fetch. 500ms is adequate for typical latencies; SSE events will
-    // correct the count if the trays load slower.
-    setTimeout(() => {
-      if (!this.isConnected) return;
-      const inbox = this.shadowRoot?.querySelector('scion-inbox-tray') as
-        | (Element & { messages?: unknown[] })
-        | null;
-      const notif = this.shadowRoot?.querySelector('scion-notification-tray') as
-        | (Element & { notifications?: unknown[] })
-        | null;
-
-      const newInbox = inbox?.messages?.length ?? 0;
-      const newNotif = notif?.notifications?.length ?? 0;
-      if (this.inboxCount !== newInbox) this.inboxCount = newInbox;
-      if (this.notificationCount !== newNotif) this.notificationCount = newNotif;
-    }, 500);
-  }
-
-  /** Bound handler for SSE tray-count events. */
-  private readonly handleTrayCountEvent = (): void => {
-    this.syncTrayCounts();
+  private readonly handleTrayCount = (event: Event): void => {
+    const detail = (event as CustomEvent<TrayCountDetail>).detail;
+    if (!detail) return;
+    const count = Math.max(0, detail.count);
+    if (detail.source === 'inbox') this.inboxCount = count;
+    else if (detail.source === 'notifications') this.notificationCount = count;
   };
 
   // =========================================================================
@@ -1444,9 +1427,9 @@ export class ScionHeader extends LitElement {
     window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
 
-    // Listen for SSE events to keep tray badge counts in sync.
-    stateManager.addEventListener('user-message-created', this.handleTrayCountEvent);
-    stateManager.addEventListener('notification-created', this.handleTrayCountEvent);
+    // The trays sit in this shadow root; their composed count events reach
+    // the host.
+    this.addEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
   }
 
   override disconnectedCallback(): void {
@@ -1459,17 +1442,14 @@ export class ScionHeader extends LitElement {
       GRAPH_PALETTE_AVAILABILITY_EVENT,
       this.handleGraphPaletteAvailability
     );
-    stateManager.removeEventListener('user-message-created', this.handleTrayCountEvent);
-    stateManager.removeEventListener('notification-created', this.handleTrayCountEvent);
+    this.removeEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
   }
 
   override firstUpdated(): void {
     // Give the tray components a frame to finish their first render so
-    // their shadow DOMs are ready, then hide their trigger buttons and
-    // read initial badge counts.
+    // their shadow DOMs are ready, then hide their trigger buttons.
     requestAnimationFrame(() => {
       this.hideTrayTriggers();
-      this.syncTrayCounts();
     });
   }
 
@@ -1482,9 +1462,12 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Clears the badge counts when the signed-in user id changes, then re-reads
-   * them from the trays, so the badges never show the previous user's counts.
-   * A new user object with the same id keeps the counts.
+   * Clears the badge counts when the signed-in user id changes, so the badges
+   * never show the previous user's counts. The trays clear their lists in
+   * their own next update, a render later than this one; clearing here keeps
+   * that render from pairing the new user with the old counts. The trays'
+   * count events then fill the badges in. A new user object with the same id
+   * keeps the counts.
    */
   private resetCountsOnUserChange(): void {
     const id = this.user?.id ?? null;
@@ -1492,7 +1475,6 @@ export class ScionHeader extends LitElement {
     this.countsUserId = id;
     this.inboxCount = 0;
     this.notificationCount = 0;
-    this.syncTrayCounts();
   }
 
   // =========================================================================
