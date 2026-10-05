@@ -839,6 +839,28 @@ describe('AgentStore feed completeness flag', () => {
       expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
     });
 
+    it('a hub walk that started after the connect timeout does not set the flag when the feed connects mid-walk', async () => {
+      const h = createHarness([agent('a1')], { view, connectTimeoutMs: 5_000 });
+      const release = h.server.pause();
+      const loading = h.store.ensure(HUB);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.server.walks()).toBe(1);
+
+      await h.connect();
+      const releaseFollowUp = h.server.pause();
+      release();
+      await loading;
+
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+
+      // The list is stale, so the next ensure walks again with the feed up.
+      const again = h.store.ensure(HUB);
+      releaseFollowUp();
+      await again;
+      expect(h.server.walks()).toBe(2);
+      expect(h.feeds[0]?.isAgentSetComplete(view)).toBe(true);
+    });
+
     it('a project walk does not set the flag', async () => {
       const h = createHarness([agent('a1')], { view });
       const loading = h.store.ensure(P1);

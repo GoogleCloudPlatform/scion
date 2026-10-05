@@ -269,7 +269,7 @@ describe('AgentStore coalescing', () => {
 
     expect(snapshot.status).toBe('ready');
     expect(h.server.walks()).toBe(1);
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(false);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
 
     await h.connect();
     await h.store.ensure(HUB);
