@@ -2229,6 +2229,12 @@ func (s *Server) createAgentInProject(
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// could not be recorded: nothing was dispatched.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					return
 				} else if s.writeStartClaimError(w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held,
 					// not eligible, a delete holding the row), or the claim
@@ -2287,6 +2293,12 @@ func (s *Server) createAgentInProject(
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
+					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// could not be recorded: nothing was dispatched.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 					return
 				} else if s.writeStartClaimError(w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held,

@@ -43,13 +43,19 @@ func (signErrStorage) GenerateSignedURL(context.Context, string, storage.SignedU
 	return nil, errors.New("injected signed URL fault")
 }
 
-// runIntentErrStore fails every run-intent write.
+// runIntentErrStore fails every run-intent write, including a start claim.
 type runIntentErrStore struct {
 	store.Store
 }
 
 func (runIntentErrStore) SwapRunIntent(context.Context, string, store.RunIntent) (store.RunIntent, time.Time, error) {
 	return "", time.Time{}, errors.New("injected run intent fault")
+}
+
+// ClaimAgentStart fails too: a create-and-start records its run intent with
+// its start claim.
+func (runIntentErrStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
+	return store.StartClaim{}, errors.New("injected run intent fault")
 }
 
 // useFailingManagedBackend swaps in a managed-agent backend whose create

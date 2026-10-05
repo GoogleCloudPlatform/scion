@@ -162,7 +162,12 @@ func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind
 		}
 	}
 	if err != nil {
-		return nil, err
+		var held *store.ClaimHeldError
+		if errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) || errors.Is(err, store.ErrDeleteInProgress) || ctx.Err() != nil {
+			return nil, err
+		}
+		// Not a refusal: the claim (the start's run-intent write) failed.
+		return nil, fmt.Errorf("%w: %w", errStartClaimWrite, err)
 	}
 	agent.RunIntent = store.RunIntentRunning
 	at := claim.RunIntentAt
@@ -476,6 +481,11 @@ func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, cle
 	agent.Phase = phase
 	return nil
 }
+
+// errStartClaimWrite marks a start claim the store failed to record (not a
+// refusal): for a claimed start, its run-intent write failed and nothing was
+// dispatched.
+var errStartClaimWrite = errors.New("record the start claim")
 
 // errStartedStatusWrite marks a start that succeeded but whose status write
 // failed: the agent is starting, so for the claim the start succeeded.
