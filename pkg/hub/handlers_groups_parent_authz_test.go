@@ -192,7 +192,7 @@ func TestCreateGroup_ParentID_RequiresAddMemberOnParent(t *testing.T) {
 	f := newParentGroupFixture(t, "cg-addmember")
 	actor := f.newSystemRoleUser(t, "cg-create-only", []string{"group.create"})
 
-	f.assertRefusedLikeAddMember(t, actor, "cg-addmember-child", "")
+	f.assertRefusedLikeAddMember(t, actor, "cg-addmember-child", `"denied_action":"addMember"`)
 }
 
 // TestCreateGroup_ParentID_AppliesRoleHierarchy: a caller holding
@@ -258,14 +258,41 @@ func TestCreateGroup_NoParentID_Unchanged(t *testing.T) {
 }
 
 // TestCreateGroup_ParentID_UnknownParent: a parentId that names no group is
-// a validation error and creates nothing.
+// a validation error and creates nothing, both for the dev admin and for a
+// caller holding only group.create.
 func TestCreateGroup_ParentID_UnknownParent(t *testing.T) {
 	f := newParentGroupFixture(t, "cg-unknown")
+	ctx := context.Background()
 
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
-		map[string]interface{}{"name": "cg-unknown-child", "slug": "cg-unknown-child", "parentId": api.NewUUID()})
-	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Equal(t, ErrCodeValidationError, apiErrorCode(t, rec.Body.String()))
-	_, err := f.store.GetGroupBySlug(context.Background(), "cg-unknown-child")
-	assert.ErrorIs(t, err, store.ErrNotFound)
+	listGroupIDs := func() []string {
+		t.Helper()
+		res, err := f.store.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1000})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(res.Items))
+		for _, g := range res.Items {
+			ids = append(ids, g.ID)
+		}
+		return ids
+	}
+
+	t.Run("dev admin", func(t *testing.T) {
+		before := listGroupIDs()
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/groups",
+			map[string]interface{}{"name": "cg-unknown-child", "slug": "cg-unknown-child", "parentId": api.NewUUID()})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeValidationError, apiErrorCode(t, rec.Body.String()))
+		_, err := f.store.GetGroupBySlug(ctx, "cg-unknown-child")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.ElementsMatch(t, before, listGroupIDs(), "no group may be created")
+	})
+
+	t.Run("create-only caller", func(t *testing.T) {
+		actor := f.newSystemRoleUser(t, "cg-unknown-create-only", []string{"group.create"})
+		before := listGroupIDs()
+		code, body := f.createChild(t, actor, "cg-unknown-child-2", api.NewUUID())
+		assert.Equal(t, http.StatusBadRequest, code, body)
+		assert.Equal(t, ErrCodeValidationError, apiErrorCode(t, body))
+		assert.ElementsMatch(t, before, listGroupIDs(), "no group may be created")
+		f.assertNothingCreated(t, actor, "cg-unknown-child-2")
+	})
 }
