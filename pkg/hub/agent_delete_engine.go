@@ -751,7 +751,10 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 // startNotInFlight reports, for the delete rollback, whether no start of cur
 // can still bring a container up: the row reads stopping or starting, has no
 // active launch and no running intent, and this replica holds no lifecycle
-// op for it.
+// op for it (replica-local). lifecycleOps is per replica and the engine
+// records intent stopped before it dispatches, so a start still in flight on
+// another replica passes this check; the rollback then writes stopped, and the next
+// heartbeat corrects stopped -> running if that start brings a container up.
 func startNotInFlight(s *Server, cur *store.Agent) bool {
 	switch state.Phase(cur.Phase) {
 	case state.PhaseStopping, state.PhaseStarting:

@@ -719,11 +719,14 @@ func TestStartDispatch_FailedDeleteDuringStartRestoresStarting(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the start's rollback restores the prior phase")
 }
 
-// F3 controls: a running intent recorded after the claim (an outstanding
-// start), or a live launch, keeps today's behaviour: the captured starting
-// is restored.
+// F3 controls: a live launch keeps today's behaviour (the captured starting
+// is restored); a running intent cannot be recorded under the claim.
 func TestStartDispatch_FailedDeleteKeepsStartingWhenStartOutstanding(t *testing.T) {
-	t.Run("running-intent", func(t *testing.T) {
+	t.Run("running-intent-refused-under-claim", func(t *testing.T) {
+		// A running intent cannot be recorded after the claim: the store
+		// refuses it while the delete holds the row (ptone/scion#2550), so
+		// startNotInFlight's intent check is defensive, and the failed
+		// delete restores stopped.
 		srv, s := testServer(t)
 		disp := &hookedStartDispatcher{failStart: true}
 		disp.deleteErr = errors.New("simulated broker delete failure")
@@ -736,15 +739,16 @@ func TestStartDispatch_FailedDeleteKeepsStartingWhenStartOutstanding(t *testing.
 		disp.onStart = func(*store.Agent) { plan = claimDeleteInHook(t, srv, a.ID) }
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
 		require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+		var swapErr error
 		disp.onDelete = func(*store.Agent) {
-			_, _, err := s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
-			require.NoError(t, err)
+			_, _, swapErr = s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
 		}
 		out := <-srv.runAgentDeletion(ctx, plan)
 		require.Equal(t, deletionOutcomeFailed, out.kind)
+		assert.ErrorIs(t, swapErr, store.ErrDeleteInProgress)
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.Equal(t, string(state.PhaseStarting), got.Phase)
+		assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	})
 	t.Run("live-launch", func(t *testing.T) {
 		srv, s := testServer(t)
