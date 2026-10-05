@@ -702,3 +702,37 @@ func TestStartClaimWiring_CreateClaimRefusedByDeleteRollsBack(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
 	assert.Equal(t, createStageRunIntent, sum.Stage)
 }
+
+// A delete that claims the row while a create's dispatch runs is a dispatch
+// failure, with and without env gather: the create is rolled back with that
+// dispatch's stage (it is not kept as a claim refusal) and answers
+// delete_in_progress.
+func TestStartClaimWiring_CreateDispatchDeleteInProgressRollsBack(t *testing.T) {
+	cases := []struct {
+		name   string
+		gather bool
+		stage  string
+	}{
+		{"dispatch", false, createStageDispatch},
+		{"dispatch with env gather", true, createStageDispatchEnvGather},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &failingCreateDispatcher{createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			req := CreateAgentRequest{Name: "dispatch-delete-" + tidSlugSafe(tc.name), ProjectID: project.ID, Task: "do something", GatherEnv: tc.gather}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
+			failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+			require.NoError(t, err)
+			require.Len(t, failed, 1, "the create is rolled back once")
+			var sum compensationSummary
+			require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+			assert.Equal(t, tc.stage, sum.Stage)
+		})
+	}
+}
