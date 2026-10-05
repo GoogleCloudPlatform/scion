@@ -118,6 +118,7 @@ func TestJWTAuth_TokenStopsWorkingAfterUserDelete(t *testing.T) {
 		rec := f.get(t, path)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s after delete: %s", path, rec.Body.String())
 		assert.Equal(t, ErrCodeUserNotFound, errorCodeOf(t, rec), "%s after delete", path)
+		assert.Contains(t, rec.Body.String(), "no user record for this token", "%s after delete", path)
 	}
 }
 

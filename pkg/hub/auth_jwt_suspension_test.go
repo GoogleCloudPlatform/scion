@@ -188,7 +188,7 @@ func TestJWTAuth_ActiveUser_PassesThrough(t *testing.T) {
 }
 
 // TestJWTAuth_DeletedUser_Returns401 verifies that a hub-issued user JWT
-// whose user no longer exists in the store is rejected with 401
+// whose subject has no user record in the store is rejected with 401
 // user_not_found, and the handler is never reached.
 func TestJWTAuth_DeletedUser_Returns401(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
@@ -216,7 +216,7 @@ func TestJWTAuth_DeletedUser_Returns401(t *testing.T) {
 
 	middleware := UnifiedAuthMiddleware(cfg)
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler must not be reached for a user that no longer exists")
+		t.Error("handler must not be reached for a token with no user record")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -235,6 +235,9 @@ func TestJWTAuth_DeletedUser_Returns401(t *testing.T) {
 	}
 	if errResp.Error.Code != ErrCodeUserNotFound {
 		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeUserNotFound)
+	}
+	if want := "invalid access token: no user record for this token"; errResp.Error.Message != want {
+		t.Errorf("error message = %q, want %q", errResp.Error.Message, want)
 	}
 }
 

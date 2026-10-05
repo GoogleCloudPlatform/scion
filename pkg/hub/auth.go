@@ -585,16 +585,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"access denied: user account is suspended", nil)
 						return
 					}
-					// A token whose user no longer exists (the account was
-					// deleted after the token was issued) is rejected here,
-					// like a suspended user. The token is self-contained, so
-					// authentication must not succeed for an identity that has
-					// no store record.
+					// A token whose subject has no user record (for example
+					// the account was deleted after the token was issued) is
+					// rejected here, like a suspended user. The token is
+					// self-contained, so authentication must not succeed for
+					// an identity that has no store record.
 					if errors.Is(uErr, store.ErrNotFound) {
-						log.Warn("JWT auth rejected: user no longer exists",
+						log.Warn("JWT auth rejected: no user record for this token",
 							"user_id", claims.UserID)
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
-							"invalid access token: user no longer exists", nil)
+							"invalid access token: no user record for this token", nil)
 						return
 					}
 				}
