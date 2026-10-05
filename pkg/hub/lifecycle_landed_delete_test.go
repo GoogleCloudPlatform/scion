@@ -19,8 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -123,6 +125,129 @@ func TestLifecycle_DeleteWinsAfterLanding(t *testing.T) {
 				if got, err := s.GetAgent(context.Background(), agent.ID); err == nil {
 					assert.NotEqual(t, string(state.PhaseRunning), got.Phase)
 				}
+			})
+		}
+	}
+}
+
+// landedFaultStore is set as srv.store (the dispatcher keeps the raw store,
+// so compensation reads the real row) and armed from landingClient.onLand:
+// the first GetAgent after arming is then the handler's re-read, and the
+// status write with ClearExit is the handler's final start/restart write.
+type landedFaultStore struct {
+	store.Store
+	armed      atomic.Bool
+	failGet    atomic.Bool // fail the handler's re-read
+	delOnWrite atomic.Bool // hard-delete the row inside the final status write
+}
+
+func (p *landedFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if p.armed.Load() && p.failGet.CompareAndSwap(true, false) {
+		return nil, errors.New("db unavailable")
+	}
+	return p.Store.GetAgent(ctx, id)
+}
+
+func (p *landedFaultStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if p.armed.Load() && u.ClearExit && p.delOnWrite.CompareAndSwap(true, false) {
+		if err := p.Store.DeleteAgent(ctx, id); err != nil {
+			return err
+		}
+	}
+	return p.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// A row hard-deleted between the handler's re-read and its status write
+// answers 409 delete_in_progress too, not 404.
+func TestLifecycle_DeleteWinsAfterReRead_HardDelete409(t *testing.T) {
+	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
+		t.Run(action, func(t *testing.T) {
+			srv, s, agent, client := newLandedDeleteServer(t)
+			// The row is live when the dispatch's compensation reads it, and
+			// gone by the handler's status write.
+			p := &landedFaultStore{Store: s}
+			p.delOnWrite.Store(true)
+			srv.store = p
+			client.onLand = func() { p.armed.Store(true) }
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			requireIntentDeleteInProgress(t, rec, agent.ID)
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, deletedWhileStartingMessage, body.Error.Message)
+			assert.Empty(t, client.deleteRuns, "the row was live when the dispatch checked it")
+		})
+	}
+}
+
+// A failed re-read with no delete answers 200 as before, with no
+// compensating delete.
+func TestLifecycle_ReReadFails_Answers200(t *testing.T) {
+	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
+		t.Run(action, func(t *testing.T) {
+			srv, s, agent, client := newLandedDeleteServer(t)
+			p := &landedFaultStore{Store: s}
+			p.failGet.Store(true)
+			srv.store = p
+			client.onLand = func() { p.armed.Store(true) }
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Empty(t, client.deleteRuns)
+		})
+	}
+}
+
+// POST /agents on an existing agent (scion start / resume in hub mode,
+// handleExistingAgent): each branch that starts the agent answers 409
+// delete_in_progress when a delete wins after the broker start landed, like
+// the lifecycle start, and 200 with the agent otherwise (ptone/scion#3255).
+func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
+	branches := []struct {
+		name  string
+		phase state.Phase
+		body  map[string]interface{}
+	}{
+		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
+		{"force-recover", state.PhaseError, map[string]interface{}{"resume": true, "forceResume": true}},
+		{"start-created", state.PhaseCreated, nil},
+	}
+	for _, br := range branches {
+		for _, del := range landingDeletes {
+			t.Run(br.name+"/"+del.name, func(t *testing.T) {
+				f := handleExistingAgentAuthzSetup(t)
+				agent := f.agent(t, "cx-landed", string(br.phase))
+				client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
+				client.onLand = func() { del.apply(t, f.store, agent.ID) }
+				f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
+
+				req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID}
+				for k, v := range br.body {
+					req[k] = v
+				}
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
+				sent := client.lastStartExtras.RunID
+				require.NotEmpty(t, sent, "the start reached the broker: %s", rec.Body.String())
+
+				if !del.compensate {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					var resp CreateAgentResponse
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+					require.NotNil(t, resp.Agent)
+					assert.Equal(t, agent.ID, resp.Agent.ID)
+					assert.Empty(t, client.deleteRuns, "no compensating delete")
+					return
+				}
+
+				requireIntentDeleteInProgress(t, rec, agent.ID)
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, deletedWhileStartingMessage, body.Error.Message)
+				assert.Contains(t, body.Error.Details["warnings"], landedRunRemovedWarning)
+				var raw map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+				assert.NotContains(t, raw, "agent", "no agent body")
+				assert.Equal(t, []string{sent}, client.deleteRuns,
+					"the landed run is deleted once, scoped to its run ID")
 			})
 		}
 	}
