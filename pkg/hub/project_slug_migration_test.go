@@ -78,29 +78,105 @@ func TestProjectRenameSlugMigratesSystemGroups(t *testing.T) {
 	}
 }
 
+// TestProjectRenameSlugMigratesLegacyMembersGroup checks that a members group
+// of this project that still carries only the legacy marker key is re-slugged
+// too, so it is not stranded at the old slug while createProjectMembersGroup
+// creates a duplicate at the new one.
+func TestProjectRenameSlugMigratesLegacyMembersGroup(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := createSlugMigrationProject(t, s, tid("project_slugmig_legacy"), "legacy-old", "Legacy Project")
+	members := &store.Group{
+		ID:          tid("group_slugmig_legacy_members"),
+		Name:        "Legacy Project Members",
+		Slug:        "project:legacy-old:members",
+		GroupType:   store.GroupTypeExplicit,
+		ProjectID:   project.ID,
+		Annotations: map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
+	}
+	if err := s.CreateGroup(ctx, members); err != nil {
+		t.Fatalf("create group %s: %v", members.Slug, err)
+	}
+
+	renameProjectSlug(t, srv, project.ID, "legacy-new", "Legacy Renamed")
+
+	got, err := s.GetGroup(ctx, members.ID)
+	if err != nil {
+		t.Fatalf("get group %s: %v", members.ID, err)
+	}
+	if got.Slug != "project:legacy-new:members" {
+		t.Errorf("legacy members group slug = %q, want %q", got.Slug, "project:legacy-new:members")
+	}
+	if got.Name != "Legacy Renamed Members" {
+		t.Errorf("legacy members group name = %q, want %q", got.Name, "Legacy Renamed Members")
+	}
+}
+
 // TestProjectRenameSlugSkipsLookAlikeGroups checks that a slug rename leaves
 // a group at the old agents or members slug untouched when it is not this
 // project's system group, and that the rename itself still succeeds
 // (ptone/scion#2683).
 func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
+	agentsMarker := map[string]string{store.AnnotationProjectAgentsGroup: "true"}
+	membersMarker := map[string]string{store.AnnotationProjectMembersGroup: "true"}
+
 	cases := []struct {
-		name        string
+		name string
+		// annotations returns the annotations for the "agents" or
+		// "members" look-alike group.
 		annotations func(kind string) map[string]string
-		otherOwner  bool
+		// groupType overrides the GroupType of the look-alike group;
+		// empty means the type the real system group would have.
+		groupType  func(kind string) string
+		otherOwner bool
+		// kinds limits which look-alike groups are created; nil means both.
+		kinds []string
 	}{
 		{
-			name:        "no marker",
+			name:        "nil annotations",
 			annotations: func(string) map[string]string { return nil },
+		},
+		{
+			name:        "unrelated annotation only",
+			annotations: func(string) map[string]string { return map[string]string{"team": "platform"} },
+		},
+		{
+			name: "marker set to false",
+			annotations: func(kind string) map[string]string {
+				if kind == "agents" {
+					return map[string]string{store.AnnotationProjectAgentsGroup: "false"}
+				}
+				return map[string]string{
+					store.AnnotationProjectMembersGroup:       "false",
+					store.LegacyAnnotationProjectMembersGroup: "false",
+				}
+			},
+		},
+		{
+			name: "other kind's marker",
+			annotations: func(kind string) map[string]string {
+				if kind == "agents" {
+					return membersMarker
+				}
+				return agentsMarker
+			},
 		},
 		{
 			name: "marker for another project",
 			annotations: func(kind string) map[string]string {
 				if kind == "agents" {
-					return map[string]string{store.AnnotationProjectAgentsGroup: "true"}
+					return agentsMarker
 				}
-				return map[string]string{store.AnnotationProjectMembersGroup: "true"}
+				return membersMarker
 			},
 			otherOwner: true,
+		},
+		{
+			name:        "marked agents group with another group type",
+			annotations: func(string) map[string]string { return agentsMarker },
+			groupType:   func(string) string { return store.GroupTypeExplicit },
+			kinds:       []string{"agents"},
 		},
 	}
 
@@ -118,11 +194,18 @@ func TestProjectRenameSlugSkipsLookAlikeGroups(t *testing.T) {
 				ownerID = other.ID
 			}
 
+			kinds := tc.kinds
+			if kinds == nil {
+				kinds = []string{"agents", "members"}
+			}
 			var groups []*store.Group
-			for _, kind := range []string{"agents", "members"} {
+			for _, kind := range kinds {
 				groupType := store.GroupTypeExplicit
 				if kind == "agents" {
 					groupType = store.GroupTypeProjectAgents
+				}
+				if tc.groupType != nil {
+					groupType = tc.groupType(kind)
 				}
 				g := &store.Group{
 					ID:          tid(fmt.Sprintf("group_slugmig_look%d_%s", i, kind)),
