@@ -1896,7 +1896,7 @@ func mapKeys(m map[string]int64) []string {
 // whenever OperationalSettings is wired (any DB driver).
 // Reports the maintenance row when one exists, else the live state.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
-	enabled, message := s.maintenanceBaseline(ops)
+	enabled, message := s.maintenanceReported(ops)
 	resp := map[string]interface{}{
 		"enabled": enabled,
 		"message": maintenanceMessageOrDefault(message),
@@ -1917,14 +1917,27 @@ func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalS
 // the empty snapshot would wrongly report, and a message-only PUT would
 // wrongly write, admin_mode=false.
 //
-// A workstation break-glass (maintenanceBreakGlass) keeps the live state
-// authoritative even with a row, since the row cannot turn it off.
+// The PUT baseline is the row even during a workstation break-glass, so a
+// message-only PUT does not copy the forced admin_mode=true into the row
+// (which would keep the hub in maintenance after a restart without the
+// break-glass). With no row, a message-only PUT does persist the live
+// admin_mode (documented in admin-settings.md).
 func (s *Server) maintenanceBaseline(ops *OperationalSettings) (enabled bool, message string) {
 	snap := ops.Snapshot()
-	if s.maintenance != nil && (!snap.HasMaintenanceRow || s.maintenanceBreakGlass()) {
+	if s.maintenance != nil && !snap.HasMaintenanceRow {
 		return s.maintenance.State()
 	}
 	return snap.AdminMode, snap.MaintenanceMessage
+}
+
+// maintenanceReported is the state GET reports: the live state during a
+// workstation break-glass (the hub is in maintenance whatever the row says),
+// else the PUT baseline.
+func (s *Server) maintenanceReported(ops *OperationalSettings) (enabled bool, message string) {
+	if s.maintenance != nil && s.maintenanceBreakGlass() {
+		return s.maintenance.State()
+	}
+	return s.maintenanceBaseline(ops)
 }
 
 // handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance

@@ -593,3 +593,32 @@ func TestWorkstation_PutServerConfig_ClearsLayer1Values(t *testing.T) {
 		t.Errorf("Layer-1 clears must not touch settings.yaml:\n%s", after)
 	}
 }
+
+// Review r2 N5(b): during a workstation break-glass with an existing row, a
+// message-only PUT keeps the row's admin_mode (false), so the hub leaves
+// maintenance once restarted without the break-glass; live state stays on.
+func TestMaintenanceBreakGlass_MessagePutKeepsRowAdminMode(t *testing.T) {
+	tempSettingsHome(t)
+	srv, st, ops := newSQLiteHubInMode(t, true, map[string]string{
+		"maintenance": `{"admin_mode":false}`,
+	})
+	srv.config.AdminMode = true
+	srv.maintenance = NewMaintenanceState(true, "")
+	ApplyMaintenanceFromSnapshot(srv, ops.Snapshot())
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenance(rr, adminRequest(http.MethodPut, "/api/v1/admin/maintenance", `{"message":"upgrading"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+	}
+	_, doc := hubSettingDocMap(t, st, "maintenance")
+	if v, _ := doc["admin_mode"].(bool); v {
+		t.Errorf("row admin_mode = true; a message-only PUT must not copy the break-glass into the row")
+	}
+	if doc["maintenance_message"] != "upgrading" {
+		t.Errorf("row message = %v, want upgrading", doc["maintenance_message"])
+	}
+	if !srv.maintenance.IsEnabled() || srv.maintenance.Message() != "upgrading" {
+		t.Errorf("live state = %v %q, want still in maintenance with the new message", srv.maintenance.IsEnabled(), srv.maintenance.Message())
+	}
+}
