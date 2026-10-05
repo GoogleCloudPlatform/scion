@@ -3209,30 +3209,35 @@ func TestReincarnateAgent_MigratingMessageOwnership(t *testing.T) {
 // design Amendment A26.8 test for the conditional clear: the completion
 // write must clear Message only if it still holds the exact migrating text
 // it set at the stopping step — never a message something else wrote in the
-// meantime. A message-only status update (no Phase, no Activity) bypasses
-// Guard 0b entirely, because updateAgentStatus only invokes
-// guardAgentPhaseTransition when Phase or Activity is present
-// (handlers_agent_lifecycle.go) — this is the one real path by which
-// something can set Message while reincarnation_state is still non-terminal.
-// This test drives that real path (the actual HTTP handler, not a direct
-// store write) while the worker is paused just before DispatchAgentStart,
-// then confirms the completion write leaves the new value alone.
+// meantime.
+//
+// It also pins the status endpoint's side (ptone/scion#2267): a
+// message-only status POST while the migration is in flight is a guarded
+// no-op (200 {"applied":false,"reason":"reincarnation_in_flight"}) and
+// leaves the worker's migrating message in place. Before #2267 that POST
+// bypassed Guard 0b and was the path this test used to set a foreign
+// message; with it closed, the foreign writer is simulated by a direct
+// store write (UpdateAgentStatus, which does not apply Guard 0b) while the
+// worker is paused just before DispatchAgentStart.
 func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *testing.T) {
 	disp := newGatedDispatcher("start", nil)
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
+	ctx := context.Background()
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	<-disp.entered // worker is about to call DispatchAgentStart; reincarnation_state is "starting"
 
-	inFlight, err := s.GetAgent(context.Background(), agent.ID)
+	inFlight, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.ReincarnationStateStarting, inFlight.ReincarnationState,
-		"the message-only bypass this test exercises only matters while a migration is genuinely in flight")
+		"this test is only meaningful while a migration is genuinely in flight")
+	require.Equal(t, "migrating to generation 2", inFlight.Message)
 
+	// The status endpoint: a message-only POST is dropped by Guard 0b.
 	statusBody, err := json.Marshal(store.AgentStatusUpdate{Message: "gen 2 says hi"})
 	require.NoError(t, err)
 	statusReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(statusBody))
@@ -3240,21 +3245,28 @@ func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *test
 	statusRec := httptest.NewRecorder()
 	srv.updateAgentStatus(statusRec, statusReq, agent.ID)
 	require.Equal(t, http.StatusOK, statusRec.Code, statusRec.Body.String())
+	var statusResp map[string]any
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp), statusRec.Body.String())
+	assert.Equal(t, false, statusResp["applied"])
+	assert.Equal(t, "reincarnation_in_flight", statusResp["reason"])
 
-	// Confirm the message-only update actually bypassed Guard 0b (a
-	// precondition for this test to mean anything — if this assertion ever
-	// fails, Guard 0b's gate widened to cover message-only updates too, and
-	// this test's premise needs revisiting).
-	midFlight, err := s.GetAgent(context.Background(), agent.ID)
+	afterPost, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, "gen 2 says hi", midFlight.Message,
-		"a message-only status update is not gated by guardAgentPhaseTransition, which only runs when Phase or Activity is set")
+	require.Equal(t, "migrating to generation 2", afterPost.Message,
+		"a message-only status POST must not replace the worker's migrating message while the migration is in flight")
+
+	// A foreign writer sets Message directly in the store mid-flight.
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Message: "gen 2 says hi"}))
+	midFlight, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "gen 2 says hi", midFlight.Message)
 
 	close(disp.release)
 	waitForReincarnationSettled(t, s, agent.ID)
 
-	final, err := s.GetAgent(context.Background(), agent.ID)
+	final, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
 	assert.Equal(t, "gen 2 says hi", final.Message,
 		"the completion write must not clobber a message that is no longer the migrating text")
 }
