@@ -182,12 +182,24 @@ func TestTranslateExplicitReplyProducesArtifact(t *testing.T) {
 			}
 
 			_, artifacts := TranslateScionToA2A(reply)
-			if len(artifacts) != 1 || artifacts[0].Parts[0].Text != "explicit reply" {
+			if len(artifacts) != 1 {
+				t.Fatalf("TranslateScionToA2A artifacts = %d, want 1", len(artifacts))
+			}
+			if len(artifacts[0].Parts) < 1 {
+				t.Fatalf("TranslateScionToA2A artifact has no parts: %+v", artifacts[0])
+			}
+			if artifacts[0].Parts[0].Text != "explicit reply" {
 				t.Errorf("TranslateScionToA2A artifacts = %+v, want one with the reply", artifacts)
 			}
 
 			_, sdkArtifacts := TranslateScionToA2AParts(reply)
-			if len(sdkArtifacts) != 1 || sdkArtifacts[0].Parts[0].Text() != "explicit reply" {
+			if len(sdkArtifacts) != 1 {
+				t.Fatalf("TranslateScionToA2AParts artifacts = %d, want 1", len(sdkArtifacts))
+			}
+			if len(sdkArtifacts[0].Parts) < 1 {
+				t.Fatalf("TranslateScionToA2AParts artifact has no parts: %+v", sdkArtifacts[0])
+			}
+			if sdkArtifacts[0].Parts[0].Text() != "explicit reply" {
 				t.Errorf("TranslateScionToA2AParts artifacts = %+v, want one with the reply", sdkArtifacts)
 			}
 		})

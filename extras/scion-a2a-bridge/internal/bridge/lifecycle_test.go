@@ -1300,7 +1300,13 @@ func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("taskEventToTaskResult: %v", err)
 	}
-	if len(result.Artifacts) != 1 || result.Artifacts[0].Parts[0].Text != "Here is the answer" {
+	if len(result.Artifacts) != 1 {
+		t.Fatalf("result artifacts = %d, want 1 from the explicit reply", len(result.Artifacts))
+	}
+	if len(result.Artifacts[0].Parts) == 0 {
+		t.Fatalf("result artifact has no parts: %+v", result.Artifacts[0])
+	}
+	if result.Artifacts[0].Parts[0].Text != "Here is the answer" {
 		t.Errorf("result artifacts = %+v, want the explicit reply", result.Artifacts)
 	}
 
