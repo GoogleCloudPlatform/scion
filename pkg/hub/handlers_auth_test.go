@@ -507,15 +507,28 @@ func (f *failingUserLookupStore) GetUserByEmail(context.Context, string) (*store
 }
 
 func TestAuthValidate(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 
 	if srv.userTokenService == nil {
 		t.Fatal("userTokenService not initialized")
 	}
 
+	// The token's subject must have a user record to be reported valid.
+	userID := tid("auth-validate-user")
+	if err := s.CreateUser(context.Background(), &store.User{
+		ID:          userID,
+		Email:       "test@example.com",
+		DisplayName: "Test",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
 	// Generate a token
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(
-		"user_1", "test@example.com", "Test", "member", ClientTypeWeb,
+		userID, "test@example.com", "Test", "member", ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
@@ -555,6 +568,94 @@ func TestAuthValidate(t *testing.T) {
 	if resp2.Valid {
 		t.Error("expected token to be invalid")
 	}
+}
+
+// failingGetUserStore wraps a store and makes the by-ID user lookup fail
+// with a non-ErrNotFound error.
+type failingGetUserStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingGetUserStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, f.err
+}
+
+// TestAuthValidate_UserRecordStatus verifies that /auth/validate applies the
+// same user-record check as hub JWT authentication: a live user's token is
+// valid, while a deleted or suspended user's token is reported invalid, and
+// a store failure is reported as 503 store_error.
+func TestAuthValidate_UserRecordStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	newUserToken := func(t *testing.T, name string) (*store.User, string) {
+		t.Helper()
+		u := &store.User{
+			ID:          tid(name),
+			Email:       name + "@test.com",
+			DisplayName: name,
+			Role:        store.UserRoleMember,
+			Status:      store.UserStatusActive,
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, u))
+		token, _, _, err := srv.userTokenService.GenerateTokenPair(
+			u.ID, u.Email, u.DisplayName, u.Role, ClientTypeCLI)
+		require.NoError(t, err)
+		return u, token
+	}
+	validate := func(t *testing.T, token string) (int, AuthValidateResponse, string) {
+		t.Helper()
+		rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: token})
+		var resp AuthValidateResponse
+		if rec.Code == http.StatusOK {
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+		}
+		return rec.Code, resp, rec.Body.String()
+	}
+
+	t.Run("live user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-live")
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.True(t, resp.Valid, body)
+		require.NotNil(t, resp.User)
+		assert.Equal(t, u.ID, resp.User.ID)
+	})
+
+	t.Run("deleted user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-deleted")
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		require.True(t, resp.Valid, "control: valid before delete: %s", body)
+
+		require.NoError(t, s.DeleteUser(ctx, u.ID))
+		code, resp, body = validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "deleted user's token must not be valid: %s", body)
+		assert.Nil(t, resp.User)
+	})
+
+	t.Run("suspended user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-suspended")
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, s.UpdateUser(ctx, u))
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "suspended user's token must not be valid: %s", body)
+		assert.Nil(t, resp.User)
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		_, token := newUserToken(t, "validate-store-error")
+		orig := srv.store
+		srv.store = &failingGetUserStore{Store: s, err: errors.New("database is locked")}
+		t.Cleanup(func() { srv.store = orig })
+		code, _, body := validate(t, token)
+		assert.Equal(t, http.StatusServiceUnavailable, code, body)
+		assert.Contains(t, body, "store_error")
+	})
 }
 
 func TestAuthToken(t *testing.T) {
