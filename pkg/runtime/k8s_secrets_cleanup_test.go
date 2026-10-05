@@ -270,7 +270,7 @@ func TestDelete_PodGone_CrossProjectSafety(t *testing.T) {
 
 	// No pod exists for either agent (simulating a previously force-deleted
 	// or evicted agent). Delete must not error and must not cross projects.
-	if err := rt.Delete(ctx, proj1Name); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: proj1Name}); err != nil {
 		t.Fatalf("Delete should succeed when the pod is already gone: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestDelete_DoesNotCrossAgentOnEnvSuffix(t *testing.T) {
 		t.Fatalf("createAgentSecret (target) failed: %v", err)
 	}
 
-	if err := rt.Delete(ctx, targetName); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: targetName}); err != nil {
 		t.Fatalf("Delete should succeed when the pod is already gone: %v", err)
 	}
 
@@ -341,7 +341,7 @@ func TestRun_Delete_RoundTrip_NoSecretsLeftBehind(t *testing.T) {
 		t.Fatalf("precondition: auth Secret should exist after Run: %v", err)
 	}
 
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
@@ -374,7 +374,7 @@ func TestRun_Delete_RoundTrip_GKE_SPCCleanedUp(t *testing.T) {
 		t.Fatalf("precondition: SPC should exist after Run: %v", err)
 	}
 
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
@@ -545,7 +545,7 @@ func TestRun_InitContainerFailure_ThenHubDelete_CleansUpSecrets(t *testing.T) {
 
 	// Simulate the hub's reconciliation observing the failed agent and
 	// auto-cleaning it, exactly as it would for a healthy agent being removed.
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if _, err := clientset.CoreV1().Secrets("default").Get(context.Background(), secretName, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {

@@ -128,7 +128,7 @@ func TestKubernetesDelete_OperationIDUsesPodNamespace(t *testing.T) {
 	if err := r.Stop(ctx, id); err != nil {
 		t.Fatalf("Stop(%q): %v", id, err)
 	}
-	if err := r.Delete(ctx, id); err != nil {
+	if err := r.Delete(ctx, RunRef{ID: id}); err != nil {
 		t.Fatalf("Delete(%q): %v", id, err)
 	}
 	if _, err := clientset.CoreV1().Pods("scion-agents").Get(ctx, "my-agent", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {

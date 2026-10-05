@@ -116,6 +116,8 @@ type ownRTOptions struct {
 	// directory, as a linked project the broker reaches only through the
 	// hub's project path hint.
 	linked bool
+	// podRunID labels the pod with this run ID.
+	podRunID string
 }
 
 func (f *ownRTFixture) requests(ns string) []string {
@@ -211,6 +213,9 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 				Annotations: map[string]string{projectkeys.LabelProjectPath: projectDir},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		if opts.podRunID != "" {
+			pod.Labels[api.LabelRunID] = opts.podRunID
 		}
 		if _, err := f.cs.CoreV1().Pods(ownRTProfileNS).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -871,5 +876,32 @@ func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
 	}
 	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 1 {
 		t.Fatalf("restart did not proceed to start; logs:\n%s", f.logs.String())
+	}
+}
+
+// A delete carrying a run ID resolves the pod in the agent's own runtime and
+// applies the run filter there: another run's ID leaves the pod untouched
+// (404), the pod's own run ID deletes it in its namespace. The default
+// namespace is not queried either way.
+func TestDeleteAgent_ProfileNamespace_RunIDFilter(t *testing.T) {
+	f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, podRunID: "run-1"})
+
+	w := f.do(t, http.MethodDelete, ownRTDeletePath+"&runId=run-2")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete of another run: status = %d, body %s; want 404", w.Code, w.Body.String())
+	}
+	if !f.podExists(t) {
+		t.Fatal("pod of another run was deleted")
+	}
+
+	w = f.do(t, http.MethodDelete, ownRTDeletePath+"&runId=run-1")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete of the pod's run: status = %d, body %s; want 204", w.Code, w.Body.String())
+	}
+	if f.podExists(t) {
+		t.Fatal("pod still present in the profile namespace")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
 	}
 }
