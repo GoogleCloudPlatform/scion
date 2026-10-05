@@ -730,6 +730,16 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 		return
 	}
 
+	// Events that feed the summary also carry the session ID. Observing it
+	// means a missed session-start does not leave the summary without an
+	// ID or start time (the session-end event itself usually has the ID).
+	// Lifecycle and other events are not observed, so they cannot open a
+	// session ahead of the real session-start.
+	switch event.Name {
+	case hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
+		h.aggregator.ObserveSession(event.Data.SessionID)
+	}
+
 	switch event.Name {
 	case hooks.EventSessionStart:
 		h.aggregator.StartSession(event.Data.SessionID)

@@ -72,8 +72,24 @@ func TestClient_ReportMetricsDoesNotRetryClientErrors(t *testing.T) {
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
 	client.retryBaseDelay = time.Millisecond
 
-	err := client.ReportMetrics(context.Background(), MetricsPayload{})
+	err := client.ReportMetrics(context.Background(), MetricsPayload{Session: SessionMetrics{ID: "session-1"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hub returned error 400: bad metrics")
 	assert.Equal(t, 1, attempts)
+}
+
+func TestClient_ReportMetricsWithoutSessionIDIsNotSent(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+
+	err := client.ReportMetrics(context.Background(), MetricsPayload{AgentID: "agent-123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no session ID")
+	assert.Equal(t, 0, attempts)
 }
