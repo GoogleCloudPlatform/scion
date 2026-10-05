@@ -542,6 +542,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			s.projectsLogger().Warn("failed to clean up project record after workspace init failure",
 				"project_id", project.ID, "error", delErr)
 		}
+		// Release the max_projects_per_user reservation taken above, like the
+		// other rollbacks in this handler. Nothing reconciles project
+		// reservations, so skipping this would leak a slot on every
+		// rolled-back create (and a hung mount invites retries).
+		if s.quotaService != nil && project.CreatedBy != "" {
+			s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+		}
 	}
 
 	// Initialize filesystem workspace for hub-managed projects and shared-workspace git projects.

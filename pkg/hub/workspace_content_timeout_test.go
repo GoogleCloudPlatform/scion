@@ -459,3 +459,81 @@ func TestDeriveAgentConfig_HungStorageReturnsError(t *testing.T) {
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.Empty(t, agent.AppliedConfig.Workspace)
 }
+
+// B1 (round 3): agent create with a caller-supplied workspace subdir. The
+// first probe happens in the remote-broker upload branch, after the agent
+// row exists. A storage timeout there must clean up the agent and answer
+// 503, not dispatch without the upload (the broker would resolve the subdir
+// against its own stale project copy).
+func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.SetStorage(newMockStorage("hung-storage-bucket"))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hung-caller-ws"), Slug: "hung-caller-ws-broker",
+		Name: "Hung Caller WS Broker", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("project-hung-caller-ws"), Slug: "hung-caller-ws", Name: "Hung Caller WS Project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":            "hung-caller-ws-agent",
+		"projectId":       project.ID,
+		"runtimeBrokerId": broker.ID,
+		"workspace":       "subdir",
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "the agent row must be cleaned up")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
+// N1 (round 3): a rolled-back project create releases its
+// max_projects_per_user reservation, so a hung mount does not leak quota
+// slots on every retry.
+func TestCreateProject_HungStorageReleasesProjectQuota(t *testing.T) {
+	srv, s, _ := hungStorageServer(t)
+	setUserProjectQuotaCeiling(t, s, 1)
+	require.Zero(t, countProjectQuotaReservations(t, s, DevUserID))
+
+	for i := 0; i < 2; i++ {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: fmt.Sprintf("Hung Quota %d", i)})
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+		assert.Zero(t, countProjectQuotaReservations(t, s, DevUserID), "rollback must release the reservation")
+	}
+
+	// Storage healthy again: the single slot is still free.
+	srv.config.WorkspaceStorageConfig = nil
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Healthy Quota"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, int64(1), countProjectQuotaReservations(t, s, DevUserID), "the quota is enforced in this test")
+}
+
+// N3 (round 3): reincarnate (dry run) answers 503 when the agent has no
+// workspace and the project workspace path cannot be resolved.
+func TestReincarnateAgent_HungStorageReturns503(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	mountRoot := filepath.Join(tmpHome, "nfs-mount")
+	hangReadDirFor(t, mountRoot)
+
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Workspace = ""
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+}
