@@ -627,6 +627,13 @@ func TestReaper_R10_5_RowErrorDoesNotDisarm(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
 	setLaunchReaperArmedSince(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
+	// Read the backdated value back rather than reusing the Go value, so the
+	// comparison below is against what the store actually persisted (PG
+	// truncates to microseconds).
+	rsBefore, err := s.client.LaunchReaperState.Get(ctx, launchReaperStateID)
+	require.NoError(t, err)
+	require.NotNil(t, rsBefore.ArmedSince)
+	armedSinceBefore := *rsBefore.ArmedSince
 
 	good := createLaunchableAgent(t, ctx, s, projectID, "reaper-row-good")
 	_, err = s.BeginLaunch(ctx, good.ID, store.LaunchKindCreate, time.Hour)
@@ -655,6 +662,15 @@ func TestReaper_R10_5_RowErrorDoesNotDisarm(t *testing.T) {
 	assert.Equal(t, 1, result.RowErrors)
 	require.Len(t, result.Reaped, 1)
 	assert.Equal(t, good.ID, result.Reaped[0].ID)
+
+	// The in-tick Armed result alone would miss a row error that persists a
+	// disarm (armed_since reset) while still reporting Armed for this tick:
+	// the *next* tick would then be disarmed. armed_since must be untouched.
+	rsAfter, err := s.client.LaunchReaperState.Get(ctx, launchReaperStateID)
+	require.NoError(t, err)
+	require.NotNil(t, rsAfter.ArmedSince)
+	assert.True(t, armedSinceBefore.Equal(*rsAfter.ArmedSince),
+		"a per-row failure must not persist a disarm: armed_since must be unchanged (was %v, now %v)", armedSinceBefore, *rsAfter.ArmedSince)
 
 	poisonAfter, err := s.GetAgent(ctx, poison.ID)
 	require.NoError(t, err)
