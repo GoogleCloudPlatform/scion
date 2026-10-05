@@ -44,16 +44,18 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
-import { navigateTo, replaceRoute, stateManager } from '../../client/main.js';
+import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { agentStore } from '../../client/agent-store.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
-import { dispatchPageTitle } from '../../client/page-title.js';
+import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import type { PageTitleDetail } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
@@ -77,6 +79,11 @@ import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
 import { touchMenuItemStyles } from '../shared/touch-styles.js';
+import {
+  rememberChatScrollAnchor,
+  takeChatScrollAnchor,
+  type ChatScrollAnchor,
+} from '../shared/chat/chat-scroll-anchor.js';
 
 /**
  * The comfy density token values. Defined once and interpolated into both
@@ -704,6 +711,25 @@ export class ScionPageChat extends LitElement {
   private _onDocumentModalShow = this._handleDocumentModalShow.bind(this);
   /** Bound handler: close the open palette if a route change navigates away from /chat. */
   private _onPopState = this._handlePopStateForPalette.bind(this);
+
+  /** The title segments this page last announced (see pushChatPath). */
+  private _lastPageTitle: string[] | null = null;
+  private _onOwnPageTitle = (e: Event): void => {
+    const segments = (e as CustomEvent<PageTitleDetail>).detail?.segments;
+    if (e.target === this && segments?.length) this._lastPageTitle = [...segments];
+  };
+
+  /**
+   * Scroll position handed over by the previous chat page instance (taken
+   * on connect), passed to the thread while the same conversation is open.
+   * Dropped as soon as a different conversation is shown, so a destination
+   * other than the one the user left — the terminal pane's jump to an agent
+   * DM, a deep link — opens normally.
+   */
+  private _pendingScrollRestore: ChatScrollAnchor | null = null;
+
+  /** The persistent "promoted to a thread" link toast, while it shows. */
+  private _promotedThreadToast: HTMLElement | null = null;
   /** The mounted switcher/palette element, if any — excluded from the modal guard's live query. */
   @query('scion-quick-palette') private _switcherEl?: Element;
   /** Whether the search panel is visible. */
@@ -1337,6 +1363,8 @@ export class ScionPageChat extends LitElement {
     // these events — see its doc comment for why.
     document.addEventListener('sl-show', this._onDocumentModalShow);
     window.addEventListener('popstate', this._onPopState);
+    this.addEventListener(PAGE_TITLE_EVENT, this._onOwnPageTitle);
+    this._pendingScrollRestore = takeChatScrollAnchor();
     this._handleRecentFilesSnapshot(chatRecentFiles.snapshot());
     this._paletteDocumentsUnsubscribe = chatRecentFiles.subscribe((snapshot) =>
       this._handleRecentFilesSnapshot(snapshot)
@@ -1361,6 +1389,9 @@ export class ScionPageChat extends LitElement {
     document.removeEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     document.removeEventListener('sl-show', this._onDocumentModalShow);
     window.removeEventListener('popstate', this._onPopState);
+    this.removeEventListener(PAGE_TITLE_EVENT, this._onOwnPageTitle);
+    this.handOverScrollPosition();
+    this.dismissPromotedThreadLinkToast();
     this._paletteDocumentsUnsubscribe?.();
     this._paletteDocumentsUnsubscribe = null;
     this._paletteAgentsRelease?.();
@@ -1429,6 +1460,59 @@ export class ScionPageChat extends LitElement {
     }
     // Nothing is on screen any more, so nothing is being actively read.
     chatNotifications.setActiveConversation(null);
+  }
+
+  /**
+   * Hand the open conversation's scroll position to the next chat page
+   * instance: switching to the dashboard destroys this page, and the one
+   * built on the way back restores it if it opens the same conversation.
+   * A position that was handed to this page but never applied is passed on.
+   */
+  private handOverScrollPosition(): void {
+    const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
+    rememberChatScrollAnchor(thread?.scrollAnchor ?? this._pendingScrollRestore);
+    this._pendingScrollRestore = null;
+  }
+
+  /**
+   * A thread has applied the handed-over position: stop offering it. The
+   * thread element is re-created without a conversation change (closing
+   * search re-mounts it), and a fresh one must not restore it again.
+   */
+  private handleScrollRestoreConsumed = (e: Event): void => {
+    if ((e as CustomEvent<ChatScrollAnchor>).detail === this._pendingScrollRestore) {
+      this._pendingScrollRestore = null;
+    }
+  };
+
+  /** The handed-over scroll position, if it belongs to this conversation. */
+  private scrollRestoreFor(conversationKey: string): ChatScrollAnchor | null {
+    const pending = this._pendingScrollRestore;
+    return pending?.conversationKey === conversationKey ? pending : null;
+  }
+
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    super.willUpdate(changedProperties);
+    // Only a move to another conversation retires the link toast; a same-key
+    // update (e.g. toggling mute on the DM) keeps it.
+    if (
+      changedProperties.has('v2Conversation') &&
+      (changedProperties.get('v2Conversation') as V2ConversationState | null | undefined)
+        ?.conversationKey !== this.v2Conversation?.conversationKey
+    ) {
+      this.dismissPromotedThreadLinkToast();
+    }
+    const pending = this._pendingScrollRestore;
+    if (
+      pending &&
+      changedProperties.has('v2Conversation') &&
+      this.v2Conversation &&
+      this.v2Conversation.conversationKey !== pending.conversationKey
+    ) {
+      this._pendingScrollRestore = null;
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -2341,10 +2425,21 @@ export class ScionPageChat extends LitElement {
     if (!oldConversationKey || !newTopic) return;
 
     // If we're currently viewing the promoted DM, navigate to the new thread
+    // — unless the user is typing in it. This event is server-pushed (the
+    // promotion may come from another tab or device), so moving them would
+    // pull the conversation out from under their draft; offer a link to the
+    // new thread instead and leave them where they are. A promotion this
+    // page started itself (still awaiting its POST) is not an interruption:
+    // its own completion moves the user, so offering a link too would leave
+    // a stale toast behind.
     if (this.v2Conversation?.conversationKey === oldConversationKey) {
       this.promoteDialogOpen = false;
-      this.navigateToPromotedThread(newTopic);
-      this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
+      if (!this.promoteLoading && this.isComposingInConversation()) {
+        this.showPromotedThreadLinkToast(newTopic);
+      } else {
+        this.navigateToPromotedThread(newTopic);
+        this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
+      }
     }
 
     // Reload the space rail so the new thread appears
@@ -2352,6 +2447,62 @@ export class ScionPageChat extends LitElement {
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
     if (rail) void rail.reload();
+  }
+
+  /**
+   * Take down the promoted-DM link toast. It persists until dismissed, so
+   * the page removes it itself once it no longer applies: the user moved
+   * to another conversation, or this page is going away.
+   */
+  private dismissPromotedThreadLinkToast(): void {
+    const toast = this._promotedThreadToast;
+    this._promotedThreadToast = null;
+    toast?.remove();
+  }
+
+  /** Whether the user has a draft in, or focus on, the open composer. */
+  private isComposingInConversation(): boolean {
+    const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
+    return thread?.isComposing ?? false;
+  }
+
+  /**
+   * Tell the user the DM they are typing in was promoted, with a link to the
+   * new thread (routed client-side by the document click handler). Built
+   * from DOM nodes, not markup, since the thread name is user content.
+   */
+  private showPromotedThreadLinkToast(topic: {
+    id: string;
+    projectId: string;
+    name: string;
+  }): void {
+    const slug = this._projectIdToSlug.get(topic.projectId);
+    const path = slug
+      ? `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topic.id)}`
+      : `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
+    // One at a time: a newer promotion replaces any link still showing.
+    this.dismissPromotedThreadLinkToast();
+    const alert = Object.assign(document.createElement('sl-alert'), {
+      variant: 'primary',
+      closable: true,
+      // Stays until dismissed or followed: the user was busy typing and
+      // may not look up for a while.
+      duration: Infinity,
+    });
+    alert.classList.add('dm-promoted-toast');
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'info-circle');
+    icon.setAttribute('slot', 'icon');
+    const link = document.createElement('a');
+    link.href = path;
+    link.textContent = `Open #${topic.name}`;
+    link.addEventListener('click', () => (alert as unknown as { hide(): void }).hide?.());
+    alert.append(icon, 'This conversation was promoted to a thread. ', link);
+    this._promotedThreadToast = alert;
+    document.body.appendChild(alert);
+    void (alert as unknown as { toast?(): Promise<void> }).toast?.();
   }
 
   private handleThreadSelect(e: CustomEvent): void {
@@ -2409,16 +2560,14 @@ export class ScionPageChat extends LitElement {
     };
     this.mobilePanel = 'center';
 
-    // Update the URL with pushState to avoid page recreation flicker
-    const base = import.meta.env.BASE_URL;
+    // Update the URL in place to avoid page recreation flicker
     let threadPath: string;
     if (slug) {
       threadPath = `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(detail.conversationKey)}`;
     } else {
       threadPath = `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`;
     }
-    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
-    window.history.pushState({}, '', browserPath);
+    this.pushChatPath(threadPath);
 
     dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
     void this.loadV2Members(detail.projectId);
@@ -2432,10 +2581,7 @@ export class ScionPageChat extends LitElement {
     // No conversation to show — put the mobile view back on the rail.
     this.mobilePanel = 'left';
     // Navigate to bare /chat
-    const base = import.meta.env.BASE_URL;
-    const chatPath = '/chat';
-    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + chatPath : chatPath;
-    window.history.pushState({}, '', browserPath);
+    this.pushChatPath('/chat');
     dispatchPageTitle(this, '', 'Chat');
     // Reload hub-level members for the sidebar
     void this.loadHubMembers();
@@ -3464,7 +3610,7 @@ export class ScionPageChat extends LitElement {
    */
   private dismissKeyboard(): void {
     const el = deepActiveElement();
-    if (el instanceof HTMLElement || el instanceof SVGElement) el.blur();
+    if (el instanceof HTMLElement || el instanceof SVGElement) blurElement(el);
   }
 
   /** Swiping right reveals the panel to the left of the current one. */
@@ -3544,10 +3690,26 @@ export class ScionPageChat extends LitElement {
 
   /** Push the DM's full-key URL, which parseV2Route matches directly. */
   private pushDMPath(dmKey: string): void {
-    const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
-    const base = import.meta.env.BASE_URL;
-    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
-    window.history.pushState({}, '', browserPath);
+    this.pushChatPath(`/chat/dm/${encodeURIComponent(dmKey)}`);
+  }
+
+  /**
+   * Push the URL of a conversation this page has already switched to in
+   * place. Going through the router keeps the shell's record of the current
+   * path in step with the URL: the header's mode switch returns to that
+   * path, and coming back from the terminal view only reuses this page when
+   * it matches. A raw pushState left both on the previously rendered path,
+   * so switching modes and back landed on the wrong conversation.
+   *
+   * The shell re-titles itself from the path it records, so the page's own
+   * latest title is put back on top once that has happened.
+   */
+  private pushChatPath(path: string): void {
+    const seq = this._userNavSeq;
+    void pushRoute(path).then(() => {
+      if (!this.isConnected || seq !== this._userNavSeq || !this._lastPageTitle) return;
+      dispatchPageTitle(this, ...this._lastPageTitle);
+    });
   }
 
   /**
@@ -4696,7 +4858,7 @@ export class ScionPageChat extends LitElement {
     if (!(dialog instanceof HTMLElement)) return;
     await (dialog as unknown as { updateComplete: Promise<boolean> }).updateComplete;
     const closeButton = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="close-button"]');
-    closeButton?.focus();
+    focusElement(closeButton);
   }
 
   private _capturePaletteInvokerFocus(): void {
@@ -4762,7 +4924,7 @@ export class ScionPageChat extends LitElement {
       this._focusPaletteFallback();
       return;
     }
-    el.focus();
+    focusElement(el);
     if (selection && (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement)) {
       try {
         el.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
@@ -4787,7 +4949,7 @@ export class ScionPageChat extends LitElement {
     const checkVisibility = (fallback as unknown as { checkVisibility?: () => boolean })
       .checkVisibility;
     if (typeof checkVisibility === 'function' && !checkVisibility.call(fallback)) return;
-    fallback.focus();
+    focusElement(fallback);
   }
 
   /**
@@ -4815,7 +4977,7 @@ export class ScionPageChat extends LitElement {
   private async _focusComposerAfterPaletteSelection(): Promise<void> {
     const slTextarea = await this._pollForNewComposerTextarea();
     if (slTextarea) {
-      slTextarea.focus();
+      focusElement(slTextarea);
       return;
     }
     // The composer never became available (e.g. read-only) — fall back to a
@@ -5325,6 +5487,8 @@ export class ScionPageChat extends LitElement {
               .members=${this.v2Members}
               .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
+              .restoreScrollAnchor=${this.scrollRestoreFor(conv.conversationKey)}
+              @scroll-restore-consumed=${this.handleScrollRestoreConsumed}
               @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>
           `}
@@ -5472,15 +5636,13 @@ export class ScionPageChat extends LitElement {
     this.mobilePanel = 'center';
 
     // Update URL
-    const base = import.meta.env.BASE_URL;
     let threadPath: string;
     if (slug) {
       threadPath = `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topic.id)}`;
     } else {
       threadPath = `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
     }
-    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
-    window.history.pushState({}, '', browserPath);
+    this.pushChatPath(threadPath);
 
     dispatchPageTitle(this, `#${topic.name}`, 'Chat');
     void this.loadV2Members(topic.projectId);

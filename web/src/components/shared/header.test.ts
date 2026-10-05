@@ -821,3 +821,30 @@ describe('tray badge counts: slow fetches', () => {
     el.remove();
   });
 });
+
+describe('mode switch: remembered chat path', () => {
+  async function modeSwitchTarget(el: ScionHeader, mode: 'dashboard' | 'chat'): Promise<string> {
+    let target = '';
+    el.addEventListener('nav-click', ((e: CustomEvent<{ path: string }>) => {
+      target = e.detail.path;
+    }) as EventListener);
+    await (el as unknown as { handleModeSwitch(m: string): Promise<void> }).handleModeSwitch(mode);
+    return target;
+  }
+
+  it('returns to the thread the shell last recorded', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-1' });
+    el.currentPath = '/chat/alpha/topic-2';
+    await el.updateComplete;
+    el.currentPath = '/';
+    await el.updateComplete;
+    expect(await modeSwitchTarget(el, 'chat')).toBe('/chat/alpha/topic-2');
+  });
+
+  it('drops a message jump fragment so the return does not replay the jump', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-3#msg-m1' });
+    el.currentPath = '/terminals';
+    await el.updateComplete;
+    expect(await modeSwitchTarget(el, 'chat')).toBe('/chat/alpha/topic-3');
+  });
+});

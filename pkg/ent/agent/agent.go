@@ -68,6 +68,8 @@ const (
 	FieldRuntime = "runtime"
 	// FieldRuntimeBrokerID holds the string denoting the runtime_broker_id field in the database.
 	FieldRuntimeBrokerID = "runtime_broker_id"
+	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
+	FieldWorkspacePlacement = "workspace_placement"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -168,6 +170,8 @@ const (
 	FieldStartClaimHoldUntil = "start_claim_hold_until"
 	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
 	FieldStartClaimLaunchID = "start_claim_launch_id"
+	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
+	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -228,6 +232,7 @@ var Columns = []string{
 	FieldDetached,
 	FieldRuntime,
 	FieldRuntimeBrokerID,
+	FieldWorkspacePlacement,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
@@ -278,6 +283,7 @@ var Columns = []string{
 	FieldStartClaimUnconfirmedAt,
 	FieldStartClaimHoldUntil,
 	FieldStartClaimLaunchID,
+	FieldSoftDeleteOpID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -303,6 +309,8 @@ var (
 	DefaultCurrentModelCalls int
 	// DefaultDetached holds the default value on creation for the "detached" field.
 	DefaultDetached bool
+	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
+	DefaultWorkspacePlacement string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -553,6 +561,11 @@ func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimeBrokerID, opts...).ToFunc()
 }
 
+// ByWorkspacePlacement orders the results by the workspace_placement field.
+func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
+}
+
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.
 func ByWebPtyEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWebPtyEnabled, opts...).ToFunc()
@@ -791,6 +804,11 @@ func ByStartClaimHoldUntil(opts ...sql.OrderTermOption) OrderOption {
 // ByStartClaimLaunchID orders the results by the start_claim_launch_id field.
 func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
+}
+
+// BySoftDeleteOpID orders the results by the soft_delete_op_id field.
+func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.
