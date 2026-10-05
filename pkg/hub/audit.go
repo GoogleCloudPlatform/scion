@@ -380,11 +380,12 @@ func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAu
 	}
 
 	// Details is emitted unconditionally, NOT debug-gated as it was before
-	// 500efd1a. That gating was a defect the no-op hid: the only in-tree
-	// producers are LogLinkEvent and LogUnlinkEvent, and the only key they set
-	// is projectId. Debug-gating it means a link record says "broker B was
-	// linked" without saying to what — an event stripped of the one field that
-	// makes it mean anything.
+	// 500efd1a. That gating was a defect the no-op hid: LogLinkEvent and
+	// LogUnlinkEvent set projectId, and debug-gating it means a link record
+	// says "broker B was linked" without saying to what — an event stripped
+	// of the one field that makes it mean anything. Registration, rotation,
+	// link and unlink events also carry the credential attribution from
+	// brokerAuditCredentialDetails.
 	//
 	// Security: Details is free-form and this method does not vet it. Callers
 	// must not put secret material in it — the same rule that governs
@@ -756,8 +757,62 @@ func getClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// LogRegistrationEvent logs a broker registration event.
-func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string) {
+// brokerAuditCredentialDetails returns the credential attribution recorded
+// on broker registration, rotation, link and unlink audit events, next to
+// the acting principal:
+//   - credential_kind: the request credential kind (interactive, dev, uat,
+//     broker, ...);
+//   - credential_id: the credential's identifier when it has one (a user
+//     access token ID or a broker ID), never a token, secret or hash;
+//   - credential_boundary_kind: the boundary kind (project or hub) of a
+//     user access token.
+//
+// Keys with no value are omitted. The returned map is freshly allocated, so
+// callers may add event-specific keys to it.
+func brokerAuditCredentialDetails(ctx context.Context) map[string]string {
+	details := map[string]string{}
+	actor := auditActorFromContext(ctx)
+	if actor.CredentialKind != "" {
+		details["credential_kind"] = actor.CredentialKind
+	}
+	if actor.CredentialID != "" {
+		details["credential_id"] = actor.CredentialID
+	}
+	if actor.CredentialKind == string(CredentialKindUAT) {
+		boundary := actor.CredentialBoundaryKind
+		if boundary == "" {
+			if b := GetCredentialContextFromContext(ctx).Boundary; b != nil {
+				boundary = string(b.Kind)
+			}
+		}
+		if boundary != "" {
+			details["credential_boundary_kind"] = boundary
+		}
+	}
+	return details
+}
+
+// mergeBrokerAuditDetails returns a new map holding details plus the given
+// event-specific key/value pairs; the pairs win on a key collision.
+func mergeBrokerAuditDetails(details map[string]string, kv ...string) map[string]string {
+	out := make(map[string]string, len(details)+len(kv)/2)
+	for k, v := range details {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[kv[i]] = kv[i+1]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// LogRegistrationEvent logs a broker registration or re-registration event.
+// details carries the credential attribution and operation
+// (brokerAuditCredentialDetails plus "operation"); it must not hold secret
+// material.
+func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -771,6 +826,7 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 		ActorID:    actorID,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
+		Details:    mergeBrokerAuditDetails(details),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
@@ -794,8 +850,10 @@ func LogJoinEvent(ctx context.Context, logger AuditLogger, brokerID, ipAddress s
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
-// LogRotateEvent logs a secret rotation event.
-func LogRotateEvent(ctx context.Context, logger AuditLogger, brokerID, actorID, actorType, ipAddress string) {
+// LogRotateEvent logs a secret rotation event. details carries the
+// credential attribution (brokerAuditCredentialDetails); it must not hold
+// secret material.
+func LogRotateEvent(ctx context.Context, logger AuditLogger, brokerID, actorID, actorType, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -808,6 +866,7 @@ func LogRotateEvent(ctx context.Context, logger AuditLogger, brokerID, actorID, 
 		ActorID:   actorID,
 		ActorType: actorType,
 		Timestamp: time.Now(),
+		Details:   mergeBrokerAuditDetails(details),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
@@ -834,7 +893,9 @@ func LogDeregisterEvent(ctx context.Context, logger AuditLogger, brokerID, broke
 }
 
 // LogLinkEvent logs a project link event (broker linked to project).
-func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string) {
+// details carries the credential attribution (brokerAuditCredentialDetails);
+// it must not hold secret material. projectId is always set from projectID.
+func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -848,16 +909,16 @@ func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName,
 		ActorID:    actorID,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
-		Details: map[string]string{
-			"projectId": projectID,
-		},
+		Details:    mergeBrokerAuditDetails(details, "projectId", projectID),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
 // LogUnlinkEvent logs a project unlink event (broker unlinked from project).
-func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, projectID, actorID, ipAddress string) {
+// details carries the credential attribution (brokerAuditCredentialDetails);
+// it must not hold secret material. projectId is always set from projectID.
+func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, projectID, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -870,9 +931,7 @@ func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, projectID
 		ActorID:   actorID,
 		ActorType: "user",
 		Timestamp: time.Now(),
-		Details: map[string]string{
-			"projectId": projectID,
-		},
+		Details:   mergeBrokerAuditDetails(details, "projectId", projectID),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)

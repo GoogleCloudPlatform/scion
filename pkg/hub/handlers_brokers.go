@@ -148,8 +148,13 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Log audit event
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
+	// Log audit event, with the credential that carried the request.
+	operation := "register"
+	if existingBroker != nil {
+		operation = "reregister"
+	}
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
+		mergeBrokerAuditDetails(brokerAuditCredentialDetails(r.Context()), "operation", operation))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -525,7 +530,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 		actorID = brokerIdent.BrokerID()
 		actorType = "broker"
 	}
-	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r))
+	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r), brokerAuditCredentialDetails(r.Context()))
 
 	writeJSON(w, http.StatusOK, resp)
 }

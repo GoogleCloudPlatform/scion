@@ -238,9 +238,11 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 	member := newHubMemberUser(t, s, "reregistration-member-hubmember")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-hubmember", owner.ID)
 
+	// No auto-provide in the body, so the denial comes from the
+	// re-registration target check alone.
 	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:        broker.Name,
-		AutoProvide: true,
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "requested"},
 	})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,

@@ -481,10 +481,11 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// application level to ensure cleanup regardless of DB behavior
 	// and to clear default_runtime_broker_id on affected projects.
 	clientIP := getClientIP(r)
+	credentialDetails := brokerAuditCredentialDetails(ctx)
 	if projects, err := s.store.GetBrokerProjects(ctx, id); err == nil {
 		for _, gp := range projects {
 			_ = s.store.RemoveProjectProvider(ctx, gp.ProjectID, id)
-			LogUnlinkEvent(ctx, s.auditLogger, id, gp.ProjectID, actorID, clientIP)
+			LogUnlinkEvent(ctx, s.auditLogger, id, gp.ProjectID, actorID, clientIP, credentialDetails)
 
 			// Clear default_runtime_broker_id if it points to this broker
 			if project, err := s.store.GetProject(ctx, gp.ProjectID); err == nil {
