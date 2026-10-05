@@ -521,30 +521,36 @@ describe('AgentStore delta probe', () => {
       expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
     });
 
-    it('does not publish while heartbeats rewrite `containerStatus`, or for the creator name compact rows add', async () => {
-      let publishes = 0;
-      const h = await loaded(
-        Array.from({ length: 400 }, (_, i) =>
-          active(`a${i}`, 1, {
-            containerStatus: 'Up 1 minute',
-            appliedConfig: { creatorName: 'Ada' },
-          } as Partial<Agent>)
-        )
-      );
-      h.store.retain(HUB, () => publishes++);
-      const a99 = find(h.store.peek(HUB), 'a99');
-      for (let i = 1; i <= 4; i++) {
-        h.server.heartbeat(t(1000 + i * 30));
-        h.server.agents = h.server.agents.map((a) => ({
-          ...a,
-          containerStatus: `Up ${i + 1} minutes`,
-        }));
-        await tick();
+    it.each(['compact', 'full'] as const)(
+      'in %s view, does not publish while heartbeats rewrite `containerStatus`, or for the creator name compact rows add',
+      async (view) => {
+        let publishes = 0;
+        // A full-view walk holds the creator name only inside `appliedConfig`.
+        const h = await loaded(
+          Array.from({ length: 400 }, (_, i) =>
+            active(`a${i}`, 1, {
+              containerStatus: 'Up 1 minute',
+              appliedConfig: { creatorName: 'Ada' },
+            } as Partial<Agent>)
+          ),
+          HUB,
+          { view }
+        );
+        h.store.retain(HUB, () => publishes++);
+        const a99 = find(h.store.peek(HUB), 'a99');
+        for (let i = 1; i <= 4; i++) {
+          h.server.heartbeat(t(1000 + i * 30));
+          h.server.agents = h.server.agents.map((a) => ({
+            ...a,
+            containerStatus: `Up ${i + 1} minutes`,
+          }));
+          await tick();
+        }
+        expect(h.server.probes()).toBe(4);
+        expect(publishes).toBe(0);
+        expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
       }
-      expect(h.server.probes()).toBe(4);
-      expect(publishes).toBe(0);
-      expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
-    });
+    );
 
     // Every field a compact row carries that the probe compares, each changed
     // alone: a heartbeat moves `updated` on every row, so only that field

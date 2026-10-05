@@ -363,7 +363,8 @@ function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
  * Probe-row fields that do not make a held row stale: `updated`, which every
  * heartbeat moves; `containerStatus`, the runtime's text ("Up 5 minutes"),
  * which heartbeats rewrite and no list consumer reads; and `creatorName`, the
- * compact view's copy of `appliedConfig.creatorName`, which full rows hold.
+ * compact view's copy of `appliedConfig.creatorName`, which a full row (from
+ * a full-view walk or a single-agent read) holds only inside `appliedConfig`.
  * A row that changes otherwise merges with all of them.
  */
 const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
