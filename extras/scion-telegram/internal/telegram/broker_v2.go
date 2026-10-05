@@ -113,9 +113,6 @@ type TelegramBrokerV2 struct {
 	userProjects      map[string]userProjectsEntry
 	userProjectsMu    sync.Mutex
 	userProjectsGroup singleflight.Group
-	// beforeUserProjectsShare, when set (tests only), is called just before
-	// a caller joins the shared project-list call.
-	beforeUserProjectsShare func()
 }
 
 type userProjectsEntry struct {
@@ -740,7 +737,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Priority 2: Look up via ConversationContext for the recipient.
 	if len(chatIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		chatIDs = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		var denied bool
+		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		if denied {
+			// The recipient is a linked user who cannot read the project
+			// (or the check failed): drop rather than broadcast.
+			b.log.Debug("Recipient cannot read project, dropping message", "topic", topic)
+			return nil
+		}
 	}
 
 	// Priority 3: Broadcast to all GroupLinks for the project.
@@ -1007,11 +1011,15 @@ func resolveOutboundMentions(ctx context.Context, store Store, text string) stri
 // It first attempts email-based lookup via GetUserMappingByEmail; if that fails
 // (e.g. because the hub rewrote the recipient to a display name), it falls back
 // to looking up the scion user UUID via GetUserMappingByScionUserID.
-func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) []int64 {
+//
+// denied is true when the recipient is a linked user who cannot read the
+// project (or the check failed); the message must then not be sent to any
+// chat for that recipient.
+func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) (chats []int64, denied bool) {
 	// Extract email from "user:email@example.com" format.
 	email := strings.TrimPrefix(recipient, "user:")
 	if email == recipient {
-		return nil
+		return nil, false
 	}
 
 	mapping, err := b.store.GetUserMappingByEmail(ctx, email)
@@ -1032,20 +1040,20 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 	}
 
 	if err != nil || mapping == nil {
-		return nil
+		return nil, false
 	}
 
 	if !b.recipientCanReadProject(ctx, mapping, projectID) {
 		b.log.Debug("Recipient cannot read project, not routing to their chat", "project_id", projectID)
-		return nil
+		return nil, true
 	}
 
 	cc, err := b.store.GetConversationContext(ctx, mapping.TelegramUserID, projectID, agentSlug)
 	if err != nil || cc == nil {
-		return nil
+		return nil, false
 	}
 
-	return []int64{cc.LastChatID}
+	return []int64{cc.LastChatID}, false
 }
 
 // publishInputNeeded sends an InputNeeded message with an inline keyboard.
@@ -2700,28 +2708,32 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 // not sent for projects the user may not be able to read.
 func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) bool {
 	principal := linkedUserPrincipal(mapping)
+	// Agent topics always carry a project; an empty one fails closed.
 	if principal == "" || projectID == "" || b.hubClient == nil {
 		return false
 	}
 
 	entry, ok := b.cachedUserProjects(principal)
 	if !ok {
-		if b.beforeUserProjectsShare != nil {
-			b.beforeUserProjectsShare()
-		}
-		v, _, _ := b.userProjectsGroup.Do(principal, func() (interface{}, error) {
+		ch := b.userProjectsGroup.DoChan(principal, func() (interface{}, error) {
 			// A caller arriving after a shared call finished finds its
 			// result here instead of starting another call.
 			if e, ok := b.cachedUserProjects(principal); ok {
 				return e, nil
 			}
-			// The shared call must not end when the first caller's context
-			// does, so it runs on its own bounded context.
+			// The shared call runs on its own bounded context so it can
+			// finish and fill the cache after any one caller stops waiting.
 			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userProjectsFetchTimeout)
 			defer cancel()
 			return b.fetchUserProjects(fetchCtx, principal), nil
 		})
-		entry = v.(userProjectsEntry)
+		select {
+		case res := <-ch:
+			entry = res.Val.(userProjectsEntry)
+		case <-ctx.Done():
+			// The caller stopped waiting: treat as not readable.
+			return false
+		}
 	}
 	return !entry.failed && entry.ids[projectID]
 }
@@ -2741,17 +2753,13 @@ func (b *TelegramBrokerV2) cachedUserProjects(principal string) (userProjectsEnt
 const userProjectsFetchTimeout = 10 * time.Second
 
 // fetchUserProjects lists the user's projects as that user and caches the
-// result (or the failure), evicting expired entries. A failure caused by a
-// cancelled or timed-out context is returned but not cached.
+// result or any failure (including a timeout), evicting expired entries.
 func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal string) userProjectsEntry {
 	entry := userProjectsEntry{fetchedAt: time.Now()}
 	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
 	if err != nil {
 		b.log.Warn("Failed to list projects for notification recipient", "error", err)
 		entry.failed = true
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return entry
-		}
 	} else {
 		entry.ids = make(map[string]bool, len(projects))
 		for _, p := range projects {

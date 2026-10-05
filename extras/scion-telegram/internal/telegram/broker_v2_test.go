@@ -3424,31 +3424,31 @@ func TestResolveRecipientChats(t *testing.T) {
 	}
 
 	t.Run("email lookup succeeds", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name with recipientID fallback", func(t *testing.T) {
 		// Hub rewrites recipient to display name; email lookup fails,
 		// but recipientID-based fallback finds the correct mapping.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name without recipientID returns nil", func(t *testing.T) {
 		// No recipientID provided — fallback cannot execute.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("non-user recipient returns nil", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("email lookup preferred over recipientID", func(t *testing.T) {
 		// When email lookup succeeds, recipientID is not used.
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 }

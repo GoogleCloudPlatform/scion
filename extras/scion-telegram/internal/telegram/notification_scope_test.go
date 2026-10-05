@@ -179,8 +179,15 @@ func TestV2_ResolveRecipientChats_OnlyForReadableProjects(t *testing.T) {
 		}))
 	}
 
-	assert.Equal(t, []int64{999}, b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder"))
-	assert.Nil(t, b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-2", "coder"))
+	chats, denied := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
+	assert.Equal(t, []int64{999}, chats)
+	assert.False(t, denied)
+	chats, denied = b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-2", "coder")
+	assert.Nil(t, chats)
+	assert.True(t, denied)
+	chats, denied = b.resolveRecipientChats(ctx, "user:nobody@example.com", "", "proj-2", "coder")
+	assert.Nil(t, chats)
+	assert.False(t, denied, "an unknown recipient is not a denial")
 }
 
 func inputNeededFor(recipient string) *messages.StructuredMessage {
@@ -357,28 +364,25 @@ func TestV2_RecipientCanReadProject_FailureIsCachedBriefly(t *testing.T) {
 	assert.Len(t, hub.userProjectCalls(), 2)
 }
 
-func TestV2_RecipientCanReadProject_ConcurrentMissesShareOneCall(t *testing.T) {
+func TestV2_RecipientCanReadProject_ConcurrentMissesMakeOneHubCall(t *testing.T) {
 	b, _, hub, _ := newDMScopeBroker(t)
 	hub.projects = []ProjectOption{{ID: "proj-1"}}
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 16)
 	hub.listUserProjectsGate = gate
 	hub.listUserProjectsEntered = entered
-	const n = 8
-	reached := make(chan struct{}, n)
-	b.beforeUserProjectsShare = func() { reached <- struct{}{} }
 	mapping, err := b.store.GetUserMapping(context.Background(), "456")
 	require.NoError(t, err)
 
+	const n = 8
 	results := make(chan bool, n)
 	for i := 0; i < n; i++ {
 		go func() { results <- b.recipientCanReadProject(context.Background(), mapping, "proj-1") }()
 	}
-	// Hold the hub call until every caller has reached the shared call.
+	// Callers that join while the hub call is held share it; callers that
+	// arrive after it finished read its cached result. Either way there is
+	// one hub call.
 	<-entered
-	for i := 0; i < n; i++ {
-		<-reached
-	}
 	close(gate)
 	for i := 0; i < n; i++ {
 		assert.True(t, <-results)
@@ -386,7 +390,7 @@ func TestV2_RecipientCanReadProject_ConcurrentMissesShareOneCall(t *testing.T) {
 	assert.Len(t, hub.userProjectCalls(), 1)
 }
 
-func TestV2_RecipientCanReadProject_SharedCallOutlivesFirstCallersContext(t *testing.T) {
+func TestV2_RecipientCanReadProject_CallerStopsWaitingSharedCallFillsCache(t *testing.T) {
 	b, _, hub, _ := newDMScopeBroker(t)
 	hub.projects = []ProjectOption{{ID: "proj-1"}}
 	gate := make(chan struct{})
@@ -400,15 +404,20 @@ func TestV2_RecipientCanReadProject_SharedCallOutlivesFirstCallersContext(t *tes
 	result := make(chan bool, 1)
 	go func() { result <- b.recipientCanReadProject(ctx, mapping, "proj-1") }()
 	<-entered
-	cancel() // the first caller's context ends while the call is in flight
-	close(gate)
+	cancel()
+	assert.False(t, <-result, "a caller that stops waiting fails closed")
 
-	assert.True(t, <-result, "the shared call is not cut short by the caller's context")
+	// The shared call is still running; once it finishes it fills the cache.
+	close(gate)
+	require.Eventually(t, func() bool {
+		_, ok := b.cachedUserProjects("user:alice@example.com")
+		return ok
+	}, 2*time.Second, 5*time.Millisecond)
 	assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
 	assert.Len(t, hub.userProjectCalls(), 1)
 }
 
-func TestV2_FetchUserProjects_ContextFailureIsNotCached(t *testing.T) {
+func TestV2_FetchUserProjects_TimeoutIsCached(t *testing.T) {
 	for name, ctxErr := range map[string]error{"canceled": context.Canceled, "deadline": context.DeadlineExceeded} {
 		t.Run(name, func(t *testing.T) {
 			b, _, hub, _ := newDMScopeBroker(t)
@@ -417,15 +426,13 @@ func TestV2_FetchUserProjects_ContextFailureIsNotCached(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
-			_, cached := b.cachedUserProjects("user:alice@example.com")
-			assert.False(t, cached, "a context failure is not remembered")
+			e, cached := b.cachedUserProjects("user:alice@example.com")
+			require.True(t, cached, "a timed-out shared call is remembered")
+			assert.True(t, e.failed)
 
-			hub.mu.Lock()
-			hub.listUserProjectsErr = nil
-			hub.projects = []ProjectOption{{ID: "proj-1"}}
-			hub.mu.Unlock()
-			assert.True(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
-			assert.Len(t, hub.userProjectCalls(), 2)
+			// Within the failure window no new hub call is made.
+			assert.False(t, b.recipientCanReadProject(context.Background(), mapping, "proj-1"))
+			assert.Len(t, hub.userProjectCalls(), 1)
 		})
 	}
 }
@@ -497,4 +504,57 @@ func TestCommandHandler_Notifications_RequiresUsableLink(t *testing.T) {
 		assert.Equal(t, staleLinkText, sent[0].Text)
 		assert.Empty(t, hub.userProjectCalls())
 	})
+}
+
+// --- Publish routing for user recipients ---
+
+func agentReplyFor(recipient string) *messages.StructuredMessage {
+	return &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().Format(time.RFC3339Nano),
+		Sender:    "agent:coder",
+		Recipient: recipient,
+		Msg:       "Here is the deploy plan",
+		Type:      messages.TypeInstruction,
+	}
+}
+
+func TestV2_Publish_DeniedRecipientIsNotBroadcast(t *testing.T) {
+	for name, setup := range map[string]func(*fakeHubClient, string){
+		"cannot read project": func(h *fakeHubClient, p string) { h.userProjects = map[string][]ProjectOption{p: {}} },
+		"check fails closed": func(h *fakeHubClient, _ string) {
+			h.listUserProjectsErr = errors.New("list user projects returned status 500")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, tgSrv, hub, principal := newDMScopeBroker(t)
+			setup(hub, principal)
+			saveTestGroupLink(t, b.store, -200, "proj-1", "alpha", "")
+			require.NoError(t, b.store.SaveConversationContext(context.Background(), &ConversationContext{
+				TelegramUserID: "456", ProjectID: "proj-1", AgentSlug: "coder", LastChatID: -200, LastMessageAt: time.Now(),
+			}))
+
+			require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", agentReplyFor("user:alice@example.com")))
+
+			assert.Empty(t, tgSrv.getSentMessages(), "the message is dropped, not broadcast to the project's groups")
+		})
+	}
+}
+
+func TestV2_Publish_RecipientWithoutContextStillBroadcasts(t *testing.T) {
+	for name, recipient := range map[string]string{
+		"unknown user recipient": "user:nobody@example.com",
+		"no recipient":           "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, tgSrv, _, _ := newDMScopeBroker(t)
+			saveTestGroupLink(t, b.store, -200, "proj-1", "alpha", "")
+
+			require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", agentReplyFor(recipient)))
+
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1)
+			assert.Equal(t, int64(-200), sent[0].ChatID)
+		})
+	}
 }
