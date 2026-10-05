@@ -19,8 +19,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -226,11 +231,12 @@ func TestInitOperationalSettings_HubDefaultGCPIdentitySurvivesRestart(t *testing
 	}
 }
 
-// TestInitOperationalSettings_SeedEnvReachesHubOnSQLite guards closed issue
-// ptone/scion#1284: on a SQLite hub, SCION_SEED_* values must reach the live
-// hub through initOperationalSettings (seed -> syncHubSettings -> Refresh ->
-// ApplySnapshot). The postgres-only gate that once skipped this is gone; this
-// keeps it from coming back.
+// TestInitOperationalSettings_SeedEnvReachesHubOnSQLite shows that
+// SCION_SEED_* values reach the live hub through initOperationalSettings on
+// a SQLite store (LoadBootstrapKoanf seed merge -> syncHubSettings' no-lock
+// branch -> Refresh -> ApplySnapshot); see closed issue ptone/scion#1284.
+// It calls initOperationalSettings directly, so it does not guard against a
+// driver gate returning in its caller, initHubServer.
 func TestInitOperationalSettings_SeedEnvReachesHubOnSQLite(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
@@ -243,7 +249,6 @@ func TestInitOperationalSettings_SeedEnvReachesHubOnSQLite(t *testing.T) {
 	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
 
 	cfg := &config.GlobalConfig{}
-	cfg.Database.Driver = "sqlite3"
 	st := newTestStore(t)
 	srv, err := hub.New(hub.ServerConfig{}, st)
 	if err != nil {
@@ -291,5 +296,67 @@ func TestColocatedBrokerRegisters(t *testing.T) {
 				t.Errorf("colocatedBrokerRegisters = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestInitHubServer_CallsInitOperationalSettingsUnconditionally is the
+// caller-level guard for closed issue ptone/scion#1284, which was a
+// postgres-only `if` around the operational-settings init in initHubServer.
+// It parses server_foreground.go and fails if the
+// initOperationalSettingsWithRetry call in initHubServer is missing or sits
+// under any `if` whose condition mentions the database driver.
+func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "initHubServer" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("initHubServer not found in server_foreground.go")
+	}
+
+	found := false
+	var stack []ast.Node
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "initOperationalSettingsWithRetry" {
+			return true
+		}
+		found = true
+		for i, anc := range stack {
+			ifs, ok := anc.(*ast.IfStmt)
+			if !ok || i+1 >= len(stack) {
+				continue
+			}
+			// Only the guarded body/else counts; the call may legitimately
+			// be the if's own init/condition (`if err := call(); err != nil`).
+			if stack[i+1] == ifs.Init || stack[i+1] == ifs.Cond {
+				continue
+			}
+			var cond strings.Builder
+			_ = printer.Fprint(&cond, fset, ifs.Cond)
+			if strings.Contains(strings.ToLower(cond.String()), "driver") {
+				t.Errorf("initOperationalSettingsWithRetry is gated by `if %s` (%s); settings init must run on every driver",
+					cond.String(), fset.Position(ifs.Pos()))
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("initHubServer no longer calls initOperationalSettingsWithRetry")
 	}
 }
