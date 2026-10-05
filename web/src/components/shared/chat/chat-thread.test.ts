@@ -68,6 +68,11 @@ vi.mock('../../../client/api.js', () => ({
   extractApiError: () => Promise.resolve('error'),
 }));
 
+const showConfirmMock = vi.fn<(message: string, options?: unknown) => Promise<boolean>>();
+vi.mock('../confirm-dialog.js', () => ({
+  showConfirm: (message: string, options?: unknown) => showConfirmMock(message, options),
+}));
+
 await import('./chat-thread.js');
 // Registers <sl-textarea> so the composer's shadow root actually contains it
 // (and its own shadow root) instead of an unupgraded, shadow-less stand-in —
@@ -433,6 +438,211 @@ describe('scion-chat-thread interrupt send payload', () => {
   it('omits interrupt on an ordinary send', async () => {
     const body = await sendAndGetBody(false);
     expect(body).not.toHaveProperty('interrupt');
+  });
+});
+
+// Wake-on-send: a send to a suspended agent the user may wake gets a wake
+// offer (409 canWake) and a dialog; "Wake and send" resends with wake,
+// Cancel hands the draft back to the composer.
+describe('scion-chat-thread wake on send', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    showConfirmMock.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  type Internals = {
+    messageMap: Map<string, Message>;
+    sendError: string | null;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+  };
+
+  function wakeOfferResponse(): Response {
+    return {
+      ok: false,
+      status: 409,
+      json: () =>
+        Promise.resolve({
+          error: {
+            code: 'agent_not_running',
+            message: 'Agent "sleepy" is suspended',
+            details: { agentId: 'a-1', agentSlug: 'sleepy', phase: 'suspended', canWake: true },
+          },
+        }),
+    } as unknown as Response;
+  }
+
+  function createdResponse(body: Record<string, unknown>): Response {
+    return {
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve(body),
+    } as unknown as Response;
+  }
+
+  function sendBodies(): Array<Record<string, unknown>> {
+    return apiFetch.mock.calls
+      .filter(
+        (c) =>
+          String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
+      )
+      .map((c) => JSON.parse(String((c[1] as RequestInit).body)) as Record<string, unknown>);
+  }
+
+  function send(
+    internals: Internals,
+    callbacks: { onSuccess: () => void; onError: (msg: string) => void }
+  ): Promise<void> {
+    return internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'please pick this up',
+          plain: false,
+          interrupt: false,
+          mentions: [],
+          attachmentIds: [],
+          ...callbacks,
+        },
+      })
+    );
+  }
+
+  it('asks the hub to offer a wake on an ordinary send', async () => {
+    const el = await mount();
+    apiFetch.mockResolvedValueOnce(createdResponse({ id: 'ok-1' }));
+    await send(el as unknown as Internals, { onSuccess: vi.fn(), onError: vi.fn() });
+    const [body] = sendBodies();
+    expect(body.offer_wake).toBe(true);
+    expect(body).not.toHaveProperty('wake');
+    expect(showConfirmMock).not.toHaveBeenCalled();
+  });
+
+  it('wakes and delivers when the user confirms', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+
+    let resolveWake!: (r: Response) => void;
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveWake = resolve;
+        })
+    );
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    const done = send(internals, { onSuccess, onError });
+
+    // While the wake request is in flight the bubble says it is waking.
+    await vi.waitFor(() => expect(sendBodies()).toHaveLength(2));
+    const waking = [...internals.messageMap.values()].find((m) => m.msg === 'please pick this up');
+    expect(waking?.dispatchState).toBe('waking');
+
+    resolveWake(createdResponse({ id: 'woken-1', dispatchState: 'dispatched' }));
+    await done;
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(String(showConfirmMock.mock.calls[0]![0])).toContain('@sleepy is suspended');
+    const bodies = sendBodies();
+    expect(bodies[0]!.offer_wake).toBe(true);
+    expect(bodies[1]!.wake).toBe(true);
+    expect(bodies[1]).not.toHaveProperty('offer_wake');
+    expect(bodies[1]!.content).toBe('please pick this up');
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(internals.messageMap.get('woken-1')?.dispatchState).toBe('dispatched');
+  });
+
+  it('keeps the draft and sends nothing more when the user cancels', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(false);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await send(internals, { onSuccess, onError });
+
+    expect(sendBodies()).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(internals.sendError).toBeNull();
+    expect([...internals.messageMap.values()]).toHaveLength(0);
+  });
+
+  it('offers no wake for an agent that is not resumable', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    apiFetch.mockResolvedValueOnce(
+      createdResponse({
+        id: 'stopped-1',
+        dispatchState: 'failed',
+        dispatchFailureReason: 'Agent unreachable (stopped)',
+        dispatchFailureCode: 'agent_unreachable',
+      })
+    );
+    await send(internals, { onSuccess: vi.fn(), onError: vi.fn() });
+
+    expect(showConfirmMock).not.toHaveBeenCalled();
+    const msg = internals.messageMap.get('stopped-1');
+    expect(msg?.dispatchState).toBe('failed');
+    expect(msg?.dispatchFailureReason).toBe('Agent unreachable (stopped)');
+  });
+
+  it('offers no wake for a conflict without canWake', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: () =>
+        Promise.resolve({
+          error: {
+            code: 'agent_not_running',
+            message: 'conversation resolution failed',
+            details: { canWake: false },
+          },
+        }),
+    } as unknown as Response);
+    const onError = vi.fn();
+    await send(internals, { onSuccess: vi.fn(), onError });
+
+    expect(showConfirmMock).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(internals.sendError).toBe('conversation resolution failed');
+  });
+
+  it('keeps the draft and shows the error when the wake is refused', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: () =>
+        Promise.resolve({
+          error: { code: 'forbidden', message: 'You do not have permission to wake this agent' },
+        }),
+    } as unknown as Response);
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await send(internals, { onSuccess, onError });
+
+    expect(sendBodies()).toHaveLength(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    // extractApiError is mocked to 'error' in this file.
+    expect(internals.sendError).toBe('error');
+    expect([...internals.messageMap.values()]).toHaveLength(0);
   });
 });
 

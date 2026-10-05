@@ -49,6 +49,13 @@ import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
+import {
+  WAKING_DISPATCH_STATE,
+  confirmWake,
+  errorMessageFromBody,
+  wakeOfferFromErrorBody,
+  type WakeOffer,
+} from './chat-wake.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -2347,16 +2354,7 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const {
-      text,
-      interrupt,
-      mentions,
-      attachmentIds,
-      replyToId,
-      replyToContent,
-      onSuccess,
-      onError,
-    } = e.detail;
+    const { text, attachmentIds, onSuccess } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -2366,6 +2364,29 @@ export class ScionChatThread extends LitElement {
       onSuccess();
       return;
     }
+
+    await this.sendV2(e.detail, false);
+  }
+
+  /**
+   * POST one v2 send. With `wake` false the request carries `offer_wake`, so
+   * a suspended primary the user may wake answers with a wake offer instead
+   * of a failed row; the user is then asked, and a confirmed wake resends the
+   * same message with `wake` (see chat-wake.ts). The composer keeps its draft
+   * (via onError) on Cancel and on any failure.
+   */
+  private async sendV2(detail: ChatSendDetail, wake: boolean): Promise<void> {
+    const {
+      text,
+      interrupt,
+      mentions,
+      attachmentIds,
+      replyToId,
+      replyToContent,
+      onSuccess,
+      onError,
+    } = detail;
+    let wakeOffer: WakeOffer | null = null;
 
     this.sending = true;
     this.sendError = null;
@@ -2396,7 +2417,9 @@ export class ScionChatThread extends LitElement {
       type: replyToId ? 'reply' : 'chat',
       agentId: '',
       createdAt: new Date().toISOString(),
-      dispatchState: 'pending',
+      // A wake resumes the agent before delivery, which takes a while:
+      // say so on the bubble instead of a plain "Sending".
+      dispatchState: wake ? WAKING_DISPATCH_STATE : 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
     this._pendingIdempotencyKeys.add(idempotencyKey);
@@ -2423,6 +2446,13 @@ export class ScionChatThread extends LitElement {
       // keep the minimal body.
       if (interrupt) {
         body.interrupt = true;
+      }
+      // Wake-on-send: either wake the suspended agent (the user confirmed)
+      // or ask the hub to offer a wake rather than fail the send.
+      if (wake) {
+        body.wake = true;
+      } else {
+        body.offer_wake = true;
       }
       // W7: Include attachment IDs.
       if (attachmentIds && attachmentIds.length > 0) {
@@ -2465,8 +2495,22 @@ export class ScionChatThread extends LitElement {
           .sort(compareMessageOrder);
         // Restore reply-to state so the reply bar comes back for retry.
         this.composerReplyTo = savedReplyTo;
-        this.sendError = await extractApiError(res, 'Failed to send message');
-        onError?.(this.sendError ?? 'Failed to send message');
+        if (!wake && res.status === 409) {
+          // Read the body once: it is either a wake offer or an ordinary
+          // conflict whose message is shown as usual.
+          const data: unknown = await res.json().catch(() => null);
+          wakeOffer = wakeOfferFromErrorBody(data);
+          if (!wakeOffer) {
+            this.sendError = errorMessageFromBody(data, 'Failed to send message');
+            onError?.(this.sendError);
+          }
+        } else {
+          this.sendError = await extractApiError(
+            res,
+            wake ? 'Failed to wake agent' : 'Failed to send message'
+          );
+          onError?.(this.sendError ?? 'Failed to send message');
+        }
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -2584,6 +2628,29 @@ export class ScionChatThread extends LitElement {
     } finally {
       this.sending = false;
     }
+
+    if (wakeOffer) {
+      await this.offerWake(detail, wakeOffer);
+    }
+  }
+
+  /**
+   * Ask whether to wake the suspended agent. "Wake and send" resends the
+   * held message with `wake`; Cancel hands the draft back to the composer.
+   * The composer stays cleared while the dialog is open, so the draft is
+   * restored exactly once, by whichever path ends the send.
+   */
+  private async offerWake(detail: ChatSendDetail, offer: WakeOffer): Promise<void> {
+    const conversationKey = this.conversationKey;
+    const confirmed = await confirmWake(offer);
+    // A conversation switch while the dialog was open must not deliver the
+    // message into the conversation the thread has since moved to.
+    if (!confirmed || conversationKey !== this.conversationKey) {
+      detail.onError?.('Wake cancelled');
+      return;
+    }
+    // The resend saves and clears the reply bar again.
+    await this.sendV2(detail, true);
   }
 
   /** Handle /default slash command. */

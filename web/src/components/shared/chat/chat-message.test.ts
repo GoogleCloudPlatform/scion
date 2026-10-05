@@ -918,6 +918,13 @@ describe('scion-chat-message delivery state', () => {
     return el.shadowRoot?.querySelector('.delivery-state');
   }
 
+  it('shows "Waking agent…" while a wake-and-send is in flight', async () => {
+    const el = await mountOutbound({ dispatchState: 'waking' });
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Waking agent');
+    expect(state?.classList.contains('waking')).toBe(true);
+  });
+
   it('shows "Agent unreachable" when dispatchFailureCode is agent_unreachable', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',
