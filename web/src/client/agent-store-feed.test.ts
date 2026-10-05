@@ -33,6 +33,7 @@ import {
 import type { Agent } from '../shared/types.js';
 import { StateManager } from './state.js';
 
+const VIEWS = ['compact', 'full'] as const;
 const HUB = { scope: 'hub' } as const;
 const P1 = { scope: 'project', projectId: 'p1' } as const;
 
@@ -774,73 +775,65 @@ describe('AgentStore feed completeness flag', () => {
     expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(true);
   });
 
-  it('a full-view hub walk cut off by the page bound does not set the flag', async () => {
-    const h = createHarness([agent('a1'), agent('a2'), agent('a3')], {
-      view: 'full',
-      pageSize: 1,
-      maxPages: 2,
+  // `isAgentSetComplete('compact')` is also true for a full flag, so each
+  // negative below checks it in both views.
+  describe.each(VIEWS)('in %s view', (view) => {
+    it('a hub walk cut off by the page bound does not set the flag', async () => {
+      const h = createHarness([agent('a1'), agent('a2'), agent('a3')], {
+        view,
+        pageSize: 1,
+        maxPages: 2,
+      });
+      const loading = h.store.ensure(HUB);
+      await h.connect();
+      await loading;
+
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
     });
-    const loading = h.store.ensure(HUB);
-    await h.connect();
-    await loading;
 
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(false);
-  });
+    it('a hub walk does not set the flag when the feed drops before it finishes', async () => {
+      const h = createHarness([agent('a1')], { view });
+      const release = h.server.pause();
+      const loading = h.store.ensure(HUB);
+      await h.connect();
 
-  it('a hub walk cut off by the page bound does not set the flag', async () => {
-    const h = createHarness([agent('a1'), agent('a2'), agent('a3')], {
-      pageSize: 1,
-      maxPages: 2,
+      h.stream().drop();
+      release();
+      await settle();
+
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+      void loading.catch(() => {});
     });
-    const loading = h.store.ensure(HUB);
-    await h.connect();
-    await loading;
 
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
-  });
+    it('a hub walk spanning a feed drop and reconnect does not set the flag', async () => {
+      const h = createHarness([agent('a1')], { view });
+      const release = h.server.pause();
+      const loading = h.store.ensure(HUB);
+      await h.connect();
 
-  it('a hub walk does not set the flag when the feed drops before it finishes', async () => {
-    const h = createHarness([agent('a1')]);
-    const release = h.server.pause();
-    const loading = h.store.ensure(HUB);
-    await h.connect();
+      h.stream().drop();
+      await vi.advanceTimersByTimeAsync(1_200);
+      await h.connect();
+      release();
+      const releaseFollowUp = h.server.pause();
+      await settle();
 
-    h.stream().drop();
-    release();
-    await settle();
+      expect(h.server.walks()).toBe(2);
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
 
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
-    void loading.catch(() => {});
-  });
+      releaseFollowUp();
+      await loading;
+      expect(h.feeds[0]?.isAgentSetComplete(view)).toBe(true);
+    });
 
-  it('a hub walk spanning a feed drop and reconnect does not set the flag', async () => {
-    const h = createHarness([agent('a1')]);
-    const release = h.server.pause();
-    const loading = h.store.ensure(HUB);
-    await h.connect();
+    it('a project walk does not set the flag', async () => {
+      const h = createHarness([agent('a1')], { view });
+      const loading = h.store.ensure(P1);
+      await h.connect();
+      await loading;
 
-    h.stream().drop();
-    await vi.advanceTimersByTimeAsync(1_200);
-    await h.connect();
-    release();
-    const releaseFollowUp = h.server.pause();
-    await settle();
-
-    expect(h.server.walks()).toBe(2);
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
-
-    releaseFollowUp();
-    await loading;
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(true);
-  });
-
-  it('a project walk does not set the flag', async () => {
-    const h = createHarness([agent('a1')]);
-    const loading = h.store.ensure(P1);
-    await h.connect();
-    await loading;
-
-    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+      expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
+    });
   });
 
   it('a loading snapshot and an SSE-created row do not set the flag', async () => {

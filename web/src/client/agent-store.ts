@@ -950,15 +950,11 @@ export class AgentStore {
         if (agent) byId.set(id, agent);
       }
 
-      if (this.view === 'compact') {
-        // Compact rows carry every field the list consumers read; the feed
-        // only ever records the compact flag for them.
-        if (entry.key === 'hub' && !truncated && connected) {
-          feed.markAgentSetComplete('compact');
-          this.feedHoldsHubSet = true;
-        }
-      } else if (entry.key === 'hub' && !truncated && connected) {
-        feed.markAgentSetComplete('full');
+      // Only a complete, unfiltered hub walk that stayed connected marks the
+      // feed's agent set complete, in the view it walked: compact rows never
+      // promise full fields.
+      if (entry.key === 'hub' && !truncated && connected) {
+        feed.markAgentSetComplete(this.view);
         this.feedHoldsHubSet = true;
       }
 
