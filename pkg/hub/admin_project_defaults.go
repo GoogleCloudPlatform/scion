@@ -107,7 +107,7 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// In postgres mode, persist via OperationalSettings.
+	// With OperationalSettings (any DB driver), persist via the DB.
 	if ops := s.GetOperationalSettings(); ops != nil {
 		caller := GetUserIdentityFromContext(r.Context())
 		updatedBy := ""

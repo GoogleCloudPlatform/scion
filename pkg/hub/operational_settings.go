@@ -71,12 +71,12 @@ type sectionState struct {
 // external source.
 //
 // Field population depends on the source:
-//   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
+//   - DB-backed, any driver (OperationalSettings.Snapshot): ALL fields are populated via
 //     the koanf merge (DB > bootstrap merge). This includes
 //     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
-//   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
+//   - No OperationalSettings (BuildLayer1SnapshotFromFile): only the fields that the old
 //     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
 //     DefaultTimezone, which are read from the top-level
 //     default_harness_config and default_timezone keys in settings.yaml.
@@ -93,9 +93,9 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
-	StalledThreshold      string // postgres-mode only (see type comment)
-	SoftDeleteRetention   string // postgres-mode only (see type comment)
-	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
+	StalledThreshold      string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
 
 	// Maintenance
 	AdminMode          bool
@@ -103,8 +103,9 @@ type Layer1Snapshot struct {
 	// HasMaintenanceRow indicates whether a maintenance section row exists in
 	// the DB. When false (row absent), ApplyMaintenanceFromSnapshot leaves
 	// MaintenanceState as initialized at startup rather than resetting to
-	// defaults. This field is only meaningful in postgres mode — file-mode
-	// snapshots should never apply maintenance state.
+	// defaults. This field is only meaningful for DB-backed snapshots (any
+	// driver) — snapshots built from the file should never apply maintenance
+	// state.
 	HasMaintenanceRow bool
 
 	// Telemetry
@@ -135,7 +136,8 @@ type Layer1Snapshot struct {
 	DefaultRuntimeBroker string
 	DefaultTimezone      string
 	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
-	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	// hub-wide GCP identity default, DB-backed snapshots only (see type
+	// comment).
 	DefaultGCPIdentityMode             string
 	DefaultGCPIdentityServiceAccountID string
 
@@ -195,7 +197,8 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
-	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
+	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
+	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
 
 	// server is set by StartPropagation — used for self-apply in Update
@@ -967,8 +970,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
 // ImageRegistry, DefaultResources, and NotificationChannels remain at zero
 // values — the old reloadSettings never applied those on config reload (they
-// are consumed at startup, not on reload). In postgres mode, the full koanf-based
-// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+// are consumed at startup, not on reload). With OperationalSettings (any DB
+// driver), the full koanf-based Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 //
 // Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
@@ -1275,10 +1278,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
-	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
-	// must never touch MaintenanceState (restoring pre-refactor behavior).
-	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
-	// separately, which respects env > DB precedence (§3.4/§3.8).
+	// Maintenance is runtime/API-owned state. On a hub without
+	// OperationalSettings, reloadSettings must never touch MaintenanceState
+	// (restoring pre-refactor behavior). With OperationalSettings (any DB
+	// driver), the caller uses ApplyMaintenanceFromSnapshot separately.
 
 	// Federation (outside mutex — atomic.Pointer swap is lock-free,
 	// and NewFederationAuthenticator may do network I/O)
@@ -1347,11 +1350,12 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 }
 
-// ApplyMaintenanceFromSnapshot applies maintenance state from a postgres-mode
-// snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+// ApplyMaintenanceFromSnapshot applies maintenance state from a DB-backed
+// (any driver) snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
 //
-// This function must be called ONLY in postgres-mode paths — file-mode
-// reloadSettings must never touch MaintenanceState (it is runtime/API-owned).
+// This function must be called ONLY on DB-backed paths (any driver) — the
+// file-mode reloadSettings must never touch MaintenanceState (it is
+// runtime/API-owned).
 //
 // Behavior:
 //   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState

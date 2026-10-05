@@ -227,8 +227,8 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 // persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
 // to the DB-owned `github_app` opsettings section (any DB driver with
 // OperationalSettings). The error is returned rather than swallowed: the DB is
-// the only durable store for these fields, so a failed write silently loses the change at the
-// next refresh and the caller must be told.
+// the only durable store for these fields, so a failed write silently loses
+// the change at the next refresh and the caller must be told.
 func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *OperationalSettings, cfg GitHubAppServerConfig, updatedBy string) error {
 	// WebhooksEnabled is a *bool in the section so an explicit false is
 	// distinguishable from an omitted field; cfg always carries a resolved value.

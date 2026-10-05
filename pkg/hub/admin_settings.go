@@ -637,8 +637,9 @@ func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profile
 // Returns a summary of what was reloaded and what requires a restart.
 //
 // This is the file-mode path: it loads GlobalConfig from settings.yaml,
-// builds a Layer1Snapshot, and delegates to applySnapshot. In postgres mode,
-// the OperationalSettings service provides the snapshot instead.
+// builds a Layer1Snapshot, and delegates to applySnapshot. It is used only by
+// a hub without OperationalSettings; with it (any DB driver) the service
+// provides the snapshot instead.
 func (s *Server) reloadSettings() map[string]interface{} {
 	results := map[string]interface{}{
 		"applied":          []string{},
