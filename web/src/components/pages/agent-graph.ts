@@ -241,6 +241,11 @@ export class AgentGraphPage extends LitElement {
    * A drain reports its own late connect.
    */
   private watchFirstConnect(): void {
+    // A new attachment starts unconnected, whatever an earlier one saw.
+    this.firstConnected = false;
+    this.firstConnectLate = false;
+    if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
+    this.connectTimer = undefined;
     const gen = stateManager.scopeGeneration;
     const attachment = ++this.attachment;
     let settled = false;
@@ -253,7 +258,9 @@ export class AgentGraphPage extends LitElement {
     stateManager.sseConnected(gen).then(
       () => {
         settled = true;
-        if (attachment === this.attachment) this.firstConnected = true;
+        // An earlier attachment's connect must not touch this one's state.
+        if (attachment !== this.attachment) return;
+        this.firstConnected = true;
         if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
         this.connectTimer = undefined;
       },

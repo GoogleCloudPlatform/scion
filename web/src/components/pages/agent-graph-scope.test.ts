@@ -298,6 +298,23 @@ function listenerBalance(
   return count(add) - count(remove);
 }
 
+/**
+ * Gives each `stateManager.sseConnected` call its own promise, resolved by
+ * the test, so one attachment's connect wait can end without another's.
+ */
+function deferredConnects(): Array<{ promise: Promise<void>; resolve: () => void }> {
+  const waits: Array<{ promise: Promise<void>; resolve: () => void }> = [];
+  vi.spyOn(stateManager, 'sseConnected').mockImplementation(() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    waits.push({ promise, resolve });
+    return promise;
+  });
+  return waits;
+}
+
 /** The agents page's own first load in the list view. */
 const AGENTS_PAGE_LOAD = '/api/v1/agents?sort=updated&dir=desc&limit=25&fit=500&stats=1';
 
@@ -1736,6 +1753,61 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
       expect(g(el).stale).toBe(false);
       expect(banner(el, 'stale')).toBeNull();
+    });
+
+    it('a re-attached probe stays unconnected when its earlier attachment connects late, and its answer after the connect timeout shows the stale banner', async () => {
+      vi.stubGlobal('EventSource', SilentEventSource);
+      const connects = deferredConnects();
+      const fake = newFake(25);
+      const h1 = holdable(fakeFetch(fake), (u) => u.searchParams.has('sort'));
+      vi.stubGlobal('fetch', vi.fn(h1.fn));
+      h1.hold(1);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const el = await mountUnsettled('?project=p-1');
+      await vi.waitFor(() => expect(h1.heldCount).toBe(1));
+      el.remove();
+      const h2 = holdable(fakeFetch(fake), (u) => u.searchParams.has('sort'));
+      vi.stubGlobal('fetch', vi.fn(h2.fn));
+      h2.hold(1);
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(h2.heldCount).toBe(1));
+      expect(connects).toHaveLength(2);
+      // The first attachment's wait resolves while the second is still unconnected.
+      connects[0].resolve();
+      await connects[0].promise;
+      expect((el as unknown as { firstConnected: boolean }).firstConnected).toBe(false);
+      vi.advanceTimersByTime(3000);
+      expect((el as unknown as { firstConnectLate: boolean }).firstConnectLate).toBe(true);
+      expect((el as unknown as { firstConnected: boolean }).firstConnected).toBe(false);
+      vi.useRealTimers();
+      h2.release();
+      await settle(el);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(g(el).stale).toBe(true);
+      expect(bannerText(el, 'stale')).toBe(STALE);
+    });
+
+    it("an earlier attachment's late connect does not cancel the re-attached page's connect timer", async () => {
+      vi.stubGlobal('EventSource', SilentEventSource);
+      const connects = deferredConnects();
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      holdInState(fake.agents, true);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const el = await mountUnsettled();
+      vi.advanceTimersByTime(1000);
+      el.remove();
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(connects).toHaveLength(2);
+      connects[0].resolve();
+      await connects[0].promise;
+      vi.advanceTimersByTime(3000);
+      await el.updateComplete;
+      expect(g(el).stale).toBe(true);
+      expect(bannerText(el, 'stale')).toBe(STALE);
+      expect(fake.requests).toEqual([]);
     });
   });
 
