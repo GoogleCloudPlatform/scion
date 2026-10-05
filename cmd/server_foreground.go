@@ -1535,7 +1535,6 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	return devAuthToken, nil
 }
 
-// resolveHubEndpoint determines the Hub's public endpoint URL.
 // loadServerSettings loads the settings the server's hub and broker use,
 // falling back to empty settings (with a warning) when they fail to load. It
 // also returns the default profile the broker reports on every heartbeat:
@@ -1551,6 +1550,7 @@ func loadServerSettings(path string) (*config.Settings, *string) {
 	return settings, brokerHeartbeatDefaultProfile(settings, loaded)
 }
 
+// resolveHubEndpoint determines the Hub's public endpoint URL.
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
 	if cfg.Hub.Endpoint != "" {
 		return cfg.Hub.Endpoint
