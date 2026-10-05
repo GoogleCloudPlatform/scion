@@ -594,6 +594,27 @@ describe('AgentStore delta probe', () => {
       expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
     });
 
+    it('does not publish for the empty values a full row holds and compact probe rows omit', async () => {
+      const h = await loaded([active('a1', 1)]);
+      h.server.agents.push(
+        active('a2', 2, { template: '', labels: {}, ancestry: [] } as Partial<Agent>)
+      );
+      await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
+      await settle();
+      const a2 = h.feeds[0].getAgent('a2');
+      expect(a2?.template).toBe('');
+
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      for (let i = 1; i <= 4; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(4);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+    });
+
     // Every field a compact row carries that the probe compares, each changed
     // alone: a heartbeat moves `updated` on every row, so only that field
     // tells the changed row apart from the rest.

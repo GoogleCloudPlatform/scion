@@ -431,16 +431,28 @@ function mergeCompactRow(held: Agent | undefined, row: Agent, keys: ReadonlySet<
 }
 
 /**
+ * Whether a held value is one the compact view omits: absent, null, or an
+ * empty string, list or map. A full row holds some of these (`template` is
+ * always sent), so a compact row that lacks the key does not change it.
+ */
+function isEmptyValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/**
  * Whether merging a probe row into the row held would change a field the
  * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}): one of the probe
  * row's own fields differs, or a compact key the row lacks (see
- * {@link mergeCompactRow}) is set on the held row, which the merge clears.
+ * {@link mergeCompactRow}) holds a value on the held row that is not empty
+ * (see {@link isEmptyValue}), which the merge clears.
  */
 function differsBeyondHeartbeat(row: Agent, held: Agent, keys: ReadonlySet<string>): boolean {
   const before = held as unknown as Record<string, unknown>;
   for (const key of keys) {
     if (PROBE_UNCOMPARED_FIELDS.has(key) || key in row) continue;
-    if (before[key] !== undefined) return true;
+    if (!isEmptyValue(before[key])) return true;
   }
   for (const [key, value] of Object.entries(row)) {
     if (PROBE_UNCOMPARED_FIELDS.has(key)) continue;
