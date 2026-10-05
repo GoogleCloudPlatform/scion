@@ -50,8 +50,8 @@ type SectionMetadata struct {
 }
 
 // ServerConfigDBResponse extends the file-mode response with metadata for the
-// postgres-mode GET endpoint. It embeds the original ServerConfigResponse and
-// adds section_metadata and env_overrides.
+// DB-backed GET endpoint (any driver). It embeds the original
+// ServerConfigResponse and adds section_metadata and env_overrides.
 type ServerConfigDBResponse struct {
 	ServerConfigResponse
 
@@ -100,7 +100,8 @@ type ServerConfigUpdateDBRequest struct {
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
-// handleGetServerConfigDB handles GET /api/v1/admin/server-config in postgres mode.
+// handleGetServerConfigDB handles GET /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // Layer-1 sections come from OperationalSettings.Snapshot(); Layer-0 comes from
 // the local GlobalConfig (settings.yaml). Section metadata shows provenance.
@@ -549,7 +550,8 @@ func (s *Server) computeDeprecatedEnvKeys(ops *OperationalSettings) []Deprecated
 	return result
 }
 
-// handlePutServerConfigDB handles PUT /api/v1/admin/server-config in postgres mode.
+// handlePutServerConfigDB handles PUT /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // It partitions incoming fields via the opsettings registry:
 //   - Layer-1 fields → per-section docs → validate → OperationalSettings.Update
@@ -868,7 +870,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	slog.Info("Server config updated via admin API (postgres mode)",
+	slog.Info("Server config updated via admin API (DB-backed)",
 		"user", updatedBy,
 		"sections", mapKeys(applied),
 	)
@@ -1735,7 +1737,8 @@ func mapKeys(m map[string]int64) []string {
 	return keys
 }
 
-// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance in postgres mode.
+// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
 // Reads maintenance state from the operational settings snapshot.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
 	snap := ops.Snapshot()
@@ -1745,7 +1748,8 @@ func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalS
 	})
 }
 
-// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance in postgres mode.
+// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
 // Writes the maintenance section via OperationalSettings.Update (durable +
 // propagated), then applies locally via ApplyMaintenanceFromSnapshot.
 func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
