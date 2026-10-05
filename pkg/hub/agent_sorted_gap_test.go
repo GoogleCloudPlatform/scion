@@ -44,8 +44,10 @@ import (
 
 // --- global endpoint: fit and stats boundaries -------------------------------
 
-// An incomplete fit request with stats=1 costs exactly the paged cost of its
-// one returned row: the stats population is counted, never decided.
+// An incomplete fit request with stats=1 costs one read decision per stats
+// candidate, the paged cost of its one returned row (one read decision per
+// candidate for the readable count, one 50-row fill batch, 9 capability
+// decisions for the row) and 4 scope decisions.
 func TestListAgentsSorted_StatsWithIncompleteFitCostsNoExtraDecisions(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 1200, "statscost", "stopped")
@@ -66,17 +68,17 @@ func TestListAgentsSorted_StatsWithIncompleteFitCostsNoExtraDecisions(t *testing
 	require.NotNil(t, resp.Stats.Agents)
 	assert.Len(t, *resp.Stats.Agents, 1201)
 
-	assert.Len(t, emitter.records, 13, "9 for the one returned row plus 4 scope decisions; stats adds none")
+	assert.Len(t, emitter.records, 1201+1201+50+13, "stats reads, count-pass reads, one fill batch, 9 for the row, 4 scope")
 }
 
-// failingStatsStore fails the global endpoint's stats read and passes every
-// other call through.
+// failingStatsStore fails the global endpoint's stats read (the stats
+// member read) and passes every other call through.
 type failingStatsStore struct {
 	store.Store
 	statsCalls int
 }
 
-func (f *failingStatsStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
+func (f *failingStatsStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
 	f.statsCalls++
 	return nil, errors.New("stats read failed")
 }

@@ -344,7 +344,9 @@ func TestListAgentsSorted_StatsIgnoresPhaseFilter(t *testing.T) {
 }
 
 // TestListAgentsSorted_StatsOmitsAgentsAbove2000 pins the omission rule:
-// stats.agents is nil (omitted from the JSON) once Total exceeds 2,000.
+// above 2,000 candidates the stats block reads only the first 2,000, so
+// total is a lower bound flagged by totalApproximate and stats.agents is
+// nil (omitted from the JSON).
 func TestListAgentsSorted_StatsOmitsAgentsAbove2000(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 2001, "cap", "stopped")
@@ -356,7 +358,8 @@ func TestListAgentsSorted_StatsOmitsAgentsAbove2000(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
 	statsRaw, ok := raw["stats"].(map[string]interface{})
 	require.True(t, ok)
-	assert.Equal(t, float64(2001), statsRaw["total"])
+	assert.Equal(t, float64(2000), statsRaw["total"])
+	assert.Equal(t, true, statsRaw["totalApproximate"])
 	_, hasAgents := statsRaw["agents"]
 	assert.False(t, hasAgents, "stats.agents must be omitted entirely above 2000, not an empty array")
 }
@@ -398,9 +401,11 @@ func TestListAgentsSorted_NoneScopeEchoesSortDir(t *testing.T) {
 // --- decision counts --------------------------------------------------------
 
 // TestListAgentsSorted_PagedDecisionCount_AtCeiling asserts the exact
-// decision count at the ceiling for the global endpoint: paged at limit=500 with more than 500 authorized agents
-// costs exactly 4,504 decisions (9 decisions per returned row plus 4 fixed
-// scope-capability decisions, at a page size of 500).
+// decision count at the ceiling for the global endpoint: paged at limit=500
+// with 501 authorized agents costs one read decision per candidate for the
+// readable count (501), the fill pass's reads up to the first row past the
+// page (501), 9 decisions per returned row and 4 fixed scope-capability
+// decisions.
 func TestListAgentsSorted_PagedDecisionCount_AtCeiling(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 501, "ceiling", "stopped")
@@ -415,13 +420,12 @@ func TestListAgentsSorted_PagedDecisionCount_AtCeiling(t *testing.T) {
 	assert.NotEmpty(t, resp.NextCursor)
 	assert.Equal(t, 501, resp.TotalCount)
 
-	assert.Len(t, emitter.records, 4504, "9P+4 at P=500: exactly 9*500+4")
+	assert.Len(t, emitter.records, 501+501+9*500+4, "count reads + fill reads + 9P+4 at P=500")
 }
 
 // TestListAgentsSorted_CompleteDecisionCount pins the complete-branch
-// decision count (9 decisions per agent plus 4 fixed scope-capability
-// decisions) at 25 agents, matching today's legacy cost exactly since every
-// row is readable.
+// decision count (one read decision per candidate, 9 decisions per agent
+// plus 4 fixed scope-capability decisions) at 25 agents.
 func TestListAgentsSorted_CompleteDecisionCount(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 25, "cx", "stopped")
@@ -435,13 +439,13 @@ func TestListAgentsSorted_CompleteDecisionCount(t *testing.T) {
 	require.NotNil(t, resp.Complete)
 	assert.True(t, *resp.Complete)
 
-	assert.Len(t, emitter.records, 9*25+4)
+	assert.Len(t, emitter.records, 25+9*25+4)
 }
 
 // TestListAgentsSorted_IncompleteFitLimit1DecisionCount pins the home/graph
-// probe cost: an incomplete fit request with limit=1 costs exactly 13
-// decisions (9 for the one returned row plus 4 fixed scope-capability
-// decisions).
+// probe cost: an incomplete fit request with limit=1 costs one read
+// decision per candidate for the readable count, one 50-row fill batch, 9
+// for the one returned row and 4 fixed scope-capability decisions.
 func TestListAgentsSorted_IncompleteFitLimit1DecisionCount(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 1200, "probe", "stopped")
@@ -456,5 +460,5 @@ func TestListAgentsSorted_IncompleteFitLimit1DecisionCount(t *testing.T) {
 	assert.False(t, *resp.Complete)
 	assert.Len(t, resp.Agents, 1)
 
-	assert.Len(t, emitter.records, 13)
+	assert.Len(t, emitter.records, 1200+50+13)
 }

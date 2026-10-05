@@ -55,6 +55,18 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		complete    bool
 	)
 
+	// stats is read before any page row is decided, so a stats read error
+	// costs no decisions.
+	var statsResp *ListAgentsStats
+	if p.stats {
+		var err error
+		statsResp, err = s.buildGlobalAgentStats(ctx, identity, statsFilter, p)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
 	if p.hasFit {
 		// fit (race-free): the store's own limit+1 probe says whether
 		// more rows exist. No decision is made on any row yet.
@@ -95,18 +107,6 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		totalCount = result.TotalCount
 		totalApprox = result.TotalCountApproximate
 		nextCursor = result.NextCursor
-	}
-
-	// stats is read before any decision is made, so a stats read error
-	// costs no decisions.
-	var statsResp *ListAgentsStats
-	if p.stats {
-		var err error
-		statsResp, err = s.buildGlobalAgentStats(ctx, identity, statsFilter, p)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
 	}
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
