@@ -581,6 +581,9 @@ func intersect(ids []string, parent store.EffectCeiling) []string {
 		return ids
 	case store.EffectCeilingBounded:
 	default:
+		// Defensive and unreachable: the planner excludes a hop whose
+		// parent ceiling is neither principal nor bounded before it
+		// intersects. Allowing nothing keeps the result fail-closed.
 		return []string{}
 	}
 	frozen, ok := parent.Frozen()

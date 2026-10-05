@@ -639,3 +639,46 @@ func TestPlanScopeSelectsAncestorClosure(t *testing.T) {
 	assert.NotNil(t, p.Hop("b"))
 	assert.Nil(t, p.Hop("c"))
 }
+
+// Only an assign-mode applied SA adds the SA permissions: an SA ID under any
+// other metadata mode does not.
+func TestPlanAddsSAPermissionsOnlyInAssignMode(t *testing.T) {
+	for _, mode := range []string{store.GCPMetadataModePassthrough, store.GCPMetadataModeBlock, ""} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			w := newWorld()
+			w.user("u")
+			a := w.agent("a", "u", "readonly")
+			a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode, ServiceAccountID: "sa1"}
+			b := w.agent("b", "u", "baseline")
+			b.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode, ServiceAccountID: "sa2"}
+			p := w.plan(t)
+			for id, role := range map[string]string{"a": "readonly", "b": "baseline"} {
+				h := requireHop(t, p, id)
+				assert.False(t, h.HasAssignedSA)
+				assert.Equal(t, policy(t, role, false), h.CeilingIDs)
+				assert.NotContains(t, h.CeilingIDs, "gcp_service_account.assign")
+				assert.NotContains(t, h.CeilingIDs, "gcp_service_account.use")
+			}
+		})
+	}
+}
+
+// A migration-recorded edge is recognized only when its boundary project is
+// its own scope; a boundary on another project is a recorded hop, not an
+// adopted one.
+func TestPlanRecognizesOnlyEdgesBoundToTheirScope(t *testing.T) {
+	w := newWorld()
+	w.user("u")
+	w.agent("a", "u", "full")
+	c := migrationCeiling(policy(t, "full", false))
+	c.BoundaryProjectID = "other-project"
+	recorded(w.edgeOf(t, "a"), c, store.SourceCredentialSystemMigration)
+	h := requireHop(t, w.plan(t), "a")
+	assert.NotEqual(t, OutcomeRecognized, h.Outcome)
+	assert.NotEqual(t, OutcomeRecognizedAbovePolicy, h.Outcome)
+	assert.Equal(t, OutcomeRecorded, h.Outcome)
+	assert.False(t, alreadyAdopted(w.edgeOf(t, "a")))
+
+	w.edgeOf(t, "a").BoundaryProjectID = proj
+	assert.Equal(t, OutcomeRecognized, requireHop(t, w.plan(t), "a").Outcome)
+}

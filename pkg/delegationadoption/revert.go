@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -27,6 +28,7 @@ import (
 // satisfies it.
 type RevertReader interface {
 	GetDelegationAdoption(ctx context.Context, id string) (*store.DelegationAdoption, error)
+	ListDelegationAdoptions(ctx context.Context, filter store.DelegationAdoptionFilter) ([]*store.DelegationAdoption, int, error)
 	GetDelegationEdge(ctx context.Context, edgeID string) (*store.DelegationEdge, error)
 }
 
@@ -49,9 +51,14 @@ type RevertHop struct {
 	OriginalEdgeID string        `json:"originalEdgeId,omitempty"`
 	Outcome        RevertOutcome `json:"outcome"`
 	Reason         Reason        `json:"reason,omitempty"`
-	Fingerprint    string        `json:"fingerprint"`
+	// CoveredRecordIDs are the other revertible records that point at the
+	// same adopted edge. The one revert of the edge reverts them too, so no
+	// record is left pointing at an inactive edge.
+	CoveredRecordIDs []string `json:"coveredRecordIds,omitempty"`
+	Fingerprint      string   `json:"fingerprint"`
 
 	record      *store.DelegationAdoption
+	covered     []*store.DelegationAdoption
 	adopted     *store.DelegationEdge
 	original    *store.DelegationEdge
 	expectCause store.EdgeDeactivationCause
@@ -59,6 +66,40 @@ type RevertHop struct {
 
 // Record returns the adoption record the hop reverts (nil when missing).
 func (h *RevertHop) Record() *store.DelegationAdoption { return h.record }
+
+// Records returns the hop's record followed by the covered records, in
+// CoveredRecordIDs order.
+func (h *RevertHop) Records() []*store.DelegationAdoption {
+	if h.record == nil {
+		return nil
+	}
+	return append([]*store.DelegationAdoption{h.record}, h.covered...)
+}
+
+func (h *RevertHop) cover(rec *store.DelegationAdoption) {
+	if rec.ID == h.RecordID {
+		return
+	}
+	for _, c := range h.covered {
+		if c.ID == rec.ID {
+			return
+		}
+	}
+	h.covered = append(h.covered, rec)
+	sort.Slice(h.covered, func(i, j int) bool { return h.covered[i].ID < h.covered[j].ID })
+	h.CoveredRecordIDs = h.CoveredRecordIDs[:0]
+	for _, c := range h.covered {
+		h.CoveredRecordIDs = append(h.CoveredRecordIDs, c.ID)
+	}
+}
+
+func revertibleStatus(s store.DelegationAdoptionStatus) bool {
+	switch s {
+	case store.DelegationAdoptionAdopted, store.DelegationAdoptionRecognized, store.DelegationAdoptionRecognizedAbovePolicy:
+		return true
+	}
+	return false
+}
 
 // RevertPlan is the plan for a revert.
 type RevertPlan struct {
@@ -92,8 +133,15 @@ func (p *RevertPlan) Fingerprint() string {
 // BuildRevert plans the revert of recordIDs, in the given order. A record
 // without a resolved original row is refused unless confirm names one for it
 // (record ID → edge ID) that matches the adopted edge.
+//
+// Hops are deduplicated by adopted edge: an edge is reverted once. The first
+// revertible hop for an edge carries the revert, and every other revertible
+// record that points at the same edge, requested or not, is covered by it
+// and reverted with it. Requested records for that edge that would be
+// refused on their own are covered too, so their refusal does not block the
+// one revert that applies to them.
 func BuildRevert(ctx context.Context, r RevertReader, recordIDs []string, confirm map[string]string) (*RevertPlan, error) {
-	plan := &RevertPlan{}
+	var hops []*RevertHop
 	seen := map[string]bool{}
 	for _, id := range recordIDs {
 		if seen[id] {
@@ -104,8 +152,40 @@ func BuildRevert(ctx context.Context, r RevertReader, recordIDs []string, confir
 		if err != nil {
 			return nil, err
 		}
-		h.Fingerprint = revertFingerprint(h)
+		hops = append(hops, h)
+	}
+
+	primary := map[string]*RevertHop{}
+	for _, h := range hops {
+		if h.Outcome == RevertOutcomeRevert && primary[h.AdoptedEdgeID] == nil {
+			primary[h.AdoptedEdgeID] = h
+		}
+	}
+	plan := &RevertPlan{}
+	for _, h := range hops {
+		p := primary[h.AdoptedEdgeID]
+		if h.AdoptedEdgeID != "" && p != nil && p != h && h.record != nil && revertibleStatus(h.record.Status) {
+			p.cover(h.record)
+			continue
+		}
 		plan.Hops = append(plan.Hops, h)
+	}
+	for _, h := range plan.Hops {
+		if h.Outcome != RevertOutcomeRevert {
+			continue
+		}
+		siblings, _, err := r.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{AdoptedEdgeID: h.AdoptedEdgeID})
+		if err != nil {
+			return nil, fmt.Errorf("adoption records for edge %s: %w", h.AdoptedEdgeID, err)
+		}
+		for _, sib := range siblings {
+			if revertibleStatus(sib.Status) {
+				h.cover(sib)
+			}
+		}
+	}
+	for _, h := range plan.Hops {
+		h.Fingerprint = revertFingerprint(h)
 	}
 	return plan, nil
 }
@@ -123,9 +203,7 @@ func planRevertHop(ctx context.Context, r RevertReader, recordID, confirmed stri
 	h.record = rec
 	h.DelegateID = rec.DelegateID
 	h.AdoptedEdgeID = rec.AdoptedEdgeID
-	switch rec.Status {
-	case store.DelegationAdoptionAdopted, store.DelegationAdoptionRecognized, store.DelegationAdoptionRecognizedAbovePolicy:
-	default:
+	if !revertibleStatus(rec.Status) {
 		h.Reason = ReasonNotRevertible
 		return h, nil
 	}
@@ -193,6 +271,10 @@ func revertFingerprint(h *RevertHop) string {
 	if h.record != nil {
 		status = string(h.record.Status)
 	}
+	covered := make([]string, 0, len(h.covered))
+	for _, c := range h.covered {
+		covered = append(covered, c.ID+":"+string(c.Status))
+	}
 	return digest(struct {
 		RecordID string     `json:"record_id"`
 		Status   string     `json:"status"`
@@ -200,7 +282,8 @@ func revertFingerprint(h *RevertHop) string {
 		Reason   string     `json:"reason"`
 		Adopted  *edgeFacts `json:"adopted"`
 		Original *edgeFacts `json:"original"`
-	}{h.RecordID, status, string(h.Outcome), string(h.Reason), facts(h.adopted), facts(h.original)})
+		Covered  []string   `json:"covered"`
+	}{h.RecordID, status, string(h.Outcome), string(h.Reason), facts(h.adopted), facts(h.original), covered})
 }
 
 // ApplyRevert reverts hop inside tx: deactivate the adopted edge only if it
