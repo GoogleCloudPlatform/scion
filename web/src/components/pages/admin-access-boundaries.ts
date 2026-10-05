@@ -29,7 +29,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import {
   list,
   resetAllSequences,
@@ -1216,12 +1215,23 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   // Navigation
   // ---------------------------------------------------------------------------
 
+  /**
+   * Dispatch SPA navigation via the document-level nav-click listener, so
+   * importing this page does not load (and initialise) the client entry
+   * module.
+   */
+  private navigate(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
+    );
+  }
+
   private navigateToBoundary(id: string): void {
-    navigateTo(`/admin/access-boundaries/${encodeURIComponent(id)}`);
+    this.navigate(`/admin/access-boundaries/${encodeURIComponent(id)}`);
   }
 
   private navigateToCreate(): void {
-    navigateTo('/admin/access-boundaries/new');
+    this.navigate('/admin/access-boundaries/new');
   }
 
   // ---------------------------------------------------------------------------
