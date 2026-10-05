@@ -437,7 +437,8 @@ func TestCommandHandler_Status_InDM_Unregistered(t *testing.T) {
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "No groups are currently linked.")
+	assert.Contains(t, sent[0].Text, "Not registered")
+	assert.Contains(t, sent[0].Text, "No groups")
 }
 
 func TestCommandHandler_Status_InDM_NoLinks(t *testing.T) {
@@ -478,6 +479,7 @@ func TestCommandHandler_Status_InDM_WithLinks(t *testing.T) {
 		LinkedAt:     time.Now().UTC(),
 		Active:       true,
 	}))
+	tgSrv.setChatMember(-100, 456, "member")
 
 	h.HandleCommand(&TGMessage{
 		Text: "/status",
@@ -601,4 +603,84 @@ func TestCommandHandler_Setup_ListsProjectsAsLinkedUser(t *testing.T) {
 	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
 
 	assert.Equal(t, []string{principal}, hub.listUserProjectsCalls)
+}
+
+// --- /status scoping ---
+
+func saveStatusTestLinks(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	for _, l := range []*GroupLink{
+		{ChatID: -101, ChatTitle: "Member Group", ProjectID: "p1", ProjectSlug: "alpha", LinkedBy: "999"},
+		{ChatID: -102, ChatTitle: "Linked By Me", ProjectID: "p2", ProjectSlug: "beta", LinkedBy: "456"},
+		{ChatID: -103, ChatTitle: "Other Team", ProjectID: "p3", ProjectSlug: "secret-project", LinkedBy: "999"},
+		{ChatID: -104, ChatTitle: "Left Group", ProjectID: "p4", ProjectSlug: "gone", LinkedBy: "999"},
+		{ChatID: -105, ChatTitle: "Kicked Group", ProjectID: "p5", ProjectSlug: "banned", LinkedBy: "999"},
+		{ChatID: -106, ChatTitle: "Admin Group", ProjectID: "p6", ProjectSlug: "admin-proj", LinkedBy: "999"},
+	} {
+		l.LinkedAt = time.Now().UTC()
+		l.Active = true
+		require.NoError(t, store.SaveGroupLink(ctx, l))
+	}
+}
+
+func TestCommandHandler_Status_ListsOnlyGroupsTheUserLinkedOrBelongsTo(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 456, "alice@example.com")
+	saveStatusTestLinks(t, store)
+	tgSrv.setChatMember(-101, 456, "member")
+	tgSrv.setChatMember(-104, 456, "left")
+	tgSrv.setChatMember(-105, 456, "kicked")
+	tgSrv.setChatMember(-106, 456, "administrator")
+	// -103: membership unknown (getChatMember fails) → left out.
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	text := sent[0].Text
+	assert.Contains(t, text, "Member Group")
+	assert.Contains(t, text, "Linked By Me")
+	assert.Contains(t, text, "Admin Group")
+	for _, hidden := range []string{"Other Team", "secret-project", "-103", "Left Group", "Kicked Group"} {
+		assert.NotContains(t, text, hidden)
+	}
+}
+
+func TestCommandHandler_Status_UnregisteredUserSeesOnlyTheirGroups(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	saveStatusTestLinks(t, store)
+	tgSrv.setChatMember(-101, 456, "member")
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Not registered")
+	assert.Contains(t, sent[0].Text, "Member Group")
+	assert.NotContains(t, sent[0].Text, "Other Team")
+}
+
+func TestCommandHandler_Status_NoVisibleGroups(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 777, "bob@example.com")
+	saveStatusTestLinks(t, store)
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 777}, Chat: TGChat{ID: 777, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Registered as bob@example.com")
+	assert.Contains(t, sent[0].Text, "No groups you linked or belong to")
+	assert.NotContains(t, sent[0].Text, "Group")
+}
+
+func TestTGChatMember_IsCurrentMember(t *testing.T) {
+	for status, want := range map[string]bool{
+		"creator": true, "administrator": true, "member": true, "left": false, "kicked": false,
+	} {
+		assert.Equal(t, want, (&TGChatMember{Status: status}).IsCurrentMember(), status)
+	}
+	assert.True(t, (&TGChatMember{Status: "restricted", IsMember: true}).IsCurrentMember())
+	assert.False(t, (&TGChatMember{Status: "restricted"}).IsCurrentMember())
 }

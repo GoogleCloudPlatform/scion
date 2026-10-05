@@ -469,17 +469,20 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	links, err := h.store.GetAllGroupLinks(ctx)
+	if msg.From == nil {
+		h.reply(chatID, "Could not identify your user.")
+		return
+	}
+
+	allLinks, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
 		h.log.Error("Failed to get group links", "error", err)
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
 	}
 
-	if len(links) == 0 {
-		h.reply(chatID, "No groups are currently linked.")
-		return
-	}
+	// List only groups the sender linked or is currently a member of.
+	links := h.groupsVisibleTo(ctx, msg.From.ID, allLinks)
 
 	var lines []string
 	for _, link := range links {
@@ -525,8 +528,34 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		}
 	}
 
-	output := "Registration: " + regStatus + "\n\nLinked groups:\n" + strings.Join(lines, "\n")
-	h.reply(chatID, output)
+	groups := "No groups you linked or belong to are linked to a project."
+	if len(lines) > 0 {
+		groups = "Linked groups:\n" + strings.Join(lines, "\n")
+	}
+	h.reply(chatID, "Registration: "+regStatus+"\n\n"+groups)
+}
+
+// groupsVisibleTo returns the group links that the Telegram user linked or
+// is currently a member of. A group whose membership cannot be checked is
+// left out.
+func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, links []*GroupLink) []*GroupLink {
+	senderID := strconv.FormatInt(userID, 10)
+	var visible []*GroupLink
+	for _, link := range links {
+		if link.LinkedBy == senderID {
+			visible = append(visible, link)
+			continue
+		}
+		member, err := h.api.GetChatMember(ctx, link.ChatID, userID)
+		if err != nil {
+			h.log.Debug("Could not check group membership for /status", "chat_id", link.ChatID, "error", err)
+			continue
+		}
+		if member.IsCurrentMember() {
+			visible = append(visible, link)
+		}
+	}
+	return visible
 }
 
 func (h *CommandHandler) handleSettings(msg *TGMessage) {

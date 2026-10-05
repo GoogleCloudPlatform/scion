@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,6 +119,21 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	// chatMembers maps chatID → userID → member status for getChatMember.
+	chatMembers map[int64]map[int64]string
+}
+
+// setChatMember records a user's status in a chat for getChatMember.
+func (f *fakeTGServerV2) setChatMember(chatID, userID int64, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chatMembers == nil {
+		f.chatMembers = make(map[int64]map[int64]string)
+	}
+	if f.chatMembers[chatID] == nil {
+		f.chatMembers[chatID] = make(map[int64]string)
+	}
+	f.chatMembers[chatID][userID] = status
 }
 
 func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
@@ -228,6 +244,18 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			f.webhookURL = ""
 			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
+
+		case "/bottest-token/getChatMember":
+			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+			userID, _ := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64)
+			f.mu.Lock()
+			status, ok := f.chatMembers[chatID][userID]
+			f.mu.Unlock()
+			if !ok {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: user not found"})
+				return
+			}
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, TGChatMember{Status: status})})
 
 		case "/bottest-token/setMyCommands":
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
