@@ -168,7 +168,7 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 
 - **INFO**: Normal operational events
 - **ERROR**: Critical failures
-- **DEBUG**: Detailed information. In `agent.log`, `sciontool` enables it when `SCION_DEBUG` is set to any non-empty value in the agent environment. `SCION_LOG_LEVEL` does not affect `agent.log`. The Hub's own log is separate: `SCION_DEBUG` has no effect there, so start the Hub with `--debug` or `SCION_LOG_LEVEL=debug` (the only value it honours).
+- **DEBUG**: Detailed information. In `agent.log`, `sciontool` enables it when `SCION_DEBUG` is set to any non-empty value in the agent environment. `SCION_LOG_LEVEL` does not affect `agent.log`. The Hub's own log is separate. `SCION_DEBUG` does not change the Hub's log level; it only enables some extra `[DEBUG]` lines on stderr (from `util.Debugf`, when `--debug` was not passed). To get DEBUG-level Hub logs, start the Hub with `--debug` or `SCION_LOG_LEVEL=debug` (the only value it honours).
 
 ## Telemetry Collection
 
