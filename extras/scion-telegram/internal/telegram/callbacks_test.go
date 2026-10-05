@@ -66,3 +66,72 @@ func TestCallbackHandler_SetupProject_UnlinkedUserGetsRegisterHint(t *testing.T)
 	require.Len(t, answered, 1)
 	assert.Contains(t, answered[0].Text, "/register")
 }
+
+func TestCallbackHandler_SetupChange_OffersOnlyTheUsersProjects(t *testing.T) {
+	h, tgSrv, hub, store := newTestCallbackHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "p1", Slug: "alpha"}, {ID: "p2", Slug: "beta"}}
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "p1", Slug: "alpha"}}}
+	h.SetProjects([]ProjectOption{{ID: "p3", Slug: "cached-gamma"}})
+
+	_, err := h.HandleCallback(context.Background(), setupCallback("setup:change", 42))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{principal}, hub.listUserProjectsCalls)
+	assert.Zero(t, hub.listFreshCalls, "the picker does not use the broker project list")
+	edited := tgSrv.getEditedTexts()
+	require.Len(t, edited, 1)
+	require.NotNil(t, edited[0].ReplyMarkup)
+	var data []string
+	for _, row := range edited[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			data = append(data, btn.CallbackData)
+		}
+	}
+	assert.Equal(t, []string{"setup:proj:p1", "setup:cancel"}, data)
+}
+
+func TestCallbackHandler_SetupChange_NoUserProjects(t *testing.T) {
+	h, tgSrv, hub, store := newTestCallbackHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "p2", Slug: "beta"}}
+	hub.userProjects = map[string][]ProjectOption{principal: {}}
+	h.SetProjects([]ProjectOption{{ID: "p3", Slug: "cached-gamma"}})
+
+	_, err := h.HandleCallback(context.Background(), setupCallback("setup:change", 42))
+	require.NoError(t, err)
+
+	edited := tgSrv.getEditedTexts()
+	require.Len(t, edited, 1)
+	assert.Equal(t, noUserProjectsText, edited[0].Text)
+	assert.Zero(t, hub.listFreshCalls)
+}
+
+func TestCallbackHandler_SetupChange_RequiresLinkedUser(t *testing.T) {
+	h, tgSrv, hub, _ := newTestCallbackHandler(t)
+	hub.projects = []ProjectOption{{ID: "p1", Slug: "alpha"}}
+
+	_, err := h.HandleCallback(context.Background(), setupCallback("setup:change", 42))
+	require.NoError(t, err)
+
+	assert.Empty(t, hub.listUserProjectsCalls)
+	assert.Zero(t, hub.listFreshCalls)
+	assert.Empty(t, tgSrv.getEditedTexts())
+	answered := tgSrv.getAnsweredCallbacks()
+	require.Len(t, answered, 1)
+	assert.Equal(t, registerHint, answered[0].Text)
+}
+
+func TestCallbackHandler_SetupProject_ResolvesSlugFromUsersProjects(t *testing.T) {
+	h, tgSrv, hub, store := newTestCallbackHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "p1", Slug: "alpha"}}}
+
+	_, err := h.HandleCallback(context.Background(), setupCallback("setup:proj:p1", 42))
+	require.NoError(t, err)
+
+	assert.Zero(t, hub.listFreshCalls)
+	edited := tgSrv.getEditedTexts()
+	require.Len(t, edited, 1)
+	assert.Contains(t, edited[0].Text, "alpha")
+}

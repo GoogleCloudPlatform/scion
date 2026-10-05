@@ -44,6 +44,8 @@ type AgentInfo struct {
 // reads must pass the requesting user's principal.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
+	// ListProjectsFresh lists every project served by this broker. It is
+	// not scoped to a user and must not feed user-facing project pickers.
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	// ListProjectsForUser returns the projects visible to the linked user.
 	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
@@ -78,7 +80,8 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 	}
 }
 
-// SetProjects updates the cached project list used by /setup.
+// SetProjects updates the cached project list used to display project names
+// (e.g. in /status). It is not offered in setup pickers.
 func (h *CommandHandler) SetProjects(projects []ProjectOption) {
 	h.cachedProjects = projects
 }
@@ -177,6 +180,12 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Setup offers the sender's own projects, so it needs a linked account.
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	link, err := h.store.GetGroupLink(ctx, chatID)
 	if err != nil {
 		h.log.Error("Failed to get group link", "chat_id", chatID, "error", err)
@@ -190,55 +199,28 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 		return
 	}
 
-	var projects []ProjectOption
-	promptText := "Select a project to link this group to:"
-
-	senderID := ""
-	if msg.From != nil {
-		senderID = strconv.FormatInt(msg.From.ID, 10)
-	}
-
-	if senderID != "" {
-		mapping, mapErr := h.store.GetUserMapping(ctx, senderID)
-		if mapErr != nil {
-			h.log.Warn("Failed to check user mapping for /setup filtering", "error", mapErr)
-		}
-		if principal := linkedUserPrincipal(mapping); principal != "" {
-			userProjects, userErr := h.hubClient.ListProjectsForUser(ctx, principal)
-			if userErr != nil {
-				h.log.Warn("Failed to list user projects, falling back to all", "error", userErr)
-			} else if len(userProjects) > 0 {
-				projects = userProjects
-				h.log.Debug("Using user-filtered project list for /setup", "user_id", mapping.ScionUserID, "count", len(projects))
-			}
-		}
+	projects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText))
+		return
 	}
 
 	if len(projects) == 0 {
-		fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
-		if freshErr == nil && len(fresh) > 0 {
-			projects = fresh
-			h.cachedProjects = fresh
-			h.log.Debug("Using fresh project list from hub for /setup", "count", len(projects))
-		} else {
-			if freshErr != nil {
-				h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
-			}
-			if len(h.cachedProjects) > 0 {
-				projects = h.cachedProjects
-				h.log.Debug("Using cached project list for /setup", "count", len(projects))
-			}
-		}
-	}
-
-	if len(projects) == 0 {
-		h.reply(chatID, "No projects found. Create a project in the hub first.")
+		h.reply(chatID, noUserProjectsText)
 		return
 	}
 
 	kb := buildProjectSelectionKeyboard(projects)
-	h.replyWithKeyboard(chatID, promptText, kb)
+	h.replyWithKeyboard(chatID, "Select a project to link this group to:", kb)
 }
+
+// Replies for the setup project pickers, which list only the linked user's
+// projects.
+const (
+	setupProjectsFailedText = "Failed to fetch your projects. Please try again later."
+	noUserProjectsText      = "Your Scion account isn't a member of any project yet. Ask a project owner to add you, then run /setup again."
+)
 
 func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	chatID := msg.Chat.ID

@@ -16,6 +16,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"testing"
@@ -101,29 +102,33 @@ func TestCommandHandler_Setup_InDM(t *testing.T) {
 }
 
 func TestCommandHandler_Setup_InGroup_NoProjects(t *testing.T) {
-	h, tgSrv, hub, _ := newTestCommandHandler(t)
+	h, tgSrv, hub, store := newTestCommandHandler(t)
 	hub.projects = []ProjectOption{}
+	linkTestUser(t, store, 42, "alice@example.com")
 
 	h.HandleCommand(&TGMessage{
 		Text: "/setup",
 		Chat: TGChat{ID: -100, Type: "group"},
+		From: &TGUser{ID: 42},
 	})
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "No projects found")
+	assert.Equal(t, noUserProjectsText, sent[0].Text)
 }
 
 func TestCommandHandler_Setup_InGroup_WithProjects(t *testing.T) {
-	h, tgSrv, hub, _ := newTestCommandHandler(t)
+	h, tgSrv, hub, store := newTestCommandHandler(t)
 	hub.projects = []ProjectOption{
 		{ID: "proj-1", Slug: "my-project"},
 		{ID: "proj-2", Slug: "other-project"},
 	}
+	linkTestUser(t, store, 42, "alice@example.com")
 
 	h.HandleCommand(&TGMessage{
 		Text: "/setup",
 		Chat: TGChat{ID: -100, Type: "group"},
+		From: &TGUser{ID: 42},
 	})
 
 	sent := tgSrv.getSentMessages()
@@ -132,46 +137,90 @@ func TestCommandHandler_Setup_InGroup_WithProjects(t *testing.T) {
 	require.NotNil(t, sent[0].ReplyMarkup)
 }
 
-func TestCommandHandler_Setup_InGroup_CachedProjects(t *testing.T) {
-	h, tgSrv, hub, _ := newTestCommandHandler(t)
-	hub.projects = []ProjectOption{} // hub returns nothing
+func TestCommandHandler_Setup_OffersOnlyTheUsersProjects(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}, {ID: "proj-2", Slug: "beta"}}
+	hub.userProjects = map[string][]ProjectOption{principal: {{ID: "proj-1", Slug: "alpha"}}}
+	h.SetProjects([]ProjectOption{{ID: "proj-3", Slug: "cached-gamma"}})
 
-	h.SetProjects([]ProjectOption{
-		{ID: "proj-1", Slug: "cached-project"},
-		{ID: "proj-2", Slug: "other-cached"},
-	})
-
-	h.HandleCommand(&TGMessage{
-		Text: "/setup",
-		Chat: TGChat{ID: -100, Type: "group"},
-	})
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "Select a project")
 	require.NotNil(t, sent[0].ReplyMarkup)
-}
-
-func TestCommandHandler_Setup_InGroup_CachedProjectsFallbackToHub(t *testing.T) {
-	h, tgSrv, hub, _ := newTestCommandHandler(t)
-	hub.projects = []ProjectOption{
-		{ID: "proj-1", Slug: "hub-project"},
+	var data []string
+	for _, row := range sent[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			data = append(data, btn.CallbackData)
+		}
 	}
-	// no cached projects set — should fall back to hub
+	assert.Contains(t, data, "setup:proj:proj-1")
+	assert.NotContains(t, data, "setup:proj:proj-2")
+	assert.NotContains(t, data, "setup:proj:proj-3")
+	assert.Zero(t, hub.listFreshCalls, "setup does not use the broker project list")
+}
 
-	h.HandleCommand(&TGMessage{
-		Text: "/setup",
-		Chat: TGChat{ID: -100, Type: "group"},
-	})
+func TestCommandHandler_Setup_DoesNotFallBackToBrokerOrCachedProjects(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	principal := linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "proj-2", Slug: "beta"}}
+	hub.userProjects = map[string][]ProjectOption{principal: {}}
+	h.SetProjects([]ProjectOption{{ID: "proj-3", Slug: "cached-gamma"}})
+
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "Select a project")
-	require.NotNil(t, sent[0].ReplyMarkup)
+	assert.Equal(t, noUserProjectsText, sent[0].Text)
+	assert.Nil(t, sent[0].ReplyMarkup)
+	assert.Zero(t, hub.listFreshCalls)
+}
+
+func TestCommandHandler_Setup_ProjectListFailureIsReported(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "proj-2", Slug: "beta"}}
+	hub.listUserProjectsErr = errors.New("list user projects returned status 500")
+
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, setupProjectsFailedText, sent[0].Text)
+	assert.Zero(t, hub.listFreshCalls)
+}
+
+func TestCommandHandler_Setup_StaleLinkShowsReregisterText(t *testing.T) {
+	h, tgSrv, hub, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 42, "alice@example.com")
+	hub.listUserProjectsErr = staleLinkError("on-behalf-of principal not found")
+
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, staleLinkText, sent[0].Text)
+}
+
+func TestCommandHandler_Setup_RequiresLinkedUser(t *testing.T) {
+	h, tgSrv, hub, _ := newTestCommandHandler(t)
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	h.SetProjects([]ProjectOption{{ID: "proj-1", Slug: "alpha"}})
+
+	h.HandleCommand(&TGMessage{Text: "/setup", Chat: TGChat{ID: -100, Type: "group"}, From: &TGUser{ID: 42}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, registerHint, sent[0].Text)
+	assert.Nil(t, sent[0].ReplyMarkup)
+	assert.Empty(t, hub.listUserProjectsCalls)
+	assert.Zero(t, hub.listFreshCalls)
 }
 
 func TestCommandHandler_Setup_AlreadyLinked(t *testing.T) {
 	h, tgSrv, _, store := newTestCommandHandler(t)
+	linkTestUser(t, store, 42, "alice@example.com")
 
 	ctx := context.Background()
 	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
@@ -185,6 +234,7 @@ func TestCommandHandler_Setup_AlreadyLinked(t *testing.T) {
 	h.HandleCommand(&TGMessage{
 		Text: "/setup",
 		Chat: TGChat{ID: -100, Type: "group"},
+		From: &TGUser{ID: 42},
 	})
 
 	sent := tgSrv.getSentMessages()

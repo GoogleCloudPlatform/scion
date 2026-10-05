@@ -46,7 +46,8 @@ type CallbackHandler struct {
 	cachedProjects []ProjectOption         // hub-injected project list
 }
 
-// SetProjects updates the cached project list used by the "change project" flow.
+// SetProjects updates the cached project list used to display project names.
+// It is not offered in setup pickers.
 func (h *CallbackHandler) SetProjects(projects []ProjectOption) {
 	h.mu.Lock()
 	h.cachedProjects = projects
@@ -213,8 +214,8 @@ func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQu
 		}
 	}
 	if projectSlug == projectID {
-		// Not in cache — try fresh fetch
-		if fresh, err := h.hubClient.ListProjectsFresh(ctx); err == nil {
+		// Not in cache — look it up among the user's projects.
+		if fresh, err := h.hubClient.ListProjectsForUser(ctx, principal); err == nil {
 			for _, p := range fresh {
 				if p.ID == projectID {
 					projectSlug = p.DisplayName()
@@ -312,25 +313,21 @@ func (h *CallbackHandler) finishSetup(ctx context.Context, cb *CallbackQuery, ch
 }
 
 func (h *CallbackHandler) handleSetupChange(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
-	fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
-	var projects []ProjectOption
-	if freshErr == nil && len(fresh) > 0 {
-		projects = fresh
-		h.mu.Lock()
-		h.cachedProjects = fresh
-		h.mu.Unlock()
-		h.log.Debug("Using fresh project list for setup change", "count", len(projects))
-	} else {
-		if freshErr != nil {
-			h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
-		}
-		h.mu.Lock()
-		projects = h.cachedProjects
-		h.mu.Unlock()
+	mapping, principal, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
+		return nil
+	}
+
+	projects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.editMessage(ctx, chatID, messageID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText), nil)
+		h.answerCallback(ctx, cb.ID, "", false)
+		return nil
 	}
 
 	if len(projects) == 0 {
-		h.editMessage(ctx, chatID, messageID, "No projects found. Please /register first.", nil)
+		h.editMessage(ctx, chatID, messageID, noUserProjectsText, nil)
 		h.answerCallback(ctx, cb.ID, "", false)
 		return nil
 	}
