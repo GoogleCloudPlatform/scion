@@ -1867,8 +1867,20 @@
           "items": { "$ref": "#/$defs/serverTrustedIssuer" }
         },
         "algorithms": { "type": "array", "items": { "type": "string", "enum": ["RS256", "ES256"] } },
-        "refresh_interval": { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"1h\". Empty means the default." },
-        "debounce_interval": { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$", "description": "Go duration, e.g. \"30s\". Empty means the default." }
+        "refresh_interval": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
+            { "type": "integer", "const": 0 }
+          ],
+          "description": "Go duration, e.g. \"1h\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+        },
+        "debounce_interval": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
+            { "type": "integer", "const": 0 }
+          ],
+          "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+        }
       },
       "additionalProperties": false
     },

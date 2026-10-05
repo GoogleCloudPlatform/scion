@@ -42,7 +42,10 @@ var settingsTagAllowList = map[string]string{}
 // (ptone/scion#3022). The pkg/api types reached from settings had no koanf
 // tags, so koanf fell back to case-insensitive Go field names and dropped
 // every multi-word key, e.g. volumes[].read_only and shared_dirs[].read_only.
-// An exported field must carry a non-empty json tag (or json:"-").
+// An exported field must carry a non-empty json tag (or json:"-"). An
+// embedded struct field (untagged under encoding/json, ",squash" for koanf)
+// or a third-party type with untagged fields (e.g. metav1.Duration) goes in
+// settingsTagAllowList with the reason.
 func TestVersionedSettings_TagsAgree(t *testing.T) {
 	var problems []string
 	matched := map[string]bool{}

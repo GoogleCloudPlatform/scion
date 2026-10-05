@@ -542,7 +542,10 @@ func compileSchemas() {
 				},
 			},
 		},
-		"federation": schemaObject(getSchemaProperty(root, "server", "federation")),
+		// federation: a DB section doc decodes strictly into
+		// FederationSettings, so the intervals keep only the string branch
+		// of the root anyOf (the file loader also takes an unquoted 0).
+		"federation": withStringOnlyIntervals(schemaObject(getSchemaProperty(root, "server", "federation"))),
 	}
 
 	// SchemaInfo serves self-contained schemas: inline every local $ref so
@@ -644,6 +647,24 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 		}
 	}
 	return map[string]interface{}{}
+}
+
+// withStringOnlyIntervals returns a copy of the federation schema whose
+// refresh_interval and debounce_interval keep only their string anyOf
+// branch.
+func withStringOnlyIntervals(node map[string]interface{}) map[string]interface{} {
+	out := withoutProperties(node)
+	props, _ := out["properties"].(map[string]interface{})
+	for _, key := range []string{"refresh_interval", "debounce_interval"} {
+		prop, _ := props[key].(map[string]interface{})
+		branches, _ := prop["anyOf"].([]interface{})
+		for _, b := range branches {
+			if bm, ok := b.(map[string]interface{}); ok && bm["type"] == "string" {
+				props[key] = bm
+			}
+		}
+	}
+	return out
 }
 
 // inlineRefs returns a deep copy of v with every local "#/$defs/..." $ref

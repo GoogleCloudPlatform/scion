@@ -51,6 +51,9 @@ var sectionSchemaDiffAllowList = map[string]string{
 // construction; this pins the hand-written ones, and catches a derived
 // section whose root property went missing.
 //
+// A section property that keeps one typed branch of a root anyOf is
+// compared against that branch.
+//
 // Limits (what this test does not compare):
 //   - only "type", "enum" and "pattern"; not minLength/maxLength,
 //     minimum/maximum, "required" or "additionalProperties": false;
@@ -219,6 +222,24 @@ func (c *schemaComparer) compare(path string, secV, rootV interface{}) {
 	if sec == nil || root == nil {
 		return
 	}
+	// A section may keep one typed branch of a root anyOf (the federation
+	// intervals keep the string branch: DB docs decode strictly, while the
+	// file loader also takes an unquoted 0). Compare against that branch.
+	if branches, ok := root["anyOf"].([]interface{}); ok && root["type"] == nil {
+		if st, ok := sec["type"].(string); ok {
+			matched := false
+			for _, b := range branches {
+				if bm := c.resolve(b); bm != nil && bm["type"] == st {
+					root, matched = bm, true
+					break
+				}
+			}
+			if !matched {
+				c.diff(path, "type "+st+" matches no root anyOf branch")
+				return
+			}
+		}
+	}
 	if st, rt := typeSet(sec["type"]), typeSet(root["type"]); st != nil && !reflect.DeepEqual(st, rt) {
 		c.diff(path, fmt.Sprintf("type %v, root %v", st, rt))
 	}
@@ -278,5 +299,19 @@ func TestSchemaInfo_SelfContained(t *testing.T) {
 	fed, _ := json.Marshal(info["federation"].Schema)
 	if !strings.Contains(string(fed), `"issuer_url"`) {
 		t.Errorf("federation: trusted_issuers items not inlined: %s", fed)
+	}
+}
+
+// The federation section (DB docs, strict decode) rejects an integer
+// interval, while the settings file schema accepts an unquoted 0.
+func TestFederationSection_IntervalsStringOnly(t *testing.T) {
+	if errs := Validate("federation", json.RawMessage(`{"refresh_interval":0}`)); len(errs) == 0 {
+		t.Error("an integer refresh_interval should fail the federation section schema")
+	}
+	if errs := Validate("federation", json.RawMessage(`{"refresh_interval":"0","debounce_interval":""}`)); len(errs) != 0 {
+		t.Errorf("string intervals should validate: %v", errs)
+	}
+	if errs := Validate("federation", json.RawMessage(`{"refresh_interval":"3600"}`)); len(errs) == 0 {
+		t.Error("a duration without a unit should fail")
 	}
 }

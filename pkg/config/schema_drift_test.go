@@ -60,6 +60,11 @@ var schemaDriftAllowList = map[string]string{
 	// (Notification params are deliberately string-only: the hub decodes
 	// seeded channels strictly, so a number there would drop them all.)
 	"type-union: server.plugins.broker.*.config.*": "weakly decoded map[string]string value",
+	// Federation intervals are strings, but an unquoted YAML 0 weakly
+	// decodes to "0", which ParseDuration accepts, so the schema takes the
+	// integer 0 as well (anyOf string pattern | const 0).
+	"type-union: server.federation.refresh_interval":  "unquoted 0 loads as \"0\"",
+	"type-union: server.federation.debounce_interval": "unquoted 0 loads as \"0\"",
 }
 
 // TestSettingsSchema_NoDriftFromGoTypes walks the Go settings types reachable
@@ -271,7 +276,24 @@ func (w *schemaDriftWalker) checkType(path string, t reflect.Type, node map[stri
 	if goKind == "" {
 		return
 	}
-	switch typ := node["type"].(type) {
+	typeVal := node["type"]
+	if typeVal == nil {
+		// An anyOf of typed branches is a union of their types.
+		if branches, ok := node["anyOf"].([]any); ok {
+			var kinds []any
+			for _, b := range branches {
+				if bm, ok := b.(map[string]any); ok {
+					if k, ok := bm["type"].(string); ok {
+						kinds = append(kinds, k)
+					}
+				}
+			}
+			if len(kinds) > 0 {
+				typeVal = kinds
+			}
+		}
+	}
+	switch typ := typeVal.(type) {
 	case string:
 		if typ != goKind {
 			w.drift = append(w.drift, "type: "+path+" (schema "+typ+", go "+goKind+")")
