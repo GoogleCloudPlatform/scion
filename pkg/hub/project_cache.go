@@ -341,7 +341,9 @@ func (s *Server) isLinkedProject(ctx context.Context, project *store.Project) bo
 }
 
 // findConnectedProvider finds a connected provider broker for a project.
-// It prefers the default runtime broker, then falls back to any connected provider.
+// It prefers the default runtime broker when it is a provider of the
+// project, then falls back to any connected provider. A broker that is not
+// a provider of the project is never chosen.
 func (s *Server) findConnectedProvider(ctx context.Context, project *store.Project) (string, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
@@ -357,9 +359,13 @@ func (s *Server) findConnectedProvider(ctx context.Context, project *store.Proje
 		return "", fmt.Errorf("project has no provider brokers")
 	}
 
-	// Prefer the default runtime broker if connected
+	// Prefer the default runtime broker if it is a provider and connected
 	if project.DefaultRuntimeBrokerID != "" && cc.IsConnected(project.DefaultRuntimeBrokerID) {
-		return project.DefaultRuntimeBrokerID, nil
+		for _, p := range providers {
+			if p.BrokerID == project.DefaultRuntimeBrokerID {
+				return p.BrokerID, nil
+			}
+		}
 	}
 
 	// Fall back to any connected provider with a local path
