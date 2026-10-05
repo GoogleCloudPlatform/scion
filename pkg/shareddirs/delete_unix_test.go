@@ -225,7 +225,7 @@ func TestDeleteProjectTree_HostBaseMissing_Refused(t *testing.T) {
 
 // TestDeleteProjectTree_MultiComponentSubPathRoot_Works is the legitimate
 // half of the multi-component subpath_root behavior:
-// config.validateSubPathRoot allows a multi-segment relative subpath_root
+// config.ValidateSubPathRoot allows a multi-segment relative subpath_root
 // (e.g. "a/b"), and deletion must walk it correctly, not just refuse it.
 func TestDeleteProjectTree_MultiComponentSubPathRoot_Works(t *testing.T) {
 	hostBase := t.TempDir()

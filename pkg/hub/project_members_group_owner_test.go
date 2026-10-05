@@ -23,8 +23,10 @@ package hub
 // ownership transfer kept managing the members group.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +34,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +88,7 @@ func TestProjectMembersGroup_AdoptDoesNotRefillOwnerID(t *testing.T) {
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{
 		ID: tid("mg-adopt-group"), Name: "MG Adopt Members", Slug: projectMembersGroupSlug(project.Slug),
 		GroupType: store.GroupTypeExplicit, ProjectID: project.ID,
-		Annotations: map[string]string{systemProjectMembersGroupAnnotation: "true"},
+		Annotations: map[string]string{store.AnnotationProjectMembersGroup: "true"},
 	}))
 
 	srv.createProjectMembersGroup(ctx, project)
@@ -222,7 +225,7 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	legacyKeyGroup := &store.Group{
 		ID: tid("mg-backfill-legacy-key"), Name: "MG Legacy Members", Slug: projectMembersGroupSlug(legacyProject.Slug),
 		GroupType: store.GroupTypeExplicit, ProjectID: legacyProject.ID, OwnerID: f.creator.ID,
-		Annotations: map[string]string{legacyProjectMembersGroupAnnotation: "true"},
+		Annotations: map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
 	}
 	require.NoError(t, s.CreateGroup(ctx, legacyKeyGroup))
 
@@ -240,7 +243,7 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	falseMarker := &store.Group{
 		ID: tid("mg-backfill-false-marker"), Name: "False Marker", Slug: "mg-backfill-false-marker",
 		GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID, OwnerID: f.coOwner.ID,
-		Annotations: map[string]string{systemProjectMembersGroupAnnotation: "false"},
+		Annotations: map[string]string{store.AnnotationProjectMembersGroup: "false"},
 	}
 	for _, g := range []*store.Group{ordinary, lookAlike, falseMarker} {
 		require.NoError(t, s.CreateGroup(ctx, g))
@@ -352,7 +355,7 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 		legacy := &store.Group{
 			ID: tid("mg-patch-legacy-key"), Name: "MG Patch Legacy", Slug: "mg-patch-legacy-key",
 			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
-			Annotations: map[string]string{legacyProjectMembersGroupAnnotation: "true"},
+			Annotations: map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
 		}
 		require.NoError(t, f.s.CreateGroup(ctx, legacy))
 		rec := patch(legacy.ID, map[string]interface{}{"ownerId": existing.ID})
@@ -370,7 +373,7 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 		require.NoError(t, f.s.CreateGroup(ctx, unmarked))
 		rec := patch(unmarked.ID, map[string]interface{}{
 			"ownerId":     existing.ID,
-			"annotations": map[string]string{systemProjectMembersGroupAnnotation: "true"},
+			"annotations": map[string]string{store.AnnotationProjectMembersGroup: "true"},
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		stored, err := f.s.GetGroup(ctx, unmarked.ID)
@@ -391,7 +394,7 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "ownerId cannot be set on a project members group")
 		stored := membersGroupFor(t, f.s, f.project)
 		assert.Empty(t, stored.OwnerID, "rejected PATCH must not set an owner")
-		assert.Equal(t, "true", stored.Annotations[systemProjectMembersGroupAnnotation],
+		assert.Equal(t, "true", stored.Annotations[store.AnnotationProjectMembersGroup],
 			"rejected PATCH must keep the marker")
 		assert.NotContains(t, stored.Annotations, "other")
 	})
@@ -454,7 +457,7 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 		return stored
 	}
 	hubKey := func() map[string]string {
-		return map[string]string{systemProjectMembersGroupAnnotation: "true"}
+		return map[string]string{store.AnnotationProjectMembersGroup: "true"}
 	}
 
 	t.Run("two-step bypass: strip marker then set owner", func(t *testing.T) {
@@ -480,7 +483,7 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 	t.Run("marker value changed", func(t *testing.T) {
 		grp := newGroup(t, "mg-marker-value", hubKey())
 		rec := patch(grp.ID, map[string]interface{}{
-			"annotations": map[string]string{systemProjectMembersGroupAnnotation: "false"},
+			"annotations": map[string]string{store.AnnotationProjectMembersGroup: "false"},
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), markerMsg)
@@ -488,11 +491,11 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 	})
 
 	t.Run("entadapter key stripped", func(t *testing.T) {
-		grp := newGroup(t, "mg-marker-legacy-key", map[string]string{legacyProjectMembersGroupAnnotation: "true"})
+		grp := newGroup(t, "mg-marker-legacy-key", map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"})
 		rec := patch(grp.ID, map[string]interface{}{"annotations": map[string]string{}})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), markerMsg)
-		assert.Equal(t, map[string]string{legacyProjectMembersGroupAnnotation: "true"}, getGroup(t, grp.ID).Annotations)
+		assert.Equal(t, map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"}, getGroup(t, grp.ID).Annotations)
 	})
 
 	t.Run("entadapter key added to a hub-key group", func(t *testing.T) {
@@ -501,8 +504,8 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 		rec := patch(grp.ID, map[string]interface{}{
 			"name": "Added",
 			"annotations": map[string]string{
-				systemProjectMembersGroupAnnotation: "true",
-				legacyProjectMembersGroupAnnotation: "true",
+				store.AnnotationProjectMembersGroup:       "true",
+				store.LegacyAnnotationProjectMembersGroup: "true",
 			},
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -571,7 +574,7 @@ func TestUpdateGroup_ProjectMembersGroupMarkerNotAddable(t *testing.T) {
 		return grp
 	}
 
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		t.Run("adding "+key, func(t *testing.T) {
 			grp := newUnmarked(t, "mg-add-"+strings.ReplaceAll(strings.TrimPrefix(key, "scion.io/"), "/", "-"))
 			rec := patch(grp.ID, map[string]interface{}{
@@ -631,7 +634,7 @@ func TestCreateGroup_RejectsProjectMembersGroupMarker(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound, "rejected POST must not create the group")
 	}
 
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		keySlug := strings.ReplaceAll(strings.TrimPrefix(key, "scion.io/"), "/", "-")
 		t.Run("creating with "+key, func(t *testing.T) {
 			assertRejected(t, "mg-create-"+keySlug, map[string]string{"a": "b", key: "true"})
@@ -703,7 +706,7 @@ func TestBackfillClearProjectMembersGroupOwners_Paginates(t *testing.T) {
 	late := &store.Group{
 		ID: tid("mg-page-late-marked"), Name: "MG Late Marked", Slug: "mg-page-late-marked",
 		GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID, OwnerID: f.creator.ID,
-		Annotations: map[string]string{systemProjectMembersGroupAnnotation: "true"},
+		Annotations: map[string]string{store.AnnotationProjectMembersGroup: "true"},
 		Created:     time.Now().Add(time.Hour),
 	}
 	require.NoError(t, s.CreateGroup(ctx, late))
@@ -777,4 +780,80 @@ func TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails(t *testing.T) {
 		assert.Contains(t, err.Error(), "injected ListUsers failure")
 		assert.Contains(t, err.Error(), "injected ListGroups failure")
 	})
+}
+
+// TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration is the
+// ptone/scion#2556 regression: a members group marked only with the legacy
+// key (written by the store marker backfill before the fix) used to be
+// refused by project re-ensure. After the startup migration rewrites the
+// key, re-ensure must adopt it. Adoption sets no Group.OwnerID and creates
+// no role binding; as for any canonical members group, the creator is
+// (re-)added as a group owner member, which carries no project authority.
+func TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	var logs bytes.Buffer
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	creator := createStaleOwnerUser(t, s, tid("mg-legacy-creator"), "mg-legacy-creator@test.com")
+	project := &store.Project{
+		ID: tid("mg-legacy-project"), Name: "MG Legacy", Slug: "mg-legacy-project",
+		OwnerID: creator.ID, CreatedBy: creator.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	legacy := &store.Group{
+		ID: tid("mg-legacy-group"), Name: "MG Legacy Members", Slug: projectMembersGroupSlug(project.Slug),
+		GroupType: store.GroupTypeExplicit, ProjectID: project.ID,
+		Annotations: map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
+	}
+	require.NoError(t, s.CreateGroup(ctx, legacy))
+
+	migrator, ok := s.(interface {
+		MigrateLegacyProjectMembersGroupMarkers(context.Context) error
+	})
+	require.True(t, ok, "test store must expose the legacy marker migration")
+	// The test server already ran the store migrations on its empty
+	// database, which completed the one-shot rewrite. Clear its completion
+	// marker to model a database upgraded with a legacy-marked group in
+	// place.
+	require.NoError(t, s.DeleteHubSetting(ctx, entadapter.LegacyProjectMembersGroupMarkerMigrationSection))
+	// The group must still carry the legacy key right before the migration
+	// runs, and the completion marker must really be gone; otherwise the
+	// rewrite below could silently be a no-op.
+	premigration, err := s.GetGroup(ctx, legacy.ID)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"}, premigration.Annotations,
+		"the seeded group must still carry only the legacy key before the migration")
+	_, err = s.GetHubSetting(ctx, entadapter.LegacyProjectMembersGroupMarkerMigrationSection)
+	require.ErrorIs(t, err, store.ErrNotFound, "the migration completion marker must be cleared")
+	require.NoError(t, migrator.MigrateLegacyProjectMembersGroupMarkers(ctx))
+
+	migrated, err := s.GetGroup(ctx, legacy.ID)
+	require.NoError(t, err)
+	assert.True(t, isSystemProjectMembersGroup(migrated, project.ID),
+		"the migrated group must be recognised as the system members group")
+
+	bindingsBefore, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, creator.ID)
+	require.NoError(t, err)
+
+	srv.createProjectMembersGroup(ctx, project)
+
+	assert.NotContains(t, logs.String(), "refusing to adopt colliding project members group")
+	adopted := membersGroupFor(t, s, project)
+	assert.Equal(t, legacy.ID, adopted.ID, "re-ensure must adopt the existing group, not replace it")
+	assert.Empty(t, adopted.OwnerID, "adoption must not set Group.OwnerID (ptone/scion#2599)")
+
+	bindingsAfter, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, creator.ID)
+	require.NoError(t, err)
+	assert.Len(t, bindingsAfter, len(bindingsBefore), "adoption must not grant the creator a role binding")
+	groupBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, legacy.ID)
+	require.NoError(t, err)
+	assert.Empty(t, groupBindings, "adoption must not create a role binding naming the members group as principal")
+
+	// As for any canonical members group, re-ensure re-adds the creator as a
+	// group owner member (no project authority under PM1).
+	membership, err := s.GetGroupMembership(ctx, legacy.ID, store.GroupMemberTypeUser, creator.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GroupMemberRoleOwner, membership.Role)
 }

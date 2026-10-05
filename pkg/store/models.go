@@ -628,6 +628,32 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Project members group marker annotations (ptone/scion#2556).
+const (
+	// AnnotationProjectMembersGroup marks a group as the hub-managed
+	// project:<slug>:members group. It is the only key the hub writes and the
+	// key project registration checks before adopting an existing group with
+	// that slug. The hub (createProjectMembersGroup) and the store marker
+	// backfill both write it.
+	AnnotationProjectMembersGroup = "scion.io/project-members-group"
+
+	// LegacyAnnotationProjectMembersGroup is the marker key the store marker
+	// backfill wrote before ptone/scion#2556. The one-shot migration
+	// MigrateLegacyProjectMembersGroupMarkers rewrites it to
+	// AnnotationProjectMembersGroup. No current code sets it; the migration
+	// only removes it. The group API marker guards and the owner-clearing
+	// backfill still accept it, because an older binary may write it during
+	// a rolling upgrade.
+	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
+)
+
+// AnnotationProjectAgentsGroup marks a group as the hub-managed
+// project:<slug>:agents group. The hub (createProjectGroup) writes it and
+// checks it (isSystemProjectAgentsGroup) before adopting an existing group
+// with that slug, and the store agents group marker backfill writes it on
+// legitimate pre-upgrade groups.
+const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,
