@@ -112,7 +112,9 @@ Seeds re-sync on restart for sections that haven't been admin-edited (seeded sec
 | `server.auth.dev_mode` | `SCION_SERVER_AUTH_DEVMODE` |
 | `server.secrets.backend` | `SCION_SERVER_SECRETS_BACKEND` |
 | `server.mode` | `SCION_SERVER_MODE` |
-| `server.log_level` | `SCION_SERVER_LOGLEVEL` |
+| `server.log_level` | `SCION_SERVER_LOGLEVEL` (file-mode reload only, see below) |
+
+There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
 
 ### `SCION_SERVER_*` Deprecation for Layer-1
 

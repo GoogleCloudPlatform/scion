@@ -492,7 +492,7 @@ There are two exceptions to the pattern:
 - The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.
 - The broker identity keys keep their underscores: `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`, and likewise `BROKER_BROKER_NAME`, `BROKER_BROKER_NICKNAME`, `BROKER_BROKER_TOKEN` and `BROKER_AUTO_PROVIDE`.
 
-`server.log_level`, `server.log_format` and `server.env` have no environment variable. Set the boot log level with `--debug` or `SCION_LOG_LEVEL=debug`.
+`server.log_format` and `server.env` have no environment variable. There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
 
 **Examples:**
 - `server.hub.port` -> `SCION_SERVER_HUB_PORT`
@@ -521,7 +521,7 @@ These environment variables control server-side logging behavior. They are not p
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
-| `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `SCION_LOG_LEVEL` | Set to `debug` to log at DEBUG level from startup. Any other value leaves the level at `info`. | `info` |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |

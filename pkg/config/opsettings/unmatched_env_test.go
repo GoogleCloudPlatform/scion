@@ -193,3 +193,26 @@ func TestSeedImageRegistry_ReachesBootstrap(t *testing.T) {
 		t.Error("image_registry is not a Layer-1 key")
 	}
 }
+
+// TestFindUnmatchedSettingsEnv_LogLevelNote checks the LOG_LEVEL warning
+// does not overstate SCION_LOG_LEVEL: the hint names the reload-only
+// setting spelling and the note gives the boot-time controls.
+func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
+	u, ok := unmatchedByName([]string{"SCION_SERVER_LOG_LEVEL=debug"})["SCION_SERVER_LOG_LEVEL"]
+	if !ok {
+		t.Fatal("SCION_SERVER_LOG_LEVEL not flagged")
+	}
+	if u.Suggestion != "SCION_SERVER_LOGLEVEL" {
+		t.Errorf("suggestion = %q, want SCION_SERVER_LOGLEVEL", u.Suggestion)
+	}
+	for _, want := range []string{"no boot-time override", "file-mode reload", "--debug", "SCION_LOG_LEVEL=debug"} {
+		if !strings.Contains(u.Note, want) {
+			t.Errorf("note %q lacks %q", u.Note, want)
+		}
+	}
+	var buf bytes.Buffer
+	config.WarnUnmatchedSettingsEnv(slog.New(slog.NewTextHandler(&buf, nil)), []string{"SCION_SERVER_LOG_LEVEL=debug"}, IsLayer1Key)
+	if !strings.Contains(buf.String(), "note=") {
+		t.Errorf("warning lacks the note:\n%s", buf.String())
+	}
+}

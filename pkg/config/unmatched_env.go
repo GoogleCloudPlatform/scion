@@ -85,11 +85,20 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_BROKER_BROKERTOKEN":                   "SCION_SERVER_BROKER_BROKER_TOKEN",
 	"SCION_SERVER_BROKER_AUTOPROVIDE":                   "SCION_SERVER_BROKER_AUTO_PROVIDE",
 	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
-	// No SCION_SERVER_* spelling sets the boot log level or format.
-	"SCION_SERVER_LOG_LEVEL":  "SCION_LOG_LEVEL",
+	// No SCION_SERVER_* spelling sets the boot log level or format; see
+	// knownInertServerEnvNotes.
+	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL",
 	"SCION_SERVER_LOG_FORMAT": "",
 	// server.env binds in VersionedSettings, but nothing reads it.
 	"SCION_SERVER_ENV": "",
+}
+
+// knownInertServerEnvNotes adds a short explanation to the warning for
+// known-inert names whose suggestion alone would mislead.
+var knownInertServerEnvNotes = map[string]string{
+	"SCION_SERVER_LOG_LEVEL":  "no boot-time override: SCION_SERVER_LOGLEVEL only affects file-mode reload; at startup use --debug or SCION_LOG_LEVEL=debug",
+	"SCION_SERVER_LOG_FORMAT": "server.log_format is not read by the hub",
+	"SCION_SERVER_ENV":        "server.env is informational and not read by the hub",
 }
 
 // UnmatchedEnvName is a SCION_SERVER_* or SCION_SEED_* environment variable
@@ -98,6 +107,8 @@ type UnmatchedEnvName struct {
 	Name string
 	// Suggestion is a spelling that does match, or "" if none is known.
 	Suggestion string
+	// Note is an optional short explanation, logged with the warning.
+	Note string
 }
 
 // FindUnmatchedSettingsEnv returns the SCION_SERVER_* and SCION_SEED_* names
@@ -148,7 +159,7 @@ func FindUnmatchedSettingsEnv(environ []string, isLayer1 func(string) bool) []Un
 		switch {
 		case strings.HasPrefix(name, serverEnvPrefix):
 			if s, ok := knownInertServerEnvNames[name]; ok {
-				out = append(out, UnmatchedEnvName{Name: name, Suggestion: s})
+				out = append(out, UnmatchedEnvName{Name: name, Suggestion: s, Note: knownInertServerEnvNotes[name]})
 				continue
 			}
 			if serverEnvMatches(name, isLayer1) {
@@ -182,6 +193,9 @@ func WarnUnmatchedSettingsEnv(logger *slog.Logger, environ []string, isLayer1 fu
 		attrs := []any{"env_var", u.Name}
 		if u.Suggestion != "" {
 			attrs = append(attrs, "did_you_mean", u.Suggestion)
+		}
+		if u.Note != "" {
+			attrs = append(attrs, "note", u.Note)
 		}
 		logger.Warn("Environment variable matches no setting and is ignored", attrs...)
 	}
