@@ -60,3 +60,9 @@ image:
 
 auth:
   sessionSecret: ci-minimal-session-secret-not-real-do-not-use
+  # PROBE VALUE, not a real resource. auth.mode defaults to proxy, and the hub
+  # refuses to start in proxy mode without an IAP audience, so every proxy
+  # fixture carries one. Cloud Run form.
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-ci-minimal
