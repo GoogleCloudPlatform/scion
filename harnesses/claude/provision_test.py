@@ -25,6 +25,7 @@ import os
 import tempfile
 import unittest
 from contextlib import contextmanager
+from typing import Any
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("claude_provision", PROVISION_PATH)
@@ -332,6 +333,143 @@ class ModelResolutionTest(unittest.TestCase):
 
         self.assertEqual(env.get("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"), "1")
         self.assertEqual(env.get("DISABLE_AUTOUPDATER"), "1")
+
+
+# Mirrors harnesses/claude/config.yaml's `thinking:` block exactly. The Go
+# test TestEmbeddedHarnessThinkingBlocks pins the yaml side to the same
+# literal table, so the two cannot drift.
+CLAUDE_THINKING = {
+    "levels": [
+        {"max": 25, "value": "low"},
+        {"max": 50, "value": "medium"},
+        {"max": 75, "value": "high"},
+        {"max": 100, "value": "xhigh"},
+    ],
+}
+
+
+def make_thinking_ctx(home: str, thinking: Any = CLAUDE_THINKING, *, omit_thinking: bool = False):
+    ctx = make_ctx(home)
+    if not omit_thinking:
+        ctx.harness_config["thinking"] = thinking
+    return ctx
+
+
+class EffortTest(unittest.TestCase):
+    """ptone/scion#3011: SCION_THINKING_LEVEL -> CLAUDE_CODE_EFFORT_LEVEL."""
+
+    def _effort(
+        self,
+        raw: str | None,
+        *,
+        preset: str | None = None,
+        thinking: Any = CLAUDE_THINKING,
+        omit_thinking: bool = False,
+    ) -> tuple[dict[str, str], str | None, list[str]]:
+        warnings: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_thinking_ctx(tmp, thinking, omit_thinking=omit_thinking)
+            ctx.warn = warnings.append  # type: ignore[method-assign]
+            with env_vars(SCION_THINKING_LEVEL=raw, CLAUDE_CODE_EFFORT_LEVEL=preset):
+                env: dict[str, str] = {}
+                effort = provision._apply_effort(ctx, env)
+        return env, effort, warnings
+
+    def test_level_maps_through_quartile_table(self) -> None:
+        cases = (
+            ("0", "low"),
+            ("25", "low"),
+            ("26", "medium"),
+            ("50", "medium"),
+            ("51", "high"),
+            ("75", "high"),
+            ("76", "xhigh"),
+            ("100", "xhigh"),
+            ("150", "xhigh"),
+            ("-5", "low"),
+        )
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                env, effort, warnings = self._effort(raw)
+                self.assertEqual(effort, want)
+                self.assertEqual(env, {"CLAUDE_CODE_EFFORT_LEVEL": want})
+                self.assertEqual(warnings, [])
+
+    def test_no_level_sets_nothing(self) -> None:
+        """Decided requirement: no level means Claude keeps its per-model default."""
+        for raw in (None, "", "   "):
+            with self.subTest(raw=raw):
+                env, effort, warnings = self._effort(raw)
+                self.assertIsNone(effort)
+                self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
+                self.assertEqual(warnings, [])
+
+    def test_invalid_level_sets_nothing_and_warns(self) -> None:
+        env, effort, warnings = self._effort("abc")
+        self.assertIsNone(effort)
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
+        self.assertTrue(any("not a valid integer" in w for w in warnings), warnings)
+
+    def test_preset_env_is_not_clobbered(self) -> None:
+        """A template/harness-config env pin wins; the overlay must not shadow it."""
+        env, effort, warnings = self._effort("90", preset="low")
+        self.assertIsNone(effort)
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("CLAUDE_CODE_EFFORT_LEVEL='low'", warnings[0])
+
+    def test_preset_env_without_level_is_silent(self) -> None:
+        env, effort, warnings = self._effort(None, preset="high")
+        self.assertIsNone(effort)
+        self.assertEqual(env, {})
+        self.assertEqual(warnings, [])
+
+    def test_missing_thinking_block_warns_only_when_level_requested(self) -> None:
+        for label, kwargs in (("omitted", {"omit_thinking": True}), ("empty", {"thinking": {}})):
+            with self.subTest(block=label):
+                env, effort, warnings = self._effort("60", **kwargs)
+                self.assertIsNone(effort)
+                self.assertEqual(env, {})
+                self.assertTrue(any("no thinking block" in w for w in warnings), warnings)
+                env, effort, warnings = self._effort(None, **kwargs)
+                self.assertEqual((env, effort), ({}, None))
+                # An empty block still draws resolve_thinking's "malformed"
+                # warning; the requested-level warning must not fire.
+                self.assertFalse(any("no thinking block" in w for w in warnings), warnings)
+
+    def test_undocumented_value_is_written_with_warning(self) -> None:
+        """A customized table may name `max`, which the env var rejects."""
+        thinking = {"levels": [{"max": 100, "value": "max"}]}
+        env, effort, warnings = self._effort("60", thinking=thinking)
+        self.assertEqual(env, {"CLAUDE_CODE_EFFORT_LEVEL": "max"})
+        self.assertEqual(effort, "max")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("'max'", warnings[0])
+
+
+class ProvisionEffortWiringTest(unittest.TestCase):
+    """Drives the real provision() entry point and reads outputs/env.json."""
+
+    def _env_json(self, raw: str | None) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            os.makedirs(os.path.join(tmp, ".scion", "harness", "inputs"))
+            ctx = make_thinking_ctx(tmp)
+            ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")  # type: ignore[method-assign]
+            with env_vars(
+                SCION_THINKING_LEVEL=raw, CLAUDE_CODE_EFFORT_LEVEL=None,
+                SCION_MODEL=None, ANTHROPIC_MODEL=None,
+            ):
+                provision.provision(ctx)
+            with open(os.path.join(tmp, ".scion", "harness", "outputs", "env.json"), encoding="utf-8") as f:
+                return json.load(f)
+
+    def test_level_reaches_env_json(self) -> None:
+        self.assertEqual(self._env_json("80").get("CLAUDE_CODE_EFFORT_LEVEL"), "xhigh")
+
+    def test_no_level_leaves_env_json_without_effort(self) -> None:
+        env = self._env_json(None)
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
+        self.assertIn("ANTHROPIC_MODEL", env)  # sanity: the overlay was written
 
 
 class ConfigYamlTest(unittest.TestCase):
