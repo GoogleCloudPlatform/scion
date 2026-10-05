@@ -43,7 +43,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -585,6 +584,13 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return fmt.Errorf("--format json and --attach are mutually exclusive")
+	}
+	// Fail before creating or starting anything when --attach has no
+	// terminal to attach (same check as scion attach).
+	if attach {
+		if err := requireAttachTerminal(); err != nil {
+			return err
+		}
 	}
 
 	// Reject --enable-telemetry with --disable-telemetry (mutually exclusive)
@@ -1573,27 +1579,13 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
-	if err := attachUnsupportedErr(attachCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
-		return err
-	}
-
-	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
-	// there is no application-level token by design, so transport auth must be
-	// determined before deciding whether an app token is required.
-	attachOpts, transportSrc, err := resolveAttachOptions()
-	if err != nil {
-		return err
-	}
-
-	// Get access token for WebSocket authentication.
-	// Only require an application token when no transport source is configured.
-	token := getHubAccessToken(hubCtx.Endpoint)
-	if token == "" && transportSrc == nil {
-		return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
-	}
-
-	statusf("Attaching to agent '%s' via Hub...\n", agentName)
-	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
+	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
+		Name:     agentName,
+		ID:       agentID,
+		Runtime:  agentRuntime,
+		BrokerID: agentBrokerID,
+		Profile:  agentProfile,
+	})
 }
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
