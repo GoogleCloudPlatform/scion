@@ -1949,7 +1949,19 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
-	_, err = target.mgr.DeleteTarget(ctx, target.name, scionrt.RunRef{ID: target.containerID, RunID: target.runID}, filesToDelete, projectPath, removeBranch)
+	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	if errors.Is(err, scionrt.ErrRunMismatch) {
+		// The runtime found the name held by another run when it came to
+		// delete (the entry was replaced after resolveDeleteTarget listed
+		// it) and deleted nothing. Answer as for errDeleteTargetRunMismatch:
+		// 404, with no file or leftover-object cleanup, since those now
+		// belong to the newer run.
+		span.SetStatus(codes.Error, err.Error())
+		s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
+			"agent_id", id, "project_id", projectID, "run_id", runID, "error", err)
+		NotFound(w, "Agent")
+		return
+	}
 	if err != nil {
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
@@ -4962,6 +4974,21 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // answers 404 like errDeleteTargetNotFound but, unlike it, performs no
 // cleanup at all: whatever remains belongs to the live, newer run.
 var errDeleteTargetRunMismatch = errors.New("no entry for the requested run")
+
+// deleteRunRef is the RunRef a resolved delete passes to the runtime: the
+// entry's own run label, or, for a legacy entry with no run label, the run
+// the request named (requestRunID, possibly empty). Passing the requested
+// run for a legacy entry lets a run-aware runtime (Kubernetes) re-check the
+// entry at delete time: an unlabelled entry still matches, but an entry of
+// another run that replaced it after the list is left alone
+// (ptone/scion#2550). A file-only target (no container) passes no run.
+func deleteRunRef(t *deleteTarget, requestRunID string) scionrt.RunRef {
+	ref := scionrt.RunRef{ID: t.containerID, RunID: t.runID}
+	if ref.RunID == "" && ref.ID != "" {
+		ref.RunID = requestRunID
+	}
+	return ref
+}
 
 // errDeleteTargetUnknown means the agent could not be resolved because a
 // runtime listing failed.
