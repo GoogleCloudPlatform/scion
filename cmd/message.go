@@ -598,6 +598,11 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		}
 		return nil
 	}
+	// Mention outcomes print before the confirmation so the last line
+	// reports the send itself; a skipped mention never means a failed send.
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
+	}
 	if resp != nil && resp.Status == "deferred" {
 		// Design agent-reincarnate §3.7: the recipient is mid-`scion
 		// reincarnate`. The message was saved to history, not dropped.
@@ -607,9 +612,6 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	}
 	if notify {
 		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
-	}
-	if resp != nil {
-		printMentionResults(resp.MentionResults)
 	}
 
 	return nil
@@ -665,10 +667,10 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		}
 		return nil
 	}
-	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
 	}
+	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
 
 	return nil
 }
@@ -739,6 +741,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				}
 				return nil
 			}
+			if resp != nil {
+				printMentionResults(resp.MentionResults)
+			}
 			if resp != nil && resp.Status == "deferred" {
 				// Design agent-reincarnate §3.7: the recipient is
 				// mid-`scion reincarnate`. The message was saved to
@@ -746,9 +751,6 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
 			} else {
 				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
-			}
-			if resp != nil {
-				printMentionResults(resp.MentionResults)
 			}
 			return nil
 		}
@@ -803,6 +805,8 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			fmt.Printf("Message dispatched to %s.\n", ref.Raw)
 			return nil
 		}
+		// Mention outcomes first, so the confirmation is the last line.
+		printMentionResults(result.MentionResults)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -814,7 +818,6 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
 		}
-		printMentionResults(result.MentionResults)
 		return nil
 	}
 
@@ -925,15 +928,15 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 		return nil
 	}
+	if result != nil {
+		printMentionResults(result.MentionResults)
+	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
 	if result != nil && result.ConversationID != "" {
 		fmt.Printf("Message sent to %s via Hub (conversation %s).\n", userRecipient, result.ConversationID)
 	} else {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
-	}
-	if result != nil {
-		printMentionResults(result.MentionResults)
 	}
 	return nil
 }
@@ -1074,10 +1077,6 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		if err := outputJSON(results); err != nil {
 			return err
 		}
-	} else if deferred > 0 {
-		fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
-	} else {
-		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
 	// @mention and --cc fan-out for group messages: mentioned agents that are
@@ -1113,6 +1112,16 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 
 		if len(filtered) > 0 {
 			sendMentionMessages(hubCtx, sender, mentionSource, message, filtered, agentSvc)
+		}
+	}
+
+	// The delivery summary prints after the mention fan-out so it is the
+	// last line; mention notes above it never change the delivery result.
+	if !isJSONOutput() {
+		if deferred > 0 {
+			fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
+		} else {
+			fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 		}
 	}
 
@@ -1311,7 +1320,7 @@ func printMentionResults(results []messages.MentionResult) {
 				fmt.Fprintf(os.Stderr, "Mention notification sent to @%s.\n", r.Slug)
 			}
 		case "not_found":
-			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", r.Slug)
+			fmt.Fprintf(os.Stderr, "Note: @%s is not an agent in this project; no agent was notified.\n", r.Slug)
 		case "unauthorized":
 			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was denied (message delivery not authorized)\n", r.Slug)
 		case "suppressed":
@@ -1334,8 +1343,8 @@ func printMentionResults(results []messages.MentionResult) {
 
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient
-// is excluded from mentions. Unresolved names produce stderr warnings but do
-// not fail the primary send.
+// is excluded from mentions. Unresolved names produce a non-fatal stderr note
+// and do not fail the primary send.
 func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageText string, mentionNames []string, agentSvc hubclient.AgentService) {
 	if len(mentionNames) == 0 {
 		return
@@ -1384,7 +1393,7 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 
 		slug, ok := knownAgents[lower]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", name)
+			fmt.Fprintf(os.Stderr, "Note: @%s is not an agent in this project; no agent was notified.\n", name)
 			continue
 		}
 		resolved = append(resolved, slug)

@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1771,7 +1772,7 @@ func TestSendMessageViaConversation_OutboundConvRef_PrintsMentionWarning(t *test
 		err = sendMessageViaConversation(hubCtx, ref, "please look at @unknown-name", false, false, nil)
 	})
 	require.NoError(t, err)
-	require.Contains(t, out, "@unknown-name does not match any agent in this project")
+	require.Contains(t, out, "Note: @unknown-name is not an agent in this project; no agent was notified.")
 }
 
 // TestSendOutboundMessageViaHub_PrintsMentionWarning covers the direct
@@ -1811,7 +1812,7 @@ func TestSendOutboundMessageViaHub_PrintsMentionWarning(t *testing.T) {
 		err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "please look at @unknown-name", false)
 	})
 	require.NoError(t, err)
-	require.Contains(t, out, "@unknown-name does not match any agent in this project")
+	require.Contains(t, out, "Note: @unknown-name is not an agent in this project; no agent was notified.")
 }
 
 // printMentionResults prints the expected warning per non-delivered status,
@@ -1834,7 +1835,7 @@ func TestPrintMentionResults(t *testing.T) {
 
 	assert.Contains(t, out, "Mention notification sent to @alice.")
 	assert.Contains(t, out, "@bob is stopped; it will see this mention once it is running.")
-	assert.Contains(t, out, "@carol does not match any agent")
+	assert.Contains(t, out, "Note: @carol is not an agent in this project; no agent was notified.")
 	assert.Contains(t, out, "@dave was denied")
 	assert.Contains(t, out, "@erin was suppressed by loop protection")
 	assert.Contains(t, out, "@frank was rate-limited")
@@ -2016,7 +2017,7 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	// Only the primary message should be sent
 	require.Len(t, *sent, 1)
 	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
-	assert.Contains(t, out, "@nonexistent does not match any agent in this project")
+	assert.Contains(t, out, "Note: @nonexistent is not an agent in this project; no agent was notified.")
 }
 
 func TestSendMessageViaHub_CCFlag(t *testing.T) {
@@ -3476,4 +3477,149 @@ func TestResolveMessageBody_OversizeRejectedNotTruncated(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, got, messages.MaxMsgSize)
 	})
+}
+
+// captureCombinedOutput routes os.Stdout and os.Stderr into one pipe, the
+// way a terminal shows them, so a test can assert the relative order of
+// the stdout confirmation and the stderr mention notes.
+func captureCombinedOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	func() {
+		defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+		fn()
+	}()
+	_ = w.Close()
+	return <-done
+}
+
+// lastLine returns the last non-empty line of out.
+func lastLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// TestSendMessageViaConversation_SkippedMentionPrintsBeforeConfirmation is
+// the ptone/scion#3303 repro: a conv: send whose body mentions a human
+// member gets a not_found mention result. The send must still succeed
+// (nil error, exit code 0), the skipped mention must read as a non-fatal
+// note, and the confirmation must be the last line of output.
+func TestSendMessageViaConversation_SkippedMentionPrintsBeforeConfirmation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "outbound-msg-3303",
+				"status":       "sent",
+				"recipient":    "conv:11111111-1111-1111-1111-111111111111",
+				"recipient_id": "uid-test",
+				"mention_results": []messages.MentionResult{
+					{Slug: "alice", Status: "not_found", Error: "no matching agent in this project"},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-msg-3303"}
+	ref := &messaging.Reference{Kind: messaging.RefConversation, Value: "11111111-1111-1111-1111-111111111111", Raw: "conv:11111111-1111-1111-1111-111111111111"}
+
+	out := captureCombinedOutput(t, func() {
+		err = sendMessageViaConversation(hubCtx, ref, "hello @alice", false, false, nil)
+	})
+	require.NoError(t, err, "a skipped mention must not fail the send")
+
+	note := "Note: @alice is not an agent in this project; no agent was notified."
+	confirm := "Message sent to conv:11111111-1111-1111-1111-111111111111 (message outbound-msg-3303)."
+	require.Contains(t, out, note)
+	require.Contains(t, out, confirm)
+	assert.NotContains(t, out, "Warning: @alice", "a skipped mention must not read as a failure")
+	assert.Less(t, strings.Index(out, note), strings.Index(out, confirm), "mention note must print before the confirmation")
+	assert.Equal(t, confirm, lastLine(out), "the confirmation must be the last line")
+}
+
+// TestSendMessageViaHub_SkippedMentionPrintsBeforeConfirmation covers the
+// agent-recipient path: mention results, then the delivery confirmation.
+func TestSendMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-3303-agent"
+	agents := []hubclient.Agent{{Name: "my-agent", Status: "running"}}
+	server, _ := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	var sendErr error
+	out := captureCombinedOutput(t, func() {
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false, false)
+	})
+	require.NoError(t, sendErr)
+
+	note := "Note: @nobody is not an agent in this project; no agent was notified."
+	require.Contains(t, out, note)
+	assert.Equal(t, "Message delivered to agent 'my-agent'.", lastLine(out))
+}
+
+// TestSendOutboundMessageViaHub_SkippedMentionPrintsBeforeConfirmation
+// covers the direct user:<email> path.
+func TestSendOutboundMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "outbound-msg-3303b",
+				"status":       "sent",
+				"recipient":    "user:alice@example.com",
+				"recipient_id": "uid-test",
+				"mention_results": []messages.MentionResult{
+					{Slug: "bob", Status: "not_found"},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-msg-3303-user"}
+
+	out := captureCombinedOutput(t, func() {
+		err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "cc @bob", false)
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "Note: @bob is not an agent in this project; no agent was notified.")
+	assert.Equal(t, "Message sent to user:alice@example.com via Hub.", lastLine(out))
 }
