@@ -376,7 +376,7 @@ func TestRun_CancelledStart_LeavesNewerSameNamedAgent(t *testing.T) {
 	waitPodCreate(t, created)
 
 	// The delete removes the old agent's objects by name...
-	if err := rt.Delete(context.Background(), startCleanupAgent); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: startCleanupAgent}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	// ...and a newer agent with the same name creates its own.

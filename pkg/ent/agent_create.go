@@ -602,6 +602,20 @@ func (_c *AgentCreate) SetNillableLaunchID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetRunID sets the "run_id" field.
+func (_c *AgentCreate) SetRunID(v string) *AgentCreate {
+	_c.mutation.SetRunID(v)
+	return _c
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1036,6 +1050,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchID
 		_c.mutation.SetLaunchID(v)
 	}
+	if _, ok := _c.mutation.RunID(); !ok {
+		v := agent.DefaultRunID
+		_c.mutation.SetRunID(v)
+	}
 	if _, ok := _c.mutation.LaunchState(); !ok {
 		v := agent.DefaultLaunchState
 		_c.mutation.SetLaunchState(v)
@@ -1381,6 +1399,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchID(); ok {
 		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
 		_node.LaunchID = value
+	}
+	if value, ok := _c.mutation.RunID(); ok {
+		_spec.SetField(agent.FieldRunID, field.TypeString, value)
+		_node.RunID = value
 	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -2302,6 +2324,24 @@ func (u *AgentUpsert) UpdateLaunchID() *AgentUpsert {
 // ClearLaunchID clears the value of the "launch_id" field.
 func (u *AgentUpsert) ClearLaunchID() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchID)
+	return u
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsert) SetRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldRunID, v)
+	return u
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunID)
+	return u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsert) ClearRunID() *AgentUpsert {
+	u.SetNull(agent.FieldRunID)
 	return u
 }
 
@@ -3592,6 +3632,27 @@ func (u *AgentUpsertOne) UpdateLaunchID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchID()
+	})
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsertOne) SetRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunID()
 	})
 }
 
@@ -5112,6 +5173,27 @@ func (u *AgentUpsertBulk) UpdateLaunchID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchID()
+	})
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentUpsertBulk) SetRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunID()
 	})
 }
 

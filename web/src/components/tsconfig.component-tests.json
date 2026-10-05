@@ -17,7 +17,9 @@
     "pages/chat-palette-shortcut.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
-    "shared/header.test.ts"
+    "shared/header.test.ts",
+    "shared/group-member-editor-membership.test.ts",
+    "pages/onboarding.test.ts"
   ],
   "exclude": []
 }
