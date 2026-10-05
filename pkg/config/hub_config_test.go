@@ -1893,6 +1893,7 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 	}{
 		{"admins file two blanks", `["", " "]`, []string{}},
 		{"admins file padded comma-joined single", `[" a@x.com,b@x.com "]`, []string{"a@x.com", "b@x.com"}},
+		{"admins file multi-element with comma kept", `["a@x.com,b@x.com", "c@x.com"]`, []string{"a@x.com,b@x.com", "c@x.com"}},
 	} {
 		rows = append(rows, row{name: f.name,
 			legacy: "hub:\n  adminEmails: " + f.list + "\n",

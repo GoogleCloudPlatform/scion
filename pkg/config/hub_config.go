@@ -1310,8 +1310,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 	}
 	applyDatabasePoolDefaults(&config.Database)
 
-	// Fixup for list fields that might be loaded as a single comma-separated string from env vars.
-	// This happens because koanf's env provider doesn't automatically split strings for slice fields.
+	// Normalize list settings (see normalizeListSettings).
 	normalizeListSettings(config)
 
 	// D11-fix: normalize AdminEmails for ALL list shapes (YAML list, env-var,
@@ -1758,8 +1757,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 		return err
 	}
 
-	// Fixup for list fields that might be loaded as a single comma-separated
-	// string from env vars (koanf's env provider doesn't auto-split slices).
+	// Normalize list settings (see normalizeListSettings).
 	normalizeListSettings(gc)
 
 	// D11-fix: normalize AdminEmails (same as primary config load path).
