@@ -289,6 +289,24 @@ export function agentQueryKey(q: AgentQuery): string {
   return params.length > 0 ? `${base}?${params.join('&')}` : base;
 }
 
+/** Id indexes by row array; held only as long as the rows are. */
+const agentIndexes = new WeakMap<
+  readonly Agent[],
+  { key: string; version: number; byId: ReadonlyMap<string, Agent> }
+>();
+
+/**
+ * The rows of `snapshot` by id, memoised on its key and version: lookups
+ * between two publishes of a list share one index.
+ */
+export function agentIndexOf(snapshot: AgentListSnapshot): ReadonlyMap<string, Agent> {
+  const held = agentIndexes.get(snapshot.agents);
+  if (held && held.key === snapshot.key && held.version === snapshot.version) return held.byId;
+  const byId = new Map(snapshot.agents.map((a) => [a.id, a]));
+  agentIndexes.set(snapshot.agents, { key: snapshot.key, version: snapshot.version, byId });
+  return byId;
+}
+
 /** Probes cover the lists SSE adds to: the whole hub and unfiltered projects. */
 function isProbeable(q: AgentQuery): boolean {
   if (q.label?.trim()) return false;
