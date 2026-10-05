@@ -272,6 +272,7 @@ func TestCallbackHandler_SetupConfirm(t *testing.T) {
 
 func TestCallbackHandler_SetupConfirm_AlreadyLinked(t *testing.T) {
 	broker, _ := testBrokerWithStore(t, nil)
+	linkTestUser(t, broker)
 
 	// Pre-create a link.
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
@@ -487,4 +488,25 @@ func TestCallbackHandler_SetupConfirm_RejectsProjectOutsideUserProjects(t *testi
 	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
 	require.NoError(t, err)
 	assert.Nil(t, link)
+}
+
+func TestCallbackHandler_SetupConfirm_UnlinkedUserInLinkedChannelGetsRegisterHint(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, nil)
+	require.NoError(t, broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-existing",
+		ProjectSlug:    "existing",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":       "setup_confirm",
+		"project_slug": "new-project",
+		"project_id":   "proj-new",
+	}))
+	require.NoError(t, err)
+	body, _ := json.Marshal(resp.Body)
+	assert.Contains(t, string(body), "`register`")
+	assert.NotContains(t, string(body), "existing")
 }

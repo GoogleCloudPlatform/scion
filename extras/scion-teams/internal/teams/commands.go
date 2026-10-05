@@ -119,6 +119,12 @@ func (h *CommandHandler) Handle(ctx context.Context, activity *Activity) (bool, 
 func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, args []string) error {
 	conversationID := stripThreadSuffix(activity.Conversation.ID)
 
+	// Setup requires a linked user; only that user's projects are offered.
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
+	}
+
 	// Check if already linked.
 	store := h.getStore()
 	if store != nil {
@@ -130,12 +136,6 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 			return h.sendReply(ctx, activity,
 				fmt.Sprintf("This conversation is already linked to project **%s**. Use `unlink` first to change projects.", existing.ProjectSlug))
 		}
-	}
-
-	// Setup requires a linked user; only that user's projects are offered.
-	mapping, ok := h.requireLinkedUser(ctx, activity)
-	if !ok {
-		return nil
 	}
 
 	hubClient := h.broker.hubClient
@@ -210,7 +210,9 @@ func noUserProjectsText(mapping *TeamsUserMapping) string {
 }
 
 // findUserProject resolves slugOrName to one of the linked user's projects.
-// It returns nil when the user has no such project.
+// It returns nil when the user has no such project. The slug lookup uses
+// ?slug=; the name-match fallback scans only the first page (hub default
+// limit 500).
 func findUserProject(ctx context.Context, hubClient *HubClient, mapping *TeamsUserMapping, slugOrName string) (*ProjectOption, error) {
 	onBehalfOf := onBehalfOfUser(mapping)
 	projects, err := hubClient.ListUserProjects(ctx, onBehalfOf, strings.ToLower(slugOrName))

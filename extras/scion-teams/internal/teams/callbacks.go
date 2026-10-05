@@ -268,6 +268,15 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
 	}
 
+	// Setup requires a linked user, and the project must be one of theirs.
+	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err)
+		}
+		return h.respondWithUpdatedCard(activity, problem), nil
+	}
+
 	// Normalize conversation ID — strip thread suffix for consistent lookups.
 	convID := stripThreadSuffix(activity.Conversation.ID)
 
@@ -282,14 +291,6 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 			fmt.Sprintf("This conversation is already linked to project **%s**.", existing.ProjectSlug)), nil
 	}
 
-	// Setup requires a linked user, and the project must be one of theirs.
-	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
-	if problem := linkProblem(mapping, err, registerHint); problem != "" {
-		if err != nil {
-			h.log.Warn("Error looking up user mapping", "error", err)
-		}
-		return h.respondWithUpdatedCard(activity, problem), nil
-	}
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
 		return h.respondWithUpdatedCard(activity, "Hub client not configured."), nil

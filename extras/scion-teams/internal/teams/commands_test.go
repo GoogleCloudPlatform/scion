@@ -283,6 +283,7 @@ func TestSetupCommand_WithProjectSlug(t *testing.T) {
 
 func TestSetupCommand_AlreadyLinked(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
+	linkTestUser(t, broker)
 	handler := broker.commandHandler
 
 	// Pre-create a channel link.
@@ -1046,4 +1047,16 @@ func TestSetupCommand_ProjectListDenialShowsActionableText(t *testing.T) {
 	assert.NoError(t, err)
 	require.Len(t, ms.sent, 1)
 	assert.Equal(t, staleLinkText, ms.sent[0].Text)
+}
+
+func TestSetupCommand_UnlinkedUserInLinkedChannelGetsRegisterHint(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	linkTestChannel(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup other"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "`register`")
+	assert.NotContains(t, ms.sent[0].Text, "test-project")
 }
