@@ -3060,8 +3060,10 @@ export class ScionPageChat extends LitElement {
     // Defence in depth: the hub view also requires the hub's claim (see
     // _sidebarShowsHubView).
     this._hubAgentsLive = false;
-    // This replaces the hub lists, so the next hub view walks the users again.
+    // This replaces the hub lists, so the next hub view walks the users again
+    // and fetches their presence again.
     this._hubUsersLoadedGeneration = null;
+    this._hubPresenceGeneration = null;
     // The previous view's member load can no longer publish (see the seq
     // check below); stop it instead of letting it finish the work.
     this._projectMembersAbort?.abort();

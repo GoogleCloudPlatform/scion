@@ -383,6 +383,30 @@ describe('hub members: hub presence fetch', () => {
     );
   }
 
+  function presenceReads(): number {
+    return vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members')
+      .length;
+  }
+
+  it('returning to the hub view from a space fetches presence again', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(1);
+
+      // On mobile: a space expanded with no conversation, then back to /chat.
+      await page.loadV2Members('p2');
+      page.loadHubMembers();
+      await settle();
+
+      expect(presenceReads()).toBe(2);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('is fetched once per hub view, not again on every rail reload', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
