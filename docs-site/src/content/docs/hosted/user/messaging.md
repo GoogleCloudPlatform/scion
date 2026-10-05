@@ -162,7 +162,13 @@ scion message @tech-lead "See the test results." --attach ./results.json
 
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md
+
+# Read the message body from stdin (`-`, or equivalently `--body-file -`)
+git log --oneline -5 | scion message @tech-lead -
+scion message @tech-lead --body-file - < ./review-notes.md
 ```
+
+For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
 ### Message Formatting
 
@@ -170,7 +176,17 @@ The `scion message` CLI delivers the body argument **verbatim** — it performs 
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
 
-**Correct** — real newlines in a quoted string:
+:::caution[Backticks and `$(...)` are expanded by your shell]
+Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` **before** `scion` starts, and substitutes the output into the message (often an empty string, plus whatever side effects the command had). Use double quotes only for plain text. For bodies that contain code, backticks, or `$`, use `--body-file`, or stdin with a quoted heredoc:
+
+```bash
+scion message --non-interactive @reviewer - <<'EOF'
+Please run `make test` and paste the output of $(go env GOPATH).
+EOF
+```
+:::
+
+**Correct** — real newlines in a quoted string (plain text only, no backticks or `$`):
 ```bash
 scion message --non-interactive @reviewer "PR #42 is ready for review.
 

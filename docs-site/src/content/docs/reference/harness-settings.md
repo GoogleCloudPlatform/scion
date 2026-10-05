@@ -52,11 +52,15 @@ scion harness-config install github.com/myorg/scion-harnesses/tree/main/hermes
 scion harness-config install file:///path/to/my-harness
 ```
 
-- `--name <name>`: override the derived config name.
-- `--force`: overwrite an existing local directory.
+- `--name <name>`: override the derived config name. Without it, the name is the `name` field in
+  the source's `config.yaml`, then its `harness` field, then the source directory name.
+- `--force`: overwrite an existing config with the same name in the target scope (a local directory,
+  or a Hub config in the same scope). Without it, `install` refuses to replace an existing config.
 
 When a Hub is available, `install` registers the config **on the Hub** (project scope by default,
-or global with `--global`); otherwise it installs it locally.
+or global with `--global`); otherwise it installs it locally. The output shows the Hub scope the
+config was created or updated in. A project-scoped config and a global config with the same name
+are separate configs, so check the printed scope to see which one you changed.
 
 ### Source-URL tracking and "Refresh from Source"
 
@@ -113,7 +117,11 @@ scion harness-config pull <name> --to <path>
 ```
 
 `sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
-hash before writing.
+hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
+default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
+the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
+it must live there. They create the config in that scope or update an existing one of the same name,
+and print the scope they used.
 
 ### Listing, inspecting, and resetting
 
