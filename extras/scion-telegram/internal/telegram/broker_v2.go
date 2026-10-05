@@ -1902,8 +1902,24 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
+	b.mu.RLock()
+	botUsername := ""
+	if b.botInfo != nil {
+		botUsername = b.botInfo.Username
+	}
+	b.mu.RUnlock()
+
+	// Resolve the sender's link before any agent-cache access: a sender
+	// the plugin cannot act as is never routed nor served cached data.
+	senderLookup := b.lookupSender(ctx, tgMsg.From)
+	if senderLookup.err != nil {
+		b.log.Debug("Message from unresolved sender not routed", "chat_id", chatID, "reason", senderLookup.err)
+		b.replyUnresolvedSender(ctx, tgMsg, botUsername, senderLookup.err)
+		return
+	}
+
 	// Get project agents (cached per user, refreshed as the sender).
-	agents, senderLookup, agentsErr := b.getProjectAgents(ctx, link.ProjectID, tgMsg.From)
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderLookup)
 	listUnavailable := func(replyTo string) {
 		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
 	}
@@ -1919,13 +1935,6 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 		listUnavailable(replyTo)
 	}
-
-	b.mu.RLock()
-	botUsername := ""
-	if b.botInfo != nil {
-		botUsername = b.botInfo.Username
-	}
-	b.mu.RUnlock()
 
 	// Resolve effective default agent: topic-level override first, then chat-level.
 	effectiveDefault := link.DefaultAgent
@@ -2080,47 +2089,19 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Determine sender identity.
-	sender := "telegram:unknown"
-	senderID := ""
-	if tgMsg.From != nil {
-		senderID = strconv.FormatInt(tgMsg.From.ID, 10)
-		if tgMsg.From.Username != "" {
-			sender = "telegram:" + tgMsg.From.Username
-		} else {
-			sender = "telegram:" + senderID
-		}
-	}
-
-	// Check for scion identity mapping — unregistered users cannot route messages.
-	// hubSenderID carries the resolved Hub user UUID (when registered) for the
-	// outbound StructuredMessage.SenderID; senderID itself must stay the raw
-	// Telegram numeric ID since it also keys ConversationContext.TelegramUserID
-	// below. Without this split, the Hub's reply-affinity lookup
-	// (webchat_conversation_context, keyed by Hub user ID) never matches what
-	// gets recorded here, so an agent's reply falls back to whatever channel
-	// that Hub user last used elsewhere (e.g. the web dashboard) instead of
-	// routing back to Telegram.
+	// Sender identity. senderID stays the raw Telegram numeric ID since it
+	// keys ConversationContext.TelegramUserID below; hubSenderID carries
+	// the resolved Hub user UUID for the outbound
+	// StructuredMessage.SenderID. Without this split, the Hub's
+	// reply-affinity lookup (webchat_conversation_context, keyed by Hub user
+	// ID) never matches what gets recorded here, so an agent's reply falls
+	// back to whatever channel that Hub user last used elsewhere (e.g. the
+	// web dashboard) instead of routing back to Telegram.
+	senderID := strconv.FormatInt(tgMsg.From.ID, 10)
+	sender := senderLookup.principal
 	hubSenderID := senderID
-	if senderID != "" {
-		// Reuse the lookup done for the agent list.
-		switch {
-		case errors.Is(senderLookup.err, errSenderLookupFailed):
-			// A lookup failure is not the same as being unlinked.
-			b.api.SendMessage(ctx, chatID, "Something went wrong. Please try again.", "")
-			return
-		case errors.Is(senderLookup.err, errSenderNotLinked):
-			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
-			b.api.SendMessage(ctx, chatID, registerHint, "")
-			return
-		case errors.Is(senderLookup.err, errSenderLinkStale):
-			b.api.SendMessage(ctx, chatID, staleLinkText, "")
-			return
-		}
-		sender = senderLookup.principal
-		if senderLookup.mapping.ScionUserID != "" {
-			hubSenderID = senderLookup.mapping.ScionUserID
-		}
+	if senderLookup.mapping.ScionUserID != "" {
+		hubSenderID = senderLookup.mapping.ScionUserID
 	}
 
 	// Resolve @username mentions to scion user identities and replace
@@ -2887,27 +2868,20 @@ func (b *TelegramBrokerV2) lookupSender(ctx context.Context, sender *TGUser) *se
 }
 
 // getProjectAgents returns the agent slugs of a project for routing a
-// message from sender, plus the sender lookup.
+// message from the resolved sender in link (link.err must be nil).
 //
-// The sender's link is looked up first and the cache is kept per user and
-// project: the sender is only served a list fetched as themselves. When
-// their entry is stale the list is refreshed from the hub as the sender; a
-// stale entry also covers a failed refresh, except when the hub denies the
-// sender. A non-nil error means no list is available: errSenderNotLinked,
-// errSenderLinkStale or errSenderLookupFailed when the plugin cannot act as
-// the sender (nothing cached is served then), otherwise the hub error.
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, sender *TGUser) (slugs []string, link *senderLink, err error) {
-	link = b.lookupSender(ctx, sender)
-	if link.err != nil {
-		return nil, link, link.err
-	}
-
+// The cache is kept per user and project: the sender is only served a list
+// fetched as themselves. When their entry is stale the list is refreshed
+// from the hub as the sender; a stale entry also covers a failed refresh,
+// except when the hub denies the sender. A non-nil error is the hub error
+// when no list is available.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, link *senderLink) ([]string, error) {
 	cached, cacheErr := b.store.GetProjectAgents(ctx, link.principal, projectID)
 	if cacheErr != nil {
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", cacheErr)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents), link, nil
+		return agentSlugs(cached.Agents), nil
 	}
 
 	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)
@@ -2917,9 +2891,9 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		// sender is denied (or their link is no longer accepted) the error
 		// is returned so they are told why and nothing is delivered.
 		if cached != nil && !isForbiddenHubError(err) {
-			return agentSlugs(cached.Agents), link, nil
+			return agentSlugs(cached.Agents), nil
 		}
-		return nil, link, err
+		return nil, err
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
@@ -2932,7 +2906,37 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agentSlugs(agents), link, nil
+	return agentSlugs(agents), nil
+}
+
+// replyUnresolvedSender answers a group message whose sender cannot be
+// acted as (unknown sender, not linked, link without email, or lookup
+// failure). Nothing derived from the agent cache is used: the sender is
+// answered only when they address the bot, otherwise the message is
+// ignored.
+func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, tgMsg *TGMessage, botUsername string, lookupErr error) {
+	if !isBotMentioned(tgMsg, botUsername) && !b.isReplyToBot(tgMsg) {
+		return
+	}
+	text := registerHint
+	switch {
+	case errors.Is(lookupErr, errSenderLinkStale):
+		text = staleLinkText
+	case errors.Is(lookupErr, errSenderLookupFailed):
+		text = "Something went wrong. Please try again."
+	}
+	b.api.SendMessage(ctx, tgMsg.Chat.ID, text, "") //nolint:errcheck
+}
+
+// isReplyToBot reports whether the message replies to a message the bot
+// sent.
+func (b *TelegramBrokerV2) isReplyToBot(tgMsg *TGMessage) bool {
+	if tgMsg.ReplyToMessage == nil || tgMsg.ReplyToMessage.From == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.botInfo != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID
 }
 
 // agentListSuppressKey returns the repeated-reply suppression key for an
@@ -2950,12 +2954,8 @@ func agentListSuppressKey(err error, sender *TGUser) string {
 // repeated-reply suppression.
 func agentListErrorKind(err error) string {
 	switch {
-	case errors.Is(err, errSenderNotLinked):
-		return "not_linked"
-	case errors.Is(err, errSenderLinkStale), isStaleLinkError(err):
+	case isStaleLinkError(err):
 		return "stale_link"
-	case errors.Is(err, errSenderLookupFailed):
-		return "lookup_failed"
 	case isForbiddenHubError(err):
 		return "forbidden"
 	default:
@@ -2968,12 +2968,6 @@ func agentListErrorKind(err error) string {
 // addressed agent as missing.
 func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error, email, project string) {
 	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
-	switch {
-	case errors.Is(listErr, errSenderNotLinked):
-		text = registerHint
-	case errors.Is(listErr, errSenderLinkStale):
-		text = staleLinkText
-	}
 	b.api.SendMessage(ctx, chatID, text, replyTo) //nolint:errcheck
 }
 

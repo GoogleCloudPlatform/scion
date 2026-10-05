@@ -186,19 +186,72 @@ func TestV2_AgentCache_PerUser_DeniedUserDoesNotSeeAnothersList(t *testing.T) {
 	assert.NotContains(t, sent[0].Text, "coder")
 }
 
-func TestV2_AgentCache_UnlinkedSenderIsNotServedCachedList(t *testing.T) {
-	b, tgSrv, hub := newRoutingTestBroker(t)
-	saveAgentCache(t, b.store, "user:bob@example.com", "proj-1", time.Now(), "coder")
-	delivered := false
-	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+// unresolvedSenders put sender 456 in each state the plugin cannot act as,
+// with the reply expected when the bot is addressed.
+var unresolvedSenders = map[string]struct {
+	setup func(t *testing.T, b *TelegramBrokerV2)
+	from  func(msg *TGMessage)
+	want  string
+}{
+	"unlinked":       {func(*testing.T, *TelegramBrokerV2) {}, nil, registerHint},
+	"unknown sender": {func(*testing.T, *TelegramBrokerV2) {}, func(msg *TGMessage) { msg.From = nil }, registerHint},
+	"link without email": {func(t *testing.T, b *TelegramBrokerV2) {
+		require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+			TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
+		}))
+	}, nil, staleLinkText},
+	"lookup failure": {func(_ *testing.T, b *TelegramBrokerV2) { b.store = mappingLookupFailingStore{b.store} }, nil, "Something went wrong. Please try again."},
+}
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+func TestV2_UnresolvedSender_SameReplyWhetherOrNotAgentsCached(t *testing.T) {
+	msgs := map[string]struct {
+		msg       func() *TGMessage
+		addressed bool
+	}{
+		"plain text to default agent": {func() *TGMessage { return plainGroupMessage(456, "hello") }, false},
+		"agent mention":               {func() *TGMessage { return plainGroupMessage(456, "@coder hello") }, false},
+		"unknown @token":              {func() *TGMessage { return plainGroupMessage(456, "hey @reviewer look") }, false},
+		"bot mention":                 {func() *TGMessage { return botMentionMessage(456, "hello") }, true},
+		"bot mention plus agent":      {func() *TGMessage { return botMentionMessage(456, "@coder hello") }, true},
+		"reply to bot message":        {func() *TGMessage { return replyToBotMessage(456, "go ahead") }, true},
+	}
+	for senderName, sc := range unresolvedSenders {
+		for msgName, mc := range msgs {
+			var replies [2][]string
+			for i, cached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/cached=%v", senderName, msgName, cached), func(t *testing.T) {
+					b, tgSrv, hub := newRoutingTestBroker(t)
+					hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+					if cached {
+						// Other users' fresh and stale entries.
+						saveAgentCache(t, b.store, "user:bob@example.com", "proj-1", time.Now(), "coder")
+						saveStaleAgentCache(t, b.store, "user:carol@example.com", "proj-1", "coder")
+					}
+					sc.setup(t, b)
+					delivered := false
+					b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+					msg := mc.msg()
+					if sc.from != nil {
+						sc.from(msg)
+					}
 
-	assert.False(t, delivered)
-	assert.Empty(t, hub.agentCalls(), "no hub read without a linked sender")
-	sent := tgSrv.getSentMessages()
-	require.Len(t, sent, 1)
-	assert.Equal(t, registerHint, sent[0].Text)
+					b.handleGroupMessage(msg)
+
+					assert.False(t, delivered, "an unresolved sender is never routed")
+					assert.Empty(t, hub.agentCalls(), "no hub call for an unresolved sender")
+					for _, m := range tgSrv.getSentMessages() {
+						replies[i] = append(replies[i], m.Text)
+					}
+					if mc.addressed {
+						assert.Equal(t, []string{sc.want}, replies[i])
+					} else {
+						assert.Empty(t, replies[i], "silent when the bot is not addressed")
+					}
+				})
+			}
+			assert.Equal(t, replies[0], replies[1], "%s/%s: same reply with and without cached agents", senderName, msgName)
+		}
+	}
 }
 
 func TestV2_AgentRefresh_FailedListIsNotReportedAsMissingDefault(t *testing.T) {
@@ -270,9 +323,8 @@ func TestV2_AgentRefresh_StaleCacheRefreshesAsSender(t *testing.T) {
 	principal := linkTestUser(t, b.store, 456, "alice@example.com")
 	saveStaleAgentCache(t, b.store, principal, "proj-1", "coder")
 
-	slugs, link, err := b.getProjectAgents(context.Background(), "proj-1", &TGUser{ID: 456})
+	slugs, err := b.getProjectAgents(context.Background(), "proj-1", b.lookupSender(context.Background(), &TGUser{ID: 456}))
 	require.NoError(t, err)
-	assert.Equal(t, "alice@example.com", link.email())
 	assert.Equal(t, []string{"coder", "reviewer"}, slugs)
 	calls := hub.agentCalls()
 	require.Len(t, calls, 1)
@@ -301,9 +353,6 @@ func TestV2_Routing_LooksUpSenderOnce(t *testing.T) {
 }
 
 func TestAgentListErrorKind(t *testing.T) {
-	assert.Equal(t, "not_linked", agentListErrorKind(errSenderNotLinked))
-	assert.Equal(t, "stale_link", agentListErrorKind(errSenderLinkStale))
-	assert.Equal(t, "lookup_failed", agentListErrorKind(errSenderLookupFailed))
 	assert.Equal(t, "stale_link", agentListErrorKind(staleLinkError("on-behalf-of principal not found")))
 	assert.Equal(t, "forbidden", agentListErrorKind(forbiddenListAgents()))
 	assert.Equal(t, "unavailable", agentListErrorKind(errors.New("connection refused")))
