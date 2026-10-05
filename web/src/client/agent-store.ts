@@ -22,10 +22,13 @@
  * of one project) asks the store instead of walking the list endpoint itself,
  * so a list is fetched once and then kept current from SSE.
  *
- * Lists are walked in the server's compact view. A compact row merges into
- * the feed's row for that agent and never strips the fields a full row
- * holds; the feed is the store's own, so compact rows never reach the
- * global `stateManager`.
+ * By default, lists are walked in the server's compact view. A compact row
+ * merges into the feed's row for that agent and never strips the fields a
+ * full row holds; the feed is the store's own, so compact rows never reach
+ * the global `stateManager`. A merge cannot clear a field either: the
+ * compact view omits empty values, so a field the server clears (labels,
+ * activity, phase, ...) keeps its last value in the feed until a full row
+ * replaces it.
  *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
