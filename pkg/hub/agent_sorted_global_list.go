@@ -22,26 +22,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// listAgentsSorted implements the global agents endpoint's sorted mode:
-// pure SQL, because the SQL scope predicate already baked into filter by
-// the caller IS the authorization (AuthorizedProjectIDs and the
-// classification fields). There is no per-item read filter, unlike the
-// project endpoint's user path, so returned rows go through the same
-// buildGlobalAgentPage as the legacy branch, with no narrow AgentMember
-// projection and no race/re-decision machinery.
+// listAgentsSorted implements the global agents endpoint's sorted mode.
+// The SQL scope predicate already baked into filter by the caller
+// (AuthorizedProjectIDs and the classification fields) narrows the
+// candidates; the agent-list rule (see listReadableAgents) then keeps only
+// the agents the caller can read, in the fit branch, the paged branch and
+// the stats block alike. Returned rows go through the same
+// buildGlobalAgentPage as the legacy branch.
 func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter store.AgentFilter, p agentListParams, identity Identity) {
 	ctx := r.Context()
 
 	binding := scopedCursorBinding(sortSuffix("agents", p.sort, p.dir), filter, identity)
 
-	var cur *store.AgentCursor
 	if p.cursor != "" {
-		decoded, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding)
-		if err != nil {
+		if _, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding); err != nil {
 			BadRequest(w, "invalid cursor")
 			return
 		}
-		cur = &decoded
 	}
 
 	// statsFilter is the request filter with Phase cleared: the fit probe
@@ -68,9 +65,18 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 			return
 		}
 		if result.NextCursor == "" {
-			// Complete: the candidate set fit. Caps and messageability for
-			// every row, exactly as today's load.
-			items = result.Items
+			// Complete: the candidate set fit. Keep the readable rows;
+			// caps and messageability for each of them.
+			readable, err := s.authzService.AuthorizeReadBatch(ctx, identity, agentResources(result.Items))
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			for i := range result.Items {
+				if readable[i] {
+					items = append(items, result.Items[i])
+				}
+			}
 			complete = true
 			totalCount = len(items)
 		}
@@ -80,14 +86,10 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	}
 
 	if !complete {
-		// Paged: filter (phase applied) in sorted order, keyset
-		// after cur. totalCount is the COUNT of filter, phase applied,
-		// which is exactly what ListAgents' own COUNT (driven
-		// by filter) already computes when SkipTotalCount is false.
-		result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-			Limit: p.limit, SortBy: p.sort, SortDir: p.dir,
-			SortCursor: cur, CursorBinding: binding,
-		})
+		// Paged: the readable rows of filter (phase applied) in sorted
+		// order, keyset after the request cursor. totalCount is the
+		// readable count of filter, phase applied.
+		result, err := s.listReadableAgentsSorted(ctx, identity, filter, p, binding)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -102,7 +104,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	var statsResp *ListAgentsStats
 	if p.stats {
 		var err error
-		statsResp, err = buildGlobalAgentStats(ctx, s, statsFilter)
+		statsResp, err = s.buildGlobalAgentStats(ctx, identity, statsFilter, p)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -165,30 +167,47 @@ func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, it
 const globalAgentStatsCap = 2000
 
 // buildGlobalAgentStats computes the "stats" block for the global
-// endpoint via CountAgentsByPhaseIDs (a SQL read with no decision made).
-// Unlike the project endpoint's buildAgentStats (which reads the already
-// in-memory, read-filtered member set), this is a dedicated store read: the
-// global endpoint's stats population has no read filter to piggyback on.
-// The [id, phase] list is only built when it will be sent.
-func buildGlobalAgentStats(ctx context.Context, s *Server, statsFilter store.AgentFilter) (*ListAgentsStats, error) {
-	idPhases, err := s.store.CountAgentsByPhaseIDs(ctx, statsFilter)
+// endpoint over the readable agents of statsFilter, under the same
+// agent-list rule as the items. The candidates are read as narrow members,
+// bounded by authorizedListMaxCandidates; past that bound the counts are a
+// lower bound and the [id,phase] list is omitted. The list is also
+// omitted above globalAgentStatsCap readable agents.
+func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, statsFilter store.AgentFilter, p agentListParams) (*ListAgentsStats, error) {
+	members, err := s.store.ListAgentMembers(ctx, statsFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
 	if err != nil {
 		return nil, err
 	}
-	stats := &ListAgentsStats{Total: len(idPhases)}
-	for _, ip := range idPhases {
-		if ip.Phase == "running" {
+	truncated := len(members) > authorizedListMaxCandidates
+	if truncated {
+		members = members[:authorizedListMaxCandidates]
+	}
+	readable, err := s.readableAgentMembers(ctx, identity, members)
+	if err != nil {
+		return nil, err
+	}
+	stats := &ListAgentsStats{Total: len(readable)}
+	for _, m := range readable {
+		if m.Phase == "running" {
 			stats.Running++
 		}
 	}
-	if stats.Total <= globalAgentStatsCap {
-		agentsOut := make([][2]string, len(idPhases))
-		for i, ip := range idPhases {
-			agentsOut[i] = [2]string{ip.ID, ip.Phase}
+	if !truncated && stats.Total <= globalAgentStatsCap {
+		agentsOut := make([][2]string, len(readable))
+		for i, m := range readable {
+			agentsOut[i] = [2]string{m.ID, m.Phase}
 		}
 		stats.Agents = &agentsOut
 	}
 	return stats, nil
+}
+
+// agentResources returns the authorization Resource of each agent.
+func agentResources(items []store.Agent) []Resource {
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = agentResource(&items[i])
+	}
+	return resources
 }
 
 // sortedShortCircuitResponse builds the empty-list short-circuit response
