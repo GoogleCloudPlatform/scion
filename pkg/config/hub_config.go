@@ -526,6 +526,27 @@ type RuntimeBrokerConfig struct {
 	// dispatches whose harness-config declares a provisioner block. Defaults
 	// to true; set false to block provisioner-based dispatches on this broker.
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
+
+	// Instances mirrors settings server.broker.instances (flat Runtime Broker
+	// instances). Only settings.yaml may set it; a legacy server.yaml that
+	// does is rejected by LoadGlobalConfig.
+	Instances []RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// RuntimeBrokerInstanceConfig is the server-config form of
+// V1RuntimeBrokerInstanceConfig.
+type RuntimeBrokerInstanceConfig struct {
+	Key           string               `json:"key" yaml:"key" koanf:"key"`
+	Name          string               `json:"name" yaml:"name" koanf:"name"`
+	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+}
+
+// RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
+type RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1316,6 +1337,12 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 
 	if err := k.Unmarshal("", config); err != nil {
 		return nil, err
+	}
+
+	// Flat Runtime Broker instances are configured only under
+	// server.broker.instances in settings.yaml, never in legacy server.yaml.
+	if len(config.RuntimeBroker.Instances) > 0 {
+		return nil, ErrRuntimeBrokerInstancesInServerYAML
 	}
 
 	if topLevel != nil {

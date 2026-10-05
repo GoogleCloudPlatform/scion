@@ -1329,6 +1329,34 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// Instances declares the flat (single-target) Runtime Broker instances
+	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
+	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
+	// requires the Hub in the same process (CheckRuntimeBrokerInstanceHosting).
+	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
+	// settings never configure instances.
+	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// V1RuntimeBrokerInstanceConfig is one flat Runtime Broker instance.
+type V1RuntimeBrokerInstanceConfig struct {
+	// Key is the immutable local instance key; it names the instance's state
+	// directory. Changing it means a different instance.
+	Key string `json:"key" yaml:"key" koanf:"key"`
+	// Name is the Runtime Broker name registered with the Hub (a mutable
+	// label, not identity). Required.
+	Name string `json:"name" yaml:"name" koanf:"name"`
+	// RuntimeTarget declares the instance's single runtime target.
+	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+}
+
+// V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
+// Context and Namespace are Kubernetes-only (defined, not implemented).
+type V1RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -3036,6 +3064,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		} else {
 			gc.RuntimeBroker.AllowContainerScriptHarnesses = true
 		}
+		gc.RuntimeBroker.Instances = v1InstancesToGlobal(v1.Broker.Instances)
 	}
 
 	// Database config
@@ -3367,6 +3396,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.RuntimeBroker.CORSAllowedHeaders,
 			MaxAge:         gc.RuntimeBroker.CORSMaxAge,
 		},
+		Instances: globalInstancesToV1(gc.RuntimeBroker.Instances),
 	}
 
 	// Database config

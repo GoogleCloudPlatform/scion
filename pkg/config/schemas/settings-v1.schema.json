@@ -1348,7 +1348,47 @@
           "description": "Allow agents whose harness-config declares a provisioner block. Provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block provisioner-based dispatches on this broker.",
           "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
-        "cors": { "$ref": "#/$defs/corsConfig" }
+        "cors": { "$ref": "#/$defs/corsConfig" },
+        "instances": {
+          "type": "array",
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+        }
+      }
+    },
+    "runtimeBrokerInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "name", "runtime_target"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "description": "Immutable local instance key; names the instance's state directory. Changing it means a different instance."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime Broker name registered with the Hub (a mutable label, not identity)."
+        },
+        "runtime_target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["docker"],
+              "description": "Runtime target type. Only docker is supported in this release (kubernetes is defined but not implemented)."
+            },
+            "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
+            "context": { "type": "string", "description": "Kubernetes only (not implemented)." },
+            "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
+          },
+          "if": { "properties": { "type": { "const": "docker" } } },
+          "then": { "not": { "anyOf": [ { "required": ["context"] }, { "required": ["namespace"] } ] } }
+        }
       }
     },
     "corsConfig": {
