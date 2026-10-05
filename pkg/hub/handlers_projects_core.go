@@ -703,7 +703,8 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 
 // hasProjectMembersGroupMarker reports whether g carries either
 // project-members-group marker key and belongs to any project. It is used by
-// the owner-clearing backfill and the group PATCH guards.
+// the owner-clearing backfill, the group PATCH guards and the slug-rename
+// migration (isRenamableProjectMembersGroup).
 //
 // Its semantics differ from isSystemProjectMembersGroup on purpose:
 // isSystemProjectMembersGroup matches only the canonical key
