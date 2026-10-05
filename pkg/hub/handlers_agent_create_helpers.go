@@ -1823,7 +1823,7 @@ func (s *Server) userHoldsBrokerDispatch(ctx context.Context, user UserIdentity,
 //   - LinkedBy is the broker's owner;
 //   - LinkedBy is "auto-provide" (linked by autoLinkProviders, which only
 //     links brokers whose auto-provide setting was authorized); or
-//   - LinkedBy is a user who is currently a super-admin.
+//   - LinkedBy is an active user who is currently a super-admin.
 //
 // Every association through authorizeBrokerProvide records the linking
 // user, who holds broker.update, so it meets one of these. A provider row
@@ -1845,6 +1845,10 @@ func (s *Server) brokerProviderHasOwnerConsent(ctx context.Context, broker *stor
 		return false
 	case broker.CreatedBy, autoProvideLinkedBy:
 		return true
+	}
+	linker, err := s.store.GetUser(ctx, provider.LinkedBy)
+	if err != nil || linker == nil || linker.Status != store.UserStatusActive {
+		return false
 	}
 	return s.authzService.IsSystemAdmin(ctx, provider.LinkedBy)
 }

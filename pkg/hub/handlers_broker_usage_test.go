@@ -33,7 +33,7 @@ import (
 // Project members may have agents dispatched to a broker that is associated
 // with their project with its owner's consent. A provider row carries
 // consent when the broker has no owner, or LinkedBy is the broker's owner,
-// "auto-provide", or a current super-admin.
+// "auto-provide", or an active user who is a current super-admin.
 
 // newUsageBroker creates an online, non-auto-provide broker owned by ownerID
 // and, when linkedBy is not nil, links it to projectID with that LinkedBy.
@@ -178,6 +178,9 @@ func TestBrokerProviderHasOwnerConsent(t *testing.T) {
 	createRS1Project(t, s, projectID, ownerID)
 	admin := newSuperAdminUser(t, s, "consent-admin")
 	member := newHubMemberUser(t, s, "consent-member")
+	suspended := newSuperAdminUser(t, s, "consent-suspended-admin")
+	suspended.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, suspended))
 
 	cases := []struct {
 		name     string
@@ -188,6 +191,8 @@ func TestBrokerProviderHasOwnerConsent(t *testing.T) {
 		{"linked by the owner", ownerID, strPtr(ownerID), true},
 		{"linked by auto-provide", ownerID, strPtr(autoProvideLinkedBy), true},
 		{"linked by a super-admin", ownerID, strPtr(admin.ID), true},
+		{"linked by a suspended super-admin", ownerID, strPtr(suspended.ID), false},
+		{"linked by an unknown user", ownerID, strPtr(tid("consent-unknown-user")), false},
 		{"ownerless broker, empty linkedBy", "", strPtr(""), true},
 		{"ownerless broker, placeholder linkedBy", "", strPtr("agent-create"), true},
 		{"empty linkedBy", ownerID, strPtr(""), false},
