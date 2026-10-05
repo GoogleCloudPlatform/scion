@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS conversation_context (
 	PRIMARY KEY (slack_user_id, project_id, agent_slug)
 );
 
+-- project_agents is retained for existing databases and is unused.
 CREATE TABLE IF NOT EXISTS project_agents (
 	project_id TEXT PRIMARY KEY,
 	agent_slugs TEXT NOT NULL DEFAULT '[]',
