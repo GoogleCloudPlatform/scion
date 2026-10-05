@@ -1707,8 +1707,10 @@ export class ScionChatThread extends LitElement {
         const hashMsgId = jumped ? '' : this.parseMessageHash();
         const restore = jumped ? null : this.takeRestoreScrollAnchor();
         if (jumped) {
-          // The jump owns the scroll position.
-          this._openScrollDeferred = this._landedJumpSeq !== this._jumpSeq;
+          // The jump owns the scroll position. Deferred only while it has
+          // not landed and no earlier jump has landed since the open.
+          this._openScrollDeferred =
+            this._landedJumpSeq !== this._jumpSeq && this._landedJumpSeq <= this._jumpSeqAtOpen;
         } else if (hashMsgId) {
           void this.scrollToMessageById(hashMsgId, true);
         } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
