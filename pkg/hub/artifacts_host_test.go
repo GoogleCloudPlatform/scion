@@ -35,7 +35,7 @@ import (
 
 func artifactTestAgent(agentID, projectID string, scopes ...AgentTokenScope) *agentIdentityWrapper {
 	return &agentIdentityWrapper{AgentTokenClaims: &AgentTokenClaims{
-		Claims:      jwt.Claims{Subject: agentID},
+		Claims:      jwt.Claims{Subject: agentID, ID: "jti-" + agentID},
 		ProjectID:   projectID,
 		Scopes:      scopes,
 		ScopeSchema: CurrentAgentScopeSchema,

@@ -233,7 +233,7 @@ func TestEffectCeilingAllows(t *testing.T) {
 	b := boundedCeiling("agent.create")
 	for _, p := range allRegistryIDs() {
 		assert.True(t, EffectCeilingAllows(principal, p, false), p)
-		assert.Equal(t, !recordedProvenanceRequired[p], EffectCeilingAllows(unrecorded, p, false), p)
+		assert.Equal(t, !recordedProvenanceRequired[p] && !legacyChainExcludedPermissions[p], EffectCeilingAllows(unrecorded, p, false), p)
 		assert.False(t, EffectCeilingAllows(store.EffectCeiling{Kind: "other"}, p, true), p)
 		want := p == "agent.create"
 		assert.Equal(t, want, EffectCeilingAllows(b, p, false), p)
@@ -788,7 +788,16 @@ func TestSourceEffectCeilingRows(t *testing.T) {
 		w := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: p.ID}, ProjectID: g.projectID}}
 		c, _, err := g.authz(g.store, true, false).sourceEffectCeiling(ctx, w)
 		require.NoError(t, err)
-		assert.Equal(t, agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)), c.PermissionIDs, "coverage only, no delivery IDs")
+		// An agent without an edge is an unrecorded chain: its role coverage,
+		// less the permissions withheld from unrecorded chains, and no
+		// delivery IDs.
+		var want []string
+		for _, id := range agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)) {
+			if !legacyChainExcludedPermissions[id] {
+				want = append(want, id)
+			}
+		}
+		assert.Equal(t, want, c.PermissionIDs, "coverage only, no delivery IDs, no withheld permissions")
 
 		markEdgeBackfillComplete(t, g.store)
 		_, _, err = g.authz(g.store, true, false).sourceEffectCeiling(ctx, w)

@@ -96,8 +96,8 @@ func TestServiceAnswers404ForEverything(t *testing.T) {
 func TestHostIsStringOnly(t *testing.T) {
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 	host := reflect.TypeOf((*Host)(nil)).Elem()
-	if host.NumMethod() != 2 {
-		t.Fatalf("Host has %d methods, want 2 (Principal, Authorize)", host.NumMethod())
+	if host.NumMethod() != 3 {
+		t.Fatalf("Host has %d methods, want 3 (Principal, Authorize, Permits)", host.NumMethod())
 	}
 	for i := 0; i < host.NumMethod(); i++ {
 		m := host.Method(i)

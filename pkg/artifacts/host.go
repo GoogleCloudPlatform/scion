@@ -38,8 +38,9 @@ const (
 	PermissionManage = "artifact.manage"
 )
 
-// Host is the service's only view of the system it runs in. It answers two
-// questions: who is calling, and whether that caller may act in a scope.
+// Host is the service's only view of the system it runs in. It answers
+// three questions: who is calling, whether that caller may act in a scope,
+// and whether the caller's credential allows an action at all.
 //
 // Every input and output is a string or a bool, so the interface can later be
 // served over a wire protocol by a standalone deployment. Do not add hub
@@ -59,4 +60,12 @@ type Host interface {
 	// closed: an unknown permission, an empty scope or an unauthenticated
 	// caller yields false.
 	Authorize(ctx context.Context, scopeRef, permission string) bool
+
+	// Permits reports whether the caller's credential itself allows
+	// permission on artifacts homed in scopeRef: the restrictions a token
+	// carries (its scopes, ceiling and boundary), checked before ownership,
+	// grants or role bindings. The service asks it first on every path, so
+	// neither ownership nor a grant reaches past what the credential allows.
+	// It fails closed like Authorize.
+	Permits(ctx context.Context, scopeRef, permission string) bool
 }

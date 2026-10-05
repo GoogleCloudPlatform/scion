@@ -413,7 +413,8 @@ func (a *AuthzService) walkDelegationChainWithCause(
 //   - a bounded hop denies a permission its ceiling does not allow, with the
 //     self-operation exception only when the resource is the acting agent;
 //   - an unrecorded hop denies every permission in
-//     recordedProvenanceRequired and passes the rest;
+//     recordedProvenanceRequired or legacyChainExcludedPermissions and
+//     passes the rest;
 //   - a principal hop passes.
 func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled bool) (DenyCause, string) {
 	if hasDevLocalProvenance(edge) {
@@ -431,7 +432,7 @@ func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resou
 	case store.EffectCeilingPrincipal:
 		return "", ""
 	case store.EffectCeilingUnrecorded:
-		if recordedProvenanceRequired[permissionID] {
+		if recordedProvenanceRequired[permissionID] || legacyChainExcludedPermissions[permissionID] {
 			return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID)
 		}
 		return "", ""
@@ -476,6 +477,11 @@ func (a *AuthzService) migrationSentinelCeiling(
 		return true, "migration-provenance delegation: read allowed at frozen ceiling", nil
 	}
 	for _, scope := range ScopesForRole(AgentRole(edge.Role)) {
+		// The backfilled role predates the ceiling-optional role scopes, so
+		// they are never covered here (legacyChainExcludedPermissions).
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		if scope == requiredScope {
 			addStep("delegation_ceiling_migration_allow_scope",
 				fmt.Sprintf("migration-provenance edge for agent %s; scope %s covered by frozen ceiling (role=%s)", agentID, requiredScope, edge.Role))

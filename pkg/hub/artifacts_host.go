@@ -41,37 +41,71 @@ func newArtifactHost(s *Server) *artifactHost {
 }
 
 // Principal maps the request identity to (kind, ref, homeScope). Owner refs
-// are stable ids (user id, agent id), never names. Classification is by
-// concrete identity type (principalContextForIdentity), never Type(): local
-// users and the dev user are users; hub agents are agents, homed in their
-// project. Every other identity (federated principals, brokers, unknown
-// types) is not served and yields ok=false.
+// are stable ids (user id, agent id), never names.
 //
-// An agent is served only when its token carries project:artifact:read. The
-// scope decides whether an agent may use the artifact service at all; the
-// service's grants only decide which artifacts. Answering ok=false here
-// means no grant can reach an agent whose ceiling did not allow the scope:
-// the service treats it as unauthenticated and answers 404.
+// Local users, scoped user access tokens and the dev user are users; what a
+// scoped token allows is Permits' question. Agents are served only when
+// token-backed (a validated agent token, which carries a token id) and when
+// the token carries project:artifact:read: in-process agent identities the
+// hub builds for its own decisions carry unfiltered role scopes and never
+// reach the artifact service. Every other identity (federated principals,
+// brokers, unknown types) is not served and yields ok=false.
 func (h *artifactHost) Principal(ctx context.Context) (kind, ref, homeScope string, ok bool) {
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
 		return "", "", "", false
 	}
-	principal := principalContextForIdentity(identity)
-	if principal.ID == "" {
-		return "", "", "", false
-	}
-	switch principal.Kind {
-	case PrincipalKindUser, PrincipalKindDev:
-		return artifacts.PrincipalKindUser, principal.ID, "", true
-	case PrincipalKindAgent:
-		agent, isAgent := identity.(AgentIdentity)
-		if !isAgent || !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		if id.ID() == "" {
 			return "", "", "", false
 		}
-		return artifacts.PrincipalKindAgent, principal.ID, agent.ProjectID(), true
+		return artifacts.PrincipalKindUser, id.ID(), "", true
+	case *agentIdentityWrapper:
+		if id.ID() == "" || id.TokenID() == "" || !agentHasAnyScope(id, []string{string(ScopeProjectArtifactRead)}) {
+			return "", "", "", false
+		}
+		return artifacts.PrincipalKindAgent, id.ID(), id.ProjectID(), true
 	default:
 		return "", "", "", false
+	}
+}
+
+// Permits reports whether the caller's credential allows permission on
+// artifacts homed in the project scopeRef, before ownership, grants or role
+// bindings are considered:
+//   - a session or dev user: yes (role bindings decide in Authorize);
+//   - a scoped user access token: its boundary must reach the project and
+//     its ceiling must allow the permission;
+//   - a token-backed agent: its token must carry one of the permission's
+//     dedicated agent scopes. There is no project boundary: grants to other
+//     projects are how agents collaborate across projects (design D5);
+//   - anything else: no.
+//
+// It fails closed on an empty scope or a permission that is not an artifact
+// registry row.
+func (h *artifactHost) Permits(ctx context.Context, scopeRef, permission string) bool {
+	if scopeRef == "" {
+		return false
+	}
+	perm, ok := artifactPermission(permission)
+	if !ok {
+		return false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return false
+	}
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *DevUser:
+		return true
+	case *ScopedUserIdentity:
+		return BoundaryAllows(id.Boundary(), TargetScope{Kind: TargetScopeProject, ProjectID: scopeRef}) &&
+			id.Ceiling().Allows(perm.ID)
+	case *agentIdentityWrapper:
+		return id.TokenID() != "" && agentHasAnyScope(id, perm.AgentScopes)
+	default:
+		return false
 	}
 }
 
