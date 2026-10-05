@@ -269,7 +269,7 @@ func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _,
 	return &RemoteAgentResponse{}, nil
 }
 
-func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _ string) error {
+func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _, _ string) error {
 	if brokerID != c.localBroker {
 		return ErrLifecycleDeferred
 	}

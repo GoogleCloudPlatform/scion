@@ -678,7 +678,11 @@ type RuntimeBrokerClient interface {
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
-	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error
+	// runID, when non-empty, names the run the stop is for
+	// (ptone/scion#2550): the broker then stops only that run's entry and
+	// answers 404 (ErrStopRunNotFound here) when only another run holds the
+	// name. An empty runID keeps the legacy name-scoped stop.
+	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error
 
 	// RestartAgent restarts an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -767,6 +771,41 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	// for every other existing-agent operation, so both transports send it
 	// beside runId.
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// stopAgentQuery builds the query string for a broker stop request. runId,
+// when set, names the run the stop is for (ptone/scion#2550); an old broker
+// ignores it and stops by name as before.
+func stopAgentQuery(ctx context.Context, projectID, runID string) string {
+	var query string
+	if projectID != "" {
+		query = "projectId=" + url.QueryEscape(projectID)
+	}
+	if runID != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += "runId=" + url.QueryEscape(runID)
+	}
+	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// ErrStopRunNotFound reports that a run-scoped stop found no entry of the
+// requested run on the broker (a 404): the run is already gone, and any
+// entry holding the agent's name belongs to a different run, which the
+// broker left untouched (ptone/scion#2550). Callers must not record the
+// current run as stopped because of it; the error still unwraps to the
+// broker's status error.
+var ErrStopRunNotFound = errors.New("runtime broker has no entry for the requested run")
+
+// stopAgentError marks a broker 404 on a run-scoped stop as
+// ErrStopRunNotFound, on both transports. Other errors, and a 404 on a
+// legacy stop without a run ID, are returned unchanged.
+func stopAgentError(err error, runID string) error {
+	if err == nil || runID == "" || !isBrokerStatus(err, http.StatusNotFound) {
+		return err
+	}
+	return fmt.Errorf("%w (run %s): %w", ErrStopRunNotFound, runID, err)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.

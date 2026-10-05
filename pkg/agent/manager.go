@@ -68,8 +68,19 @@ type Manager interface {
 	// Start launches a new agent with the given configuration
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
 
-	// Stop terminates an agent
-	Stop(ctx context.Context, agentID string, projectPath string) error
+	// Stop terminates an agent, resolving agentID by slug (scoped by
+	// projectPath when given). runID, when non-empty, names the run the stop
+	// is for (ptone/scion#2550): only an entry labelled with that run (or a
+	// legacy entry with no run label) is stopped, and with no such entry
+	// Stop returns an error satisfying errors.Is(err, ErrStopRunNotFound)
+	// without stopping anything. An empty runID keeps the legacy behaviour,
+	// including the fallback that passes agentID to the runtime as-is.
+	Stop(ctx context.Context, agentID, projectPath, runID string) error
+
+	// StopTarget stops an agent the caller has already resolved to a
+	// specific runtime entry (ref.ID; ref.RunID is that entry's run ID). It
+	// never re-resolves by slug. It mirrors DeleteTarget.
+	StopTarget(ctx context.Context, ref runtime.RunRef) error
 
 	// Delete terminates and removes an agent, resolving agentID by slug
 	// (scoped by projectPath when given). It fails closed when the slug is
@@ -338,24 +349,72 @@ func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 	return out
 }
 
-func (m *AgentManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+// ErrStopRunNotFound is returned by Stop when it names a run and no entry
+// of that run holds the agent's name: the run is already gone, and the
+// entry that does hold the name (if any) belongs to another run, so nothing
+// is stopped (ptone/scion#2550).
+var ErrStopRunNotFound = errors.New("agent not found for the requested run")
+
+func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
 	// Resolve the agent name to a container ID so that runtimes which do
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	if runID != "" {
+		// A run-scoped stop never falls back to the bare name: the name may
+		// now belong to an agent recreated under a different run.
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		target, found, selErr := selectAgentTarget(filterAgentsByRun(agents, runID), agentID, resolveProjectName(projectPath))
+		if selErr != nil {
+			return selErr
+		}
+		if !found {
+			return fmt.Errorf("agent '%s' (run %s): %w", agentID, runID, ErrStopRunNotFound)
+		}
+		return m.Runtime.Stop(ctx, runtime.RunRef{ID: target.ContainerID, RunID: target.RunID})
+	}
 	if err == nil {
 		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
 		if selErr != nil {
 			return selErr
 		}
 		if found {
-			return m.Runtime.Stop(ctx, target.ContainerID)
+			return m.Runtime.Stop(ctx, runtime.RunRef{ID: target.ContainerID, RunID: target.RunID})
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
 	// failed — pass it through directly.
-	return m.Runtime.Stop(ctx, agentID)
+	return m.Runtime.Stop(ctx, runtime.RunRef{ID: agentID})
+}
+
+// filterAgentsByRun keeps the entries a stop naming run runID may target,
+// with the same rule the broker applies to a run-scoped delete: entries
+// labelled runID win; without one, a legacy entry carrying no run label
+// (started before run IDs existed) still matches by name; an entry labelled
+// with a different run never does.
+func filterAgentsByRun(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	var exact, legacy []api.AgentInfo
+	for _, a := range agents {
+		switch a.RunID {
+		case runID:
+			exact = append(exact, a)
+		case "":
+			legacy = append(legacy, a)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return legacy
+}
+
+// StopTarget stops the runtime entry ref, which the caller has already
+// resolved; unlike Stop it performs no slug re-resolution.
+func (m *AgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	return m.Runtime.Stop(ctx, ref)
 }
 
 func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
@@ -399,7 +458,7 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 		// SIGKILL which can leave mounts in a state that causes permission
 		// errors when DeleteAgentFiles tries to remove the agent directory.
 		util.Debugf("delete: stopping container %s before removal", targetID)
-		if err := m.Runtime.Stop(ctx, targetID); err != nil {
+		if err := m.Runtime.Stop(ctx, ref); err != nil {
 			// Log but don't fail — the container may already be stopped,
 			// and Delete (force-remove) will handle it either way.
 			util.Debugf("delete: stop returned error (continuing): %v", err)

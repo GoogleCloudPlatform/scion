@@ -479,7 +479,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// A stop failure is fatal, checked BEFORE any config write. The broker
 	// itself already treats "already stopped" and "not found" as success
 	// (runtimebroker handlers.go stopAgent), so any error returned here is a
-	// genuine failure — broker unreachable, a real runtime error, or a stop
+	// genuine failure. The one 404 a broker returns, for a stop naming a run
+	// that no longer holds the name (ErrStopRunNotFound, ptone/scion#2550),
+	// fails here too: the entry holding the name is another run's — broker unreachable, a real runtime error, or a stop
 	// that timed out — and continuing past it would re-render config and
 	// dispatch a fresh session under a container that is still running the
 	// old generation.

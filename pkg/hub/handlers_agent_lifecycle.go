@@ -726,7 +726,7 @@ const (
 func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
 	ctx := r.Context()
 	at := intentAt
-	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at})
+	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, RunID: agent.RunID})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

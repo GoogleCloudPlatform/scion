@@ -75,8 +75,8 @@ func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 }
 
-func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
-	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
+	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 }
 
 func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
@@ -3303,7 +3303,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	// Send the row's run ID so the broker stops only that run's entry,
+	// never a newer run recreated under the same name (ptone/scion#2550).
+	// A row with no run ID sends none, and the broker stops by name as
+	// before. A broker 404 on a run-scoped stop comes back as
+	// ErrStopRunNotFound: the requested run is already gone, and callers
+	// must not record the current run as stopped because of it.
+	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, agent.RunID)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredStop(ctx, agent)
 	}
@@ -3672,7 +3678,10 @@ func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Ag
 
 // deferredStop handles a cross-node agent stop.
 func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Agent) error {
-	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{}, isStopTerminal)
+	// The intent pins the run this stop was dispatched for, so the owning
+	// node stops that run even if the row's run ID moves on before it
+	// drains the intent (ptone/scion#2550).
+	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{RunID: agent.RunID}, isStopTerminal)
 }
 
 // deferredRestart handles a cross-node agent restart.

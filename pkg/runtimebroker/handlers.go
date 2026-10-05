@@ -2554,9 +2554,12 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.project.id", projectID),
 	)
 
-	// Wake any local launch waiting on this agent (design §3.8.1); see the
-	// identical comment in deleteAgent.
-	s.cancelLocalLaunch(launchKey{ProjectID: projectID, Slug: id})
+	// runId, when the hub sends it, names the run the stop is for
+	// (ptone/scion#2550). A stop for a run that no longer holds this name
+	// answers 404 and touches nothing, so a stale stop cannot stop an agent
+	// recreated under the same name. Without it, behaviour is as before.
+	runID := r.URL.Query().Get("runId")
+	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
@@ -2571,7 +2574,28 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// below — the manager whose List call actually produced the matched
 	// entry, not one re-resolved by a second, independent lookup that could
 	// land on a different runtime than the one the target came from.
-	target, mgr, err := s.projectScopedTarget(ctx, id, projectID)
+	//
+	// The lookup runs before the launch cancel below so that a run-scoped
+	// stop that matches another run returns before any side effect. Unlike
+	// delete, stop needs no cancel ahead of resolution: no lookup outcome
+	// here returns before reaching the cancel except the run mismatch, which
+	// must not cancel anything.
+	match, lookupErr := s.lookupAgentMatch(ctx, id, projectID)
+	if runID != "" && s.stopRunMismatch(launchKey{ProjectID: projectID, Slug: id}, runID, match, lookupErr) {
+		s.agentLifecycleLog.Info("Agent stop: no entry for the requested run; leaving the other run untouched",
+			"agent_id", id, "project_id", projectID, "run_id", runID,
+			"entry_run_id", match.entry.RunID)
+		span.SetStatus(codes.Error, "run mismatch")
+		NotFound(w, "Agent")
+		return
+	}
+
+	// Wake any local launch waiting on this agent (design §3.8.1); see the
+	// identical comment in deleteAgent. Run-aware, as there: a stop naming
+	// a run leaves a start of a different run alone.
+	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, runID)
+
+	target, mgr, err := s.projectScopedTargetFrom(ctx, id, projectID, match, lookupErr)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, ErrAgentListUnavailable) {
@@ -2636,7 +2660,13 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		})
 		return
 	}
-	if err := mgr.Stop(ctx, target, ""); err != nil {
+	// Stop exactly the resolved entry: StopTarget does not re-resolve by
+	// name, so the run checked above is the run stopped.
+	stopRef := scionrt.RunRef{ID: target}
+	if match.containerID == target {
+		stopRef.RunID = match.entry.RunID
+	}
+	if err := mgr.StopTarget(ctx, stopRef); err != nil {
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -2659,6 +2689,28 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		"status":  "accepted",
 		"message": "Stop operation accepted",
 	})
+}
+
+// stopRunMismatch reports whether a stop naming run runID must be refused
+// with 404 and no side effects (ptone/scion#2550), given the stop's lookup
+// result:
+//   - the matched entry (with or without a container ID) is labelled with a
+//     different, non-empty run: that run now holds the name;
+//   - nothing matched, but a launch of a different run is in flight on this
+//     broker under key: the name belongs to that starting run, and the
+//     "not found in project" 202 must not be reported for it.
+//
+// A legacy entry or launch with no run label matches by name, as a
+// run-scoped delete does. A lookup error is never a mismatch here; the
+// caller reports it as before.
+func (s *Server) stopRunMismatch(key launchKey, runID string, m agentMatch, lookupErr error) bool {
+	if m.matched {
+		return m.entry.RunID != "" && m.entry.RunID != runID
+	}
+	if lookupErr != nil && !errors.Is(lookupErr, ErrAgentNotFound) {
+		return false
+	}
+	return s.launchRegistry.inFlightOtherRun(key, runID)
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -2779,7 +2831,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the start below create it.
 	if stopTarget == "" {
 		s.agentLifecycleLog.Warn("Restart: agent not found in project, proceeding with start", "agent_id", id)
-	} else if err := stopMgr.Stop(ctx, stopTarget, ""); err != nil {
+	} else if err := stopMgr.Stop(ctx, stopTarget, "", ""); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {

@@ -3117,8 +3117,12 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	return nil
 }
 
-func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, RunRef{ID: id})
+// Stop is Delete on Kubernetes. ref.RunID is passed through so Stop picks up
+// Delete's run enforcement when it lands.
+// TODO(ptone/scion#2550 P2/P4): Delete does not enforce ref.RunID yet; the
+// pod name is reused across runs, so this is still name-scoped today.
+func (r *KubernetesRuntime) Stop(ctx context.Context, ref RunRef) error {
+	return r.Delete(ctx, ref)
 }
 
 // Delete removes the pod ref.ID and its secrets.

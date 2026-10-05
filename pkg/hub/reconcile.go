@@ -202,6 +202,12 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 			return "", fmt.Errorf("unmarshal stop args: %w", err)
 		}
 		intentAt = args.IntentAt
+		if args.RunID != "" {
+			// Stop the run the intent was queued for, not whatever run the
+			// row names now (ptone/scion#2550). agent is this call's own
+			// copy, loaded by resolveDispatchAgent above.
+			agent.RunID = args.RunID
+		}
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or

@@ -177,16 +177,12 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 }
 
 // StopAgent stops an agent via control channel.
-func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/stop", url.PathEscape(agentID))
-	query := ""
-	if projectID != "" {
-		query = "projectId=" + url.QueryEscape(projectID)
-	}
-	query = withRecordedRuntimeQuery(ctx, query)
+	query := stopAgentQuery(ctx, projectID, runID)
 	_, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
-	return err
+	return stopAgentError(err, runID)
 }
 
 // RestartAgent restarts an agent via control channel.
@@ -815,12 +811,12 @@ func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEnd
 // StopAgent stops an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	case routeHTTP:
-		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	default:
 		return ErrLifecycleDeferred
 	}
