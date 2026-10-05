@@ -2303,7 +2303,10 @@ func writeLaunchInvalidPhase(w http.ResponseWriter) {
 // failure) while the broker dispatch is still in flight.
 func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) {
 	current, err := s.store.GetAgent(ctx, agent.ID)
-	if err != nil {
+	// A soft-deleted row is left alone: adopting its StateVersion would let
+	// the caller's write (zero DeletedAt in memory) win the CAS and clear
+	// deleted_at. The write then conflicts and the retry merges into the row.
+	if err != nil || !current.DeletedAt.IsZero() {
 		return
 	}
 	p := state.Phase(current.Phase)
