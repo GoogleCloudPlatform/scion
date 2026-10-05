@@ -824,7 +824,9 @@ var Catalog = []OperationSpec{
 		DelegationDescription: "Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); " +
 			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
 		AuthorityEval: AuthorityEvalNone,
-		DenialCodes:   []DenialCode{DenialForbidden},
+		// conflict: the agent's owner user no longer exists (deleted while
+		// the create ran), or its slug's identity key is taken.
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
@@ -897,8 +899,10 @@ var Catalog = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		// conflict: the agent's owner user no longer exists, or its
+		// identity key is now taken by another agent.
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
 	},
 	{
 		ID:          "agent.lifecycle.exec",

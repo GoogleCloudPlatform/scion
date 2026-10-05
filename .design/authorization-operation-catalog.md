@@ -1103,7 +1103,7 @@
 - **Kind:** `non_amplification`
 - Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
@@ -1210,7 +1210,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 

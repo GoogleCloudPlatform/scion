@@ -58,7 +58,7 @@ func (e *userOwnsAgentsDeleteError) Error() string {
 	return userOwnsAgentsDeleteMessage
 }
 
-const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first"
+const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first, including agents started by those agents"
 
 // writeUserOwnsAgentsDeleteError writes the 409 conflict response for a user
 // deletion refused because the user owns agents; details.agents lists them.
@@ -71,8 +71,10 @@ func writeUserOwnsAgentsDeleteError(w http.ResponseWriter, e *userOwnsAgentsDele
 // is a variable so tests can force several pages.
 var ownedAgentsPageSize = 100
 
-// checkUserOwnsNoAgentsTx refuses the deletion of userID while agents with
-// OwnerID == userID exist. It runs inside the delete transaction.
+// checkUserOwnsNoAgentsTx refuses the deletion of userID while the user's
+// agents exist: agents with OwnerID == userID, and agents started by those
+// agents (the user is the root of their ancestry). It runs inside the delete
+// transaction.
 //
 // It first locks the user row exclusively (SELECT ... FOR UPDATE on
 // PostgreSQL; see store.UserStore.LockUserRow). Agent create and restore
@@ -97,19 +99,32 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 		return err
 	}
 	var owned []ownedAgentRef
-	opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
-	for {
-		page, err := tx.ListAgents(ctx, store.AgentFilter{OwnerID: userID}, opts)
-		if err != nil {
-			return fmt.Errorf("list agents owned by user: %w", err)
+	seen := map[string]bool{}
+	// Direct agents (OwnerID == userID) and agents whose ancestry contains
+	// the user, which are the agents started by the user's agents (and their
+	// descendants; a user ID only appears as the ancestry root). Agents the
+	// user created also record [userID] as their ancestry, so the two
+	// queries overlap; seen drops the duplicates. The OwnerID query still
+	// covers legacy agents with an empty ancestry.
+	for _, filter := range []store.AgentFilter{{OwnerID: userID}, {AncestorID: userID}} {
+		opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
+		for {
+			page, err := tx.ListAgents(ctx, filter, opts)
+			if err != nil {
+				return fmt.Errorf("list agents owned by user: %w", err)
+			}
+			for _, a := range page.Items {
+				if seen[a.ID] {
+					continue
+				}
+				seen[a.ID] = true
+				owned = append(owned, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID})
+			}
+			if page.NextCursor == "" || len(page.Items) == 0 {
+				break
+			}
+			opts.Cursor = page.NextCursor
 		}
-		for _, a := range page.Items {
-			owned = append(owned, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID})
-		}
-		if page.NextCursor == "" || len(page.Items) == 0 {
-			break
-		}
-		opts.Cursor = page.NextCursor
 	}
 	if len(owned) == 0 {
 		return nil
@@ -146,20 +161,27 @@ func lockAgentOwnerUserTx(ctx context.Context, tx store.Store, ownerUserID strin
 	return nil
 }
 
-// agentOwnerUserID returns the agent's OwnerID when the owner is a user, or
-// "" when it is another principal (an agent) or cannot be told. OwnerID is a
+// agentOwnerUserID returns the agent's OwnerID when the owner may be a
+// user, or "" when it is another principal (an agent). OwnerID is a
 // polymorphic principal reference. An agent a user created records that user
 // as both its owner and the root of its ancestry ([userID]); an agent another
 // agent created records the parent agent as its owner and the parent at the
-// end of its ancestry, after the root user. So the owner is a user when it is
-// the ancestry root, unless the ancestry is that one ID and the ID is also an
-// agent (a legacy parent agent with an empty ancestry of its own), which the
-// caller checks.
+// end of its ancestry, after the root user. So the owner may be a user when
+// it is the ancestry root. Two cases cannot be told from the row alone and
+// are returned for the caller (checkRestoreOwnerTx) to resolve against the
+// store: a legacy parent agent with an empty ancestry of its own (its child
+// records the parent as both owner and ancestry root), and a legacy agent
+// with an empty ancestry (recorded before ancestry was). The caller treats
+// the owner as a missing user only when it is neither a user nor an agent,
+// the existence rule relationshipSourceActive uses.
 func agentOwnerUserID(a *store.Agent) string {
-	if a.OwnerID == "" || len(a.Ancestry) == 0 || a.Ancestry[0] != a.OwnerID {
+	if a.OwnerID == "" {
 		return ""
 	}
-	return a.OwnerID
+	if len(a.Ancestry) == 0 || a.Ancestry[0] == a.OwnerID {
+		return a.OwnerID
+	}
+	return ""
 }
 
 // userScopedDataCleanupTimeout bounds the post-delete cleanup of one user's

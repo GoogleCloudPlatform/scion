@@ -1624,10 +1624,14 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 
 // checkRestoreOwnerTx refuses the restore, with errAgentOwnerUserMissing,
 // when ownerUserID (agentOwnerUserID of the agent) names a user that no
-// longer exists. It locks the user's row shared (lockAgentOwnerUserTx). A
-// legacy agent created by a parent agent with an empty ancestry records the
-// parent as both owner and ancestry root; an owner that is an agent is not a
-// missing user, so the restore goes ahead.
+// longer exists. It locks the user's row shared (lockAgentOwnerUserTx). The
+// owner counts as a missing user only when it is neither a user nor an
+// agent (GetUser and GetAgent both return not found), the existence rule
+// relationshipSourceActive uses. That covers a legacy agent created by a
+// parent agent with an empty ancestry, which records the parent as both
+// owner and ancestry root (an owner that is an agent is not a missing user,
+// so the restore goes ahead), and a legacy agent with an empty ancestry,
+// whose owner kind is not recorded.
 func checkRestoreOwnerTx(ctx context.Context, tx store.Store, ownerUserID string) error {
 	err := lockAgentOwnerUserTx(ctx, tx, ownerUserID)
 	if !errors.Is(err, errAgentOwnerUserMissing) {

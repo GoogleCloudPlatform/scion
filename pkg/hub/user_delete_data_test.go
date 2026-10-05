@@ -20,9 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -527,4 +529,252 @@ func TestCommitAgentCreate_OwnerUserMissing(t *testing.T) {
 	require.ErrorIs(t, err, errAgentOwnerUserMissing)
 	_, err = s.GetAgent(ctx, a.ID)
 	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+}
+
+// TestDeleteUser_DescendantAgentDenied: an agent started by one of the
+// user's agents (the user is its ancestry root) blocks the delete even after
+// the user's own agent is soft-deleted; a soft-deleted descendant does not.
+func TestDeleteUser_DescendantAgentDenied(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	parent := &store.Agent{ID: tid("agent-dave-parent"), Slug: "dave-parent", Name: "dave-parent",
+		ProjectID: project.ID, Phase: "running", OwnerID: dave.ID, CreatedBy: dave.ID,
+		Ancestry: []string{dave.ID}}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+	child := &store.Agent{ID: tid("agent-dave-child"), Slug: "dave-child", Name: "dave-child",
+		ProjectID: project.ID, Phase: "stopped", OwnerID: parent.ID, CreatedBy: parent.ID,
+		Ancestry: []string{dave.ID, parent.ID}}
+	require.NoError(t, s.CreateAgent(ctx, child))
+	// A soft-deleted descendant does not count.
+	softDeletedAgent(t, s, "dave-gone-child", project.ID, parent.ID, []string{dave.ID, parent.ID})
+
+	// Both are listed once each (the parent matches both the owner and the
+	// ancestry query).
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	requireOwnsAgentsDenial(t, rec, parent, child)
+
+	now := time.Now()
+	_, err := s.UpdateAgentDeletion(ctx, parent.ID, store.DeletionPredicate{},
+		store.DeletionFields{DeletedAt: &now})
+	require.NoError(t, err)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	requireOwnsAgentsDenial(t, rec, child)
+	_, err = s.GetUser(ctx, dave.ID)
+	require.NoError(t, err, "denied delete must keep the user")
+}
+
+// userLockRecordingStore records, in order, the user-row locks, agent
+// lists and agent writes made through it, including inside WithTx.
+// LockUserRow fails with lockErr when it is set.
+type userLockRecordingStore struct {
+	store.Store
+	mu      *sync.Mutex
+	events  *[]string
+	lockErr error
+}
+
+func newUserLockRecordingStore(s store.Store) *userLockRecordingStore {
+	return &userLockRecordingStore{Store: s, mu: &sync.Mutex{}, events: &[]string{}}
+}
+
+func (r *userLockRecordingStore) record(e string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	*r.events = append(*r.events, e)
+}
+
+// index returns the position of the first event equal to e, or -1.
+func (r *userLockRecordingStore) index(e string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, got := range *r.events {
+		if got == e {
+			return i
+		}
+	}
+	return -1
+}
+
+func (r *userLockRecordingStore) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), *r.events...)
+}
+
+func (r *userLockRecordingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return r.Store.WithTx(ctx, func(tx store.Store) error {
+		c := *r
+		c.Store = tx
+		return fn(&c)
+	})
+}
+
+func (r *userLockRecordingStore) LockUserRow(ctx context.Context, id string, exclusive bool) error {
+	r.record(fmt.Sprintf("lock:%s:%t", id, exclusive))
+	if r.lockErr != nil {
+		return r.lockErr
+	}
+	return r.Store.LockUserRow(ctx, id, exclusive)
+}
+
+func (r *userLockRecordingStore) ListAgents(ctx context.Context, f store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	switch {
+	case f.OwnerID != "":
+		r.record("list:owner:" + f.OwnerID)
+	case f.AncestorID != "":
+		r.record("list:ancestor:" + f.AncestorID)
+	}
+	return r.Store.ListAgents(ctx, f, opts)
+}
+
+func (r *userLockRecordingStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+	r.record("create:" + a.Slug)
+	return r.Store.CreateAgent(ctx, a)
+}
+
+func (r *userLockRecordingStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	r.record("update:" + a.ID)
+	return r.Store.UpdateAgent(ctx, a)
+}
+
+// requireBefore asserts both events were recorded, first before second.
+func requireBefore(t *testing.T, r *userLockRecordingStore, first, second string) {
+	t.Helper()
+	i, j := r.index(first), r.index(second)
+	require.GreaterOrEqual(t, i, 0, "%q not recorded; events: %v", first, r.snapshot())
+	require.GreaterOrEqual(t, j, 0, "%q not recorded; events: %v", second, r.snapshot())
+	require.Less(t, i, j, "%q must come before %q; events: %v", first, second, r.snapshot())
+}
+
+// TestUserRowLocks_DeleteExclusiveCreateRestoreShared pins where the hub
+// takes the user-row lock (ptone/scion#2769): both delete paths lock the
+// user's row exclusively before listing the user's agents, and agent create
+// and restore lock the owner's row shared before writing the agent. On
+// SQLite the lock is a plain read, so only the call order is checked here;
+// the PostgreSQL lock semantics are covered in pkg/store/integrationtest.
+func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
+	t.Run("users delete", func(t *testing.T) {
+		srv, s, _, _, _ := setupDemoPolicyTest(t)
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		requireBefore(t, r, "lock:"+dave.ID+":true", "list:owner:"+dave.ID)
+		requireBefore(t, r, "lock:"+dave.ID+":true", "list:ancestor:"+dave.ID)
+	})
+	t.Run("allow-list delete", func(t *testing.T) {
+		srv, s, _, _, _ := setupDemoPolicyTest(t)
+		carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		requireBefore(t, r, "lock:"+carol.ID+":true", "list:owner:"+carol.ID)
+		requireBefore(t, r, "lock:"+carol.ID+":true", "list:ancestor:"+carol.ID)
+	})
+	t.Run("create", func(t *testing.T) {
+		f := newUATCreateFixture(t, "lock-create")
+		r := newUserLockRecordingStore(f.store)
+		f.srv.store = r
+		rec := f.create(t, authUser(f.creator), CreateAgentRequest{Name: "lock-create"})
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		requireBefore(t, r, "lock:"+f.creator.ID+":false", "create:lock-create")
+		assert.Equal(t, -1, r.index("lock:"+f.creator.ID+":true"), "create must not lock exclusively")
+	})
+	t.Run("restore", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		a := softDeletedAgent(t, s, "dave-agent", project.ID, dave.ID, []string{dave.ID})
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		requireBefore(t, r, "lock:"+dave.ID+":false", "update:"+a.ID)
+		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "restore must not lock exclusively")
+	})
+}
+
+// TestRestoreAgent_LegacyParentOwnerRestored: a legacy child whose parent
+// agent had an empty ancestry records the parent as both owner and ancestry
+// root ([P]). The parent is an agent, not a missing user, so the restore
+// succeeds.
+func TestRestoreAgent_LegacyParentOwnerRestored(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	parent := &store.Agent{ID: tid("agent-legacy-parent"), Slug: "legacy-parent", Name: "legacy-parent",
+		ProjectID: project.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+	child := softDeletedAgent(t, s, "legacy-child", project.ID, parent.ID, []string{parent.ID})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+child.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(ctx, child.ID)
+	require.NoError(t, err)
+	assert.True(t, got.DeletedAt.IsZero())
+}
+
+// TestRestoreAgent_EmptyAncestryOwnerMissingRefused: an agent with an empty
+// ancestry (recorded before ancestry was) whose owner is neither a user nor
+// an agent is refused like a deleted user's agent; one whose owner user or
+// owner agent exists is restored.
+func TestRestoreAgent_EmptyAncestryOwnerMissingRefused(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	gone := softDeletedAgent(t, s, "legacy-gone", project.ID, tid("user-gone"), nil)
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	daves := softDeletedAgent(t, s, "legacy-dave", project.ID, dave.ID, nil)
+	parent := &store.Agent{ID: tid("agent-legacy-owner"), Slug: "legacy-owner", Name: "legacy-owner",
+		ProjectID: project.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+	agentOwned := softDeletedAgent(t, s, "legacy-agent-owned", project.ID, parent.ID, nil)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+gone.ID+"/restore", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "owner no longer exists")
+	got, err := s.GetAgent(ctx, gone.ID)
+	require.NoError(t, err)
+	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
+
+	for _, a := range []*store.Agent{daves, agentOwned} {
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", a.Slug, rec.Body.String())
+	}
+}
+
+// TestCreateAgent_OwnerUserMissingReturns409: when the owner user's row is
+// gone at commit time, the create handler answers 409 conflict and releases
+// the quota reservations it took.
+func TestCreateAgent_OwnerUserMissingReturns409(t *testing.T) {
+	f := newUATCreateFixture(t, "owner-gone")
+	setProjectAgentCeiling(t, f.store, 10)
+	real := f.store
+	r := newUserLockRecordingStore(real)
+	r.lockErr = store.ErrNotFound
+	f.srv.store = r
+
+	rec := f.create(t, authUser(f.creator), CreateAgentRequest{Name: "owner-gone"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, "cannot create the agent: its owner no longer exists", resp.Error.Message)
+	require.GreaterOrEqual(t, r.index("lock:"+f.creator.ID+":false"), 0, "the create must take the owner lock")
+
+	_, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "owner-gone")
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+	assert.Empty(t, activeReservationResources(t, real, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, f.proj.ID),
+		"the refused create must release its project reservation")
+
+	// Control: the same create without the fault holds a reservation, so
+	// the empty list above is a release, not a reservation never taken.
+	r.lockErr = nil
+	rec = f.create(t, authUser(f.creator), CreateAgentRequest{Name: "owner-gone"})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	created, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "owner-gone")
+	require.NoError(t, err)
+	assert.Equal(t, []string{created.ID},
+		activeReservationResources(t, real, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, f.proj.ID))
 }
