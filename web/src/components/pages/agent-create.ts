@@ -97,6 +97,11 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
+  // Set once the user operates the auto-expose toggle or a sub-field. Only
+  // then does buildConfig send the auto-expose env keys, as explicit values,
+  // even when they equal the seeded hub default. Left unsent, the agent
+  // inherits the project, then template, then hub default value.
+  @state() private autoExposeTouched = false;
 
   // ── Additional Options > Auth & Security Tab ────────────────────────
   @state() private agentRole = '';
@@ -426,6 +431,11 @@ export class ScionPageAgentCreate extends LitElement {
       margin-bottom: 1.25rem;
     }
 
+    .notify-field .source-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .notify-field sl-checkbox::part(label) {
       font-size: 0.875rem;
       color: var(--scion-text, #1e293b);
@@ -713,7 +723,9 @@ export class ScionPageAgentCreate extends LitElement {
           defaultModel?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
-        this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        if (!this.autoExposeTouched) {
+          this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        }
         this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
         this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
         this.hubDefaultTemplate = data.defaultTemplate ?? '';
@@ -1166,14 +1178,18 @@ export class ScionPageAgentCreate extends LitElement {
     // Telemetry (use structured config property, matching agent-configure.ts)
     config.telemetry = { enabled: this.telemetryEnabled };
 
-    // Auto-expose ports
-    env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-    if (this.autoExposePortsEnabled) {
-      env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-      if (this.autoExposePortsList) {
+    // Auto-expose ports: sent, as explicit values, only when the user operated
+    // the control. Otherwise the hub resolves the project, then template,
+    // then hub default value. The list is always sent with the control, as
+    // in agent-configure.ts: an empty list means "no list" and, as an
+    // explicit value, overrides a template's list.
+    if (this.autoExposeTouched) {
+      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
+      if (this.autoExposePortsEnabled) {
+        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
         env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
-      env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
     }
 
     if (Object.keys(env).length > 0) {
@@ -1810,16 +1826,22 @@ export class ScionPageAgentCreate extends LitElement {
           ?checked=${this.autoExposePortsEnabled}
           @sl-change=${(e: Event) => {
             this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
+            this.autoExposeTouched = true;
           }}
         >
           Enable Auto-Expose Ports
         </sl-checkbox>
         <sl-tooltip
-          content="Automatically detect and expose TCP listening ports from this agent's container."
+          content="Automatically detect and expose TCP listening ports from this agent's container. Until you change this control, the agent inherits the project setting, then the template, then the hub default; only the hub default is shown here."
           hoist
         >
           <span class="help-badge">?</span>
         </sl-tooltip>
+        <span class="source-label" data-testid="auto-expose-source">
+          ${this.autoExposeTouched
+            ? 'Source: explicit'
+            : 'Source: inherited (hub default shown; project or template may override)'}
+        </span>
       </div>
 
       <!-- Auto-Expose Sub-fields (conditional) -->
@@ -1831,6 +1853,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.autoExposePortsMode}
                 @sl-change=${(e: Event) => {
                   this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposeTouched = true;
                 }}
               >
                 <sl-option value="allowlist">Allowlist</sl-option>
@@ -1849,6 +1872,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.autoExposePortsList}
                 @sl-input=${(e: Event) => {
                   this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposeTouched = true;
                 }}
               ></sl-input>
               <div class="hint">
@@ -1865,6 +1889,7 @@ export class ScionPageAgentCreate extends LitElement {
                   this.autoExposePortsInterval = (
                     e.target as HTMLElement & { value: string }
                   ).value;
+                  this.autoExposeTouched = true;
                 }}
               ></sl-input>
               <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>

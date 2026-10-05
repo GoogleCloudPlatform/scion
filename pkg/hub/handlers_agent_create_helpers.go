@@ -725,19 +725,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
 	// template-env fill above so the project tier can overwrite a template
 	// value. The hub default is never written here; see resolveAutoExposeEnv.
-	// Explicit keys come from the CreateInputs snapshot every create path
-	// takes before derivation; a config without one falls back to
-	// InlineConfig.Env, which nothing on these paths writes derived keys to.
+	// Explicit keys come from explicitEnvOf.
 	if agent.AppliedConfig != nil {
-		var explicitEnv map[string]string
-		if ci := agent.AppliedConfig.CreateInputs; ci != nil {
-			if ci.InlineConfig != nil {
-				explicitEnv = ci.InlineConfig.Env
-			}
-		} else if agent.AppliedConfig.InlineConfig != nil {
-			explicitEnv = agent.AppliedConfig.InlineConfig.Env
-		}
-		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnv)
+		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnvOf(agent.AppliedConfig))
 	}
 
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
@@ -792,6 +782,26 @@ func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, 
 		ac.Env = make(map[string]string)
 	}
 	ac.Env[api.EnvAutoExposePorts] = strconv.FormatBool(enabled)
+}
+
+// explicitEnvOf returns the requester's explicit env for ac: the
+// CreateInputs snapshot every create path takes before derivation, or, for a
+// config without CreateInputs, InlineConfig.Env, which holds explicit keys
+// only. The returned map is not a copy.
+func explicitEnvOf(ac *store.AgentAppliedConfig) map[string]string {
+	if ac == nil {
+		return nil
+	}
+	if ci := ac.CreateInputs; ci != nil {
+		if ci.InlineConfig != nil {
+			return ci.InlineConfig.Env
+		}
+		return nil
+	}
+	if ac.InlineConfig != nil {
+		return ac.InlineConfig.Env
+	}
+	return nil
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
