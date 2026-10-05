@@ -245,6 +245,24 @@ func getHubAccessToken(endpoint string) string {
 	return apiclient.ResolveDevToken()
 }
 
+// explicitProjectTarget reports whether the user named the project with the
+// --project / -g or --global flag. It reads the flag variables, not the
+// path a caller passes on, so a caller that resolved the cwd project itself
+// is not treated as explicit (ptone/scion#3123).
+func explicitProjectTarget() bool {
+	return projectPath != "" || globalMode
+}
+
+// loadSettingsForTarget loads settings for resolvedPath. When the user named
+// the project with a flag, SCION_PROJECT_ID in the environment does not
+// override that project's own ID (ptone/scion#3123).
+func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
+	if explicitProjectTarget() {
+		return config.LoadSettingsIgnoringEnvProjectID(resolvedPath)
+	}
+	return config.LoadSettings(resolvedPath)
+}
+
 // CheckHubAvailability checks if Hub integration is enabled and returns a ready-to-use
 // Hub context if available. Returns nil if Hub should not be used (not enabled or --no-hub flag is set).
 //
@@ -288,6 +306,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		SkipSync:         skipSync,
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
+		ExplicitProject:  explicitProjectTarget(),
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
@@ -522,7 +541,7 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 		// (ptone/scion#3124): say how to reach a hub project instead of
 		// pointing at a git remote the global directory never has.
 		return "", errors.New("the local global project is not linked to a hub project.\n\n" +
-			"Pass --global (-g global) to target the hub's Global project, or --project <slug|id> to target another hub project")
+			"Link it with 'scion hub link', or pass --project <slug|id> to target a hub project")
 	}
 	if gitRemote == "" {
 		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"

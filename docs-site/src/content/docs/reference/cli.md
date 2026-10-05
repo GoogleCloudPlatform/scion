@@ -25,11 +25,16 @@ These flags are available on all commands:
 3. The project `.scion` directory found from the current directory.
 4. The global project (`~/.scion`).
 
-An explicit flag always wins over `SCION_PROJECT_ID` and `SCION_PROJECT`.
+A context is Hub-connected when `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` or `SCION_PROJECT_ID` is set
+in the environment, as in an agent container. Enabling the Hub in a workstation's settings does not
+make it a Hub-connected context: there, `--global` uses the local global directory.
+
+An explicit flag wins over `SCION_PROJECT_ID` and `SCION_PROJECT`. This applies to commands that go
+through the Hub pre-flight check, and to the `conversation` and `notifications` commands.
 
 In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
 `global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
-project, the command fails with an error that names `--project <slug|id>` as the alternative.
+project, or you do not have access to it, the command fails with an error that names `--project <slug|id>` as the alternative.
 
 :::note[Agents creating agents in other projects]
 Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -56,15 +57,21 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 		flagIsProjectDir bool
 		// cwdInProject runs from inside the temp project directory.
 		cwdInProject bool
+		// passResolvedCwd passes config.GetResolvedProjectDir("") with no
+		// flag, as cmd callers such as harness-config sync do.
+		passResolvedCwd bool
 		// globalProjectID is written to ~/.scion/settings.yaml when set.
 		globalProjectID string
 		// env sets SCION_PROJECT / SCION_PROJECT_ID ("" = unset).
 		envID, envSlug string
 		// hubHasGlobal makes the mock hub serve a project with slug "global".
 		hubHasGlobal bool
-		wantID       string
-		wantGlobal   bool
-		wantErr      string
+		// hubHasNamedGlobal makes the mock hub serve a project named
+		// "Global" whose slug is not "global" for a ?name= lookup.
+		hubHasNamedGlobal bool
+		wantID            string
+		wantGlobal        bool
+		wantErr           string
 	}
 
 	cases := []testCase{
@@ -115,6 +122,14 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 			wantGlobal: true,
 		},
 		{
+			// A resolved directory is not a flag: the env still wins.
+			name:            "no flag, resolved cwd dir passed, env wins",
+			cwdInProject:    true,
+			passResolvedCwd: true,
+			envID:           envProjectID, envSlug: envProjectSlug,
+			wantID: envProjectID,
+		},
+		{
 			name:         "no flag, in project, no env project",
 			cwdInProject: true,
 			wantID:       fileProjectID,
@@ -143,7 +158,15 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 		{
 			name:    "-g global, no env project, hub has no Global project",
 			flag:    "global",
-			wantErr: `no project with slug "global"`,
+			wantErr: `or you do not have access to it`,
+		},
+		{
+			// Only the slug identifies the Global project; a project
+			// merely named "Global" must not be picked.
+			name:              "-g global, hub has only a project named Global",
+			flag:              "global",
+			hubHasNamedGlobal: true,
+			wantErr:           `no project with slug "global"`,
 		},
 	}
 
@@ -159,6 +182,8 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 					switch q := r.URL.Query(); {
 					case q.Get("slug") == "global" && tc.hubHasGlobal:
 						projects = append(projects, hubclient.Project{ID: hubGlobalProjectID, Name: "Global", Slug: "global"})
+					case q.Get("name") != "" && tc.hubHasNamedGlobal:
+						projects = append(projects, hubclient.Project{ID: "hub-named-global-id", Name: "Global", Slug: "global-team"})
 					case q.Get("slug") == "other-project":
 						projects = append(projects, hubclient.Project{ID: hubOtherProjectID, Name: "Other", Slug: "other-project"})
 					}
@@ -215,8 +240,16 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 			if tc.flagIsProjectDir {
 				flag = projectRoot
 			}
+			explicit := flag != ""
+			if tc.passResolvedCwd {
+				resolved, err := config.GetResolvedProjectDir("")
+				if err != nil {
+					t.Fatal(err)
+				}
+				flag = resolved
+			}
 
-			hubCtx, err := EnsureHubReady(flag, EnsureHubReadyOptions{AutoConfirm: true, SkipSync: true})
+			hubCtx, err := EnsureHubReady(flag, EnsureHubReadyOptions{AutoConfirm: true, SkipSync: true, ExplicitProject: explicit})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("EnsureHubReady(%q) error = %v, want containing %q", flag, err, tc.wantErr)

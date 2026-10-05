@@ -2611,7 +2611,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 	}
 
 	// Create a HubContext for syncing
-	settings, err := config.LoadSettings(projectPath)
+	settings, err := loadSettingsForTarget(projectPath)
 	if err != nil {
 		fmt.Printf("Warning: failed to load settings for template sync: %v\n", err)
 		return

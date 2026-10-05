@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,6 +37,15 @@ func setOrUnsetTestEnv(t *testing.T, key, val string) {
 	if val == "" {
 		require.NoError(t, os.Unsetenv(key))
 	}
+}
+
+// setProjectFlagForTest sets the --project flag variable as the root command
+// leaves it (--global becomes "global") and restores it after the test.
+func setProjectFlagForTest(t *testing.T, flag string) {
+	t.Helper()
+	origProject, origGlobal := projectPath, globalMode
+	t.Cleanup(func() { projectPath, globalMode = origProject, origGlobal })
+	projectPath, globalMode = flag, false
 }
 
 // TestCheckHubAvailability_ProjectFlagPrecedence drives the CLI entry point
@@ -53,8 +63,11 @@ func TestCheckHubAvailability_ProjectFlagPrecedence(t *testing.T) {
 	)
 
 	cases := []struct {
-		name            string
-		flag            string
+		name string
+		flag string
+		// passResolvedCwd passes config.GetResolvedProjectDir("") with no
+		// flag, as harness-config sync, push and install do.
+		passResolvedCwd bool
 		globalProjectID string
 		envID, envSlug  string
 		wantID          string
@@ -64,6 +77,7 @@ func TestCheckHubAvailability_ProjectFlagPrecedence(t *testing.T) {
 		{name: "-g global, no env, hub Global", flag: "global", wantID: hubGlobalID},
 		{name: "no flag, env wins", flag: "", globalProjectID: globalLocalID, envID: envProjectID, envSlug: "env-project", wantID: envProjectID},
 		{name: "no flag, no env, global settings", flag: "", globalProjectID: globalLocalID, wantID: globalLocalID},
+		{name: "no flag, resolved cwd dir, env wins", passResolvedCwd: true, globalProjectID: globalLocalID, envID: envProjectID, envSlug: "env-project", wantID: envProjectID},
 	}
 
 	for _, tc := range cases {
@@ -103,8 +117,16 @@ func TestCheckHubAvailability_ProjectFlagPrecedence(t *testing.T) {
 			setOrUnsetTestEnv(t, "SCION_DEV_TOKEN", "test-dev-token")
 			setOrUnsetTestEnv(t, "SCION_AUTH_TOKEN", "")
 			t.Chdir(tmpHome)
+			setProjectFlagForTest(t, tc.flag)
 
-			hubCtx, err := CheckHubAvailabilityWithOptions(tc.flag, true)
+			arg := tc.flag
+			if tc.passResolvedCwd {
+				resolved, err := config.GetResolvedProjectDir("")
+				require.NoError(t, err)
+				arg = resolved
+			}
+
+			hubCtx, err := CheckHubAvailabilityWithOptions(arg, true)
 			require.NoError(t, err)
 			require.NotNil(t, hubCtx)
 			assert.Equal(t, tc.wantID, hubCtx.ProjectID)
@@ -125,11 +147,58 @@ func TestGetProjectID_UnlinkedGlobalExplainsFlag(t *testing.T) {
 
 	_, err := GetProjectID(&HubContext{IsGlobal: true})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--global (-g global)")
+	assert.Contains(t, err.Error(), "--project <slug|id>")
+	assert.NotContains(t, err.Error(), "Pass --global")
 	assert.NotContains(t, err.Error(), "git origin remote")
 
 	// A non-global project keeps the git remote guidance.
 	_, err = GetProjectID(&HubContext{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no git origin remote found")
+}
+
+// TestRequireHubClient_ProjectFlagPrecedence covers the conversation and
+// notifications path: with --global (or -g <dir>) the settings project ID
+// comes from that project, not from SCION_PROJECT_ID in the agent
+// container's environment; without a flag the environment still wins
+// (ptone/scion#3123).
+func TestRequireHubClient_ProjectFlagPrecedence(t *testing.T) {
+	const (
+		envProjectID  = "env-project-id"
+		globalLocalID = "global-local-id"
+	)
+	cases := []struct {
+		name   string
+		flag   string
+		wantID string
+	}{
+		{name: "--global beats env", flag: "global", wantID: globalLocalID},
+		{name: "no flag, env wins", flag: "", wantID: envProjectID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			globalDir := filepath.Join(tmpHome, ".scion")
+			require.NoError(t, os.MkdirAll(globalDir, 0755))
+			settings := "project_id: " + globalLocalID + "\nhub:\n  enabled: true\n  endpoint: http://hub.invalid\n"
+			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0644))
+
+			t.Setenv("HOME", tmpHome)
+			setOrUnsetTestEnv(t, "SCION_HUB_ENDPOINT", "http://hub.invalid")
+			setOrUnsetTestEnv(t, "SCION_HUB_URL", "")
+			setOrUnsetTestEnv(t, "SCION_HUB_PROJECT_ID", "")
+			setOrUnsetTestEnv(t, "SCION_PROJECT_ID", envProjectID)
+			setOrUnsetTestEnv(t, "SCION_PROJECT", "env-project")
+			setOrUnsetTestEnv(t, "SCION_DEV_TOKEN", "test-dev-token")
+			setOrUnsetTestEnv(t, "SCION_AUTH_TOKEN", "")
+			t.Chdir(tmpHome)
+			setProjectFlagForTest(t, tc.flag)
+
+			got, _, err := requireHubClient()
+			require.NoError(t, err)
+			id, err := resolveProjectID(got, "")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantID, id)
+		})
+	}
 }

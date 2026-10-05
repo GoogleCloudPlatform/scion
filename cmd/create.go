@@ -140,9 +140,10 @@ The agent is provisioned but not started, even when a task is given. Run
 		// If Hub is not configured, this returns nil and provisioning
 		// proceeds without a resolver (S1 fail-closed for required skills).
 		hctx, hubErr := hubsync.EnsureHubReady(projectPath, hubsync.EnsureHubReadyOptions{
-			NoHub:       noHub,
-			AutoConfirm: true,
-			SkipSync:    true,
+			NoHub:           noHub,
+			AutoConfirm:     true,
+			SkipSync:        true,
+			ExplicitProject: explicitProjectTarget(),
 		})
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			var flushResolutions func()

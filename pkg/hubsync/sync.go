@@ -197,6 +197,11 @@ type EnsureHubReadyOptions struct {
 	// ExcludedAgents extends TargetAgent to support multi-agent operations.
 	// Any excluded agent is filtered from sync gating checks.
 	ExcludedAgents []string
+	// ExplicitProject reports that projectPath came from the --project / -g
+	// or --global flag. Only flag handling sets it: a caller passing a
+	// directory it resolved itself is not an explicit target and keeps
+	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
+	ExplicitProject bool
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -247,7 +252,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// be running in (ptone/scion#3123). Precedence: flag, then the
 	// environment (hub-connected containers only), then the project .scion,
 	// then the global directory.
-	explicitTarget := projectPath != ""
+	explicitTarget := opts.ExplicitProject
 	loadSettings := config.LoadSettings
 	if explicitTarget {
 		loadSettings = config.LoadSettingsIgnoringEnvProjectID
@@ -1640,9 +1645,9 @@ func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, end
 		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
 	}
 	if resp == nil || len(resp.Projects) == 0 {
-		return "", fmt.Errorf("no project with slug %q found on hub %s.\n\n"+
+		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
 			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
-			"Create or link it on the hub, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
 	}
 	return resp.Projects[0].ID, nil
 }
