@@ -177,6 +177,9 @@ var (
 		{Name: "runtime", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "workspace_placement", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "pinned_runtime_broker_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "web_pty_enabled", Type: field.TypeBool, Default: false},
 		{Name: "exposed_ports", Type: field.TypeJSON, Nullable: true},
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
@@ -237,7 +240,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[77]},
+				Columns:    []*schema.Column{AgentsColumns[80]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -246,12 +249,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[77]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[80]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[50]},
+				Columns: []*schema.Column{AgentsColumns[53]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -259,17 +262,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[45]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[65]},
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[68]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[69], AgentsColumns[73]},
+				Columns: []*schema.Column{AgentsColumns[72], AgentsColumns[76]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -2016,6 +2019,9 @@ var (
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
+		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2034,6 +2040,11 @@ var (
 				Name:    "runtimebroker_status",
 				Unique:  false,
 				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+			},
+			{
+				Name:    "runtimebroker_runtime_target_id",
+				Unique:  true,
+				Columns: []*schema.Column{RuntimeBrokersColumns[25]},
 			},
 		},
 	}

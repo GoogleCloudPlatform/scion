@@ -457,6 +457,66 @@ func (_u *RuntimeBrokerUpdate) ClearConnectedAt() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (_u *RuntimeBrokerUpdate) SetRuntimeTargetID(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetID sets the "runtime_target_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetID(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetID() *RuntimeBrokerUpdate {
+	_u.mutation.ClearRuntimeTargetID()
+	return _u
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (_u *RuntimeBrokerUpdate) SetRuntimeTargetType(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetType sets the "runtime_target_type" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetType(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetType() *RuntimeBrokerUpdate {
+	_u.mutation.ClearRuntimeTargetType()
+	return _u
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (_u *RuntimeBrokerUpdate) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetRuntimeTargetDisplayName(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetDisplayName sets the "runtime_target_display_name" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetDisplayName(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetRuntimeTargetDisplayName(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpdate {
+	_u.mutation.ClearRuntimeTargetDisplayName()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *RuntimeBrokerUpdate) SetUpdated(v time.Time) *RuntimeBrokerUpdate {
 	_u.mutation.SetUpdated(v)
@@ -656,6 +716,24 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.ConnectedAtCleared() {
 		_spec.ClearField(runtimebroker.FieldConnectedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RuntimeTargetID(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetIDCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetType(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetTypeCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetType, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetDisplayName(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetDisplayNameCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)
@@ -1109,6 +1187,66 @@ func (_u *RuntimeBrokerUpdateOne) ClearConnectedAt() *RuntimeBrokerUpdateOne {
 	return _u
 }
 
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (_u *RuntimeBrokerUpdateOne) SetRuntimeTargetID(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetID sets the "runtime_target_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetID(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetID() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearRuntimeTargetID()
+	return _u
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (_u *RuntimeBrokerUpdateOne) SetRuntimeTargetType(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetType sets the "runtime_target_type" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetType(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetType() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearRuntimeTargetType()
+	return _u
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (_u *RuntimeBrokerUpdateOne) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetRuntimeTargetDisplayName(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetDisplayName sets the "runtime_target_display_name" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetDisplayName(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetRuntimeTargetDisplayName(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearRuntimeTargetDisplayName()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *RuntimeBrokerUpdateOne) SetUpdated(v time.Time) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1338,6 +1476,24 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.ConnectedAtCleared() {
 		_spec.ClearField(runtimebroker.FieldConnectedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RuntimeTargetID(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetIDCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetType(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetTypeCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetType, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetDisplayName(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetDisplayNameCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)

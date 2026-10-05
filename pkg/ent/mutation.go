@@ -4549,6 +4549,9 @@ type AgentMutation struct {
 	runtime                    *string
 	runtime_broker_id          *string
 	workspace_placement        *string
+	pinned_runtime_broker_id   *string
+	pinned_runtime_target_id   *string
+	pinned_runtime_target_type *string
 	web_pty_enabled            *bool
 	exposed_ports              *[]store.ExposedPort
 	appendexposed_ports        []store.ExposedPort
@@ -5988,6 +5991,153 @@ func (m *AgentMutation) WorkspacePlacementCleared() bool {
 func (m *AgentMutation) ResetWorkspacePlacement() {
 	m.workspace_placement = nil
 	delete(m.clearedFields, agent.FieldWorkspacePlacement)
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) SetPinnedRuntimeBrokerID(s string) {
+	m.pinned_runtime_broker_id = &s
+}
+
+// PinnedRuntimeBrokerID returns the value of the "pinned_runtime_broker_id" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeBrokerID() (r string, exists bool) {
+	v := m.pinned_runtime_broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeBrokerID returns the old "pinned_runtime_broker_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeBrokerID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeBrokerID: %w", err)
+	}
+	return oldValue.PinnedRuntimeBrokerID, nil
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) ClearPinnedRuntimeBrokerID() {
+	m.pinned_runtime_broker_id = nil
+	m.clearedFields[agent.FieldPinnedRuntimeBrokerID] = struct{}{}
+}
+
+// PinnedRuntimeBrokerIDCleared returns if the "pinned_runtime_broker_id" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeBrokerIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeBrokerID]
+	return ok
+}
+
+// ResetPinnedRuntimeBrokerID resets all changes to the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) ResetPinnedRuntimeBrokerID() {
+	m.pinned_runtime_broker_id = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeBrokerID)
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (m *AgentMutation) SetPinnedRuntimeTargetID(s string) {
+	m.pinned_runtime_target_id = &s
+}
+
+// PinnedRuntimeTargetID returns the value of the "pinned_runtime_target_id" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeTargetID() (r string, exists bool) {
+	v := m.pinned_runtime_target_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeTargetID returns the old "pinned_runtime_target_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeTargetID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeTargetID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeTargetID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeTargetID: %w", err)
+	}
+	return oldValue.PinnedRuntimeTargetID, nil
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (m *AgentMutation) ClearPinnedRuntimeTargetID() {
+	m.pinned_runtime_target_id = nil
+	m.clearedFields[agent.FieldPinnedRuntimeTargetID] = struct{}{}
+}
+
+// PinnedRuntimeTargetIDCleared returns if the "pinned_runtime_target_id" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeTargetIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeTargetID]
+	return ok
+}
+
+// ResetPinnedRuntimeTargetID resets all changes to the "pinned_runtime_target_id" field.
+func (m *AgentMutation) ResetPinnedRuntimeTargetID() {
+	m.pinned_runtime_target_id = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeTargetID)
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (m *AgentMutation) SetPinnedRuntimeTargetType(s string) {
+	m.pinned_runtime_target_type = &s
+}
+
+// PinnedRuntimeTargetType returns the value of the "pinned_runtime_target_type" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeTargetType() (r string, exists bool) {
+	v := m.pinned_runtime_target_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeTargetType returns the old "pinned_runtime_target_type" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeTargetType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeTargetType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeTargetType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeTargetType: %w", err)
+	}
+	return oldValue.PinnedRuntimeTargetType, nil
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (m *AgentMutation) ClearPinnedRuntimeTargetType() {
+	m.pinned_runtime_target_type = nil
+	m.clearedFields[agent.FieldPinnedRuntimeTargetType] = struct{}{}
+}
+
+// PinnedRuntimeTargetTypeCleared returns if the "pinned_runtime_target_type" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeTargetTypeCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeTargetType]
+	return ok
+}
+
+// ResetPinnedRuntimeTargetType resets all changes to the "pinned_runtime_target_type" field.
+func (m *AgentMutation) ResetPinnedRuntimeTargetType() {
+	m.pinned_runtime_target_type = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeTargetType)
 }
 
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
@@ -8617,7 +8767,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 77)
+	fields := make([]string, 0, 80)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8698,6 +8848,15 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.workspace_placement != nil {
 		fields = append(fields, agent.FieldWorkspacePlacement)
+	}
+	if m.pinned_runtime_broker_id != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeBrokerID)
+	}
+	if m.pinned_runtime_target_id != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetID)
+	}
+	if m.pinned_runtime_target_type != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetType)
 	}
 	if m.web_pty_enabled != nil {
 		fields = append(fields, agent.FieldWebPtyEnabled)
@@ -8911,6 +9070,12 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RuntimeBrokerID()
 	case agent.FieldWorkspacePlacement:
 		return m.WorkspacePlacement()
+	case agent.FieldPinnedRuntimeBrokerID:
+		return m.PinnedRuntimeBrokerID()
+	case agent.FieldPinnedRuntimeTargetID:
+		return m.PinnedRuntimeTargetID()
+	case agent.FieldPinnedRuntimeTargetType:
+		return m.PinnedRuntimeTargetType()
 	case agent.FieldWebPtyEnabled:
 		return m.WebPtyEnabled()
 	case agent.FieldExposedPorts:
@@ -9074,6 +9239,12 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRuntimeBrokerID(ctx)
 	case agent.FieldWorkspacePlacement:
 		return m.OldWorkspacePlacement(ctx)
+	case agent.FieldPinnedRuntimeBrokerID:
+		return m.OldPinnedRuntimeBrokerID(ctx)
+	case agent.FieldPinnedRuntimeTargetID:
+		return m.OldPinnedRuntimeTargetID(ctx)
+	case agent.FieldPinnedRuntimeTargetType:
+		return m.OldPinnedRuntimeTargetType(ctx)
 	case agent.FieldWebPtyEnabled:
 		return m.OldWebPtyEnabled(ctx)
 	case agent.FieldExposedPorts:
@@ -9371,6 +9542,27 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetWorkspacePlacement(v)
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeBrokerID(v)
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeTargetID(v)
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeTargetType(v)
 		return nil
 	case agent.FieldWebPtyEnabled:
 		v, ok := value.(bool)
@@ -9893,6 +10085,15 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldWorkspacePlacement) {
 		fields = append(fields, agent.FieldWorkspacePlacement)
 	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeBrokerID) {
+		fields = append(fields, agent.FieldPinnedRuntimeBrokerID)
+	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeTargetID) {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetID)
+	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeTargetType) {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetType)
+	}
 	if m.FieldCleared(agent.FieldExposedPorts) {
 		fields = append(fields, agent.FieldExposedPorts)
 	}
@@ -10086,6 +10287,15 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldWorkspacePlacement:
 		m.ClearWorkspacePlacement()
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		m.ClearPinnedRuntimeBrokerID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		m.ClearPinnedRuntimeTargetID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		m.ClearPinnedRuntimeTargetType()
 		return nil
 	case agent.FieldExposedPorts:
 		m.ClearExposedPorts()
@@ -10301,6 +10511,15 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldWorkspacePlacement:
 		m.ResetWorkspacePlacement()
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		m.ResetPinnedRuntimeBrokerID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		m.ResetPinnedRuntimeTargetID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		m.ResetPinnedRuntimeTargetType()
 		return nil
 	case agent.FieldWebPtyEnabled:
 		m.ResetWebPtyEnabled()
@@ -58426,6 +58645,9 @@ type RuntimeBrokerMutation struct {
 	connected_hub_id               *string
 	connected_session_id           *string
 	connected_at                   *time.Time
+	runtime_target_id              *string
+	runtime_target_type            *string
+	runtime_target_display_name    *string
 	created                        *time.Time
 	updated                        *time.Time
 	clearedFields                  map[string]struct{}
@@ -59643,6 +59865,153 @@ func (m *RuntimeBrokerMutation) ResetConnectedAt() {
 	delete(m.clearedFields, runtimebroker.FieldConnectedAt)
 }
 
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetID(s string) {
+	m.runtime_target_id = &s
+}
+
+// RuntimeTargetID returns the value of the "runtime_target_id" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetID() (r string, exists bool) {
+	v := m.runtime_target_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetID returns the old "runtime_target_id" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetID: %w", err)
+	}
+	return oldValue.RuntimeTargetID, nil
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetID() {
+	m.runtime_target_id = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetID] = struct{}{}
+}
+
+// RuntimeTargetIDCleared returns if the "runtime_target_id" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetIDCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetID]
+	return ok
+}
+
+// ResetRuntimeTargetID resets all changes to the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetID() {
+	m.runtime_target_id = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetID)
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetType(s string) {
+	m.runtime_target_type = &s
+}
+
+// RuntimeTargetType returns the value of the "runtime_target_type" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetType() (r string, exists bool) {
+	v := m.runtime_target_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetType returns the old "runtime_target_type" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetType: %w", err)
+	}
+	return oldValue.RuntimeTargetType, nil
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetType() {
+	m.runtime_target_type = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetType] = struct{}{}
+}
+
+// RuntimeTargetTypeCleared returns if the "runtime_target_type" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetTypeCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetType]
+	return ok
+}
+
+// ResetRuntimeTargetType resets all changes to the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetType() {
+	m.runtime_target_type = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetType)
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetDisplayName(s string) {
+	m.runtime_target_display_name = &s
+}
+
+// RuntimeTargetDisplayName returns the value of the "runtime_target_display_name" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetDisplayName() (r string, exists bool) {
+	v := m.runtime_target_display_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetDisplayName returns the old "runtime_target_display_name" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetDisplayName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetDisplayName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetDisplayName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetDisplayName: %w", err)
+	}
+	return oldValue.RuntimeTargetDisplayName, nil
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetDisplayName() {
+	m.runtime_target_display_name = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetDisplayName] = struct{}{}
+}
+
+// RuntimeTargetDisplayNameCleared returns if the "runtime_target_display_name" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetDisplayNameCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetDisplayName]
+	return ok
+}
+
+// ResetRuntimeTargetDisplayName resets all changes to the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetDisplayName() {
+	m.runtime_target_display_name = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetDisplayName)
+}
+
 // SetCreated sets the "created" field.
 func (m *RuntimeBrokerMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -59749,7 +60118,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 29)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -59822,6 +60191,15 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	if m.connected_at != nil {
 		fields = append(fields, runtimebroker.FieldConnectedAt)
 	}
+	if m.runtime_target_id != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetID)
+	}
+	if m.runtime_target_type != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetType)
+	}
+	if m.runtime_target_display_name != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
 	if m.created != nil {
 		fields = append(fields, runtimebroker.FieldCreated)
 	}
@@ -59884,6 +60262,12 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.ConnectedSessionID()
 	case runtimebroker.FieldConnectedAt:
 		return m.ConnectedAt()
+	case runtimebroker.FieldRuntimeTargetID:
+		return m.RuntimeTargetID()
+	case runtimebroker.FieldRuntimeTargetType:
+		return m.RuntimeTargetType()
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		return m.RuntimeTargetDisplayName()
 	case runtimebroker.FieldCreated:
 		return m.Created()
 	case runtimebroker.FieldUpdated:
@@ -59945,6 +60329,12 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldConnectedSessionID(ctx)
 	case runtimebroker.FieldConnectedAt:
 		return m.OldConnectedAt(ctx)
+	case runtimebroker.FieldRuntimeTargetID:
+		return m.OldRuntimeTargetID(ctx)
+	case runtimebroker.FieldRuntimeTargetType:
+		return m.OldRuntimeTargetType(ctx)
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		return m.OldRuntimeTargetDisplayName(ctx)
 	case runtimebroker.FieldCreated:
 		return m.OldCreated(ctx)
 	case runtimebroker.FieldUpdated:
@@ -60126,6 +60516,27 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetConnectedAt(v)
 		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetID(v)
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetType(v)
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetDisplayName(v)
+		return nil
 	case runtimebroker.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -60236,6 +60647,15 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldConnectedAt) {
 		fields = append(fields, runtimebroker.FieldConnectedAt)
 	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetID) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetID)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetType) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetType)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetDisplayName) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
 	return fields
 }
 
@@ -60300,6 +60720,15 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldConnectedAt:
 		m.ClearConnectedAt()
+		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		m.ClearRuntimeTargetID()
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		m.ClearRuntimeTargetType()
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		m.ClearRuntimeTargetDisplayName()
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker nullable field %s", name)
@@ -60380,6 +60809,15 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldConnectedAt:
 		m.ResetConnectedAt()
+		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		m.ResetRuntimeTargetID()
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		m.ResetRuntimeTargetType()
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		m.ResetRuntimeTargetDisplayName()
 		return nil
 	case runtimebroker.FieldCreated:
 		m.ResetCreated()

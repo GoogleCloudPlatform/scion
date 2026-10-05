@@ -525,6 +525,66 @@ func (_u *AgentUpdate) ClearWorkspacePlacement() *AgentUpdate {
 	return _u
 }
 
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdate) SetPinnedRuntimeBrokerID(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeBrokerID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeBrokerID() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeBrokerID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (_u *AgentUpdate) SetPinnedRuntimeTargetID(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeTargetID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeTargetID() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeTargetID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (_u *AgentUpdate) SetPinnedRuntimeTargetType(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeTargetType(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeTargetType() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeTargetType()
+	return _u
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_u *AgentUpdate) SetWebPtyEnabled(v bool) *AgentUpdate {
 	_u.mutation.SetWebPtyEnabled(v)
@@ -1784,6 +1844,24 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.WorkspacePlacementCleared() {
 		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
 	}
+	if value, ok := _u.mutation.PinnedRuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetType(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetTypeCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetType, field.TypeString)
+	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 	}
@@ -2706,6 +2784,66 @@ func (_u *AgentUpdateOne) SetNillableWorkspacePlacement(v *string) *AgentUpdateO
 // ClearWorkspacePlacement clears the value of the "workspace_placement" field.
 func (_u *AgentUpdateOne) ClearWorkspacePlacement() *AgentUpdateOne {
 	_u.mutation.ClearWorkspacePlacement()
+	return _u
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeBrokerID(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeBrokerID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeBrokerID() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeBrokerID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeTargetID(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeTargetID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeTargetID() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeTargetID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeTargetType(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeTargetType(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeTargetType() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeTargetType()
 	return _u
 }
 
@@ -3997,6 +4135,24 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.WorkspacePlacementCleared() {
 		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetType(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetTypeCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetType, field.TypeString)
 	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)

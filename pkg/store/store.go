@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Common errors returned by store implementations.
@@ -476,6 +478,16 @@ type AgentStore interface {
 	// active remote brokers are left untouched. Returns the number of projects
 	// updated.
 	ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error)
+
+	// SetAgentPinnedRuntimeTarget compare-and-sets an agent's placement:
+	// runtime_broker_id must equal expected.RuntimeBrokerID ("" also matches
+	// NULL) and the pin columns must match the rest of expected (NULL when
+	// expected.RuntimeTargetID is ""). It writes runtime_broker_id and the
+	// pin from next and bumps state_version in the same conditional update,
+	// so a stale UpdateAgent conflicts instead of reverting the move. next
+	// must be complete (it never unpins): ErrInvalidPinnedPlacement. A miss
+	// returns ErrPinnedPlacementChanged; a missing agent ErrNotFound.
+	SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)
 
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
@@ -1083,6 +1095,16 @@ type RuntimeBrokerStore interface {
 	// This is used to prevent duplicate brokers with the same name.
 	// Returns ErrNotFound if the broker doesn't exist.
 	GetRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
+
+	// GetLegacyRuntimeBrokerByName is GetRuntimeBrokerByName restricted to
+	// legacy rows (no stored runtime target). When several legacy rows
+	// match it returns the oldest by creation time. ErrNotFound when none.
+	GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
+
+	// SetRuntimeBrokerTarget updates a flat Runtime Broker's target display
+	// name. It never converts a legacy row (ErrRuntimeBrokerNotFlat) and
+	// never changes a stored target ID or type (ErrRuntimeTargetChanged).
+	SetRuntimeBrokerTarget(ctx context.Context, brokerID string, desc api.RuntimeTargetDescriptor) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.

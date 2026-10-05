@@ -197,114 +197,118 @@ func init() {
 	agentDescWorkspacePlacement := agentFields[27].Descriptor()
 	// agent.DefaultWorkspacePlacement holds the default value on creation for the workspace_placement field.
 	agent.DefaultWorkspacePlacement = agentDescWorkspacePlacement.Default.(string)
+	// agentDescPinnedRuntimeTargetType is the schema descriptor for pinned_runtime_target_type field.
+	agentDescPinnedRuntimeTargetType := agentFields[30].Descriptor()
+	// agent.DefaultPinnedRuntimeTargetType holds the default value on creation for the pinned_runtime_target_type field.
+	agent.DefaultPinnedRuntimeTargetType = agentDescPinnedRuntimeTargetType.Default.(string)
 	// agentDescWebPtyEnabled is the schema descriptor for web_pty_enabled field.
-	agentDescWebPtyEnabled := agentFields[28].Descriptor()
+	agentDescWebPtyEnabled := agentFields[31].Descriptor()
 	// agent.DefaultWebPtyEnabled holds the default value on creation for the web_pty_enabled field.
 	agent.DefaultWebPtyEnabled = agentDescWebPtyEnabled.Default.(bool)
 	// agentDescCreated is the schema descriptor for created field.
-	agentDescCreated := agentFields[35].Descriptor()
+	agentDescCreated := agentFields[38].Descriptor()
 	// agent.DefaultCreated holds the default value on creation for the created field.
 	agent.DefaultCreated = agentDescCreated.Default.(func() time.Time)
 	// agentDescUpdated is the schema descriptor for updated field.
-	agentDescUpdated := agentFields[36].Descriptor()
+	agentDescUpdated := agentFields[39].Descriptor()
 	// agent.DefaultUpdated holds the default value on creation for the updated field.
 	agent.DefaultUpdated = agentDescUpdated.Default.(func() time.Time)
 	// agent.UpdateDefaultUpdated holds the default value on update for the updated field.
 	agent.UpdateDefaultUpdated = agentDescUpdated.UpdateDefault.(func() time.Time)
 	// agentDescStateVersion is the schema descriptor for state_version field.
-	agentDescStateVersion := agentFields[41].Descriptor()
+	agentDescStateVersion := agentFields[44].Descriptor()
 	// agent.DefaultStateVersion holds the default value on creation for the state_version field.
 	agent.DefaultStateVersion = agentDescStateVersion.Default.(int64)
 	// agentDescGeneration is the schema descriptor for generation field.
-	agentDescGeneration := agentFields[42].Descriptor()
+	agentDescGeneration := agentFields[45].Descriptor()
 	// agent.DefaultGeneration holds the default value on creation for the generation field.
 	agent.DefaultGeneration = agentDescGeneration.Default.(int)
 	// agentDescReincarnationState is the schema descriptor for reincarnation_state field.
-	agentDescReincarnationState := agentFields[43].Descriptor()
+	agentDescReincarnationState := agentFields[46].Descriptor()
 	// agent.DefaultReincarnationState holds the default value on creation for the reincarnation_state field.
 	agent.DefaultReincarnationState = agentDescReincarnationState.Default.(string)
 	// agentDescLaunchAsyncOptIn is the schema descriptor for launch_async_opt_in field.
-	agentDescLaunchAsyncOptIn := agentFields[45].Descriptor()
+	agentDescLaunchAsyncOptIn := agentFields[48].Descriptor()
 	// agent.DefaultLaunchAsyncOptIn holds the default value on creation for the launch_async_opt_in field.
 	agent.DefaultLaunchAsyncOptIn = agentDescLaunchAsyncOptIn.Default.(bool)
 	// agentDescLaunchID is the schema descriptor for launch_id field.
-	agentDescLaunchID := agentFields[46].Descriptor()
+	agentDescLaunchID := agentFields[49].Descriptor()
 	// agent.DefaultLaunchID holds the default value on creation for the launch_id field.
 	agent.DefaultLaunchID = agentDescLaunchID.Default.(string)
 	// agentDescRunID is the schema descriptor for run_id field.
-	agentDescRunID := agentFields[47].Descriptor()
+	agentDescRunID := agentFields[50].Descriptor()
 	// agent.DefaultRunID holds the default value on creation for the run_id field.
 	agent.DefaultRunID = agentDescRunID.Default.(string)
 	// agentDescLaunchState is the schema descriptor for launch_state field.
-	agentDescLaunchState := agentFields[48].Descriptor()
+	agentDescLaunchState := agentFields[51].Descriptor()
 	// agent.DefaultLaunchState holds the default value on creation for the launch_state field.
 	agent.DefaultLaunchState = agentDescLaunchState.Default.(string)
 	// agentDescLaunchEndReason is the schema descriptor for launch_end_reason field.
-	agentDescLaunchEndReason := agentFields[49].Descriptor()
+	agentDescLaunchEndReason := agentFields[52].Descriptor()
 	// agent.DefaultLaunchEndReason holds the default value on creation for the launch_end_reason field.
 	agent.DefaultLaunchEndReason = agentDescLaunchEndReason.Default.(string)
 	// agentDescLaunchKind is the schema descriptor for launch_kind field.
-	agentDescLaunchKind := agentFields[50].Descriptor()
+	agentDescLaunchKind := agentFields[53].Descriptor()
 	// agent.DefaultLaunchKind holds the default value on creation for the launch_kind field.
 	agent.DefaultLaunchKind = agentDescLaunchKind.Default.(string)
 	// agentDescLaunchOwner is the schema descriptor for launch_owner field.
-	agentDescLaunchOwner := agentFields[53].Descriptor()
+	agentDescLaunchOwner := agentFields[56].Descriptor()
 	// agent.DefaultLaunchOwner holds the default value on creation for the launch_owner field.
 	agent.DefaultLaunchOwner = agentDescLaunchOwner.Default.(string)
 	// agentDescLaunchSeq is the schema descriptor for launch_seq field.
-	agentDescLaunchSeq := agentFields[54].Descriptor()
+	agentDescLaunchSeq := agentFields[57].Descriptor()
 	// agent.DefaultLaunchSeq holds the default value on creation for the launch_seq field.
 	agent.DefaultLaunchSeq = agentDescLaunchSeq.Default.(int64)
 	// agentDescLaunchStep is the schema descriptor for launch_step field.
-	agentDescLaunchStep := agentFields[55].Descriptor()
+	agentDescLaunchStep := agentFields[58].Descriptor()
 	// agent.DefaultLaunchStep holds the default value on creation for the launch_step field.
 	agent.DefaultLaunchStep = agentDescLaunchStep.Default.(string)
 	// agentDescLaunchError is the schema descriptor for launch_error field.
-	agentDescLaunchError := agentFields[56].Descriptor()
+	agentDescLaunchError := agentFields[59].Descriptor()
 	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
 	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
 	// agentDescDeletionState is the schema descriptor for deletion_state field.
-	agentDescDeletionState := agentFields[57].Descriptor()
+	agentDescDeletionState := agentFields[60].Descriptor()
 	// agent.DefaultDeletionState holds the default value on creation for the deletion_state field.
 	agent.DefaultDeletionState = agentDescDeletionState.Default.(string)
 	// agentDescDeletionClaim is the schema descriptor for deletion_claim field.
-	agentDescDeletionClaim := agentFields[58].Descriptor()
+	agentDescDeletionClaim := agentFields[61].Descriptor()
 	// agent.DefaultDeletionClaim holds the default value on creation for the deletion_claim field.
 	agent.DefaultDeletionClaim = agentDescDeletionClaim.Default.(int64)
 	// agentDescDeletionCode is the schema descriptor for deletion_code field.
-	agentDescDeletionCode := agentFields[62].Descriptor()
+	agentDescDeletionCode := agentFields[65].Descriptor()
 	// agent.DefaultDeletionCode holds the default value on creation for the deletion_code field.
 	agent.DefaultDeletionCode = agentDescDeletionCode.Default.(string)
 	// agentDescDeletionError is the schema descriptor for deletion_error field.
-	agentDescDeletionError := agentFields[63].Descriptor()
+	agentDescDeletionError := agentFields[66].Descriptor()
 	// agent.DefaultDeletionError holds the default value on creation for the deletion_error field.
 	agent.DefaultDeletionError = agentDescDeletionError.Default.(string)
 	// agentDescDeletionPrior is the schema descriptor for deletion_prior field.
-	agentDescDeletionPrior := agentFields[64].Descriptor()
+	agentDescDeletionPrior := agentFields[67].Descriptor()
 	// agent.DefaultDeletionPrior holds the default value on creation for the deletion_prior field.
 	agent.DefaultDeletionPrior = agentDescDeletionPrior.Default.(string)
 	// agentDescDeletionRequest is the schema descriptor for deletion_request field.
-	agentDescDeletionRequest := agentFields[65].Descriptor()
+	agentDescDeletionRequest := agentFields[68].Descriptor()
 	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
 	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
 	// agentDescStartClaimKind is the schema descriptor for start_claim_kind field.
-	agentDescStartClaimKind := agentFields[69].Descriptor()
+	agentDescStartClaimKind := agentFields[72].Descriptor()
 	// agent.DefaultStartClaimKind holds the default value on creation for the start_claim_kind field.
 	agent.DefaultStartClaimKind = agentDescStartClaimKind.Default.(string)
 	// agentDescStartClaimState is the schema descriptor for start_claim_state field.
-	agentDescStartClaimState := agentFields[70].Descriptor()
+	agentDescStartClaimState := agentFields[73].Descriptor()
 	// agent.DefaultStartClaimState holds the default value on creation for the start_claim_state field.
 	agent.DefaultStartClaimState = agentDescStartClaimState.Default.(string)
 	// agentDescStartClaimOwner is the schema descriptor for start_claim_owner field.
-	agentDescStartClaimOwner := agentFields[71].Descriptor()
+	agentDescStartClaimOwner := agentFields[74].Descriptor()
 	// agent.DefaultStartClaimOwner holds the default value on creation for the start_claim_owner field.
 	agent.DefaultStartClaimOwner = agentDescStartClaimOwner.Default.(string)
 	// agentDescStartClaimTarget is the schema descriptor for start_claim_target field.
-	agentDescStartClaimTarget := agentFields[72].Descriptor()
+	agentDescStartClaimTarget := agentFields[75].Descriptor()
 	// agent.DefaultStartClaimTarget holds the default value on creation for the start_claim_target field.
 	agent.DefaultStartClaimTarget = agentDescStartClaimTarget.Default.(string)
 	// agentDescStartClaimLaunchID is the schema descriptor for start_claim_launch_id field.
-	agentDescStartClaimLaunchID := agentFields[77].Descriptor()
+	agentDescStartClaimLaunchID := agentFields[80].Descriptor()
 	// agent.DefaultStartClaimLaunchID holds the default value on creation for the start_claim_launch_id field.
 	agent.DefaultStartClaimLaunchID = agentDescStartClaimLaunchID.Default.(string)
 	// agentDescID is the schema descriptor for id field.
@@ -1700,12 +1704,20 @@ func init() {
 	runtimebrokerDescAutoProvide := runtimebrokerFields[19].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
+	// runtimebrokerDescRuntimeTargetType is the schema descriptor for runtime_target_type field.
+	runtimebrokerDescRuntimeTargetType := runtimebrokerFields[26].Descriptor()
+	// runtimebroker.DefaultRuntimeTargetType holds the default value on creation for the runtime_target_type field.
+	runtimebroker.DefaultRuntimeTargetType = runtimebrokerDescRuntimeTargetType.Default.(string)
+	// runtimebrokerDescRuntimeTargetDisplayName is the schema descriptor for runtime_target_display_name field.
+	runtimebrokerDescRuntimeTargetDisplayName := runtimebrokerFields[27].Descriptor()
+	// runtimebroker.DefaultRuntimeTargetDisplayName holds the default value on creation for the runtime_target_display_name field.
+	runtimebroker.DefaultRuntimeTargetDisplayName = runtimebrokerDescRuntimeTargetDisplayName.Default.(string)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[25].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[28].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[26].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[29].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.

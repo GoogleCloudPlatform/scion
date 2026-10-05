@@ -171,6 +171,21 @@ func WorkspacePlacement(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
 }
 
+// PinnedRuntimeBrokerID applies equality check predicate on the "pinned_runtime_broker_id" field. It's identical to PinnedRuntimeBrokerIDEQ.
+func PinnedRuntimeBrokerID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeTargetID applies equality check predicate on the "pinned_runtime_target_id" field. It's identical to PinnedRuntimeTargetIDEQ.
+func PinnedRuntimeTargetID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetType applies equality check predicate on the "pinned_runtime_target_type" field. It's identical to PinnedRuntimeTargetTypeEQ.
+func PinnedRuntimeTargetType(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeTargetType, v))
+}
+
 // WebPtyEnabled applies equality check predicate on the "web_pty_enabled" field. It's identical to WebPtyEnabledEQ.
 func WebPtyEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWebPtyEnabled, v))
@@ -1844,6 +1859,231 @@ func WorkspacePlacementEqualFold(v string) predicate.Agent {
 // WorkspacePlacementContainsFold applies the ContainsFold predicate on the "workspace_placement" field.
 func WorkspacePlacementContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldWorkspacePlacement, v))
+}
+
+// PinnedRuntimeBrokerIDEQ applies the EQ predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDNEQ applies the NEQ predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDIn applies the In predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldPinnedRuntimeBrokerID, vs...))
+}
+
+// PinnedRuntimeBrokerIDNotIn applies the NotIn predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldPinnedRuntimeBrokerID, vs...))
+}
+
+// PinnedRuntimeBrokerIDGT applies the GT predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDGTE applies the GTE predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDLT applies the LT predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDLTE applies the LTE predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDContains applies the Contains predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDHasPrefix applies the HasPrefix predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDHasSuffix applies the HasSuffix predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDIsNil applies the IsNil predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPinnedRuntimeBrokerID))
+}
+
+// PinnedRuntimeBrokerIDNotNil applies the NotNil predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPinnedRuntimeBrokerID))
+}
+
+// PinnedRuntimeBrokerIDEqualFold applies the EqualFold predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeBrokerIDContainsFold applies the ContainsFold predicate on the "pinned_runtime_broker_id" field.
+func PinnedRuntimeBrokerIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldPinnedRuntimeBrokerID, v))
+}
+
+// PinnedRuntimeTargetIDEQ applies the EQ predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDNEQ applies the NEQ predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDIn applies the In predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldPinnedRuntimeTargetID, vs...))
+}
+
+// PinnedRuntimeTargetIDNotIn applies the NotIn predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldPinnedRuntimeTargetID, vs...))
+}
+
+// PinnedRuntimeTargetIDGT applies the GT predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDGTE applies the GTE predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDLT applies the LT predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDLTE applies the LTE predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDContains applies the Contains predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDHasPrefix applies the HasPrefix predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDHasSuffix applies the HasSuffix predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDIsNil applies the IsNil predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPinnedRuntimeTargetID))
+}
+
+// PinnedRuntimeTargetIDNotNil applies the NotNil predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPinnedRuntimeTargetID))
+}
+
+// PinnedRuntimeTargetIDEqualFold applies the EqualFold predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetIDContainsFold applies the ContainsFold predicate on the "pinned_runtime_target_id" field.
+func PinnedRuntimeTargetIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldPinnedRuntimeTargetID, v))
+}
+
+// PinnedRuntimeTargetTypeEQ applies the EQ predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeNEQ applies the NEQ predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeIn applies the In predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldPinnedRuntimeTargetType, vs...))
+}
+
+// PinnedRuntimeTargetTypeNotIn applies the NotIn predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldPinnedRuntimeTargetType, vs...))
+}
+
+// PinnedRuntimeTargetTypeGT applies the GT predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeGTE applies the GTE predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeLT applies the LT predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeLTE applies the LTE predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeContains applies the Contains predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeHasPrefix applies the HasPrefix predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeHasSuffix applies the HasSuffix predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeIsNil applies the IsNil predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPinnedRuntimeTargetType))
+}
+
+// PinnedRuntimeTargetTypeNotNil applies the NotNil predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPinnedRuntimeTargetType))
+}
+
+// PinnedRuntimeTargetTypeEqualFold applies the EqualFold predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldPinnedRuntimeTargetType, v))
+}
+
+// PinnedRuntimeTargetTypeContainsFold applies the ContainsFold predicate on the "pinned_runtime_target_type" field.
+func PinnedRuntimeTargetTypeContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldPinnedRuntimeTargetType, v))
 }
 
 // WebPtyEnabledEQ applies the EQ predicate on the "web_pty_enabled" field.

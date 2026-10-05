@@ -70,6 +70,12 @@ const (
 	FieldRuntimeBrokerID = "runtime_broker_id"
 	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
 	FieldWorkspacePlacement = "workspace_placement"
+	// FieldPinnedRuntimeBrokerID holds the string denoting the pinned_runtime_broker_id field in the database.
+	FieldPinnedRuntimeBrokerID = "pinned_runtime_broker_id"
+	// FieldPinnedRuntimeTargetID holds the string denoting the pinned_runtime_target_id field in the database.
+	FieldPinnedRuntimeTargetID = "pinned_runtime_target_id"
+	// FieldPinnedRuntimeTargetType holds the string denoting the pinned_runtime_target_type field in the database.
+	FieldPinnedRuntimeTargetType = "pinned_runtime_target_type"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -231,6 +237,9 @@ var Columns = []string{
 	FieldRuntime,
 	FieldRuntimeBrokerID,
 	FieldWorkspacePlacement,
+	FieldPinnedRuntimeBrokerID,
+	FieldPinnedRuntimeTargetID,
+	FieldPinnedRuntimeTargetType,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
@@ -308,6 +317,8 @@ var (
 	DefaultDetached bool
 	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
 	DefaultWorkspacePlacement string
+	// DefaultPinnedRuntimeTargetType holds the default value on creation for the "pinned_runtime_target_type" field.
+	DefaultPinnedRuntimeTargetType string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -561,6 +572,21 @@ func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
 // ByWorkspacePlacement orders the results by the workspace_placement field.
 func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeBrokerID orders the results by the pinned_runtime_broker_id field.
+func ByPinnedRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetID orders the results by the pinned_runtime_target_id field.
+func ByPinnedRuntimeTargetID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetType orders the results by the pinned_runtime_target_type field.
+func ByPinnedRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetType, opts...).ToFunc()
 }
 
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.

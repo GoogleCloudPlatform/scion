@@ -366,6 +366,48 @@ func (_c *AgentCreate) SetNillableWorkspacePlacement(v *string) *AgentCreate {
 	return _c
 }
 
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (_c *AgentCreate) SetPinnedRuntimeBrokerID(v string) *AgentCreate {
+	_c.mutation.SetPinnedRuntimeBrokerID(v)
+	return _c
+}
+
+// SetNillablePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillablePinnedRuntimeBrokerID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetPinnedRuntimeBrokerID(*v)
+	}
+	return _c
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (_c *AgentCreate) SetPinnedRuntimeTargetID(v string) *AgentCreate {
+	_c.mutation.SetPinnedRuntimeTargetID(v)
+	return _c
+}
+
+// SetNillablePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillablePinnedRuntimeTargetID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetPinnedRuntimeTargetID(*v)
+	}
+	return _c
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (_c *AgentCreate) SetPinnedRuntimeTargetType(v string) *AgentCreate {
+	_c.mutation.SetPinnedRuntimeTargetType(v)
+	return _c
+}
+
+// SetNillablePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field if the given value is not nil.
+func (_c *AgentCreate) SetNillablePinnedRuntimeTargetType(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetPinnedRuntimeTargetType(*v)
+	}
+	return _c
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
 	_c.mutation.SetWebPtyEnabled(v)
@@ -1162,6 +1204,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultWorkspacePlacement
 		_c.mutation.SetWorkspacePlacement(v)
 	}
+	if _, ok := _c.mutation.PinnedRuntimeTargetType(); !ok {
+		v := agent.DefaultPinnedRuntimeTargetType
+		_c.mutation.SetPinnedRuntimeTargetType(v)
+	}
 	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
 		v := agent.DefaultWebPtyEnabled
 		_c.mutation.SetWebPtyEnabled(v)
@@ -1491,6 +1537,18 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.WorkspacePlacement(); ok {
 		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
 		_node.WorkspacePlacement = value
+	}
+	if value, ok := _c.mutation.PinnedRuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeBrokerID, field.TypeString, value)
+		_node.PinnedRuntimeBrokerID = &value
+	}
+	if value, ok := _c.mutation.PinnedRuntimeTargetID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetID, field.TypeString, value)
+		_node.PinnedRuntimeTargetID = &value
+	}
+	if value, ok := _c.mutation.PinnedRuntimeTargetType(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetType, field.TypeString, value)
+		_node.PinnedRuntimeTargetType = value
 	}
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
@@ -2240,6 +2298,60 @@ func (u *AgentUpsert) UpdateWorkspacePlacement() *AgentUpsert {
 // ClearWorkspacePlacement clears the value of the "workspace_placement" field.
 func (u *AgentUpsert) ClearWorkspacePlacement() *AgentUpsert {
 	u.SetNull(agent.FieldWorkspacePlacement)
+	return u
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (u *AgentUpsert) SetPinnedRuntimeBrokerID(v string) *AgentUpsert {
+	u.Set(agent.FieldPinnedRuntimeBrokerID, v)
+	return u
+}
+
+// UpdatePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePinnedRuntimeBrokerID() *AgentUpsert {
+	u.SetExcluded(agent.FieldPinnedRuntimeBrokerID)
+	return u
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (u *AgentUpsert) ClearPinnedRuntimeBrokerID() *AgentUpsert {
+	u.SetNull(agent.FieldPinnedRuntimeBrokerID)
+	return u
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (u *AgentUpsert) SetPinnedRuntimeTargetID(v string) *AgentUpsert {
+	u.Set(agent.FieldPinnedRuntimeTargetID, v)
+	return u
+}
+
+// UpdatePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePinnedRuntimeTargetID() *AgentUpsert {
+	u.SetExcluded(agent.FieldPinnedRuntimeTargetID)
+	return u
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (u *AgentUpsert) ClearPinnedRuntimeTargetID() *AgentUpsert {
+	u.SetNull(agent.FieldPinnedRuntimeTargetID)
+	return u
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (u *AgentUpsert) SetPinnedRuntimeTargetType(v string) *AgentUpsert {
+	u.Set(agent.FieldPinnedRuntimeTargetType, v)
+	return u
+}
+
+// UpdatePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePinnedRuntimeTargetType() *AgentUpsert {
+	u.SetExcluded(agent.FieldPinnedRuntimeTargetType)
+	return u
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (u *AgentUpsert) ClearPinnedRuntimeTargetType() *AgentUpsert {
+	u.SetNull(agent.FieldPinnedRuntimeTargetType)
 	return u
 }
 
@@ -3680,6 +3792,69 @@ func (u *AgentUpsertOne) UpdateWorkspacePlacement() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearWorkspacePlacement() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearWorkspacePlacement()
+	})
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (u *AgentUpsertOne) SetPinnedRuntimeBrokerID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeBrokerID(v)
+	})
+}
+
+// UpdatePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePinnedRuntimeBrokerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeBrokerID()
+	})
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (u *AgentUpsertOne) ClearPinnedRuntimeBrokerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeBrokerID()
+	})
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (u *AgentUpsertOne) SetPinnedRuntimeTargetID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeTargetID(v)
+	})
+}
+
+// UpdatePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePinnedRuntimeTargetID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeTargetID()
+	})
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (u *AgentUpsertOne) ClearPinnedRuntimeTargetID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeTargetID()
+	})
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (u *AgentUpsertOne) SetPinnedRuntimeTargetType(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeTargetType(v)
+	})
+}
+
+// UpdatePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePinnedRuntimeTargetType() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeTargetType()
+	})
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (u *AgentUpsertOne) ClearPinnedRuntimeTargetType() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeTargetType()
 	})
 }
 
@@ -5431,6 +5606,69 @@ func (u *AgentUpsertBulk) UpdateWorkspacePlacement() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearWorkspacePlacement() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearWorkspacePlacement()
+	})
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (u *AgentUpsertBulk) SetPinnedRuntimeBrokerID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeBrokerID(v)
+	})
+}
+
+// UpdatePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePinnedRuntimeBrokerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeBrokerID()
+	})
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (u *AgentUpsertBulk) ClearPinnedRuntimeBrokerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeBrokerID()
+	})
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (u *AgentUpsertBulk) SetPinnedRuntimeTargetID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeTargetID(v)
+	})
+}
+
+// UpdatePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePinnedRuntimeTargetID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeTargetID()
+	})
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (u *AgentUpsertBulk) ClearPinnedRuntimeTargetID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeTargetID()
+	})
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (u *AgentUpsertBulk) SetPinnedRuntimeTargetType(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPinnedRuntimeTargetType(v)
+	})
+}
+
+// UpdatePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePinnedRuntimeTargetType() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePinnedRuntimeTargetType()
+	})
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (u *AgentUpsertBulk) ClearPinnedRuntimeTargetType() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPinnedRuntimeTargetType()
 	})
 }
 

@@ -79,6 +79,15 @@ type Agent struct {
 	// older copy cannot clobber a newer report.
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 
+	// Pinned placement (flat Runtime Brokers; .design/flat-runtime-brokers-contract.md
+	// section 8). Empty means unpinned. Written only by CreateAgent (when
+	// set) and SetAgentPinnedRuntimeTarget, never by UpdateAgent; untagged
+	// so an API PATCH cannot set them. The pin is valid only while
+	// PinnedRuntimeBrokerID == RuntimeBrokerID (see PinValid).
+	PinnedRuntimeBrokerID   string `json:"-"`
+	PinnedRuntimeTargetID   string `json:"-"`
+	PinnedRuntimeTargetType string `json:"-"`
+
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
@@ -913,6 +922,13 @@ type RuntimeBroker struct {
 	// the broker has not reported one (e.g. registered before this field
 	// existed) or the hub has not yet learned it.
 	DefaultProfile string `json:"defaultProfile,omitempty"`
+
+	// RuntimeTarget is the single runtime target of a flat Runtime Broker;
+	// nil means a legacy (profile-based) Runtime Broker. Written only by
+	// CreateRuntimeBroker and SetRuntimeBrokerTarget; UpdateRuntimeBroker
+	// never writes it, and on a flat row it stores Profiles/DefaultProfile
+	// as empty.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 
 	// WorkspaceStorage describes where the broker places agent workspaces,
 	// reported at registration and refreshed on every heartbeat (stored as

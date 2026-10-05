@@ -147,6 +147,9 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
+	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
+	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
 	sa.DeletionFailedAt = copyTimePtr(a.DeletionFailedAt)
@@ -313,6 +316,17 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
+	}
+	// Pinned placement (flat Runtime Brokers) is written at create, in the
+	// same transaction as the row, and afterwards only by
+	// SetAgentPinnedRuntimeTarget.
+	if a.PinnedRuntimeTargetID != "" {
+		if a.PinnedRuntimeBrokerID == "" || a.PinnedRuntimeBrokerID != a.RuntimeBrokerID {
+			return fmt.Errorf("%w: pin must name the agent's Runtime Broker", store.ErrInvalidPinnedPlacement)
+		}
+		create.SetPinnedRuntimeBrokerID(a.PinnedRuntimeBrokerID).
+			SetPinnedRuntimeTargetID(a.PinnedRuntimeTargetID).
+			SetPinnedRuntimeTargetType(a.PinnedRuntimeTargetType)
 	}
 	if a.Labels != nil {
 		create.SetLabels(a.Labels)
@@ -2079,6 +2093,13 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 		return nil, fmt.Errorf("invalid currentBrokerID %q: %w", currentBrokerID, parseErr)
 	}
 
+	// A flat Runtime Broker never adopts orphans.
+	if flat, err := s.isFlatRuntimeBroker(ctx, parsedID); err != nil {
+		return nil, err
+	} else if flat {
+		return nil, nil
+	}
+
 	// Collect IDs of all online brokers (excluding the current one, which may
 	// not be stamped online yet during startup).
 	onlineBrokers, err := s.client.RuntimeBroker.Query().
@@ -2099,6 +2120,15 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 	for _, b := range onlineBrokers {
 		excludeIDs = append(excludeIDs, b.ID.String())
 	}
+	// Agents on flat Runtime Brokers are never orphan candidates. The IDs
+	// are collected in Go (runtime_brokers.id is a UUID column and
+	// agents.runtime_broker_id a string). A missing broker row counts as
+	// legacy, so agents of a deleted legacy Runtime Broker stay eligible.
+	flatIDs, err := s.flatRuntimeBrokerIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	excludeIDs = append(excludeIDs, flatIDs...)
 
 	// Terminal phases: agents in these states should not be reassigned.
 	terminalPhases := []string{"stopped", "error"}
@@ -2109,6 +2139,7 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 			agent.RuntimeBrokerIDNEQ(""),        // Must have a broker assignment
 			agent.PhaseNotIn(terminalPhases...), // Not in a terminal state
 			agent.DeletedAtIsNil(),              // Not soft-deleted
+			agent.PinnedRuntimeBrokerIDIsNil(),  // Never move a pinned agent
 		).
 		All(ctx)
 	if err != nil {
@@ -2142,8 +2173,19 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 		return 0, nil
 	}
 
+	// Agents are never bulk-moved onto a flat Runtime Broker.
+	if destUID, err := uuid.Parse(brokerID); err == nil {
+		flat, err := s.isFlatRuntimeBroker(ctx, destUID)
+		if err != nil {
+			return 0, err
+		}
+		if flat {
+			return 0, store.ErrFlatRuntimeBrokerReassign
+		}
+	}
+
 	affected, err := s.client.Agent.Update().
-		Where(agent.IDIn(ids...)).
+		Where(agent.IDIn(ids...), agent.PinnedRuntimeBrokerIDIsNil()).
 		SetRuntimeBrokerID(brokerID).
 		Save(ctx)
 	if err != nil {
@@ -2160,6 +2202,22 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error) {
 	if oldBrokerID == newBrokerID {
 		return 0, nil
+	}
+
+	// A project default is never repointed to or from a flat Runtime
+	// Broker. A missing row counts as legacy.
+	for _, id := range []string{oldBrokerID, newBrokerID} {
+		uid, err := uuid.Parse(id)
+		if err != nil {
+			continue
+		}
+		flat, err := s.isFlatRuntimeBroker(ctx, uid)
+		if err != nil {
+			return 0, err
+		}
+		if flat {
+			return 0, nil
+		}
 	}
 
 	// Safety guard: check if the old broker is still online. If so, it is a
