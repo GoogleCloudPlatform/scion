@@ -16,6 +16,7 @@ package harnesses
 
 import (
 	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -31,18 +32,25 @@ const minNodeTestMajor = 18
 // example the opencode scion-bridge plugin test) with Node's built-in test
 // runner, from the test file's own directory.
 func TestHarnessNodeUnit(t *testing.T) {
+	// A missing or too-old node skips locally but fails under CI (CI set),
+	// where a skip would read as a pass for suites that never ran (same rule
+	// as requirePython in python_unit_test.go and hack/lib/require-tool.sh).
+	skip := t.Skipf
+	if os.Getenv("CI") != "" {
+		skip = t.Fatalf
+	}
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node not found in PATH; skipping harness JS unit tests")
+		skip("node not found in PATH; harness JS unit tests were NOT run")
 	}
 	out, err := exec.Command(node, "--version").Output()
 	if err != nil {
-		t.Skipf("node --version failed (%v); skipping harness JS unit tests", err)
+		skip("node --version failed (%v); harness JS unit tests were NOT run", err)
 	}
 	version := strings.TrimSpace(string(out))
 	major, err := strconv.Atoi(strings.SplitN(strings.TrimPrefix(version, "v"), ".", 2)[0])
 	if err != nil || major < minNodeTestMajor {
-		t.Skipf("node %s lacks the built-in test runner (need >= %d); skipping harness JS unit tests", version, minNodeTestMajor)
+		skip("node %s lacks the built-in test runner (need >= %d); harness JS unit tests were NOT run", version, minNodeTestMajor)
 	}
 
 	var tests []string

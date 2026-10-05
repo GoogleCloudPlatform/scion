@@ -3105,10 +3105,14 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 }
 
 func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, id)
+	return r.Delete(ctx, RunRef{ID: id})
 }
 
-func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the pod ref.ID and its secrets.
+// P2/P4: enforce ref.RunID (ptone/scion#2550). Today the pod name is reused
+// across runs, so this still targets whatever pod holds the name.
+func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	var namespace string
 
 	// Support namespace/pod format
@@ -3391,6 +3395,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     p.Name, // Pod name serves as the container identifier
+			RunID:           p.Labels[api.LabelRunID],
 			Name:            p.Labels["scion.name"],
 			Template:        p.Labels["scion.template"],
 			Project:         projectkeys.ProjectNameFromLabels(p.Labels),

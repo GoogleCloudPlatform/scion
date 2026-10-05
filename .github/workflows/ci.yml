@@ -177,8 +177,9 @@ jobs:
         run: |
           # Invoked directly rather than via `make check-authz-guards`: GNU make
           # reports its own failure code (always 2), which would collapse the
-          # script's exit 1 (violations found) and exit 2 (nothing was analysed)
-          # into one indistinguishable result. Those mean opposite things.
+          # script's exit 1 (violations found) and exit 3/4 (nothing was
+          # analysed; see hack/LINT-CONVENTIONS.md) into one indistinguishable
+          # result. Those mean opposite things.
           set +e
           ./hack/check-authz-guards.sh
           rc=$?
@@ -327,6 +328,17 @@ jobs:
       - name: Run pkg/hub + perf/bench/seed tests (SQLite-enabled)
         run: make test-hub-sqlite
 
+      # internal/fixturegen's TestFixtureCoverage carries `//go:build
+      # !no_sqlite`, so Build & Test (make test-fast, -tags no_sqlite) never
+      # compiles it; before this step it ran only in the non-blocking Full
+      # Test Suite, and went red on main twice when a schema change skipped
+      # the fixture (ptone/scion#625, ptone/scion#1931). This job already
+      # builds the SQLite driver, so the gate costs a few seconds. Kept out
+      # of make test-hub-sqlite so that target's package list stays as is.
+      - name: Run fixture coverage gate (SQLite)
+        if: ${{ !cancelled() }}
+        run: make test-fixture-coverage
+
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
@@ -468,60 +480,83 @@ jobs:
           fi
 
       - name: Check for bare MethodNotAllowed calls
-        # Reporting only. This was the separate "Lint 405 Allow header
-        # (reporting only)" job; it was folded in here to save a runner
-        # spin-up (ptone/scion#2845). It must never fail shellcheck:
-        # continue-on-error absorbs its non-zero exit, and the result is
-        # reported in the step summary. !cancelled() runs it even when
-        # Run shellcheck above failed, as the separate job did.
+        # Blocking (ptone/scion#2421). Formerly the reporting-only "Lint 405
+        # Allow header (reporting only)" job, folded in here to save a runner
+        # spin-up (ptone/scion#2845); the logic now lives in
+        # hack/check-method-not-allowed.sh and covers pkg/hub and
+        # pkg/runtimebroker. It is a step, not a separate check, so it adds no
+        # check name. !cancelled() runs it even when Run shellcheck above
+        # failed, so both results show on one run.
+        #
+        # Invoked directly rather than via `make check-method-not-allowed`,
+        # for the same reason as Check Authorization Guards in Build & Test:
+        # make would collapse exit 1 (violations) and exit 3/4 (nothing was
+        # analysed) into one code.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: |
-          echo "## 405 Allow Header Lint" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Checking for MethodNotAllowed(w) calls without allowed methods." >> $GITHUB_STEP_SUMMARY
-          echo "Per RFC 9110 section 15.5.6, 405 responses MUST include an Allow header." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Find bare MethodNotAllowed(w) calls (no allowed methods argument)
-          # Exclude: function definition, test files (test files may legitimately test the bare call)
-          VIOLATIONS=$(grep -rn 'MethodNotAllowed(w)$' --include='*.go' pkg/hub/ \
-            | grep -v '_test.go' \
-            | grep -v 'func MethodNotAllowed' \
-            || true)
-
-          COUNT=$(echo "$VIOLATIONS" | grep -c '.' 2>/dev/null || echo 0)
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "**Found ${COUNT} bare MethodNotAllowed(w) calls missing Allow header.**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Each of these should specify allowed methods:" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "MethodNotAllowed(w, http.MethodGet)           // single method" >> $GITHUB_STEP_SUMMARY
-            echo "MethodNotAllowed(w, http.MethodGet, http.MethodPost)  // multiple" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>Violations (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "$VIOLATIONS" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "</details>" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "All MethodNotAllowed calls include allowed methods. RFC 9110 compliant." >> $GITHUB_STEP_SUMMARY
+          # Prove the matcher works on this runner's grep before trusting a
+          # clean scan. The `|| st=$?` guard keeps `bash -e` from aborting, so
+          # a self-test failure fails the step via the explicit exit 1 below,
+          # before the real scan runs. Exit 3 means a required tool (grep) is
+          # missing and 126/127 mean the script itself could not be executed;
+          # neither means the matcher is broken.
+          st=0
+          ./hack/check-method-not-allowed.sh --self-test || st=$?
+          if [ "$st" -ne 0 ]; then
+            if [ "$st" -eq 3 ]; then
+              echo "::error title=405 Allow header NOT checked::check-method-not-allowed --self-test could not run (exit 3: required tool missing) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase."
+            elif [ "$st" -eq 126 ] || [ "$st" -eq 127 ]; then
+              echo "::error title=405 Allow header NOT checked::hack/check-method-not-allowed.sh could not be executed (exit $st: not found or not executable) — NOTHING WAS ANALYSED. This is a checkout or permissions failure, not a statement about the codebase."
+            else
+              echo "::error title=405 Allow header NOT checked::check-method-not-allowed --self-test failed (exit $st) — the matcher is broken on this runner, so NOTHING WAS ANALYSED."
+            fi
+            exit 1
           fi
+          set +e
+          ./hack/check-method-not-allowed.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=405 Allow header::Bare MethodNotAllowed(w) calls found: a 405 must carry an Allow header (RFC 9110 15.5.6). Pass the accepted methods, e.g. MethodNotAllowed(w, http.MethodGet). The file:line list is in the step log above." ;;
+            *) echo "::error title=405 Allow header NOT checked::check-method-not-allowed could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "_This is a reporting-only check. It does not block CI._" >> $GITHUB_STEP_SUMMARY
-          echo "_See PR #1413 for context on the Allow header requirement._" >> $GITHUB_STEP_SUMMARY
+  ent-generate-check:
+    name: ent generated code drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
-          # Exit with count for visibility (continue-on-error means it won't block)
-          if [ "$COUNT" -gt 0 ]; then
-            echo ""
-            echo "Found ${COUNT} bare MethodNotAllowed(w) calls without Allow header."
-            echo "See step summary for details."
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # Regenerates pkg/ent from pkg/ent/schema and fails on any diff or new
+      # untracked file under pkg/ent, or any go.mod/go.sum change
+      # (ptone/scion#2746). Nothing else checks that a schema edit was
+      # committed together with its generated code. Its own job, not a Build &
+      # Test step: generation downloads ent's codegen dependencies.
+      - name: Check ent generated code is up to date
+        #
+        # ent-check exits 3 when go generate itself failed (schema compile or
+        # module download error) and 1 on drift. make collapses both to exit
+        # 2, so the step tells them apart by the target's "(not drift)" line.
+        run: |
+          set -o pipefail
+          if ! make ent-check 2>&1 | tee "$RUNNER_TEMP/ent-check.log"; then
+            if grep -qF 'go generate ./pkg/ent failed (not drift)' "$RUNNER_TEMP/ent-check.log"; then
+              echo "::error title=ent generation failed (not drift)::go generate ./pkg/ent failed, so drift was NOT checked. The generator error (schema compile or module download) is in the step log above."
+            else
+              echo "::error title=ent generated code drift::pkg/ent does not match pkg/ent/schema. Run 'go generate ./pkg/ent' and commit the result."
+            fi
             exit 1
           fi
 
