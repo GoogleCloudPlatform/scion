@@ -152,7 +152,7 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 	// Deliver the response to the hub.
 	if err := h.deliverAskUserResponse(ctx, activity, pending, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		mapping := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity), h.log)
+		mapping, _ := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
 		return h.respondWithUpdatedCard(activity,
 			hubErrorText(err, mapping, h.projectSlugFor(ctx, pending.ConversationID), "Failed to deliver your response. Please try again.")), nil
 	}
@@ -273,9 +273,12 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	}
 
 	// Setup requires a linked user, and the project must be one of theirs.
-	mapping := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity), h.log)
-	if mapping == nil {
-		return h.respondWithUpdatedCard(activity, registerHint), nil
+	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err)
+		}
+		return h.respondWithUpdatedCard(activity, problem), nil
 	}
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
@@ -346,7 +349,7 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 	// Teams user ID.
 	teamsUserID := teamsUserIDOf(activity)
 	sender := "teams:" + teamsUserID
-	if mapping := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID, h.log); mapping != nil {
+	if mapping, _ := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID); mapping != nil {
 		sender = onBehalfOfUser(mapping)
 	}
 

@@ -17,6 +17,7 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -978,4 +979,47 @@ func TestBroker_HandleMessage_DeliveryFailureIsReported(t *testing.T) {
 	require.Len(t, ms.sent, 1)
 	assert.Contains(t, ms.sent[0].Text, "could not be delivered")
 	assert.Contains(t, ms.sent[0].Text, "dev-1")
+}
+
+// mappingErrorStore fails every user mapping lookup.
+type mappingErrorStore struct {
+	Store
+}
+
+func (mappingErrorStore) GetUserMapping(context.Context, string) (*TeamsUserMapping, error) {
+	return nil, errors.New("database unavailable")
+}
+
+func TestBroker_HandleMessage_LinkLookupErrorRepliesGenerically(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkDefaultAgentChannel(t, broker)
+	broker.store = mappingErrorStore{Store: broker.store}
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	assert.False(t, hubCalled)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
+}
+
+func TestCommands_LinkLookupErrorRepliesGenerically(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestChannel(t, broker)
+	broker.store = mappingErrorStore{Store: broker.store}
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("agents"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	assert.False(t, hubCalled)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
 }

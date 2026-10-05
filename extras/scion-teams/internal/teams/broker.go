@@ -794,9 +794,12 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 
 	// Deliver as the sender's linked Scion account. Unlinked senders get a
 	// register hint instead of a silent drop.
-	mapping := linkedUserByTeamsID(ctx, store, msg.SenderID, b.log)
-	if mapping == nil {
-		b.replyText(ctx, activity, unlinkedInboundHint)
+	mapping, err := linkedUserByTeamsID(ctx, store, msg.SenderID)
+	if problem := linkProblem(mapping, err, unlinkedInboundHint); problem != "" {
+		if err != nil {
+			b.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", msg.SenderID)
+		}
+		b.replyText(ctx, activity, problem)
 		return nil
 	}
 	msg.Sender = onBehalfOfUser(mapping)
@@ -853,21 +856,37 @@ func inboundDeliveryFailureText(agentSlug string) string {
 	return fmt.Sprintf("Your message to **%s** could not be delivered. Please try again.", agentSlug)
 }
 
-// linkedUserByTeamsID returns the Scion account linked to teamsUserID, or nil
-// when there is no usable link.
-func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string, log *slog.Logger) *TeamsUserMapping {
+// linkCheckFailedText is shown when the sender's account link cannot be read.
+const linkCheckFailedText = "Couldn't check your account link. Please try again."
+
+// linkedUserByTeamsID returns the Scion account linked to teamsUserID. It
+// returns (nil, nil) when there is no usable link and an error when the link
+// could not be read.
+func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string) (*TeamsUserMapping, error) {
 	if store == nil || teamsUserID == "" {
-		return nil
+		return nil, nil
 	}
 	mapping, err := store.GetUserMapping(ctx, teamsUserID)
 	if err != nil {
-		log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
-		return nil
+		return nil, err
 	}
 	if mapping == nil || mapping.ScionEmail == "" {
-		return nil
+		return nil, nil
 	}
-	return mapping
+	return mapping, nil
+}
+
+// linkProblem returns the reply for a sender whose account link cannot be
+// used, or "" when mapping is usable. unlinkedText is used when the sender
+// has no link.
+func linkProblem(mapping *TeamsUserMapping, err error, unlinkedText string) string {
+	switch {
+	case err != nil:
+		return linkCheckFailedText
+	case mapping == nil:
+		return unlinkedText
+	}
+	return ""
 }
 
 // replyText sends a plain-text message to the activity's conversation.

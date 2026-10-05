@@ -882,18 +882,16 @@ func teamsUserIDOf(activity *Activity) string {
 	return activity.From.ID
 }
 
-// linkedUser returns the Scion account linked to the activity sender, or nil
-// when the sender has not registered.
-func (h *CommandHandler) linkedUser(ctx context.Context, activity *Activity) *TeamsUserMapping {
-	return linkedUserByTeamsID(ctx, h.getStore(), teamsUserIDOf(activity), h.log)
-}
-
-// requireLinkedUser returns the sender's linked Scion account. When the
-// sender is not linked it replies with a register hint and returns false.
+// requireLinkedUser returns the sender's linked Scion account. When the link
+// cannot be used it replies with what to do next and returns false.
 func (h *CommandHandler) requireLinkedUser(ctx context.Context, activity *Activity) (*TeamsUserMapping, bool) {
-	mapping := h.linkedUser(ctx, activity)
-	if mapping == nil {
-		_ = h.sendReply(ctx, activity, registerHint)
+	teamsUserID := teamsUserIDOf(activity)
+	mapping, err := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID)
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
+		}
+		_ = h.sendReply(ctx, activity, problem)
 		return nil, false
 	}
 	return mapping, true
