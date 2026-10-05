@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -210,4 +211,67 @@ func TestSetOnBehalfOf_KeepsListedSignedHeaders(t *testing.T) {
 		assert.Empty(t, req.Header.Get("X-Scion-On-Behalf-Of"))
 		assert.Empty(t, req.Header.Get("X-Scion-Signed-Headers"))
 	})
+}
+
+func TestHTTPHubClient_ListProjectsForUser_FollowsCursor(t *testing.T) {
+	var cursors []string
+	var principals []string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cursor := r.URL.Query().Get("cursor")
+		cursors = append(cursors, cursor)
+		principals = append(principals, r.Header.Get("X-Scion-On-Behalf-Of"))
+		switch cursor {
+		case "":
+			json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p1"}, {ID: "p2"}}, NextCursor: "c/2+"})
+		case "c/2+":
+			json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p3"}}, NextCursor: "c3"})
+		default:
+			json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p4"}}})
+		}
+	}))
+	defer hub.Close()
+
+	projects, err := NewHTTPHubClient(hub.URL, "", "", nil).ListProjectsForUser(context.Background(), "user:alice@example.com")
+	require.NoError(t, err)
+	var ids []string
+	for _, p := range projects {
+		ids = append(ids, p.ID)
+	}
+	assert.Equal(t, []string{"p1", "p2", "p3", "p4"}, ids)
+	assert.Equal(t, []string{"", "c/2+", "c3"}, cursors)
+	for _, p := range principals {
+		assert.Equal(t, "user:alice@example.com", p, "every page carries the linked user")
+	}
+}
+
+func TestHTTPHubClient_ListProjectsForUser_PageLimit(t *testing.T) {
+	var calls atomic.Int64
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		json.NewEncoder(w).Encode(hubProjectsResponse{
+			Projects:   []hubProject{{ID: fmt.Sprintf("p%d", n)}},
+			NextCursor: fmt.Sprintf("c%d", n),
+		})
+	}))
+	defer hub.Close()
+
+	projects, err := NewHTTPHubClient(hub.URL, "", "", nil).ListProjectsForUser(context.Background(), "user:alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, int64(maxUserProjectPages), calls.Load())
+	assert.Len(t, projects, maxUserProjectPages)
+}
+
+func TestHTTPHubClient_ListProjectsForUser_ErrorOnLaterPage(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p1"}}, NextCursor: "c2"})
+			return
+		}
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer hub.Close()
+
+	projects, err := NewHTTPHubClient(hub.URL, "", "", nil).ListProjectsForUser(context.Background(), "user:alice@example.com")
+	require.Error(t, err)
+	assert.Nil(t, projects, "a partial list is not returned on error")
 }

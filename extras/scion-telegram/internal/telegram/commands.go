@@ -22,6 +22,7 @@ import (
 	"html"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -809,7 +810,8 @@ func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client)
 }
 
 type hubProjectsResponse struct {
-	Projects []hubProject `json:"projects"`
+	Projects   []hubProject `json:"projects"`
+	NextCursor string       `json:"nextCursor,omitempty"`
 }
 
 type hubProject struct {
@@ -868,12 +870,39 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
+// maxUserProjectPages bounds how many pages ListProjectsForUser follows.
+const maxUserProjectPages = 20
+
 func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects"
+	var projects []ProjectOption
+	cursor := ""
+	for page := 0; page < maxUserProjectPages; page++ {
+		result, err := c.listUserProjectsPage(ctx, onBehalfOf, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range result.Projects {
+			projects = append(projects, ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug})
+		}
+		if result.NextCursor == "" {
+			return projects, nil
+		}
+		cursor = result.NextCursor
+	}
+	slog.Warn("User project list truncated at page limit", "pages", maxUserProjectPages, "count", len(projects))
+	return projects, nil
+}
 
-	slog.Debug("Listing projects for linked user from hub", "url", url, "on_behalf_of", onBehalfOf)
+// listUserProjectsPage fetches one page of the linked user's projects.
+func (c *httpHubClient) listUserProjectsPage(ctx context.Context, onBehalfOf, cursor string) (*hubProjectsResponse, error) {
+	endpoint := c.hubURL + "/api/v1/projects"
+	if cursor != "" {
+		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	slog.Debug("Listing projects for linked user from hub", "url", endpoint, "on_behalf_of", onBehalfOf)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
@@ -897,12 +926,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf stri
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode list user projects response: %w", err)
 	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
+	return &result, nil
 }
 
 func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
