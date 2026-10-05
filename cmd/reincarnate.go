@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -35,6 +36,14 @@ var (
 	reincarnateDryRun          bool
 	reincarnateHandoffTemplate bool
 	reincarnateBroker          string
+
+	// Patch flags (ptone/scion#3302).
+	reincarnateServiceAccount string
+	reincarnateRole           string
+	reincarnateModel          string
+	reincarnateThinkingLevel  int = -1
+	reincarnateHarnessAuth    string
+	reincarnateImage          string
 )
 
 // reincarnateFiveLineContract is the design §3.9 self-migration contract,
@@ -116,9 +125,9 @@ re-opening a decision that is already settled.
 // /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2): stop an
 // agent, re-resolve its configuration against the current template/harness
 // catalog, and start a fresh generation with the same identity, handing it
-// an agent-authored handoff as its first task. Phase 1 supports only the
-// handoff and dry-run; every override flag (--image, --model, --harness,
-// --rollback, etc.) is design-scoped for later phases.
+// an agent-authored handoff as its first task. The patch flags
+// (--service-account, --role, --model, --thinking-level, --harness-auth,
+// --image; ptone/scion#3302) change those settings on the new generation.
 var reincarnateCmd = &cobra.Command{
 	Use:   "reincarnate [agent]",
 	Short: "Migrate an agent to a fresh generation (new template/config, same identity)",
@@ -140,6 +149,13 @@ sections.
 
 Use --dry-run to see the planned changes (template, image, harness config,
 model, env keys, branch) without migrating anything.
+
+Patch flags change a setting on the new generation, and later
+reincarnations keep the new value: --service-account, --role, --model,
+--thinking-level, --harness-auth and --image. --service-account and --role
+get the same access checks as create. --dry-run shows the old and new
+value of each patched setting. An agent that patches itself needs the
+agent lifecycle permission, and can lower its own role but not raise it.
 
 Use --broker <name|id> to move the agent to another runtime broker. Both
 brokers must mount the same NFS export, so the workspace moves without being
@@ -164,6 +180,9 @@ eligibility check and changes nothing.`,
 		}
 
 		if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
+			return err
+		}
+		if err := validateReincarnatePatchFlags(); err != nil {
 			return err
 		}
 
@@ -240,6 +259,27 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		DryRun:       reincarnateDryRun,
 		TargetBroker: reincarnateBroker,
 	}
+	applyReincarnatePatchFlags(req)
+	wantPatched := requestedPatchFields(req)
+
+	// A hub that predates the patch fields ignores serviceAccount, role and
+	// thinkingLevel, and would run an unpatched reincarnation. Before a real
+	// patched request, ask for the plan first and stop if the hub did not
+	// apply the patch.
+	if len(wantPatched) > 0 && !reincarnateDryRun {
+		probe := *req
+		probe.DryRun = true
+		probeResp, err := agentSvc.Reincarnate(ctx, agentName, &probe)
+		if err != nil {
+			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
+				printMoveVerdict(os.Stderr, v)
+			}
+			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
+		}
+		if err := checkHubAppliedPatch(wantPatched, probeResp); err != nil {
+			return err
+		}
+	}
 
 	if reincarnateDryRun {
 		statusf("Resolving reincarnation plan for '%s'...\n", agentName)
@@ -261,6 +301,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	}
 
 	if err := checkHubSupportsMove(reincarnateBroker, resp); err != nil {
+		return err
+	}
+	if err := checkHubAppliedPatch(wantPatched, resp); err != nil {
 		return err
 	}
 
@@ -291,6 +334,72 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 func validateReincarnateBrokerFlags(broker string, dryRun bool) error {
 	if broker != "" && !dryRun {
 		return fmt.Errorf("--broker requires --dry-run: moving an agent between brokers is not supported yet")
+	}
+	return nil
+}
+
+// validateReincarnatePatchFlags checks the patch flag values locally, with
+// create's rules, before any hub call.
+func validateReincarnatePatchFlags() error {
+	if err := validateAgentRole(reincarnateRole); err != nil {
+		return err
+	}
+	if err := validateHarnessAuthFlag(reincarnateHarnessAuth); err != nil {
+		return err
+	}
+	return validateThinkingLevelFlag(reincarnateThinkingLevel)
+}
+
+// applyReincarnatePatchFlags copies the patch flags onto req. The model is
+// normalized the way start/create normalize --model.
+func applyReincarnatePatchFlags(req *hubclient.ReincarnateAgentRequest) {
+	req.ServiceAccount = reincarnateServiceAccount
+	req.Role = reincarnateRole
+	req.Image = reincarnateImage
+	req.HarnessAuth = reincarnateHarnessAuth
+	if reincarnateModel != "" {
+		req.Model = config.NormalizeModelAlias(reincarnateModel)
+	}
+	if reincarnateThinkingLevel != -1 {
+		tl := reincarnateThinkingLevel
+		req.ThinkingLevel = &tl
+	}
+}
+
+// requestedPatchFields lists the patch fields req sets, using the hub's
+// field names in its display order (ReincarnationPlan.Patched).
+func requestedPatchFields(req *hubclient.ReincarnateAgentRequest) []string {
+	var out []string
+	add := func(set bool, name string) {
+		if set {
+			out = append(out, name)
+		}
+	}
+	add(req.ServiceAccount != "", "serviceAccount")
+	add(req.Role != "", "role")
+	add(req.Image != "", "image")
+	add(req.Model != "", "model")
+	add(req.ThinkingLevel != nil, "thinkingLevel")
+	add(req.HarnessAuth != "", "harnessAuth")
+	return out
+}
+
+// checkHubAppliedPatch fails when the response's plan does not list every
+// requested patch field: the hub ignored them.
+func checkHubAppliedPatch(want []string, resp *hubclient.ReincarnateAgentResponse) error {
+	if len(want) == 0 {
+		return nil
+	}
+	got := map[string]bool{}
+	if resp != nil {
+		for _, f := range resp.Plan.Patched {
+			got[f] = true
+		}
+	}
+	for _, f := range want {
+		if !got[f] {
+			return fmt.Errorf("this hub does not support reincarnate patch flags; upgrade the hub")
+		}
 	}
 	return nil
 }
@@ -367,6 +476,15 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	printChange("Image", plan.Image)
 	printChange("Harness cfg", plan.HarnessCfg)
 	printChange("Model", plan.Model)
+	printPatch := func(label string, c *hubclient.FieldChange) {
+		if c != nil {
+			printChange(label, *c)
+		}
+	}
+	printPatch("Role", plan.Role)
+	printPatch("Service acct", plan.ServiceAccount)
+	printPatch("Thinking", plan.ThinkingLevel)
+	printPatch("Harness auth", plan.HarnessAuth)
 	fmt.Printf("  %-14s %s\n", "Branch:", valueOrNone(plan.Branch))
 
 	if len(plan.EnvKeys.Added) > 0 {
@@ -400,5 +518,11 @@ func init() {
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
 	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. Requires --dry-run for now")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
+	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account ID for the new generation (same access checks as create)")
+	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")
+	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")
+	reincarnateCmd.Flags().IntVar(&reincarnateThinkingLevel, "thinking-level", -1, "Thinking level (0-100) for the new generation")
+	reincarnateCmd.Flags().StringVar(&reincarnateHarnessAuth, "harness-auth", "", "Auth method for the new generation (api-key, oauth-token, auth-file, vertex-ai)")
+	reincarnateCmd.Flags().StringVarP(&reincarnateImage, "image", "i", "", "Container image for the new generation")
 	rootCmd.AddCommand(reincarnateCmd)
 }

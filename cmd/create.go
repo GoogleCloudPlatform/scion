@@ -51,14 +51,8 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
-		// Validate --harness-auth value
-		if harnessAuthFlag != "" {
-			switch harnessAuthFlag {
-			case "api-key", "oauth-token", "auth-file", "vertex-ai":
-				// valid
-			default:
-				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
-			}
+		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+			return err
 		}
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
