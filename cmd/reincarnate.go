@@ -152,8 +152,10 @@ eligibility check and changes nothing.
 Use --shared-dir-backend NAME=nfs to move a shared dir's recorded storage
 backend from local to nfs. Only this agent's record changes, while the
 directory belongs to the project: stop every agent that uses it, copy the
-local directory to the nfs directory, then reincarnate each of those agents
-with the flag. The local directory is never moved or deleted. The start
+local directory's contents into the nfs directory keeping ownership, modes,
+the setgid bit and ACLs (for example rsync -aAX LOCAL/ NFS/, then check the
+nfs directory with getfacl), then reincarnate each of those agents with the
+flag. The local directory is never moved or deleted. The start
 refuses an empty nfs directory while the previous local directory is not
 empty (on Kubernetes, whenever the nfs directory is empty); add
 --allow-empty-shared-dir to start anyway.
