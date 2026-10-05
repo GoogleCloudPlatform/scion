@@ -1234,6 +1234,18 @@ type V1ServerHubConfig struct {
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
 	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
+	// StartClaimLeaseTTL is the lease of a start claim; the holder renews it
+	// every third of this (e.g., "90s"; 30s to 5m).
+	StartClaimLeaseTTL string `json:"start_claim_lease_ttl,omitempty" yaml:"start_claim_lease_ttl,omitempty" koanf:"start_claim_lease_ttl"`
+	// StartMaxDuration is the hard deadline on any agent start, including a
+	// wait for another hub node (e.g., "12m"; minimum 11m).
+	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
+	// StartUnconfirmedHold is the longest a start whose outcome is unknown
+	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
+	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
+	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
@@ -2532,10 +2544,14 @@ func versionedEnvKeyMapper(s string) string {
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"start_create_unconfirmed_hold",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
+	"start_unconfirmed_hold",
+	"start_claim_lease_ttl",
 	"soft_delete_retention",
 	"missing_agent_grace",
+	"start_max_duration",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -2846,6 +2862,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MissingAgentGrace != "" {
 			if d, err := time.ParseDuration(v1.Hub.MissingAgentGrace); err == nil {
 				gc.Hub.MissingAgentGrace = d
+			}
+		}
+		for _, f := range []struct {
+			v   string
+			dst *time.Duration
+		}{
+			{v1.Hub.StartClaimLeaseTTL, &gc.Hub.StartClaimLeaseTTL},
+			{v1.Hub.StartMaxDuration, &gc.Hub.StartMaxDuration},
+			{v1.Hub.StartUnconfirmedHold, &gc.Hub.StartUnconfirmedHold},
+			{v1.Hub.StartCreateUnconfirmedHold, &gc.Hub.StartCreateUnconfirmedHold},
+		} {
+			if f.v == "" {
+				continue
+			}
+			if d, err := time.ParseDuration(f.v); err == nil {
+				*f.dst = d
 			}
 		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
@@ -3172,6 +3204,18 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if gc.Hub.StartClaimLeaseTTL > 0 {
+		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
+	}
+	if gc.Hub.StartMaxDuration > 0 {
+		v1Hub.StartMaxDuration = gc.Hub.StartMaxDuration.String()
+	}
+	if gc.Hub.StartUnconfirmedHold > 0 {
+		v1Hub.StartUnconfirmedHold = gc.Hub.StartUnconfirmedHold.String()
+	}
+	if gc.Hub.StartCreateUnconfirmedHold > 0 {
+		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

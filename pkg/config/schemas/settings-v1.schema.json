@@ -994,6 +994,30 @@
           "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
           "x-since": "1"
         },
+        "start_claim_lease_ttl": {
+          "type": "string",
+          "description": "Lease of the claim every agent start holds; the holder renews it every third of this. Default '90s', allowed 30s to 5m.",
+          "x-env-var": "SCION_SERVER_HUB_STARTCLAIMLEASETTL",
+          "x-since": "1"
+        },
+        "start_max_duration": {
+          "type": "string",
+          "description": "Hard deadline on any agent start, including a wait for another hub node. Default '12m', minimum 11m.",
+          "x-env-var": "SCION_SERVER_HUB_STARTMAXDURATION",
+          "x-since": "1"
+        },
+        "start_unconfirmed_hold": {
+          "type": "string",
+          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '13m', minimum 12m40s.",
+          "x-env-var": "SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD",
+          "x-since": "1"
+        },
+        "start_create_unconfirmed_hold": {
+          "type": "string",
+          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '5m', allowed 3m up to start_unconfirmed_hold.",
+          "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
+          "x-since": "1"
+        },
         "async_agent_launch": {
           "type": "boolean",
           "description": "Turns on asynchronous agent create, off by default. A create is asynchronous only when this is on AND the client request also opts in (acceptAsyncLaunch); other requests, provision-only creates and reprovisioning stay synchronous, as do creates sent to a broker without async launch support. Restart required to change.",
