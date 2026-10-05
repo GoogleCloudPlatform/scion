@@ -140,11 +140,18 @@ func (ss *syncStart) ownsName() bool {
 	return launchMarkerMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 }
 
+// testHookSyncStartFinish, when set (tests only), runs at the start of
+// syncStart.finish.
+var testHookSyncStartFinish func(key launchKey)
+
 // finish removes this start's marker (only if it still holds this start's
 // owner value), then releases the registry record, which lets a newer start
 // waiting in beginSyncStart proceed. The marker goes first so its
 // check-and-remove cannot remove a marker the newer start writes.
 func (ss *syncStart) finish() {
+	if testHookSyncStartFinish != nil {
+		testHookSyncStartFinish(ss.key)
+	}
 	if ss.projectPath != "" {
 		removeLaunchMarkerIfMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 	}

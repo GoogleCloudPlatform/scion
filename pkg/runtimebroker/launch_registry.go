@@ -201,6 +201,22 @@ func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
 	rec.CancelLocal()
 }
 
+// OtherRunInFlight reports whether a launch of a run other than runID is
+// registered under key (ptone/scion#2675). Such a launch is provisioning, or
+// about to provision, the agent's files under this name, so a delete naming
+// runID must leave them alone even before the launch has recorded its run
+// on disk. False without a run ID on either side, matching
+// CancelLocalForRun.
+func (r *launchRegistry) OtherRunInFlight(key launchKey, runID string) bool {
+	if r == nil || runID == "" {
+		return false
+	}
+	r.mu.Lock()
+	rec := r.records[key]
+	r.mu.Unlock()
+	return rec != nil && rec.RunID != "" && rec.RunID != runID
+}
+
 // Finish closes rec's done channel and removes it from the registry if it is
 // still the current record for key (a newer launch may already have
 // replaced it via Begin, in which case removal here would wrongly drop the

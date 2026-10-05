@@ -80,6 +80,10 @@ stringData:
     server:
       auth:
         mode: proxy
+        proxy:
+          iap:
+            audience: /projects/123456789012/global/backendServices/1111111111111111111
+          provider: iap
       broker:
         auto_provide: true
         host: 127.0.0.1
@@ -276,7 +280,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-varied"
         checksum/env-config: 2de4f066a863fb877dec8904f0784d7fe6ccc69e2662ac70ac59370829ef2df2
-        checksum/settings: 12009b2578aa834709bdb43a37297eb428020d5e2307b2282c0f9df215229d83
+        checksum/settings: 0e34bf9522f05a4c22b842372411165f55b22c8d59184fd1c8cb4e186af7c751
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

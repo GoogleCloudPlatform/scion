@@ -235,3 +235,25 @@ func HomeStorageIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles ma
 func IsKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
 	return isKubernetesRuntimeEntry(name, rt)
 }
+
+// Hub dispatch windows a synchronous start must fit in: the rolling window
+// of a deferred dispatch and the broker client's request timeout.
+const (
+	HubStartRollingWindowSeconds = 90
+	HubBrokerRequestSeconds      = 120
+)
+
+// HomeStorageWindowWarnings returns a warning when a start could wait
+// longer for the previous pod (stop_grace_seconds plus
+// termination_wait_seconds) than the hub's dispatch windows allow. The
+// rest of the start also needs time inside those windows.
+func HomeStorageWindowWarnings(h *V1HomeStorageConfig) []string {
+	if h == nil {
+		return nil
+	}
+	bound := h.StopGrace() + h.TerminationWait()
+	if bound < HubStartRollingWindowSeconds {
+		return nil
+	}
+	return []string{fmt.Sprintf("server.home_storage: stop_grace_seconds + termination_wait_seconds is %ds, which does not fit the hub's %ds start window (and %ds broker request timeout); starts that wait for a previous pod may time out", bound, HubStartRollingWindowSeconds, HubBrokerRequestSeconds)}
+}

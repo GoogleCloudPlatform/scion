@@ -36,15 +36,13 @@ import {
   canLifecycle,
   canMessageAgent,
   isTerminalAvailable,
-  getAgentDisplayStatus,
   isAgentRunning,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -2014,12 +2012,7 @@ export class ScionPageAgents extends LitElement {
                 : ''}
             </div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          >
-          </scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -2112,11 +2105,7 @@ export class ScionPageAgents extends LitElement {
         </td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"

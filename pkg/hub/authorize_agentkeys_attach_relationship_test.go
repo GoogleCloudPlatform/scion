@@ -44,7 +44,6 @@ package hub
 // gets the identical pre-backfill treatment.
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
@@ -137,10 +136,8 @@ func TestExecuteAgentKeys_AgentCallerRequiresAttachRelationship(t *testing.T) {
 				f, d, storeSpy, events := newExecuteAgentKeysFixture(t)
 				markEdgeBackfillComplete(t, f.store)
 				callerID := tid("execkeys-attach-revoked-" + shape.name)
-				edgeID := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, callerID, f.projectA.ID)
-				if err := f.store.DeactivateDelegationEdge(context.Background(), edgeID); err != nil {
-					t.Fatalf("setup: DeactivateDelegationEdge: %v", err)
-				}
+				addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, callerID, f.projectA.ID)
+				revokeDelegateEdges(t, f.store, callerID)
 				token := f.agentToken(t, callerID, f.projectA.ID, ScopeAgentLifecycle)
 				log := installSentinelLogCapture(t)
 

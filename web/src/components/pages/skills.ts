@@ -86,6 +86,14 @@ export class ScionPageSkills extends LitElement {
         margin-bottom: 0.5rem;
       }
 
+      /* The header's only child holds the name and scope. As a flex item it
+         defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .skill-header > div {
+        min-width: 0;
+      }
+
       .skill-meta {
         font-size: 0.813rem;
         color: var(--scion-text-muted, #64748b);
@@ -544,7 +552,7 @@ export class ScionPageSkills extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="lightning-charge"></sl-icon>
-              ${skill.name}
+              <span>${skill.name}</span>
             </h3>
             <div class="skill-meta">
               <span class="scope-badge">${skill.scope}</span>
