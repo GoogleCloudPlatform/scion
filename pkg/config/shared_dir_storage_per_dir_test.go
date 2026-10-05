@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -385,4 +386,38 @@ func TestValidateSharedDirStorageBackendValues(t *testing.T) {
 	assert.Equal(t, "profiles.p.shared_dir_storage_backends.Bad_Name", errs[0].Path)
 	assert.Equal(t, "profiles.p.shared_dir_storage_backends.notes", errs[1].Path)
 	assert.Equal(t, "runtimes.rt.shared_dir_storage_backend", errs[2].Path)
+}
+
+// The JSON schema repeats the shared dir name pattern as a literal; both
+// shared_dir_storage_backends entries must use SharedDirNamePattern.
+func TestSettingsSchema_SharedDirStorageBackendsPatternMatchesConstant(t *testing.T) {
+	data, err := schemasFS.ReadFile(settingsSchemaFiles["1"])
+	require.NoError(t, err)
+	var doc interface{}
+	require.NoError(t, json.Unmarshal(data, &doc))
+	var patterns []string
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch n := v.(type) {
+		case map[string]interface{}:
+			for k, child := range n {
+				if k == "shared_dir_storage_backends" {
+					entry, _ := child.(map[string]interface{})
+					names, _ := entry["propertyNames"].(map[string]interface{})
+					pattern, _ := names["pattern"].(string)
+					patterns = append(patterns, pattern)
+				}
+				walk(child)
+			}
+		case []interface{}:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(doc)
+	require.Len(t, patterns, 2, "runtime and profile entries")
+	for _, p := range patterns {
+		assert.Equal(t, SharedDirNamePattern, p)
+	}
 }
