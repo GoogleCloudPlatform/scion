@@ -1810,3 +1810,62 @@ func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadGlobalConfig_ListFieldNormalization pins splitEnvCommaLists on
+// both load paths: a single-element list (from env or file) is split on
+// commas, trimmed, and emptied of blank items, for every list field it
+// covers.
+func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
+	type row struct {
+		name   string
+		env    map[string]string
+		legacy string // server.yaml body (legacy path)
+		v1     string // settings.yaml server: body (settings path)
+		get    func(*GlobalConfig) []string
+		want   []string
+	}
+	hubOrigins := func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedOrigins }
+	rows := []row{
+		{name: "env origins split and trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "https://a, https://b"},
+			get: hubOrigins, want: []string{"https://a", "https://b"}},
+		{name: "env single origin trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "  https://only.example  "},
+			get: hubOrigins, want: []string{"https://only.example"}},
+		{name: "env empty origin dropped", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": ""},
+			get: hubOrigins, want: []string{}},
+		{name: "env hub methods", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDMETHODS": "GET,POST"},
+			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
+		{name: "env hub headers", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDHEADERS": "X-A, X-B"},
+			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedHeaders }, want: []string{"X-A", "X-B"}},
+		{name: "env broker methods", env: map[string]string{"SCION_SERVER_RUNTIMEBROKER_CORSALLOWEDMETHODS": "GET,PUT"},
+			get: func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedMethods }, want: []string{"GET", "PUT"}},
+		{name: "env broker headers", env: map[string]string{"SCION_SERVER_RUNTIMEBROKER_CORSALLOWEDHEADERS": "X-C,X-D"},
+			get: func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedHeaders }, want: []string{"X-C", "X-D"}},
+		{name: "file single comma-joined origin split",
+			legacy: "hub:\n  corsAllowedOrigins: [\"https://f1,https://f2\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\"https://f1,https://f2\"]\n",
+			get:    hubOrigins, want: []string{"https://f1", "https://f2"}},
+	}
+	for _, r := range rows {
+		for _, mode := range []string{"legacy", "settings"} {
+			t.Run(r.name+"/"+mode, func(t *testing.T) {
+				files := map[string]string{}
+				if mode == "legacy" {
+					files["server.yaml"] = r.legacy
+				} else {
+					files["settings.yaml"] = "schema_version: \"1\"\nserver:\n  mode: workstation\n" + r.v1
+				}
+				writeGlobalFiles(t, files)
+				for k, v := range r.env {
+					t.Setenv(k, v)
+				}
+				gc, err := LoadGlobalConfig(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := r.get(gc); !reflect.DeepEqual(got, r.want) {
+					t.Errorf("got %q, want %q", got, r.want)
+				}
+			})
+		}
+	}
+}

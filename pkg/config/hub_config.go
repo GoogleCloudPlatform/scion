@@ -1768,9 +1768,13 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	return nil
 }
 
-// splitEnvCommaLists splits list fields that koanf's env provider loaded as a
-// single comma-separated string (it does not split slices itself), e.g.
-// SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b.
+// splitEnvCommaLists normalizes single-element list fields: koanf's env
+// provider loads a list env var as one string (it does not split slices),
+// e.g. SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b. Any
+// single-element list, from env or file, is split on commas, its items
+// trimmed, and empty items dropped, so "  https://only  " becomes
+// ["https://only"] and "" becomes []. None of these fields (emails, domains,
+// CORS origins, methods, headers) can legitimately contain a comma.
 func splitEnvCommaLists(gc *GlobalConfig) {
 	for _, list := range []*[]string{
 		&gc.Hub.AdminEmails,
@@ -1778,9 +1782,14 @@ func splitEnvCommaLists(gc *GlobalConfig) {
 		&gc.Hub.CORSAllowedOrigins, &gc.Hub.CORSAllowedMethods, &gc.Hub.CORSAllowedHeaders,
 		&gc.RuntimeBroker.CORSAllowedOrigins, &gc.RuntimeBroker.CORSAllowedMethods, &gc.RuntimeBroker.CORSAllowedHeaders,
 	} {
-		if len(*list) == 1 && strings.Contains((*list)[0], ",") {
-			*list = parseCommaSeparatedList((*list)[0])
+		if len(*list) != 1 {
+			continue
 		}
+		items := parseCommaSeparatedList((*list)[0])
+		if items == nil {
+			items = []string{}
+		}
+		*list = items
 	}
 }
 
