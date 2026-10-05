@@ -132,51 +132,30 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 		}
 	}
 
-	// Check if user is registered.
-	teamsUserID := activity.From.AadObjectID
-	if teamsUserID == "" {
-		teamsUserID = activity.From.ID
+	// Setup requires a linked user; only that user's projects are offered.
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
 	}
-	var mapping *TeamsUserMapping
-	if store != nil {
-		var err error
-		mapping, err = store.GetUserMapping(ctx, teamsUserID)
-		if err != nil {
-			h.log.Warn("Error checking user mapping", "error", err)
-		}
-	}
-	if mapping == nil {
-		return h.sendReply(ctx, activity, "Please link your Teams account first with the `register` command.")
+
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.sendReply(ctx, activity, "Hub client not configured.")
 	}
 
 	if len(args) > 0 {
 		// Direct setup with project slug.
-		projectSlug := args[0]
-		return h.completeSetup(ctx, activity, projectSlug)
+		return h.completeSetup(ctx, activity, mapping, args[0])
 	}
 
-	// Get projects - try user-scoped first, then fall back to broker endpoint.
-	hubClient := h.broker.hubClient
-	var projects []ProjectOption
-	if hubClient != nil {
-		if mapping.ScionUserID != "" {
-			var err error
-			projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID, onBehalfOfUser(mapping))
-			if err != nil {
-				h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
-			}
-		}
-		if len(projects) == 0 {
-			var err error
-			projects, err = hubClient.ListProjects(ctx)
-			if err != nil {
-				h.log.Warn("Failed to list projects from hub", "error", err)
-			}
-		}
+	projects, err := hubClient.ListUserProjects(ctx, onBehalfOfUser(mapping), "")
+	if err != nil {
+		h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, "", "Failed to retrieve your projects. Please try again."))
 	}
 
 	if len(projects) == 0 {
-		return h.sendReply(ctx, activity, "No projects found. Create a project in the hub first.")
+		return h.sendReply(ctx, activity, noUserProjectsText(mapping))
 	}
 
 	// Build Adaptive Card with project buttons.
@@ -225,30 +204,53 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 	return h.sendCardReply(ctx, activity, card)
 }
 
+// noUserProjectsText is shown when the linked user has no projects.
+func noUserProjectsText(mapping *TeamsUserMapping) string {
+	return fmt.Sprintf("Your Scion account (%s) isn't a member of any projects. Ask a project owner to add you, or create a project in the hub.", mapping.ScionEmail)
+}
+
+// findUserProject resolves slugOrName to one of the linked user's projects.
+// It returns nil when the user has no such project.
+func findUserProject(ctx context.Context, hubClient *HubClient, mapping *TeamsUserMapping, slugOrName string) (*ProjectOption, error) {
+	onBehalfOf := onBehalfOfUser(mapping)
+	projects, err := hubClient.ListUserProjects(ctx, onBehalfOf, strings.ToLower(slugOrName))
+	if err != nil {
+		return nil, err
+	}
+	if len(projects) == 0 {
+		// Fall back to matching by name across the user's projects.
+		projects, err = hubClient.ListUserProjects(ctx, onBehalfOf, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range projects {
+		if strings.EqualFold(p.Slug, slugOrName) || strings.EqualFold(p.Name, slugOrName) || p.ID == slugOrName {
+			return &p, nil
+		}
+	}
+	return nil, nil
+}
+
 // completeSetup finishes the setup process by creating the channel link.
-func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, projectSlug string) error {
+// The project must be one of the linked user's projects.
+func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, mapping *TeamsUserMapping, projectSlug string) error {
 	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Setup failed: store not initialized.")
 	}
 
-	// Resolve project ID from slug via hub if possible.
-	// TODO: Consider caching the project list or adding a GetProjectBySlug
-	// hub endpoint to avoid the O(N) scan on every setup invocation.
-	projectID := projectSlug
-	hubClient := h.broker.hubClient
-	if hubClient != nil {
-		projects, err := hubClient.ListProjects(ctx)
-		if err == nil {
-			for _, p := range projects {
-				if strings.EqualFold(p.Slug, projectSlug) || strings.EqualFold(p.Name, projectSlug) {
-					projectID = p.ID
-					projectSlug = p.Slug
-					break
-				}
-			}
-		}
+	project, err := findUserProject(ctx, h.broker.hubClient, mapping, projectSlug)
+	if err != nil {
+		h.log.Warn("Failed to resolve project for setup", "error", err, "project", projectSlug)
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, projectSlug, "Failed to look up the project. Please try again."))
 	}
+	if project == nil {
+		return h.sendReply(ctx, activity,
+			fmt.Sprintf("Project **%s** was not found among your Scion projects. Run `setup` to pick one of your projects.", projectSlug))
+	}
+	projectID := project.ID
+	projectSlug = project.Slug
 
 	// Extract team/channel info.
 	teamID := ""

@@ -223,8 +223,31 @@ func TestCallbackHandler_AskInput(t *testing.T) {
 	assert.True(t, hasInputText, "expected card body to contain an Input.Text element")
 }
 
+// userProjectsHub serves the given projects from the user-scoped project list.
+func userProjectsHub(t *testing.T, projects ...hubProject) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/projects" {
+			t.Errorf("unexpected hub request %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
+		out := projects
+		if slug := r.URL.Query().Get("slug"); slug != "" {
+			out = nil
+			for _, p := range projects {
+				if p.Slug == slug {
+					out = append(out, p)
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(hubProjectsResponse{Projects: out})
+	}
+}
+
 func TestCallbackHandler_SetupConfirm(t *testing.T) {
-	broker, _ := testBrokerWithStore(t, nil)
+	broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Name: "My Project", Slug: "my-project"}))
+	linkTestUser(t, broker)
 
 	activity := invokeActivity(map[string]string{
 		"action":       "setup_confirm",
@@ -310,7 +333,8 @@ func TestCallbackHandler_NonAdaptiveCardInvoke(t *testing.T) {
 }
 
 func TestCallbackHandler_WrappedActionData(t *testing.T) {
-	broker, _ := testBrokerWithStore(t, nil)
+	broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-wrapped", Slug: "wrapped-project"}))
+	linkTestUser(t, broker)
 
 	// Test with wrapped action data format:
 	// {"action": {"type": "Action.Execute", "data": {"action": "setup_confirm", ...}}}
@@ -405,4 +429,39 @@ func TestCallbackHandler_AskResponse_UnlinkedSenderUsesTeamsID(t *testing.T) {
 	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
 	assert.Equal(t, "teams:aad-user-1", payload.Message.Sender)
 	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+}
+
+func TestCallbackHandler_SetupConfirm_RequiresLinkedUser(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}))
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":       "setup_confirm",
+		"project_slug": "my-project",
+		"project_id":   "proj-1",
+	}))
+	require.NoError(t, err)
+	body, _ := json.Marshal(resp.Body)
+	assert.Contains(t, string(body), "register")
+
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+}
+
+func TestCallbackHandler_SetupConfirm_RejectsProjectOutsideUserProjects(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Slug: "my-project"}))
+	linkTestUser(t, broker)
+
+	resp, err := broker.callbackHandler.HandleInvoke(context.Background(), invokeActivity(map[string]string{
+		"action":       "setup_confirm",
+		"project_slug": "other-project",
+		"project_id":   "proj-other",
+	}))
+	require.NoError(t, err)
+	body, _ := json.Marshal(resp.Body)
+	assert.Contains(t, string(body), "not found among your Scion projects")
+
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
 }

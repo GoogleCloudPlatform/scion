@@ -310,6 +310,8 @@ Commands are also available via the Teams command menu (type `/` or the bot name
 
 Registration codes expire after 15 minutes. Run the register command again for a fresh code.
 
+`setup`, `agents`, `status`, `default`, and messages to agents run as your linked Scion account, so register first. `setup` offers only the projects your account is a member of. If the bot reports that your linked account is no longer active, run `unregister` and then `register`.
+
 ### Sending Messages to Agents
 
 Messages are routed based on @-mentions and conversation context:

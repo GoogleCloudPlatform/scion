@@ -219,7 +219,8 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string
 	return agents, nil
 }
 
-// ListProjects returns all projects visible to the broker.
+// ListProjects returns every project visible to the broker. It is not scoped
+// to a user, so user-facing pickers must use ListUserProjects instead.
 // GET /api/v1/broker/projects
 func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	u := c.hubURL + "/api/v1/broker/projects"
@@ -254,11 +255,15 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	return projects, nil
 }
 
-// ListProjectsForUser returns projects owned by a specific user, read as the
-// linked user identified by onBehalfOf ("user:<email>").
-// GET /api/v1/projects?ownerId=<ownerID>
-func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID, onBehalfOf string) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/projects?ownerId=" + url.QueryEscape(ownerID)
+// ListUserProjects returns the projects the linked user identified by
+// onBehalfOf ("user:<email>") is a member of. A non-empty slug narrows the
+// result to that project slug.
+// GET /api/v1/projects[?slug=<slug>]
+func (c *HubClient) ListUserProjects(ctx context.Context, onBehalfOf, slug string) ([]ProjectOption, error) {
+	u := c.hubURL + "/api/v1/projects"
+	if slug != "" {
+		u += "?slug=" + url.QueryEscape(slug)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {

@@ -159,7 +159,7 @@ func TestHubClient_Reads_SendLinkedUser(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.GetProjectStatus(ctx, "proj-1", "user:alice@example.com")
 	require.NoError(t, err)
-	_, err = client.ListProjectsForUser(ctx, "scion-1", "user:alice@example.com")
+	_, err = client.ListUserProjects(ctx, "user:alice@example.com", "")
 	require.NoError(t, err)
 
 	require.Len(t, headers, 3)

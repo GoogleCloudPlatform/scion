@@ -272,9 +272,31 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 			fmt.Sprintf("This conversation is already linked to project **%s**.", existing.ProjectSlug)), nil
 	}
 
-	if projectID == "" {
-		projectID = projectSlug
+	// Setup requires a linked user, and the project must be one of theirs.
+	mapping := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity), h.log)
+	if mapping == nil {
+		return h.respondWithUpdatedCard(activity, registerHint), nil
 	}
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.respondWithUpdatedCard(activity, "Hub client not configured."), nil
+	}
+	lookup := projectSlug
+	if lookup == "" {
+		lookup = projectID
+	}
+	project, err := findUserProject(ctx, hubClient, mapping, lookup)
+	if err != nil {
+		h.log.Warn("Failed to resolve project for setup", "error", err, "project", lookup)
+		return h.respondWithUpdatedCard(activity,
+			hubErrorText(err, mapping, lookup, "Failed to look up the project. Please try again.")), nil
+	}
+	if project == nil || (projectID != "" && project.ID != projectID) {
+		return h.respondWithUpdatedCard(activity,
+			fmt.Sprintf("Project **%s** was not found among your Scion projects.", lookup)), nil
+	}
+	projectID = project.ID
+	projectSlug = project.Slug
 
 	// Extract team info.
 	teamID := ""
