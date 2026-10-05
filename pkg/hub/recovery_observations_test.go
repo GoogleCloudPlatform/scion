@@ -185,6 +185,9 @@ func TestRecoveryObservations_RecordedFromHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, inv, 1)
 	assert.Equal(t, "docker", inv[0].Target)
+	now, err := f.s.StoreClock(ctx)
+	require.NoError(t, err)
+	assert.True(t, observationFresh(got[lost.ID], targetInventoryTimes(inv), now), "a stored observation reads back as fresh")
 }
 
 func TestRecoveryObservations_UnconfirmedClaimWithoutTargetUsesClaimTarget(t *testing.T) {
@@ -235,4 +238,20 @@ func TestRecoveryObservations_HTTPBrokerReconnectFreshness(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, obs[a.ID].ObservedAt.Equal(before[a.ID].ObservedAt), "the first heartbeat after the gap writes nothing")
 	assert.False(t, observationFresh(obs[a.ID], inv, later), "the pre-gap observation is not fresh after the first heartbeat")
+}
+
+func TestRecoveryObservations_QueuedStopIsNotInFlight(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("queued-stop", "error", "")
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, &store.BrokerDispatch{
+		ID: tid("queued-stop"), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "stop",
+	}))
+	f.heartbeat(completeInventory())
+	got, err := f.s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	require.Contains(t, got, a.ID)
+	assert.False(t, got[a.ID].InFlight, "a queued stop is not a start in flight")
 }

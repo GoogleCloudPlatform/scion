@@ -341,6 +341,12 @@ type heartbeatReport struct {
 	agentsLoaded bool
 	agents       []store.Agent
 	agentsErr    error
+
+	// Agents with a queued create, start or restart dispatch, read at most
+	// once per heartbeat (pendingStarts).
+	startsLoaded bool
+	starts       map[string]bool
+	startsErr    error
 }
 
 func newHeartbeatReport() *heartbeatReport {
@@ -367,7 +373,9 @@ func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequ
 
 // brokerAgents returns every non-deleted agent assigned to brokerID,
 // listed once per heartbeat and shared by the missing-container reconcile
-// and the runtime observations.
+// and the runtime observations. The list is read before the reconcile
+// writes, so an agent the reconcile marks missing on this heartbeat is
+// observed in its new state on the next one.
 func (r *heartbeatReport) brokerAgents(ctx context.Context, s *Server, brokerID string) ([]store.Agent, error) {
 	if r.agentsLoaded {
 		return r.agents, r.agentsErr
@@ -375,6 +383,35 @@ func (r *heartbeatReport) brokerAgents(ctx context.Context, s *Server, brokerID 
 	r.agentsLoaded = true
 	r.agents, r.agentsErr = s.listBrokerAgents(ctx, brokerID)
 	return r.agents, r.agentsErr
+}
+
+// pendingStarts returns the IDs of agents with a queued create, start or
+// restart dispatch for brokerID, read at most once per heartbeat. Such a
+// dispatch may create a container at any moment, so it counts as a start
+// in flight. A queued stop or delete does not. A row the owning node has
+// already claimed (in_progress) is not listed; that window is covered by
+// the start-claim reaper's time rule (an inventory must follow the claim
+// becoming unconfirmed by a heartbeat interval).
+func (r *heartbeatReport) pendingStarts(ctx context.Context, s *Server, brokerID string) (map[string]bool, error) {
+	if r.startsLoaded {
+		return r.starts, r.startsErr
+	}
+	r.startsLoaded = true
+	rows, err := s.store.ListPendingDispatch(ctx, brokerID)
+	if err != nil {
+		r.startsErr = err
+		return nil, err
+	}
+	r.starts = make(map[string]bool, len(rows))
+	for _, d := range rows {
+		switch d.Op {
+		case "create", "start", "restart":
+			if d.AgentID != "" {
+				r.starts[d.AgentID] = true
+			}
+		}
+	}
+	return r.starts, nil
 }
 
 // pendingLifecycleAgents returns the IDs of agents with a queued lifecycle

@@ -123,7 +123,7 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 	// A queued create, start or restart dispatch (for a broker reached
 	// through another hub node) may create a container at any moment:
 	// record it as a start in flight.
-	pending, err := s.pendingLifecycleAgents(ctx, brokerID)
+	pending, err := report.pendingStarts(ctx, s, brokerID)
 	if err != nil {
 		slog.Warn("Recovery observations: listing pending dispatches failed", "broker_id", brokerID, "error", err)
 		return
