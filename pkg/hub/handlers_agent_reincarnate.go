@@ -632,8 +632,8 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 // stays in force. Any other requester becomes the recorded delegator, so it
 // must pass CanDelegate for the stored role, and its source ceiling must
 // cover that role (childRoleWithinCeiling, role explicit). On a refusal the
-// response is written (403, or 503 for a ceiling lookup fault) and ok is
-// false; nothing has been written to the store.
+// response is written (403, 503 for a ceiling lookup fault, or 500 for a
+// nil agent) and ok is false; nothing has been written to the store.
 func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent) (auth *reincarnateAuthority, ok bool) {
 	if agent == nil {
 		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
