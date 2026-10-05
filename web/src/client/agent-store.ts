@@ -351,14 +351,27 @@ function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
 }
 
 /**
- * Whether merging a probe row into the row held would change more than
- * `updated`, which every heartbeat moves. A merge never clears a field the
- * probe row omits, so only the probe row's own fields count.
+ * Probe-row fields that do not make a held row stale: `updated`, which every
+ * heartbeat moves; `containerStatus`, the runtime's text ("Up 5 minutes"),
+ * which heartbeats rewrite and no list consumer reads; and `creatorName`, the
+ * compact view's copy of `appliedConfig.creatorName`, which full rows hold.
+ * A row that changes otherwise merges with all of them.
  */
-function changesMoreThanUpdated(row: Agent, held: Agent): boolean {
+const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
+  'updated',
+  'containerStatus',
+  'creatorName',
+]);
+
+/**
+ * Whether merging a probe row into the row held would change a field the
+ * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}). A merge never clears
+ * a field the probe row omits, so only the probe row's own fields count.
+ */
+function differsBeyondHeartbeat(row: Agent, held: Agent): boolean {
   const before = held as unknown as Record<string, unknown>;
   for (const [key, value] of Object.entries(row)) {
-    if (key === 'updated') continue;
+    if (PROBE_UNCOMPARED_FIELDS.has(key)) continue;
     const other = before[key];
     if (value === other) continue;
     if (typeof value !== 'object' || typeof other !== 'object' || !value || !other) return true;
@@ -1074,7 +1087,7 @@ export class AgentStore {
   /**
    * One delta probe: read the most recently active rows in the server's
    * order, and merge those the feed does not hold, or holds older and
-   * different in more than `updated` (which heartbeats move), as a seeded
+   * different in a field heartbeats do not move, as a seeded
    * merge (deltas that land meanwhile win, deleted agents stay
    * deleted, the completeness flag is untouched). When the first page all
    * lists before the newest row the last probe saw, follow further pages;
@@ -1120,7 +1133,7 @@ export class AgentStore {
             !listed.has(row.id) ||
             (rowUpdated !== undefined &&
               (heldUpdated === undefined || rowUpdated > heldUpdated) &&
-              changesMoreThanUpdated(row, held))
+              differsBeyondHeartbeat(row, held))
           ) {
             changed.push(row);
           }
