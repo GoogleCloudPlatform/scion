@@ -129,24 +129,6 @@ func TestFormatLegacyAsNewDelivery_PlainMessage(t *testing.T) {
 	}
 }
 
-func TestFormatLegacyAsNewDelivery_RawMessage(t *testing.T) {
-	old := &messages.StructuredMessage{
-		Version:   messages.Version,
-		Timestamp: "2026-08-27T10:00:00Z",
-		Sender:    "user:alice",
-		Recipient: "agent:builder",
-		Msg:       "raw keystroke",
-		Type:      messages.TypeInstruction,
-		Raw:       true,
-	}
-
-	result := FormatLegacyAsNewDelivery(old, nil)
-
-	if result != "raw keystroke" {
-		t.Errorf("raw delivery = %q, want %q", result, "raw keystroke")
-	}
-}
-
 func TestFormatLegacyAsNewDelivery_NilMessage(t *testing.T) {
 	result := FormatLegacyAsNewDelivery(nil, nil)
 	if result != "" {

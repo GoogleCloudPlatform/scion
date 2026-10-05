@@ -1178,9 +1178,8 @@ type Server struct {
 	// keysTargetLimiter is keyed per target agent. Both must allow a
 	// request; they are separate from chatSendLimiter's aggregate DM
 	// allowance (keys must not charge or evade it) and are shared by the
-	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
-	// in New and read without the lock; nil-safe. In-memory and per-Hub
-	// instance, not a distributed quota service (contract §5): N Hub
+	// /keys routes. Set once in New and read without the lock; nil-safe.
+	// In-memory and per-Hub instance, not a distributed quota service (contract §5): N Hub
 	// replicas behind a load balancer allow N times the configured rate in
 	// aggregate, and a Hub restart resets both buckets to full.
 	keysPrincipalLimiter *keysRateLimiter

@@ -16,25 +16,9 @@
 
 package hub
 
-// ---------------------------------------------------------------------------
-// Do not mirror terminal input to message observers.
-//
-// For the still-supported raw shape (an unadorned direct single-agent DM),
-// agent_dm_operation.go's observer publish (the agent-sender DM fork,
-// ExecuteAgentDM) — which otherwise sends an observer-only copy of the
-// message to plugin observers (Telegram, broker-log) and chat relays via
-// MessageBrokerProxy — skips that publication entirely when the message is
-// raw, and the tests below exercise that skip directly.
-//
-// handlers_agent_messaging.go's general-fallthrough observer publish
-// carries the same `!structuredMsg.Raw` skip as a second check, but it is
-// untested here (and untestable through this file's ExecuteAgentDM-only
-// setup) because it is unreachable for raw in practice: the sender is only
-// stamped "agent:" when an agent identity is in the request context, and
-// that same condition always takes the ExecuteAgentDM fork in
-// handleAgentMessage before that fallthrough code runs. Both call sites
-// carry the guard; only the reachable one has a test.
-// ---------------------------------------------------------------------------
+// Observer publication for agent-to-agent DMs: ExecuteAgentDM publishes one
+// observer-only copy of every accepted DM (normal or plain) to plugin
+// observers through MessageBrokerProxy.
 
 import (
 	"context"
@@ -49,10 +33,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// rawObserverTestEnv wires a same-project agent pair (so the still-supported
-// raw shape is reachable) with a spy broker bus behind a real
+// dmObserverTestEnv wires a same-project agent pair with a spy broker bus behind a real
 // MessageBrokerProxy, so observer publications are directly observable.
-type rawObserverTestEnv struct {
+type dmObserverTestEnv struct {
 	srv        *Server
 	store      store.Store
 	sender     *store.Agent
@@ -61,7 +44,7 @@ type rawObserverTestEnv struct {
 	spyBus     *spyBrokerBus
 }
 
-func setupRawObserverTest(t *testing.T) rawObserverTestEnv {
+func setupDMObserverTest(t *testing.T) dmObserverTestEnv {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -144,33 +127,13 @@ func setupRawObserverTest(t *testing.T) rawObserverTestEnv {
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
 
-	return rawObserverTestEnv{srv: srv, store: s, sender: sender, target: target, dispatcher: dispatcher, spyBus: spyBus}
+	return dmObserverTestEnv{srv: srv, store: s, sender: sender, target: target, dispatcher: dispatcher, spyBus: spyBus}
 }
 
-// TestExecuteAgentDM_RawSkipsObserverPublish proves the agent-sender DM fork
-// (agent_dm_operation.go) does not publish an observer copy for an accepted
-// raw DM.
-func TestExecuteAgentDM_RawSkipsObserverPublish(t *testing.T) {
-	env := setupRawObserverTest(t)
-	ctx := context.Background()
-
-	input := deliveryDMInput(env.sender, env.target, "RAWOBSERVER-PROBE")
-	input.Raw = true
-
-	result, dmErr := env.srv.ExecuteAgentDM(ctx, input)
-	require.Nil(t, dmErr, "raw DM must be accepted (still-supported shape)")
-	require.Equal(t, AgentDMAccepted, result.Outcome)
-
-	require.Len(t, env.dispatcher.getCalls(), 1, "the raw DM must still dispatch to its target")
-	assert.Empty(t, env.spyBus.getEvents(), "an accepted raw DM must not mirror its body to message observers")
-}
-
-// TestExecuteAgentDM_NormalStillPublishesObserverCopy is the positive
-// control: a normal (non-raw, non-plain) agent DM must still publish
-// exactly one observer copy, proving the raw skip above is a raw-specific
-// change and not a break of observer publication generally.
+// TestExecuteAgentDM_NormalStillPublishesObserverCopy pins that a normal
+// agent DM publishes exactly one observer copy.
 func TestExecuteAgentDM_NormalStillPublishesObserverCopy(t *testing.T) {
-	env := setupRawObserverTest(t)
+	env := setupDMObserverTest(t)
 	ctx := context.Background()
 
 	input := deliveryDMInput(env.sender, env.target, "NORMALOBSERVER-PROBE")
@@ -185,11 +148,10 @@ func TestExecuteAgentDM_NormalStillPublishesObserverCopy(t *testing.T) {
 	assert.Equal(t, "NORMALOBSERVER-PROBE", events[0].msg.Msg)
 }
 
-// TestExecuteAgentDM_PlainStillPublishesObserverCopy proves Plain is
-// unaffected by the raw-specific observer skip — only Raw carries literal
-// keystrokes; Plain is still an ordinary message body.
+// TestExecuteAgentDM_PlainStillPublishesObserverCopy pins that a plain
+// agent DM publishes exactly one observer copy, with Plain preserved.
 func TestExecuteAgentDM_PlainStillPublishesObserverCopy(t *testing.T) {
-	env := setupRawObserverTest(t)
+	env := setupDMObserverTest(t)
 	ctx := context.Background()
 
 	input := deliveryDMInput(env.sender, env.target, "PLAINOBSERVER-PROBE")

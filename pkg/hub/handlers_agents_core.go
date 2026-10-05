@@ -3802,14 +3802,14 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			return
 		}
 
-		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
-		// Classify raw before authorizeAgentMessage runs (contract §6.1's
-		// branch-point invariant): a raw-selected request is handled here
-		// entirely, through authorizeAgentKeys/ExecuteAgentKeys exclusively,
-		// and never reaches authorizeAgentMessage or handleAgentMessage. A
-		// non-raw request (including an unparseable body) falls through
-		// completely unaffected, with the body restored byte-for-byte.
-		if s.tryAgentKeysMessageBridge(w, r, targetAgent, id, "/api/v1/agents/"+targetAgent.ID+"/keys", false) {
+		// Raw keystroke delivery through /message has been removed. A body
+		// carrying the retired raw field (top level or structured_message)
+		// is rejected with raw_input_removed before authorizeAgentMessage
+		// or any decode, persistence or dispatch runs; every other body
+		// falls through with its bytes restored.
+		if s.rejectRetiredRawMessageBody(w, r, rawIngressAgentMessage,
+			agentKeysAuditTarget{AgentID: targetAgent.ID, ProjectID: targetAgent.ProjectID},
+			rawInputRemovedReplacement, rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 			return
 		}
 
