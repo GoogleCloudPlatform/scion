@@ -41,6 +41,7 @@ const globalMap = vi.hoisted(() => {
       seedAgents: (list: Agent[]): void => {
         for (const a of list) agents.set(a.id, a);
       },
+      getAgent: (id: string): Agent | undefined => agents.get(id),
       getAgents: (): Agent[] => Array.from(agents.values()),
       getDeletedAgentIds: (): Set<string> => new Set<string>(),
       removeAgent: (id: string): void => {
@@ -384,6 +385,11 @@ describe('hub members: live updates from the store', () => {
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
       expect(page.v2AgentMembers.find((m) => m.id === 'a2')?.activity).toBe('thinking');
+      // The DM thread finds its peer in the hub list: no single-agent read.
+      expect(
+        vi.mocked(apiFetch).mock.calls.filter((c) => c[0].startsWith('/api/v1/agents/a1'))
+      ).toEqual([]);
+      expect(harness.server.agentFetches('a1')).toBe(0);
     } finally {
       unmount(page);
     }
