@@ -315,7 +315,7 @@ function updatedAt(agent: Agent | undefined): number | undefined {
  * first by the last activity time when set, else `updated`, with ties on
  * `created`, then id, both descending. A heartbeat moves `updated` but not
  * the activity time, so it does not move an active agent up the order.
- * Times compare to the millisecond, finer than the server stores them: two
+ * Times compare to the millisecond, coarser than the server stores them: two
  * keys within one millisecond fall through to the tie order here, so a
  * catch-up decision at that boundary can be off by one probe.
  */
@@ -983,7 +983,7 @@ export class AgentStore {
         w.cleanup();
         w.reject(error);
       }
-      // The probe keeps a loaded list current while it is in error, and its
+      // The probe keeps a loaded list current after a failed walk, and its
       // next periodic walk retries.
       this.syncProbe(entry);
       this.scheduleIdleWork(entry);
