@@ -98,6 +98,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-20*time.Second))
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
+	rec.RunID = req.RunID
 	supersededDone := s.launchRegistry.Begin(key, rec)
 
 	resp := CreateAgentResponse{

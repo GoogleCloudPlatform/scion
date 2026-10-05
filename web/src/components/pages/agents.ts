@@ -51,6 +51,8 @@ import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
@@ -119,6 +121,9 @@ export class ScionPageAgents extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /** One lease timer for this page's deleting agents (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () => this.agents);
 
   /** "Jump to agent" over the graph, offering the agents its tree view shows. */
   readonly graphPalette = new GraphPaletteController(this, {
@@ -578,6 +583,15 @@ export class ScionPageAgents extends LitElement {
     }
   }
 
+  /**
+   * DELETE returned 202: the hub is still deleting (ptone/scion#2483).
+   * Keep the row, show "Deleting…" from the response's `deletion` at once,
+   * and let the SSE `deleted` event remove it in place.
+   */
+  private async keepDeletingAgent(agentId: string, response: Response): Promise<void> {
+    stateManager.applyDeleteAccepted(agentId, await readAcceptedDeletion(response));
+  }
+
   private async handleAgentAction(
     agentId: string,
     action: AgentLifecycleAction,
@@ -628,12 +642,21 @@ export class ScionPageAgents extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
+              if (forceResponse.status === 202) {
+                await this.keepDeletingAgent(agentId, forceResponse);
+                return;
+              }
               this.agents = this.agents.filter((a) => a.id !== agentId);
               this.backgroundRefresh();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
+        }
+
+        if (response.status === 202) {
+          await this.keepDeletingAgent(agentId, response);
+          return;
         }
 
         // Server confirmed — remove from local list
@@ -1169,6 +1192,9 @@ export class ScionPageAgents extends LitElement {
 
   private renderActionButtons(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
 
     return html`
       ${agent.messageMode === 'none'
@@ -1231,7 +1257,7 @@ export class ScionPageAgents extends LitElement {
           `
         : nothing}
       ${isAgentRunning(agent)
-        ? canLifecycle(agent._capabilities)
+        ? lifecycleOk
           ? html`
               ${agent.harnessCapabilities?.resume?.support !== 'no'
                 ? html`
@@ -1268,7 +1294,7 @@ export class ScionPageAgents extends LitElement {
             `
           : nothing
         : agent.phase === 'suspended'
-          ? canLifecycle(agent._capabilities)
+          ? lifecycleOk
             ? html`
                 <sl-tooltip content="Resume">
                   <sl-button
@@ -1286,7 +1312,7 @@ export class ScionPageAgents extends LitElement {
                 </sl-tooltip>
               `
             : nothing
-          : canLifecycle(agent._capabilities)
+          : lifecycleOk
             ? html`
                 ${agent.phase === 'error'
                   ? html`
@@ -1320,7 +1346,7 @@ export class ScionPageAgents extends LitElement {
                 </sl-tooltip>
               `
             : nothing}
-      ${can(agent._capabilities, 'delete')
+      ${can(agent._capabilities, 'delete') && !deleting
         ? html`
             <sl-tooltip content="Delete">
               <sl-button
@@ -1380,6 +1406,10 @@ export class ScionPageAgents extends LitElement {
             size="small"
           >
           </scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
           <scion-message-mode-badge
             mode=${agent.messageMode || 'project'}
             size="small"
@@ -1472,6 +1502,10 @@ export class ScionPageAgents extends LitElement {
             label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
+          <scion-deletion-badge
+            .deletion=${this.deletionLease.view(agent)}
+            size="small"
+          ></scion-deletion-badge>
         </td>
         <td class="hide-mobile">
           <scion-message-mode-badge

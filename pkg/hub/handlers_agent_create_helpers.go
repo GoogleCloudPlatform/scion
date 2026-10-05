@@ -1125,7 +1125,7 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
@@ -1134,6 +1134,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
@@ -1220,7 +1222,7 @@ func (s *Server) handleExistingAgent(
 			}
 			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				writeErrorFromErr(w, err, "")
+				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
@@ -1229,6 +1231,8 @@ func (s *Server) handleExistingAgent(
 					return res
 				}
 				switch {
+				case errors.Is(err, store.ErrDeleteInProgress):
+					deleteInProgressRefusal(existingAgent.ID).write(w)
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
 				case writeEmptyPerAgentCapabilityError(w, err):
@@ -1348,7 +1352,7 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
@@ -1356,6 +1360,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case errors.Is(err, store.ErrDeleteInProgress):
+				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
