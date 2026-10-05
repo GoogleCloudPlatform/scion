@@ -458,10 +458,12 @@ func TestV2_Configure_AgentCacheTTL(t *testing.T) {
 		value string
 		want  time.Duration
 	}{
-		"default":           {"", defaultAgentCacheTTL},
-		"within retention":  {"10m", 10 * time.Minute},
-		"at the limit":      {maxAgentCacheTTL.String(), maxAgentCacheTTL},
-		"longer is clamped": {"2h", maxAgentCacheTTL},
+		"default":                   {"", defaultAgentCacheTTL},
+		"within retention":          {"10m", 10 * time.Minute},
+		"at the limit":              {maxAgentCacheTTL.String(), maxAgentCacheTTL},
+		"longer is clamped":         {"2h", maxAgentCacheTTL},
+		"negative uses the default": {"-1m", defaultAgentCacheTTL},
+		"zero disables reuse":       {"0s", 0},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -471,8 +472,12 @@ ON CONFLICT(user_principal, project_id) DO UPDATE SET
 		return err
 	}
 	cutoff := time.Now().Add(-agentCacheRetention).UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(ctx, `DELETE FROM user_project_agents WHERE refreshed_at < ?`, cutoff)
-	return err
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM user_project_agents WHERE refreshed_at < ?`, cutoff); err != nil {
+		// The list is saved; old rows are retried on the next save and are
+		// never served meanwhile.
+		slog.Warn("Failed to evict expired agent-cache entries", "error", err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {

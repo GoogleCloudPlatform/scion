@@ -17,7 +17,9 @@ package telegram
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,7 +396,27 @@ INSERT INTO project_agents VALUES ('proj-1', '[{"slug":"coder"}]', '` + time.Now
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 
+	var oldTables int
+	require.NoError(t, rawAgentCache(t, store).db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'project_agents'`).Scan(&oldTables))
+	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
 	testProjectAgentsDropsProjectKeyedCache(t, store)
+}
+
+func TestStore_ProjectAgents_FailedEvictionDoesNotFailSave(t *testing.T) {
+	store := newTestStore(t)
+	_, err := rawAgentCache(t, store).db.Exec(`CREATE TRIGGER block_evict BEFORE DELETE ON user_project_agents BEGIN SELECT RAISE(ABORT, 'eviction blocked'); END`)
+	require.NoError(t, err)
+	rawAgentCache(t, store).insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+
+	require.NoError(t, store.SaveProjectAgents(context.Background(), &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: time.Now(),
+	}), "the list is saved even when evicting old rows fails")
+
+	got, err := store.GetProjectAgents(context.Background(), "user:bob@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, []AgentInfo{{Slug: "reviewer"}}, got.Agents)
 }
 
 // testProjectAgentsPerUser checks that a cached agent list is only returned
@@ -432,45 +454,91 @@ func testProjectAgentsPerUser(t *testing.T, store Store) {
 		"a list cannot be cached without a user")
 }
 
-// testProjectAgentsEviction checks that saving a list evicts entries older
-// than the retention window.
+// agentCacheTable gives raw SQL access to the agent-list cache table of a
+// store, bypassing the Store methods.
+type agentCacheTable struct {
+	db    *sql.DB
+	table string
+	// postgres selects $n placeholders and TIMESTAMPTZ values.
+	postgres bool
+}
+
+func rawAgentCache(t *testing.T, store Store) agentCacheTable {
+	t.Helper()
+	switch s := store.(type) {
+	case *sqliteStore:
+		return agentCacheTable{db: s.db, table: "user_project_agents"}
+	case *postgresStore:
+		return agentCacheTable{db: s.db, table: "telegram_user_project_agents", postgres: true}
+	}
+	t.Fatalf("unsupported store %T", store)
+	return agentCacheTable{}
+}
+
+func (c agentCacheTable) query(q string) string {
+	if !c.postgres {
+		return q
+	}
+	for i := 1; strings.Contains(q, "?"); i++ {
+		q = strings.Replace(q, "?", fmt.Sprintf("$%d", i), 1)
+	}
+	return q
+}
+
+// insert writes a cache row directly.
+func (c agentCacheTable) insert(t *testing.T, user, projectID string, refreshedAt time.Time) {
+	t.Helper()
+	var ts interface{} = refreshedAt.UTC().Format(time.RFC3339)
+	if c.postgres {
+		ts = refreshedAt.UTC()
+	}
+	_, err := c.db.Exec(c.query(`INSERT INTO `+c.table+` (user_principal, project_id, agent_slugs, refreshed_at) VALUES (?, ?, '[{"slug":"coder"}]', ?)`),
+		user, projectID, ts)
+	require.NoError(t, err)
+}
+
+// count returns how many cache rows exist for user and project.
+func (c agentCacheTable) count(t *testing.T, user, projectID string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, c.db.QueryRow(c.query(`SELECT count(*) FROM `+c.table+` WHERE user_principal = ? AND project_id = ?`), user, projectID).Scan(&n))
+	return n
+}
+
+// testProjectAgentsEviction checks that saving a list deletes rows older
+// than the retention window and keeps younger ones.
 func testProjectAgentsEviction(t *testing.T, store Store) {
 	t.Helper()
 	ctx := context.Background()
-	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
-		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}},
-		RefreshedAt: time.Now().Add(-agentCacheRetention - time.Minute),
-	}))
-	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
-		User: "user:alice@example.com", ProjectID: "proj-2", Agents: []AgentInfo{{Slug: "coder"}},
-		RefreshedAt: time.Now().Add(-agentCacheRetention + time.Minute),
-	}))
+	raw := rawAgentCache(t, store)
+	raw.insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+	raw.insert(t, "user:alice@example.com", "proj-2", time.Now().Add(-agentCacheRetention+time.Minute))
+
 	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
 		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: time.Now(),
 	}))
 
-	expired, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
-	require.NoError(t, err)
-	assert.Nil(t, expired, "an expired entry is evicted")
-	kept, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-2")
-	require.NoError(t, err)
-	assert.NotNil(t, kept, "an entry within retention is kept")
+	assert.Zero(t, raw.count(t, "user:alice@example.com", "proj-1"), "an expired row is deleted")
+	assert.Equal(t, 1, raw.count(t, "user:alice@example.com", "proj-2"), "a row within retention is kept")
+	assert.Equal(t, 1, raw.count(t, "user:bob@example.com", "proj-1"))
 }
 
-// testProjectAgentsExpiredNotServed checks that an entry older than the
-// retention window is not returned even when no later save evicted it.
+// testProjectAgentsExpiredNotServed checks that a row older than the
+// retention window is not returned even though nothing evicted it.
 func testProjectAgentsExpiredNotServed(t *testing.T, store Store) {
 	t.Helper()
-	ctx := context.Background()
-	// Saved last, so no later save evicts it.
-	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
-		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}},
-		RefreshedAt: time.Now().Add(-agentCacheRetention - time.Minute),
-	}))
+	raw := rawAgentCache(t, store)
+	raw.insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+	raw.insert(t, "user:alice@example.com", "proj-2", time.Now().Add(-agentCacheRetention+time.Minute))
 
-	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
+	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
-	assert.Nil(t, got, "an entry past retention is not served")
+	assert.Nil(t, got, "a row past retention is not served")
+	require.Equal(t, 1, raw.count(t, "user:alice@example.com", "proj-1"), "the expired row is still stored")
+
+	kept, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-2")
+	require.NoError(t, err)
+	assert.NotNil(t, kept, "a row within retention is served")
 }
 
 // testProjectAgentsDropsProjectKeyedCache checks that a list cached per
