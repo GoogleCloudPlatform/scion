@@ -1417,6 +1417,34 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// SECURITY-GATE: broker-side consent for the brokerId branch below.
+	// Linking an existing broker to the project requires broker.update on
+	// that broker (its owner or a super-admin, see authorizeBrokerProvide)
+	// in addition to project-side authority: an existing project already
+	// passed the project-update gate above, and a new project is owned by
+	// the caller. The lookup and decision run here, before any project
+	// creation or mutation, so a denial leaves no project, quota slot or
+	// group behind.
+	var providedBroker *store.RuntimeBroker
+	if req.BrokerID != "" {
+		b, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				ValidationError(w, "brokerId not found: broker must be registered via POST /brokers and /brokers/join first", map[string]interface{}{
+					"field":    "brokerId",
+					"brokerId": req.BrokerID,
+				})
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.authorizeBrokerProvide(w, r, b) {
+			return
+		}
+		providedBroker = b
+	}
+
 	// Create new project if not found
 	if project == nil {
 		// Use client-provided ID if available; fall back to random UUID.
@@ -1551,20 +1579,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	var secretKey string
 
 	if req.BrokerID != "" {
-		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join
-		existingBroker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				ValidationError(w, "brokerId not found: broker must be registered via POST /brokers and /brokers/join first", map[string]interface{}{
-					"field":    "brokerId",
-					"brokerId": req.BrokerID,
-				})
-				return
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		broker = existingBroker
+		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join.
+		// The broker was looked up and authorized (authorizeBrokerProvide)
+		// before the project was created or mutated; see the SECURITY-GATE
+		// block preceding "Create new project if not found".
+		broker = providedBroker
 
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
@@ -1581,6 +1600,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
 			Status:     broker.Status,
+			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
 		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
@@ -1677,12 +1697,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				localPath = existingProvider.LocalPath
 			}
 		}
+		// The embedded path does not call authorizeBrokerProvide: the caller
+		// either created this broker (and owns it) or passed
+		// brokerRemintTargetAuthorized above (creator or super-admin), which
+		// is at least as strict as the broker.update consent check.
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
 			Status:     store.BrokerStatusOnline,
+			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
 		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
@@ -2727,6 +2752,24 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// A default runtime broker must already be associated with the project
+	// (a provider); associating one goes through the provider endpoints,
+	// which require the broker owner's consent. Keeping the current default
+	// needs no check.
+	if updates.DefaultRuntimeBrokerID != "" && updates.DefaultRuntimeBrokerID != project.DefaultRuntimeBrokerID {
+		if _, err := s.store.GetProjectProvider(ctx, project.ID, updates.DefaultRuntimeBrokerID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, "broker must be a provider of this project; provide it first", map[string]interface{}{
+					"field":                  "defaultRuntimeBrokerId",
+					"defaultRuntimeBrokerId": updates.DefaultRuntimeBrokerID,
+				})
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	oldSlug := project.Slug

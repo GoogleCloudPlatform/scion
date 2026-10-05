@@ -699,7 +699,7 @@ func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked as a provider")
 	assert.Equal(t, broker.ID, provider.BrokerID)
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 
 	// Verify the broker was set as the default
 	updatedProject, err := s.GetProject(ctx, project.ID)
@@ -1240,7 +1240,7 @@ func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked")
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 	assert.Empty(t, provider.LocalPath,
 		"LocalPath should NOT be set when auto-linking during agent creation for hub-managed project")
 }
@@ -1764,7 +1764,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
-		Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline, CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
@@ -1782,6 +1782,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "owner's broker link should create a provider row")
 	assert.Equal(t, broker.ID, provider.BrokerID)
+	assert.Equal(t, owner.ID, provider.LinkedBy, "the link records the linking user")
 
 	stored, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)

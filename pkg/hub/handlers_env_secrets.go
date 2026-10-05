@@ -2189,7 +2189,15 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 
 	// SECURITY-GATE: CheckAccess — one check here gates the whole providers
 	// subtree (list, link, unlink) before dispatching to the handlers below.
-	if !s.authorize(w, r, projectResource(project), action) {
+	// Linking additionally requires the broker owner's consent
+	// (authorizeBrokerProvide in addProjectProvider). Unlinking one broker
+	// is also open to that broker's owner (authorizeProviderUnlink), so an
+	// owner can withdraw a broker from a project it does not administer.
+	if r.Method == http.MethodDelete && subPath != "" {
+		if !s.authorizeProviderUnlink(w, r, project, subPath) {
+			return
+		}
+	} else if !s.authorize(w, r, projectResource(project), action) {
 		return
 	}
 
@@ -2368,6 +2376,13 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// SECURITY-GATE: broker-side consent — the caller must hold broker.update
+	// on this broker (its owner or a super-admin) in addition to the
+	// project.update gate in handleProjectProviders. Checked before any write.
+	if !s.authorizeBrokerProvide(w, r, broker) {
+		return
+	}
+
 	// Get the user who is performing this action
 	var linkedBy string
 	if user := GetUserIdentityFromContext(ctx); user != nil {
@@ -2433,6 +2448,32 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusCreated, AddProviderResponse{
 		Provider: provider,
 	})
+}
+
+// authorizeProviderUnlink decides DELETE /api/v1/projects/{id}/providers/{brokerId}:
+// the caller must hold project.update on the project, or broker.update on
+// the named broker (its owner or a super-admin, see brokerProvideDecision),
+// which withdraws the owner's consent to the association. On denial it logs
+// and writes the project.update 403, and returns false.
+func (s *Server) authorizeProviderUnlink(w http.ResponseWriter, r *http.Request, project *store.Project, brokerID string) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
+	if decision.Allowed {
+		return true
+	}
+	if broker, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil && broker != nil {
+		if allowed, _, _ := s.brokerProvideDecision(ctx, identity, broker); allowed {
+			return true
+		}
+	}
+	logAuthzDenial(r, identity, projectResource(project), ActionUpdate, decision.Reason)
+	writeForbiddenStructuredDenial(w, "", "project", ActionUpdate, decision.DeniedBy)
+	return false
 }
 
 // removeProjectProvider removes a broker from a project's providers.

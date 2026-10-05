@@ -176,13 +176,18 @@ func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
 	assertNoSecretInDetails(t, e.Details, string(key), string(stored.SecretKey))
 }
 
-func TestBrokerAudit_ProjectTokenLinkAndUnlinkRecordCredential(t *testing.T) {
+// A link uses a session (a project token cannot carry the broker
+// side of the association); the unlink uses a project token that
+// carries project:update. Each event records its own credential.
+func TestBrokerAudit_SessionLinkAndProjectTokenUnlinkRecordCredential(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	audit := installBrokerAuditCapture(srv)
 	projectID := tid("audit-link-project")
 	ownerID := tid("audit-link-owner")
 	createRS1Project(t, s, projectID, ownerID)
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
 	broker := &store.RuntimeBroker{
 		ID: tid("audit-link-broker"), Name: "audit-link-broker", Slug: "audit-link-broker",
 		Status: store.BrokerStatusOnline, CreatedBy: ownerID,
@@ -194,21 +199,22 @@ func TestBrokerAudit_ProjectTokenLinkAndUnlinkRecordCredential(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The project token cannot link: no link event is recorded.
 	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/projects/"+projectID+"/providers", AddProviderRequest{BrokerID: broker.ID})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventLink))
+
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+projectID+"/providers", AddProviderRequest{BrokerID: broker.ID})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
-	want := map[string]string{
-		"credential_kind":          string(CredentialKindUAT),
-		"credential_id":            token.ID,
-		"credential_boundary_kind": string(BoundaryKindProject),
-		"projectId":                projectID,
-	}
 	links := brokerAuditEventsOfType(audit, BrokerAuthEventLink)
 	require.Len(t, links, 1)
 	assert.Equal(t, broker.ID, links[0].BrokerID)
 	assert.Equal(t, ownerID, links[0].ActorID)
-	assert.Equal(t, want, links[0].Details)
-	assertNoSecretInDetails(t, links[0].Details, key, token.KeyHash)
+	assert.Equal(t, map[string]string{
+		"credential_kind": string(CredentialKindInteractive),
+		"projectId":       projectID,
+	}, links[0].Details)
 
 	rec = doRequestWithToken(t, srv, key, http.MethodDelete, "/api/v1/projects/"+projectID+"/providers/"+broker.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
@@ -216,7 +222,12 @@ func TestBrokerAudit_ProjectTokenLinkAndUnlinkRecordCredential(t *testing.T) {
 	unlinks := brokerAuditEventsOfType(audit, BrokerAuthEventUnlink)
 	require.Len(t, unlinks, 1)
 	assert.Equal(t, ownerID, unlinks[0].ActorID)
-	assert.Equal(t, want, unlinks[0].Details)
+	assert.Equal(t, map[string]string{
+		"credential_kind":          string(CredentialKindUAT),
+		"credential_id":            token.ID,
+		"credential_boundary_kind": string(BoundaryKindProject),
+		"projectId":                projectID,
+	}, unlinks[0].Details)
 	assertNoSecretInDetails(t, unlinks[0].Details, key, token.KeyHash)
 }
 

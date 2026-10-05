@@ -43,6 +43,9 @@ type providersAuthzFixture struct {
 	member *store.User
 }
 
+// providersAuthzFixtureTime is a fixed timestamp for fixture brokers.
+var providersAuthzFixtureTime = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 func providersAuthzSetup(t *testing.T) *providersAuthzFixture {
 	t.Helper()
 	f := &providersAuthzFixture{bypassAgentsFixture: bypassAgentsSetup(t)}
@@ -60,14 +63,17 @@ func providersAuthzSetup(t *testing.T) *providersAuthzFixture {
 	// (ptone/scion#2586).
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.target.ID, f.owner.ID))
 
+	// Both brokers are owned by the project owner: linking needs broker.update
+	// on the broker in addition to project.update.
 	mkBroker := func(name string) *store.RuntimeBroker {
 		b := &store.RuntimeBroker{
-			ID:      uuid.New().String(),
-			Name:    name,
-			Slug:    name,
-			Status:  store.BrokerStatusOnline,
-			Created: time.Now(),
-			Updated: time.Now(),
+			ID:        uuid.New().String(),
+			Name:      name,
+			Slug:      name,
+			Status:    store.BrokerStatusOnline,
+			CreatedBy: f.owner.ID,
+			Created:   providersAuthzFixtureTime,
+			Updated:   providersAuthzFixtureTime,
 		}
 		require.NoError(t, f.store.CreateRuntimeBroker(ctx, b))
 		return b

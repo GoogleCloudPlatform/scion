@@ -1562,6 +1562,14 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				return "", store.ErrNotFound
 			}
 
+			// SECURITY-GATE: broker-side consent — the same decision as
+			// authorizeBrokerProvide: broker.update on this broker (its
+			// owner or a super-admin). Denied before any state is written.
+			if allowed, reason, deniedBy := s.brokerProvideDecision(ctx, identity, broker); !allowed {
+				writeBrokerProvideDenial(w, nil, identity, broker, reason, deniedBy)
+				return "", store.ErrNotFound
+			}
+
 			// Do not link (or dispatch to) a broker that exists but is
 			// offline: 503 before anything is written (ptone/scion#2715).
 			if !s.brokerRecordReachable(broker) {
@@ -1577,7 +1585,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				BrokerID:   broker.ID,
 				BrokerName: broker.Name,
 				Status:     broker.Status,
-				LinkedBy:   "agent-create",
+				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
 			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",

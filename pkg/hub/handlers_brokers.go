@@ -238,6 +238,59 @@ func (s *Server) authorizeBrokerAutoProvide(w http.ResponseWriter, r *http.Reque
 	return s.authorize(w, r, resource, ActionAutoProvide)
 }
 
+// brokerProvideDeniedMessage is the 403 body for a denied broker association.
+const brokerProvideDeniedMessage = "only the broker's owner or a super-admin may associate this broker with a project"
+
+// brokerProvideDecision decides the broker side of associating broker with a
+// project: the caller must present an admitted user credential (see
+// brokerUserCredentialKindAdmitted, user access tokens included) and hold
+// broker.update on this broker, which its owner and super-admins hold and
+// no hub role grants. Project-side authority (project.update) is checked
+// separately by each caller. It writes no response; it returns the denial
+// reason and stage for the caller's log and 403.
+func (s *Server) brokerProvideDecision(ctx context.Context, identity Identity, broker *store.RuntimeBroker) (bool, string, DeniedBy) {
+	if isNilIdentity(identity) || broker == nil {
+		return false, "no identity or broker", ""
+	}
+	if !brokerUserCredentialKindAdmitted(ctx, identity, true) {
+		return false, "credential kind not admitted for broker association", ""
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, brokerResource(broker), ActionUpdate)
+	return decision.Allowed, decision.Reason, decision.DeniedBy
+}
+
+// writeBrokerProvideDenial logs and writes the 403 for a denied broker
+// association. r may be nil when the caller has no request at hand.
+func writeBrokerProvideDenial(w http.ResponseWriter, r *http.Request, identity Identity, broker *store.RuntimeBroker, reason string, deniedBy DeniedBy) {
+	logAuthzDenial(r, identity, brokerResource(broker), ActionUpdate, reason)
+	writeForbiddenStructuredDenial(w, brokerProvideDeniedMessage, "broker", ActionUpdate, deniedBy)
+}
+
+// authorizeBrokerProvide decides whether the caller may associate broker
+// with a project (link it as a provider). Project-side authority
+// (project.update) is checked by the caller's existing gate; this adds the
+// broker side through brokerProvideDecision: the caller must hold
+// broker.update on this broker (its owner, or a super-admin). Registering a
+// broker, or holding project.update alone, is never enough. Every link site
+// calls this helper or brokerProvideDecision: POST
+// /api/v1/projects/{id}/providers, the brokerId branch of POST
+// /api/v1/projects/register, and the explicit-broker link during agent
+// creation. Writes 401/403 and returns false when the caller is not
+// allowed.
+func (s *Server) authorizeBrokerProvide(w http.ResponseWriter, r *http.Request, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	allowed, reason, deniedBy := s.brokerProvideDecision(r.Context(), identity, broker)
+	if !allowed {
+		writeBrokerProvideDenial(w, r, identity, broker, reason, deniedBy)
+		return false
+	}
+	return true
+}
+
 // brokerUserCredentialKindAdmitted reports whether the request credential
 // recorded in ctx is a user credential admitted for broker registration,
 // re-registration and secret rotation: an interactive session or a dev
@@ -349,6 +402,17 @@ func ownerForNewBroker(callerUser UserIdentity) string {
 		return callerUser.ID()
 	}
 	return ""
+}
+
+// linkedByForProvider returns the ProjectProvider.LinkedBy value for a link
+// by callerUser: the caller's user ID, or "" when there is none. The
+// value is consent evidence for project members using the broker, so it
+// records the authorized user, never a placeholder.
+func linkedByForProvider(callerUser UserIdentity) string {
+	if isNilIdentity(callerUser) {
+		return ""
+	}
+	return callerUser.ID()
 }
 
 // handleBrokerJoin handles POST /api/v1/brokers/join.

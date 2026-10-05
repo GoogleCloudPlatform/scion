@@ -196,13 +196,15 @@ func TestResolveRuntimeBroker_ExplicitSlugNotYetProvider_AutoLinks(t *testing.T)
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	w := httptest.NewRecorder()
-	brokerID, err := srv.resolveRuntimeBroker(devUserContext(ctx), w, "slug-only-broker", project)
+	callerCtx := devUserContext(ctx)
+	brokerID, err := srv.resolveRuntimeBroker(callerCtx, w, "slug-only-broker", project)
 	require.NoError(t, err, w.Body.String())
 	assert.Equal(t, broker.ID, brokerID)
 
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, GetUserIdentityFromContext(callerCtx).ID(), provider.LinkedBy,
+		"the link records the linking user")
 }
 
 func TestFindBrokerByIDOrSlug(t *testing.T) {
@@ -316,7 +318,9 @@ func TestResolveRuntimeBroker_ExplicitBrokerErrors_ListOnlyUsableBrokers(t *test
 	})
 
 	t.Run("auto-link offline broker 503", func(t *testing.T) {
-		unlinked := &store.RuntimeBroker{ID: tid("nf-usable-unlinked"), Name: "Usable Unlinked", Slug: "usable-unlinked", Status: store.BrokerStatusOffline}
+		// Owned by the member, so the link's broker-side check passes and
+		// the offline check decides.
+		unlinked := &store.RuntimeBroker{ID: tid("nf-usable-unlinked"), Name: "Usable Unlinked", Slug: "usable-unlinked", Status: store.BrokerStatusOffline, CreatedBy: tid("nf-member")}
 		require.NoError(t, s.CreateRuntimeBroker(ctx, unlinked))
 		w := httptest.NewRecorder()
 		_, err := srv.resolveRuntimeBroker(memberContext(ctx), w, unlinked.Slug, project)
