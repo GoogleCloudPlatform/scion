@@ -2425,7 +2425,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
 {{- end }}
 
 {{/*
@@ -2476,6 +2476,15 @@ it; keep that call.
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
 {{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- /*
+secrets.backend has a non-empty default, but local is also what renders nothing,
+so any other value was typed. The gcpsm leaves default empty.
+*/}}
+{{- $secretsInline := .Values.secrets | default (dict) }}
+{{- $gcpsmInline := $secretsInline.gcpsm | default (dict) }}
+{{- if ne (toString ($secretsInline.backend | default "local")) "local" }}{{- $inline = append $inline "secrets.backend" }}{{- end }}
+{{- if $gcpsmInline.projectId }}{{- $inline = append $inline "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpsmInline.replicationLocations }}{{- $inline = append $inline "secrets.gcpsm.replicationLocations" }}{{- end }}
 {{- /*
 PHASE 2 DELTA. The three database leaves below are the append this comment asked
 later phases for, and phase 2 owed it: phase 2 is what introduced the database
@@ -3221,6 +3230,44 @@ nothing, so it is refused rather than discarded.
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 {{- if $oauthWeb }}
 {{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
+{{- end }}
+
+{{- /*
+server.secrets: the secret backend. Snake_case, as V1SecretsConfig binds it
+(pkg/config/settings_v1.go). local is the hub's own default (NewBackend treats
+"" and local alike), so it renders nothing.
+
+gcpsm WITHOUT A PROJECT IS REFUSED BECAUSE THE HUB DOES NOT REFUSE IT.
+NewGCPBackend returns "gcpsm backend requires a GCP project ID", and the caller
+in cmd/server_foreground.go logs that as a warning and carries on with a nil
+backend - the hub starts, passes /readyz, and every secret operation fails.
+
+The gcpsm fields under backend local reach nothing, so they are refused rather
+than discarded. gcp_credentials is not rendered: on GKE the hub uses
+Application Default Credentials from Workload Identity, and an inline key does
+not belong in a value. IAM for Secret Manager is not this chart's.
+*/}}
+{{- $secretsValues := .Values.secrets | default (dict) }}
+{{- $secretsBackend := toString ($secretsValues.backend | default "local") }}
+{{- $gcpsmValues := $secretsValues.gcpsm | default (dict) }}
+{{- $gcpProjectId := trim (toString ($gcpsmValues.projectId | default "")) }}
+{{- $gcpLocations := $gcpsmValues.replicationLocations | default (list) }}
+{{- if eq $secretsBackend "gcpsm" }}
+{{- if not $gcpProjectId }}
+{{- fail "secrets.backend is gcpsm, which requires secrets.gcpsm.projectId. The hub does not refuse to start without it: NewGCPBackend fails with \"gcpsm backend requires a GCP project ID\", the server logs that as a warning (cmd/server_foreground.go) and runs with no secret backend, so every secret read and write fails at request time." }}
+{{- end }}
+{{- $secretsOut := dict "backend" "gcpsm" "gcp_project_id" $gcpProjectId }}
+{{- if $gcpLocations }}
+{{- $secretsOut = set $secretsOut "gcp_replication_locations" (toStrings $gcpLocations) }}
+{{- end }}
+{{- $server = set $server "secrets" $secretsOut }}
+{{- else }}
+{{- $inertSecrets := list }}
+{{- if $gcpProjectId }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpLocations }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.replicationLocations" }}{{- end }}
+{{- if $inertSecrets }}
+{{- fail (printf "%s set while secrets.backend is %s. The chart renders server.secrets only for backend gcpsm, so the value would reach nothing. Set secrets.backend: gcpsm, or remove it." (join " and " $inertSecrets) $secretsBackend) }}
+{{- end }}
 {{- end }}
 
 {{- /*

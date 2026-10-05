@@ -2019,6 +2019,11 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # gcpsm needs its project to render at all, and the project is refused under
+  # local, so the three secrets leaves each carry the backend and project.
+  [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'
+  [secrets.gcpsm.projectId]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project'
+  [secrets.gcpsm.replicationLocations]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project|--set|secrets.gcpsm.replicationLocations={us-central1}'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:

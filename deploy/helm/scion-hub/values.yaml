@@ -388,8 +388,9 @@ config:
   # NOTES.txt, from a single definition in templates/_helpers.tpl.
   #
   # Not listed, because they refuse rather than go quiet: config.extra,
-  # storage.bucket, agents.imageRegistry, hub.adminEmails, the database name,
-  # user and password,
+  # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
+  # secrets.backend and the secrets.gcpsm values, the database name, user and
+  # password,
   # the OAuth web client credentials, auth.proxy.iap.audience and the three
   # auth.transport values fail the render when set together with this
   # (NOTES.txt prints the exact list). auth.proxy.provider is not on either
@@ -641,6 +642,39 @@ storage:
   # no bucket fails at hub startup rather than at install; requiring it here
   # moves that failure to helm template.
   bucket: ""
+
+# Where the hub keeps the secrets users and agents store through it, rendered
+# as server.secrets in settings.yaml (V1SecretsConfig,
+# pkg/config/settings_v1.go). Read once at startup by secret.NewBackend
+# (cmd/server_foreground.go).
+secrets:
+  # local (the default) keeps secrets in the hub database and renders nothing.
+  # gcpsm stores them in Google Cloud Secret Manager and renders
+  # server.secrets.backend: gcpsm.
+  #
+  # The chart grants no IAM. The hub authenticates to Secret Manager with
+  # Application Default Credentials - on GKE, the Workload Identity binding
+  # named by serviceAccount.gcpServiceAccount - and that service account's
+  # Secret Manager roles belong to whatever provisions the project (Terraform).
+  # server.secrets.gcp_credentials, an inline key or key path, is deliberately
+  # not modelled.
+  backend: local
+
+  gcpsm:
+    # REQUIRED when backend is gcpsm. The project the secrets are created in,
+    # rendered as server.secrets.gcp_project_id. The hub does not refuse to
+    # start without it: NewGCPBackend errors, the server logs a warning and
+    # runs with no secret backend. The chart refuses the render instead.
+    projectId: ""
+
+    # Optional. Non-empty switches Secret Manager from automatic (global) to
+    # user-managed regional replication in these locations; needed when the
+    # constraints/gcp.resourceLocations org policy forbids global resources.
+    # Rendered as server.secrets.gcp_replication_locations.
+    #
+    #   replicationLocations: [us-central1]
+    #
+    replicationLocations: []
 
 auth:
   # proxy is the hosted shape: an identity-aware proxy in front of the hub

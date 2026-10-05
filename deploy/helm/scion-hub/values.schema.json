@@ -37,7 +37,7 @@
       }
     }
   },
-  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth"],
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "secrets", "auth"],
   "properties": {
     "global": {
       "type": "object",
@@ -552,6 +552,34 @@
         "bucket": {
           "type": "string",
           "description": "GCS bucket name, no gs:// prefix. Required when database.driver is postgres."
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "description": "The hub's secret backend, rendered as server.secrets. local renders nothing. The chart grants no IAM for gcpsm.",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["local", "gcpsm"],
+          "description": "local keeps secrets in the hub database. gcpsm uses Google Cloud Secret Manager and requires secrets.gcpsm.projectId."
+        },
+        "gcpsm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "description": "Rendered as server.secrets.gcp_project_id. Required when backend is gcpsm; refused otherwise."
+            },
+            "replicationLocations": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "description": "Rendered as server.secrets.gcp_replication_locations. Non-empty selects user-managed regional replication. Refused unless backend is gcpsm."
+            }
+          }
         }
       }
     },

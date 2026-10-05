@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=152   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes).
+EXPECTED_TOTAL=159   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -881,6 +881,42 @@ else
   failed=$((failed + 1))
 fi
 unset _oa
+
+echo "== secrets.backend =="
+# local renders nothing; gcpsm renders server.secrets and needs a project. The
+# hub only WARNS when gcpsm has no project (NewGCPBackend's error is logged by
+# cmd/server_foreground.go and the hub runs with no secret backend), so the
+# chart refuses it. gcpsm values under local reach nothing and are refused too.
+reject "gcpsm with no projectId" "requires secrets.gcpsm.projectId" --set secrets.backend=gcpsm
+reject "projectId under backend local" "set while secrets.backend is local" \
+  --set secrets.gcpsm.projectId=rg-project
+reject "replicationLocations under backend local" "set while secrets.backend is local" \
+  --set 'secrets.gcpsm.replicationLocations={us-central1}'
+reject "unknown backend, schema layer" "secrets.backend" --set secrets.backend=vault
+reject "gcpsm alongside config.existingSecret" "secrets.backend" \
+  --set config.existingSecret=rg-settings --set auth.proxy.iap.audience= \
+  --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+accept "gcpsm with projectId" --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+# The rendered shape: snake_case keys V1SecretsConfig binds, under server.secrets,
+# and absent entirely under the default backend.
+executed=$((executed + 1))
+_sb="$(render --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project \
+  --set 'secrets.gcpsm.replicationLocations={us-central1,us-east1}' --show-only templates/secret-settings.yaml)"
+_sd="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_sb" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_sd" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.secrets shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_sb" | grep -qE '^      secrets:$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        backend: gcpsm$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        gcp_project_id: rg-project$' \
+  && printf '%s\n' "$_sb" | grep -A2 -E '^        gcp_replication_locations:$' | grep -qE '^        - us-east1$' \
+  && ! printf '%s\n' "$_sd" | grep -qE '^      secrets:$'; then
+  echo "ok    gcpsm renders server.secrets.{backend,gcp_project_id,gcp_replication_locations}; local renders no server.secrets"
+else
+  echo "FAIL  server.secrets shape: gcpsm did not render the snake_case keys, or local rendered a secrets block"
+  failed=$((failed + 1))
+fi
+unset _sb _sd
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

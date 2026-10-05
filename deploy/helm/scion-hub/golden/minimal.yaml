@@ -51,9 +51,6 @@ stringData:
     #
     # Positions deliberately left unrendered, each owned by a later change:
     #   server.database.url        Cloud SQL. Note the key is url, not dsn.
-    #   server.secrets             the secret backend (gcpsm).
-    #   server.auth.proxy,
-    #   server.auth.transport      the subtree selected by server.auth.mode.
     #   server.oauth               NOW RENDERED: web client credentials land here
     #                              as server.oauth.web.<provider>.client_id and
     #                              client_secret, in snake_case. cli and device

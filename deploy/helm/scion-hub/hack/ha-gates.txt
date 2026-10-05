@@ -20,11 +20,11 @@
 #
 # GOLDEN DIGESTS (sha256, as walked)
 #   existing-secret.yaml     db0359b7092a35d6580b7985f2d07e2e69c4ea185118e52c1d0125142a08f76a
-#   minimal.yaml             fa1f95f9e13d85a06bb8a5914a4a6f561d9cd8f4437c98ee8bc85b4e55483307
-#   session-existing.yaml    a6a272606b88e9bbf81151c3a116d81ce610a6a3085377e39cbafb6eebdf34b6
-#   settings-oauth.yaml      b6f90ff1c88b62111e2e2fd2a16ea08dc4f5bd477ea8af7e1f18350c24f6bddd
-#   settings.yaml            208504ee168f0a9d862f205cede5b30a6b06ad1a72e3f967a0a04ace71f65689
-#   varied.yaml              12b1c7a8ba1f58f3cbc6d77754631c9125847d5677d32356884c580c8781e345
+#   minimal.yaml             d0a9e50c0584c3ea8e43c3ef531b678024904ef7d2eab941ad55035da4a49aeb
+#   session-existing.yaml    827b44f69c774408b25ff021aab39fb6a1758f98872efe59eab4a01b5269bf4a
+#   settings-oauth.yaml      3860788dae29b15dd6142134f1c53c686afcdd92ebe5677c08e6cb1243c4ce35
+#   settings.yaml            af2205f1e6077e563577c1c8beebb985b4f84d6ff272cc164aa5e5d9175a3f2d
+#   varied.yaml              14ac1a91a6c582dfe07033600c0a2050da1c12d6d116ac67e726a9b7cdda8f70
 
 ===== existing-secret.yaml
 NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden

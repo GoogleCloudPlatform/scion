@@ -118,6 +118,12 @@ auth:
         clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
         clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
 
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
+
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion
 

@@ -73,6 +73,12 @@ auth:
     oidcAudience: probe-ci-settings-oauth-client.apps.googleusercontent.com
     platformAuthSa: probe-ci-settings@probe-project.iam.gserviceaccount.com
 
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
+
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion
 
