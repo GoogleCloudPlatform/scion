@@ -932,3 +932,46 @@ func TestCommandHandler_Status_RegistrationLookupFailureIsNotUnregistered(t *tes
 	assert.NotContains(t, sent[0].Text, "Not registered")
 	assert.Contains(t, sent[0].Text, "Registration: Unknown")
 }
+
+func TestCommandHandler_GroupsVisibleTo_CachedGroupsDoNotUseTheLimit(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	ctx := context.Background()
+	const groups = memberCheckLimit + 10
+	for i := 1; i <= groups; i++ {
+		chatID := int64(-3000 - i)
+		require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
+			ChatID: chatID, ProjectID: fmt.Sprintf("p%d", i), LinkedBy: "999", LinkedAt: time.Now().UTC(), Active: true,
+		}))
+		tgSrv.setChatMember(chatID, 456, "member")
+	}
+	// 20 groups already have a cached answer (10 member, 10 recently failed).
+	h.memberCacheMu.Lock()
+	h.memberCache = make(map[string]memberCacheEntry)
+	for i := 1; i <= 20; i++ {
+		h.memberCache[memberCacheKey(int64(-3000-i), 456)] = memberCacheEntry{member: i <= 10, failed: i > 10, checkedAt: time.Now()}
+	}
+	h.memberCacheMu.Unlock()
+	links, err := store.GetAllGroupLinks(ctx)
+	require.NoError(t, err)
+
+	visible, unchecked := h.groupsVisibleTo(ctx, 456, links)
+
+	calls, _ := tgSrv.chatMemberStats()
+	assert.Equal(t, groups-20, calls, "the 40 uncached groups are all checked: cached ones do not use the limit")
+	assert.Len(t, visible, 10+(groups-20))
+	assert.True(t, unchecked, "the cached failures are still reported")
+}
+
+func TestCommandHandler_Status_LinkWithoutEmailShowsStaleLinkText(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+	require.NoError(t, store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+		TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
+	}))
+
+	h.HandleCommand(&TGMessage{Text: "/status", From: &TGUser{ID: 456}, Chat: TGChat{ID: 456, Type: "private"}})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Registration: "+staleLinkText)
+	assert.NotContains(t, sent[0].Text, "user ID")
+}

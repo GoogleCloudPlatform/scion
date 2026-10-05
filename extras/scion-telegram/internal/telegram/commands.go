@@ -604,12 +604,11 @@ func (h *CommandHandler) registrationStatus(userID int64) string {
 		return "Unknown (could not be checked)"
 	case m == nil:
 		return "Not registered"
-	case m.ScionEmail != "":
-		return "Registered as " + m.ScionEmail
-	case m.ScionUserID != "":
-		return "Registered (user ID: " + m.ScionUserID + ")"
+	case m.ScionEmail == "":
+		// Linked without a Scion email: the link cannot be used.
+		return staleLinkText
 	default:
-		return "Not registered"
+		return "Registered as " + m.ScionEmail
 	}
 }
 
@@ -649,6 +648,16 @@ func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, link
 	for i, link := range links {
 		if link.LinkedBy == senderID {
 			results[i] = member
+			continue
+		}
+		// Cached answers are free and do not count toward the limit.
+		if e, ok := h.cachedMembership(link.ChatID, userID); ok {
+			switch {
+			case e.failed:
+				results[i] = failed
+			case e.member:
+				results[i] = member
+			}
 			continue
 		}
 		if queued >= memberCheckLimit {
@@ -696,14 +705,26 @@ func isNotVisibleChatError(err error) bool {
 	}
 }
 
+func memberCacheKey(chatID, userID int64) string {
+	return strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
+}
+
+// cachedMembership returns the unexpired cached membership check.
+func (h *CommandHandler) cachedMembership(chatID, userID int64) (memberCacheEntry, bool) {
+	h.memberCacheMu.Lock()
+	defer h.memberCacheMu.Unlock()
+	e, ok := h.memberCache[memberCacheKey(chatID, userID)]
+	if !ok || time.Since(e.checkedAt) >= e.ttl() {
+		return memberCacheEntry{}, false
+	}
+	return e, true
+}
+
 // isGroupMember reports whether the user is currently in the chat, using a
 // short-lived cache of results and of failed checks.
 func (h *CommandHandler) isGroupMember(ctx context.Context, chatID, userID int64) (bool, error) {
-	key := strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
-	h.memberCacheMu.Lock()
-	entry, ok := h.memberCache[key]
-	h.memberCacheMu.Unlock()
-	if ok && time.Since(entry.checkedAt) < entry.ttl() {
+	key := memberCacheKey(chatID, userID)
+	if entry, ok := h.cachedMembership(chatID, userID); ok {
 		if entry.failed {
 			return false, errMembershipCheckFailed
 		}
