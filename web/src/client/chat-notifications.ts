@@ -26,7 +26,7 @@
  *
  * - it is not the user's own message;
  * - the user takes part in the conversation: a DM they are in, or a thread
- *   they are a member of (see isThreadMember);
+ *   they are a member of (see isKnownThreadMember);
  * - the conversation is not on screen in a focused tab;
  * - the conversation is not muted;
  * - the user turned on chat message alerts (and the browser allows them).
@@ -332,19 +332,21 @@ export class ChatNotificationDispatcher {
   }
 
   /**
-   * Whether the user is a member of a thread, as far as the page can tell.
+   * Whether the page already knows the user is a member of a thread,
+   * without fetching anything.
    *
    * The thread message event does not say who the thread's members are, so
    * this takes the hub's membership rules where the page can see them: the
-   * user created the thread, posted in it (seen on this page), or is
-   * @mentioned in it. An event on the user's own subject is addressed to
-   * them, and so counts as membership by itself.
+   * user posted in the thread (seen on this page) or is @mentioned in it.
+   * An event on the user's own subject is addressed to them, and so counts
+   * as membership by itself. The remaining rule, the user created the
+   * thread, needs the thread list (isThreadCreator).
    *
    * This is an approximation. Once the hub fans thread messages out to
    * member participants on `user.<id>.chat.message`, every member thread
    * message arrives with `deliveredToUser` set and the check is exact.
    */
-  private isThreadMember(n: ChatMessagePayload, info: ConversationInfo | null): boolean {
+  private isKnownThreadMember(n: ChatMessagePayload): boolean {
     const key = n.threadId ?? '';
     if (n.deliveredToUser) return true;
     if (this.memberThreads.has(key)) return true;
@@ -352,12 +354,22 @@ export class ChatNotificationDispatcher {
       this.memberThreads.add(key);
       return true;
     }
+    return false;
+  }
+
+  /** The creator half of the membership rule, which needs the thread list. */
+  private isThreadCreator(info: ConversationInfo | null): boolean {
     return !!info?.createdBy && info.createdBy === this.identity?.id;
   }
 
-  private rememberMessage(id: string | undefined): boolean {
-    if (!id) return true;
-    if (this.seenMessages.has(id)) return false;
+  /**
+   * Records a message that passed every gate, so a second copy of it (the
+   * same message on another subject) is dropped. Only messages that passed
+   * are recorded: a copy rejected as "not a member" must not stop the
+   * user-subject copy, which proves membership, from being shown.
+   */
+  private rememberMessage(id: string | undefined): void {
+    if (!id) return;
     this.seenMessages.add(id);
     if (this.seenMessages.size > SEEN_MESSAGE_LIMIT) {
       // Sets iterate in insertion order: drop the oldest id.
@@ -366,7 +378,6 @@ export class ChatNotificationDispatcher {
         break;
       }
     }
-    return true;
   }
 
   /**
@@ -391,8 +402,9 @@ export class ChatNotificationDispatcher {
       return 'own-message';
     }
 
-    // The same message can arrive on more than one subject.
-    if (!this.rememberMessage(n.id)) return 'duplicate';
+    // The same message can arrive on more than one subject; only a copy
+    // that passed every gate is remembered (see rememberMessage).
+    if (n.id && this.seenMessages.has(n.id)) return 'duplicate';
 
     // Already looking at it. Only when the tab actually has focus — a
     // background tab left open on a conversation is not "watching" it.
@@ -400,11 +412,18 @@ export class ChatNotificationDispatcher {
       return 'conversation-visible';
     }
 
+    // Membership the page can decide on its own comes first. The thread
+    // list is fetched only for what is left: the creator rule, and mute.
+    const knownMember = isDM || this.isKnownThreadMember(n);
     const info = this.lookup
       ? await this.lookup(n)
       : await lookupConversationInfo(n, this.threadCache);
-    if (!isDM && !this.isThreadMember(n, info)) return 'not-member';
+    if (!knownMember && !this.isThreadCreator(info)) return 'not-member';
     if (info?.muted) return 'muted';
+
+    // Another copy may have passed while the lookup was in flight.
+    if (n.id && this.seenMessages.has(n.id)) return 'duplicate';
+    this.rememberMessage(n.id);
 
     // The chime is independent of desktop push permission/opt-in.
     playChimeThrottled(n.projectId ?? '');

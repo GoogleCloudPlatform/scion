@@ -353,6 +353,116 @@ describe('thread membership', () => {
   });
 });
 
+describe('dedupe order and lookups', () => {
+  /** A started dispatcher whose lookup is a spy answered from `infos`. */
+  function spied(): {
+    d: ChatNotificationDispatcher;
+    lookup: ReturnType<typeof vi.fn>;
+  } {
+    const lookup = vi.fn((n: ChatMessagePayload) =>
+      Promise.resolve(infos[n.threadId ?? ''] ?? null)
+    );
+    const d = new ChatNotificationDispatcher(undefined, undefined, lookup);
+    d.start({ id: ME, email: 'me@example.com', name: 'Grace Hopper' });
+    started.push(d);
+    return { d, lookup };
+  }
+
+  it('a not-member copy does not stop the user-subject copy of the same message', async () => {
+    const { d } = spied();
+    const projectCopy = thread({ id: 'same' });
+    expect(await d.handle(projectCopy)).toBe('not-member');
+    expect(await d.handle({ ...projectCopy, deliveredToUser: true })).toBeNull();
+    expect(popups).toHaveLength(1);
+    // A third copy is now a duplicate.
+    expect(await d.handle({ ...projectCopy, deliveredToUser: true })).toBe('duplicate');
+  });
+
+  it('a muted or visible copy is not remembered either', async () => {
+    const { d } = spied();
+    d.setActiveConversation(DM_KEY);
+    expect(await d.handle(dm({ id: 'v' }))).toBe('conversation-visible');
+    d.setActiveConversation(null);
+    expect(await d.handle(dm({ id: 'v' }))).toBeNull();
+  });
+
+  it('shows one popup when two copies pass while both are looking up', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const d = new ChatNotificationDispatcher(undefined, undefined, async (n) => {
+      await gate;
+      return infos[n.threadId ?? ''] ?? null;
+    });
+    d.start(ME);
+    started.push(d);
+    const first = d.handle(dm({ id: 'race' }));
+    const second = d.handle(dm({ id: 'race', deliveredToUser: true }));
+    release();
+    expect((await Promise.all([first, second])).sort()).toEqual(['duplicate', null].sort());
+    expect(popups).toHaveLength(1);
+  });
+
+  it('looks nothing up when an earlier gate decides', async () => {
+    const { d, lookup } = spied();
+    expect(await d.handle(dm({ threadId: '' }))).toBe('not-chat');
+    expect(await d.handle(dm({ threadId: 'dm:user:a:user:b' }))).toBe('not-for-me');
+    expect(await d.handle(thread({ senderId: ME }))).toBe('own-message');
+    d.setActiveConversation(DM_KEY);
+    expect(await d.handle(dm())).toBe('conversation-visible');
+    d.setActiveConversation(null);
+    const shown = dm();
+    expect(await d.handle(shown)).toBeNull();
+    lookup.mockClear();
+    expect(await d.handle(shown)).toBe('duplicate');
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('looks up once for a known member, for the mute check', async () => {
+    const { d, lookup } = spied();
+    expect(await d.handle(thread({ deliveredToUser: true }))).toBeNull();
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('identity change', () => {
+  it('forgets shown messages, so the next user is told about them', async () => {
+    const d = dispatcher();
+    const m = thread({ id: 'shared', deliveredToUser: true });
+    expect(await d.handle(m)).toBeNull();
+    d.start({ id: 'user-other' });
+    expect(await d.handle(m)).toBeNull();
+    expect(popups).toHaveLength(2);
+  });
+
+  it('keeps shown messages when the same user starts again', async () => {
+    const d = dispatcher();
+    const m = thread({ id: 'kept', deliveredToUser: true });
+    await d.handle(m);
+    d.start({ id: ME, email: 'me@example.com', name: 'Grace Hopper' });
+    expect(await d.handle(m)).toBe('duplicate');
+  });
+
+  it('drops the cached thread lists', async () => {
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ threads: [{ id: 'topic-1', createdBy: ME }] }), {
+          status: 200,
+        })
+      )
+    );
+    const d = new ChatNotificationDispatcher();
+    d.start(ME);
+    started.push(d);
+    await d.handle(thread());
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    d.start('user-other');
+    await d.handle(thread());
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('background chime', () => {
   it('chimes for a message that would otherwise pop a notification', async () => {
     await dispatcher().handle(thread({ deliveredToUser: true }));
