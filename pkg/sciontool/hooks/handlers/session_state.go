@@ -78,22 +78,41 @@ func NewFileSessionState(home string) *FileSessionState {
 	return &FileSessionState{Path: filepath.Join(home, ".scion", SessionStateFileName)}
 }
 
+// ErrSessionStateUnavailable reports that Update could not take the lock,
+// so the persisted state was neither loaded nor saved. The event was applied
+// to the in-memory aggregator only, which therefore does not hold the
+// session's counts; a summary finalized from it must not be reported.
+var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
+
 // Update implements SessionStateStore.
+//
+// Persisted state belongs to one harness session. If the event carries a
+// session ID and the persisted state has a different one, the persisted
+// session is over without having been reported (its session-end was never
+// delivered, e.g. the harness was killed), so its state is discarded rather
+// than merged into the new session. This holds for every event, not only
+// session-start, because the new session's session-start may itself have
+// been missed.
 func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() bool) error {
 	unlock, err := s.lock()
 	if err != nil {
 		apply()
-		return fmt.Errorf("event counted but not persisted: %w", err)
+		return fmt.Errorf("%w: event counted in memory only: %v", ErrSessionStateUnavailable, err)
 	}
 	defer unlock()
 
 	if st, ok := s.load(); ok {
-		if event.Name == hooks.EventSessionStart && st.Open &&
-			st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID {
-			log.Info("Session metrics: session-start for session %s discards the unreported state of session %s",
-				event.Data.SessionID, st.SessionID)
+		switch {
+		case st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID:
+			log.Info("Session metrics: %s event for session %s discards the unreported state of session %s",
+				event.Name, event.Data.SessionID, st.SessionID)
+			agg.RestoreState(telemetry.AggregatorState{})
+		default:
+			if event.Name == hooks.EventSessionStart && st.Open && !st.Implicit && st.SessionID != "" {
+				log.Info("Session metrics: repeated session-start for open session %s resets its counts", st.SessionID)
+			}
+			agg.RestoreState(st)
 		}
-		agg.RestoreState(st)
 	}
 
 	if apply() {

@@ -6,6 +6,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -750,6 +751,12 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	if h.SessionState != nil && isAggregatorEvent(event.Name) {
 		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
 			log.Error("Session metrics state: %v", err)
+			if ended && errors.Is(err, ErrSessionStateUnavailable) {
+				// The summary was built without the session's persisted
+				// counts; reporting it would send a near-empty summary.
+				log.Error("Session metrics for session %s not reported: state unavailable", event.Data.SessionID)
+				return
+			}
 		}
 	} else {
 		apply()

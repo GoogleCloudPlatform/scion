@@ -185,3 +185,62 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 		t.Errorf("state written without the lock: %v", statErr)
 	}
 }
+
+// A session that never got its session-end (harness killed) must not be
+// merged into the next session when that session's session-start is also
+// missed: any event with a different session ID discards the stale state.
+func TestFileSessionState_DifferentSessionIDDiscardsStaleStateWithoutStart(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "old"))
+	hookRun(t, store, toolEvent("old", "Bash"))
+	hookRun(t, store, sessionEvent(hooks.EventAgentEnd, "old"))
+	// No session-end for "old", and no session-start for "new".
+
+	hookRun(t, store, toolEvent("new", "Read"))
+	s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "new"))
+	if s == nil {
+		t.Fatal("session-end produced no summary")
+	}
+	if s.SessionID != "new" {
+		t.Errorf("SessionID = %q, want new", s.SessionID)
+	}
+	if s.TurnCount != 0 || s.ToolCalls["Bash"].Calls != 0 || s.ToolCalls["Read"].Calls != 1 {
+		t.Errorf("summary = %+v, want only the new session's counts", *s)
+	}
+}
+
+// Events without a session ID cannot be attributed elsewhere, so they keep
+// counting into the persisted session.
+func TestFileSessionState_EventWithoutSessionIDKeepsState(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
+	hookRun(t, store, toolEvent("", "Bash"))
+	s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
+	if s == nil || s.SessionID != "s1" || s.ToolCalls["Bash"].Calls != 1 {
+		t.Errorf("summary = %+v, want s1 with one Bash", s)
+	}
+}
+
+// If the lock cannot be taken on session-end, the summary would be built
+// without the session's persisted counts, so it is not reported.
+func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
+	hookRun(t, store, toolEvent("s1", "Bash"))
+
+	held, err := os.OpenFile(store.Path+".lock", os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	if s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1")); s != nil {
+		t.Errorf("reported summary %+v while the state was unavailable", *s)
+	}
+	if _, err := os.Stat(store.Path); err != nil {
+		t.Errorf("state file should be left in place: %v", err)
+	}
+}
