@@ -216,4 +216,7 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 7200s # 2 hours - measured 641s (build 9a1b9766), but it also builds scion-base, seen at ~40m (build 14e5e1c1)
+# 2 hours. Omni is amd64 only; measured 641s (build 9a1b9766), which
+# includes its scion-base step. Headroom while the scion-base slowdown
+# seen in build 14e5e1c1 is unexplained.
+timeout: 7200s
