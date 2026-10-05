@@ -1965,6 +1965,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
+	// Remove user-scope secrets and env vars whose user no longer exists
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists.
+	if n, err := srv.sweepOrphanedUserScopedData(ctx); err != nil {
+		slog.Warn("Failed to sweep user-scope data of deleted users", "error", err)
+	} else if n > 0 {
+		slog.Info("Removed user-scope data of deleted users", "users", n)
+	}
+
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
 	if err := srv.seedPlatformSkillInsertions(ctx, resources.PlatformSkillsFS()); err != nil {

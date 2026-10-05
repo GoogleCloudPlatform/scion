@@ -1236,8 +1236,9 @@ var Catalog = []OperationSpec{
 			Atomic:        true,
 		},
 		// last_owner: the user is the last active owner of a project.
-		// conflict: last super-admin, self-delete, or the user's role
-		// bindings changed concurrently during the delete.
+		// conflict: last super-admin, self-delete, the user still owns
+		// agents, or the user's role bindings changed concurrently during
+		// the delete.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
