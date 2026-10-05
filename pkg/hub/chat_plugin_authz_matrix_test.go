@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -48,7 +50,8 @@ import (
 
 // chatMatrixEnv is the shared fixture for the matrix: one project with an
 // owner, an active outsider with no role in it, a second project the
-// outsider owns, and plugin credentials for a hub-managed plugin.
+// outsider owns, a suspended user, and plugin credentials for a hub-managed
+// plugin.
 type chatMatrixEnv struct {
 	srv *Server
 
@@ -56,6 +59,7 @@ type chatMatrixEnv struct {
 	ownerEmail     string
 	outsiderEmail  string
 	outsiderProjID string
+	suspendedEmail string
 	agentSlug      string
 
 	auth *apiclient.HMACAuth
@@ -64,6 +68,7 @@ type chatMatrixEnv struct {
 func setupChatMatrixEnv(t *testing.T) *chatMatrixEnv {
 	t.Helper()
 	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	ownerID := tid("chat-matrix-owner")
@@ -75,6 +80,13 @@ func setupChatMatrixEnv(t *testing.T) *chatMatrixEnv {
 	outsiderID := tid("chat-matrix-outsider")
 	outsiderProjID := tid("chat-matrix-outsider-project")
 	rs4Project(t, s, outsiderProjID, outsiderID)
+
+	// A suspended hub user, used as a linked user and as a message sender.
+	suspendedID := tid("chat-matrix-suspended")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: suspendedID, Email: suspendedID + "@test.com",
+		DisplayName: "Suspended", Role: store.UserRoleMember, Status: store.UserStatusSuspended,
+	}))
 
 	// A stopped agent: an inbound message that passes the sender check is
 	// then answered with 409 (agent not running), which keeps the test
@@ -109,6 +121,19 @@ func setupChatMatrixEnv(t *testing.T) *chatMatrixEnv {
 		Updated:   time.Now(),
 	}))
 
+	// A global template, visible to every caller.
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
+		ID:        tid("chat-matrix-global-template"),
+		Name:      "chat-matrix-global-template",
+		Slug:      "chat-matrix-global-template",
+		Harness:   "claude",
+		Scope:     store.TemplateScopeGlobal,
+		Status:    store.TemplateStatusActive,
+		CreatedBy: ownerID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}))
+
 	// Plugin credentials, obtained the way a hub-managed plugin gets them.
 	creds := srv.getPluginHubCreds(ctx, "chat-matrix-plugin")
 	brokerID := creds["broker_id"]
@@ -123,6 +148,7 @@ func setupChatMatrixEnv(t *testing.T) *chatMatrixEnv {
 		ownerEmail:     ownerID + "@test.com",
 		outsiderEmail:  outsiderID + "@test.com",
 		outsiderProjID: outsiderProjID,
+		suspendedEmail: suspendedID + "@test.com",
 		agentSlug:      agentSlug,
 		auth:           &apiclient.HMACAuth{BrokerID: brokerID, SecretKey: key},
 	}
@@ -176,18 +202,30 @@ func chatMatrixListIDs(t *testing.T, w *httptest.ResponseRecorder, field string)
 	return ids
 }
 
-// chatMatrixErrorBody decodes a hub error response.
-func chatMatrixErrorBody(t *testing.T, w *httptest.ResponseRecorder) (code, message string, details map[string]interface{}) {
+// chatMatrixSecretKeys returns the keys in a secret list response.
+func chatMatrixSecretKeys(t *testing.T, w *httptest.ResponseRecorder) []string {
 	t.Helper()
-	var resp struct {
-		Error struct {
-			Code    string                 `json:"code"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details"`
-		} `json:"error"`
-	}
+	var resp ListSecretsResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), w.Body.String())
-	return resp.Error.Code, resp.Error.Message, resp.Error.Details
+	keys := make([]string, 0, len(resp.Secrets))
+	for _, sec := range resp.Secrets {
+		keys = append(keys, sec.Key)
+	}
+	return keys
+}
+
+// assertChatMatrixError asserts a hub error response's status, code and,
+// when wantMessagePrefix is non-empty, the start of its message.
+func assertChatMatrixError(t *testing.T, w *httptest.ResponseRecorder, wantStatus int, wantCode, wantMessagePrefix string) ErrorResponse {
+	t.Helper()
+	require.Equal(t, wantStatus, w.Code, w.Body.String())
+	resp := parseErrorResponse(t, w.Body.Bytes())
+	assert.Equal(t, wantCode, resp.Error.Code, w.Body.String())
+	if wantMessagePrefix != "" {
+		assert.True(t, strings.HasPrefix(resp.Error.Message, wantMessagePrefix),
+			"message %q should start with %q", resp.Error.Message, wantMessagePrefix)
+	}
+	return resp
 }
 
 func TestChatPluginAuthzMatrix(t *testing.T) {
@@ -199,9 +237,8 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 	t.Run("project agent list", func(t *testing.T) {
 		t.Run("request without the linked user is denied", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, noUser, nil)
-			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
-			_, _, details := chatMatrixErrorBody(t, w)
-			assert.Equal(t, "list", details["denied_action"], w.Body.String())
+			resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+			assertStructuredDenial(t, resp, "agent", "list")
 		})
 		t.Run("request with the linked owner lists agents", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, env.ownerEmail, nil)
@@ -210,7 +247,8 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		})
 		t.Run("request with a linked outsider is denied", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, env.outsiderEmail, nil)
-			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+			assertStructuredDenial(t, resp, "agent", "list")
 		})
 	})
 
@@ -261,6 +299,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				w := env.do(t, http.MethodGet, "/api/v1/templates?scope=global&status=active", user, nil)
 				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.Contains(t, chatMatrixListIDs(t, w, "templates"), tid("chat-matrix-global-template"))
 			})
 		}
 	})
@@ -284,31 +323,43 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		putBody := map[string]string{
 			"value": "v", "encoding": "raw", "scope": "project", "scopeId": env.projectID,
 		}
+		putPath := "/api/v1/secrets/CHAT_MATRIX_KEY"
+		getPath := "/api/v1/secrets/CHAT_MATRIX_KEY?" + scopeQuery
+		listPath := "/api/v1/secrets?" + scopeQuery
+
+		// The linked owner writes, reads and lists in that order.
+		t.Run("put with the linked owner stores the secret", func(t *testing.T) {
+			w := env.do(t, http.MethodPut, putPath, env.ownerEmail, putBody)
+			assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, w.Code, w.Body.String())
+		})
+		t.Run("get with the linked owner returns the secret", func(t *testing.T) {
+			w := env.do(t, http.MethodGet, getPath, env.ownerEmail, nil)
+			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		})
+		t.Run("list with the linked owner includes the secret", func(t *testing.T) {
+			w := env.do(t, http.MethodGet, listPath, env.ownerEmail, nil)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Contains(t, chatMatrixSecretKeys(t, w), "CHAT_MATRIX_KEY")
+		})
+
 		calls := []struct {
 			name   string
 			method string
 			path   string
 			body   interface{}
 		}{
-			{"list", http.MethodGet, "/api/v1/secrets?" + scopeQuery, nil},
-			{"get", http.MethodGet, "/api/v1/secrets/CHAT_MATRIX_KEY?" + scopeQuery, nil},
-			{"put", http.MethodPut, "/api/v1/secrets/CHAT_MATRIX_KEY", putBody},
+			{"list", http.MethodGet, listPath, nil},
+			{"get", http.MethodGet, getPath, nil},
+			{"put", http.MethodPut, putPath, putBody},
 		}
 		for _, c := range calls {
 			t.Run(c.name+" without the linked user is denied", func(t *testing.T) {
 				w := env.do(t, c.method, c.path, noUser, c.body)
-				assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
-			})
-			t.Run(c.name+" with the linked owner is not denied", func(t *testing.T) {
-				// Tests run without a secret backend, so a permitted request
-				// may still fail later; it must not be a 403.
-				w := env.do(t, c.method, c.path, env.ownerEmail, c.body)
-				assert.NotEqual(t, http.StatusForbidden, w.Code, w.Body.String())
-				assert.NotEqual(t, http.StatusUnauthorized, w.Code, w.Body.String())
+				assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
 			})
 			t.Run(c.name+" with a linked outsider is denied", func(t *testing.T) {
 				w := env.do(t, c.method, c.path, env.outsiderEmail, c.body)
-				assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+				assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
 			})
 		}
 	})
@@ -336,9 +387,13 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 
 	t.Run("request with an unknown linked user is denied", func(t *testing.T) {
 		w := env.do(t, http.MethodGet, agentsPath, "nobody-chat-matrix@test.com", nil)
-		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
-		_, msg, _ := chatMatrixErrorBody(t, w)
-		assert.Equal(t, "on-behalf-of principal not found", msg)
+		resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
+		assert.Equal(t, "on-behalf-of principal not found", resp.Error.Message)
+	})
+
+	t.Run("request with a suspended linked user is denied", func(t *testing.T) {
+		w := env.do(t, http.MethodGet, agentsPath, env.suspendedEmail, nil)
+		assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "on-behalf-of principal is not active")
 	})
 
 	t.Run("inbound message sender", func(t *testing.T) {
@@ -358,7 +413,15 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		}
 		t.Run("sender without the user prefix is denied", func(t *testing.T) {
 			w := send(t, "slack:U123")
-			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeMessageDenied, "")
+		})
+		t.Run("unknown user sender is denied", func(t *testing.T) {
+			w := send(t, "user:nobody-chat-matrix@test.com")
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "sender identity could not be resolved")
+		})
+		t.Run("suspended user sender is denied", func(t *testing.T) {
+			w := send(t, "user:"+env.suspendedEmail)
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "sender identity is not active")
 		})
 		t.Run("owner sender passes the sender check", func(t *testing.T) {
 			w := send(t, "user:"+env.ownerEmail)
@@ -367,7 +430,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		})
 		t.Run("outsider sender is denied", func(t *testing.T) {
 			w := send(t, "user:"+env.outsiderEmail)
-			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeMessageDenied, "")
 		})
 	})
 }
