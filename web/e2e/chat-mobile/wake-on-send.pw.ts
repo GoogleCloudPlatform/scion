@@ -81,12 +81,10 @@ function composerValue(page: Page): Promise<string> {
     .evaluate((el) => (el as unknown as { value: string }).value);
 }
 
+// Tagged @static: click and type only, no gestures, so they also run on
+// the opt-in webkit-iphone project (PW_WEBKIT=1).
 test.describe('wake on send', () => {
-  test.beforeEach(({ page: _page }, testInfo) => {
-    test.skip(testInfo.project.name === 'webkit-iphone', 'dialog flow is engine-independent');
-  });
-
-  test('"Wake and send" wakes the agent and delivers the message', async ({ page }) => {
+  test('@static "Wake and send" wakes the agent and delivers the message', async ({ page }) => {
     await openChatRail(page);
     await openGeneralThread(page);
     const send = await mockWakeSend(page);
@@ -113,7 +111,7 @@ test.describe('wake on send', () => {
     expect(await composerValue(page)).toBe('');
   });
 
-  test('Cancel keeps the draft and sends nothing more', async ({ page }) => {
+  test('@static Cancel keeps the draft and sends nothing more', async ({ page }) => {
     await openChatRail(page);
     await openGeneralThread(page);
     const send = await mockWakeSend(page);

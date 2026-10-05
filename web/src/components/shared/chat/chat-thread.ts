@@ -53,6 +53,7 @@ import {
   WAKING_DISPATCH_STATE,
   confirmWake,
   errorMessageFromBody,
+  saveDraftForConversation,
   wakeOfferFromErrorBody,
   type WakeOffer,
 } from './chat-wake.js';
@@ -503,6 +504,12 @@ export class ScionChatThread extends LitElement {
   @state() private error: string | null = null;
   @state() private sending = false;
   @state() private sendError: string | null = null;
+  /**
+   * Conversation whose wake-and-send is in flight, or ''. Its composer is
+   * blocked meanwhile (up to the hub's wake budget), so text typed during
+   * the wait cannot be overwritten when a failed wake restores the draft.
+   */
+  @state() private wakingConversationKey = '';
   @state() private pinnedToBottom = true;
   /** Whether the user expanded a one-line send error to its full text. */
   @state() private sendErrorExpanded = false;
@@ -2387,8 +2394,12 @@ export class ScionChatThread extends LitElement {
       onError,
     } = detail;
     let wakeOffer: WakeOffer | null = null;
+    // Messages already known before this send: after a network error on a
+    // wake send, a new own row with the same text means it was delivered.
+    const knownIds = wake ? new Set(this.messageMap.keys()) : null;
 
     this.sending = true;
+    if (wake) this.wakingConversationKey = this.conversationKey;
     this.sendError = null;
     // Sending is the other way mark-unread's suppression lifts (besides
     // navigating away and back): you cannot both have just marked a
@@ -2504,6 +2515,8 @@ export class ScionChatThread extends LitElement {
             this.sendError = errorMessageFromBody(data, 'Failed to send message');
             onError?.(this.sendError);
           }
+        } else if (wake && sendConversationKey !== this.conversationKey) {
+          this.returnDraftElsewhere(sendConversationKey, text);
         } else {
           this.sendError = await extractApiError(
             res,
@@ -2623,10 +2636,22 @@ export class ScionChatThread extends LitElement {
         .sort(compareMessageOrder);
       // Restore reply-to state so the reply bar comes back for retry.
       this.composerReplyTo = savedReplyTo;
-      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
-      onError?.(this.sendError ?? 'Failed to send message');
+      const errorText = err instanceof Error ? err.message : 'Failed to send message';
+      // A wake send runs long; if the connection drops, the hub may still
+      // have delivered it. Restoring the draft then would invite a resend
+      // and a duplicate, so check the history first.
+      if (knownIds && (await this.wakeSendLanded(text, knownIds, sendConversationKey))) {
+        this.composerReplyTo = null;
+        onSuccess();
+      } else if (wake && sendConversationKey !== this.conversationKey) {
+        this.returnDraftElsewhere(sendConversationKey, text);
+      } else {
+        this.sendError = errorText;
+        onError?.(errorText);
+      }
     } finally {
       this.sending = false;
+      if (wake) this.wakingConversationKey = '';
     }
 
     if (wakeOffer) {
@@ -2643,14 +2668,56 @@ export class ScionChatThread extends LitElement {
   private async offerWake(detail: ChatSendDetail, offer: WakeOffer): Promise<void> {
     const conversationKey = this.conversationKey;
     const confirmed = await confirmWake(offer);
-    // A conversation switch while the dialog was open must not deliver the
-    // message into the conversation the thread has since moved to.
-    if (!confirmed || conversationKey !== this.conversationKey) {
+    // A conversation switch while the dialog was open must neither deliver
+    // the message nor drop the draft into the new conversation's composer.
+    if (conversationKey !== this.conversationKey) {
+      this.returnDraftElsewhere(conversationKey, detail.text);
+      return;
+    }
+    if (!confirmed) {
       detail.onError?.('Wake cancelled');
       return;
     }
     // The resend saves and clears the reply bar again.
     await this.sendV2(detail, true);
+  }
+
+  /**
+   * After a network error on a wake send: reload the recent history and
+   * report whether a new own message with the same text arrived, i.e. the
+   * hub delivered it before the connection dropped.
+   */
+  private async wakeSendLanded(
+    text: string,
+    knownIds: Set<string>,
+    conversationKey: string
+  ): Promise<boolean> {
+    if (conversationKey !== this.conversationKey) return false;
+    try {
+      await this.runBackfillV2();
+    } catch {
+      return false;
+    }
+    const self = this.selfUserId();
+    for (const m of this.messageMap.values()) {
+      if (knownIds.has(m.id) || this._pendingIdempotencyKeys.has(m.id)) continue;
+      if (m.senderId === self && m.msg === text) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The user switched conversations while a wake send was pending: keep the
+   * draft with the conversation it was written in, not the open composer.
+   */
+  private returnDraftElsewhere(conversationKey: string, text: string): void {
+    const saved = saveDraftForConversation(conversationKey, text);
+    showToast(
+      saved
+        ? 'Message not sent: you switched conversations. It was kept as a draft there.'
+        : 'Message not sent: you switched conversations.',
+      'warning'
+    );
   }
 
   /** Handle /default slash command. */
@@ -4689,6 +4756,8 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          ?disabled=${this.wakingConversationKey !== '' &&
+          this.wakingConversationKey === this.conversationKey}
           @chat-cancel-reply=${this.handleComposerCancelReply}
           @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}

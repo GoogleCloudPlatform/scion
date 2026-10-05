@@ -69,6 +69,11 @@ vi.mock('../../../client/api.js', () => ({
 }));
 
 const showConfirmMock = vi.fn<(message: string, options?: unknown) => Promise<boolean>>();
+const showToastMock = vi.fn();
+vi.mock('../../../utils/toast.js', () => ({
+  showToast: (...args: unknown[]) => showToastMock(...args) as unknown,
+}));
+
 vi.mock('../confirm-dialog.js', () => ({
   showConfirm: (message: string, options?: unknown) => showConfirmMock(message, options),
 }));
@@ -617,6 +622,135 @@ describe('scion-chat-thread wake on send', () => {
     expect(showConfirmMock).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(internals.sendError).toBe('conversation resolution failed');
+  });
+
+  function composerDisabled(el: ScionChatThread): boolean {
+    const composer = el.shadowRoot?.querySelector('scion-chat-composer') as
+      | (HTMLElement & { disabled: boolean })
+      | null;
+    return composer?.disabled ?? false;
+  }
+
+  it('blocks the composer while waking and restores the draft only after', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    let resolveWake!: (r: Response) => void;
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveWake = resolve;
+        })
+    );
+    const onError = vi.fn(() => {
+      // The draft comes back while the composer is still blocked, so no
+      // text typed during the wait can be overwritten.
+      expect(composerDisabled(el)).toBe(true);
+    });
+    const done = send(internals, { onSuccess: vi.fn(), onError });
+
+    await vi.waitFor(() => expect(sendBodies()).toHaveLength(2));
+    await el.updateComplete;
+    expect(composerDisabled(el)).toBe(true);
+
+    resolveWake({
+      ok: false,
+      status: 502,
+      json: () => Promise.resolve({ error: { message: 'Failed to wake agent: boom' } }),
+    } as unknown as Response);
+    await done;
+    await el.updateComplete;
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(composerDisabled(el)).toBe(false);
+  });
+
+  it('treats a dropped wake request as delivered when the row arrived', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    // The backfill after the network error finds the delivered row.
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'landed-1',
+              senderId: 'user-me',
+              sender: 'user:me@example.com',
+              msg: 'please pick this up',
+              createdAt: '2026-01-01T00:00:00Z',
+              dispatchState: 'dispatched',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await send(internals, { onSuccess, onError });
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(internals.sendError).toBeNull();
+    expect(internals.messageMap.has('landed-1')).toBe(true);
+  });
+
+  it('restores the draft after a dropped wake request when no row arrived', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    // Default mock: the backfill sees an empty history.
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await send(internals, { onSuccess, onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(internals.sendError).toBe('Failed to fetch');
+  });
+
+  it('keeps the draft with its conversation when the user switches during the dialog', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showToastMock.mockReset();
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    let answer!: (v: boolean) => void;
+    showConfirmMock.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          answer = resolve;
+        })
+    );
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+
+    const onError = vi.fn();
+    const done = send(internals, { onSuccess: vi.fn(), onError });
+    await vi.waitFor(() => expect(showConfirmMock).toHaveBeenCalled());
+
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    answer(true);
+    await done;
+
+    expect(sendBodies()).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(localStorage.getItem(`scion-chat-draft-${CONVERSATION_KEY}`)).toBe(
+      'please pick this up'
+    );
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    expect(String(showToastMock.mock.calls[0]![0])).toContain('kept as a draft');
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
   });
 
   it('keeps the draft and shows the error when the wake is refused', async () => {

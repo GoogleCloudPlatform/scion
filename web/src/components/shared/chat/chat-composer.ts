@@ -45,6 +45,7 @@ import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_ITEMS: ActionSheetItem[] = [
@@ -965,7 +966,7 @@ export class ScionChatComposer extends LitElement {
     this._persistedText = '';
     if (!this.conversationKey) return;
     try {
-      const key = `scion-chat-draft-${this.conversationKey}`;
+      const key = chatDraftStorageKey(this.conversationKey);
       const saved = localStorage.getItem(key);
       this._persistedText = saved ?? '';
       if (saved !== null) {
@@ -983,7 +984,7 @@ export class ScionChatComposer extends LitElement {
     if (this._draftTimer !== null) clearTimeout(this._draftTimer);
     this._draftTimer = setTimeout(() => {
       try {
-        const key = `scion-chat-draft-${this.conversationKey}`;
+        const key = chatDraftStorageKey(this.conversationKey);
         if (this.text) {
           localStorage.setItem(key, this.text);
         } else {
@@ -1005,7 +1006,7 @@ export class ScionChatComposer extends LitElement {
     }
     if (!this.conversationKey) return;
     try {
-      localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+      localStorage.removeItem(chatDraftStorageKey(this.conversationKey));
       this._persistedText = '';
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
@@ -1029,7 +1030,7 @@ export class ScionChatComposer extends LitElement {
     if (!key) return;
     try {
       if (this.text === this._persistedText) return;
-      const storageKey = `scion-chat-draft-${key}`;
+      const storageKey = chatDraftStorageKey(key);
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
       } else {

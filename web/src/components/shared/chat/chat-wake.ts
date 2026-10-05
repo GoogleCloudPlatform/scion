@@ -28,6 +28,7 @@
  */
 
 import { showConfirm } from '../confirm-dialog.js';
+import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 
 /** Client-only dispatch state shown on the optimistic bubble while waking. */
 export const WAKING_DISPATCH_STATE = 'waking';
@@ -87,4 +88,23 @@ export function confirmWake(offer: WakeOffer): Promise<boolean> {
     cancelText: 'Cancel',
     variant: 'primary',
   });
+}
+
+/**
+ * Saves a draft that could not go back into the composer because the user
+ * switched conversations meanwhile: it becomes the draft of the conversation
+ * it was written in, unless that conversation already has another draft.
+ * Returns whether it was saved.
+ */
+export function saveDraftForConversation(conversationKey: string, text: string): boolean {
+  if (!conversationKey || !text) return false;
+  try {
+    const key = chatDraftStorageKey(conversationKey);
+    if (localStorage.getItem(key)) return false;
+    localStorage.setItem(key, text);
+    return true;
+  } catch {
+    // localStorage may throw in private browsing mode.
+    return false;
+  }
 }

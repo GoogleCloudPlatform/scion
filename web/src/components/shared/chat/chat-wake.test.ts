@@ -21,8 +21,13 @@ vi.mock('../confirm-dialog.js', () => ({
   showConfirm: (message: string, options?: unknown) => showConfirm(message, options),
 }));
 
-const { confirmWake, errorMessageFromBody, wakeConfirmMessage, wakeOfferFromErrorBody } =
-  await import('./chat-wake.js');
+const {
+  confirmWake,
+  errorMessageFromBody,
+  saveDraftForConversation,
+  wakeConfirmMessage,
+  wakeOfferFromErrorBody,
+} = await import('./chat-wake.js');
 
 describe('wakeOfferFromErrorBody', () => {
   it('reads an explicit wake offer', () => {
@@ -73,5 +78,21 @@ describe('confirmWake', () => {
 
   it('falls back to a generic name without a slug', () => {
     expect(wakeConfirmMessage({ agentId: 'a-1', agentSlug: '' })).toMatch(/^This agent is/);
+  });
+});
+
+describe('saveDraftForConversation', () => {
+  it('saves into an empty draft slot and never overwrites another draft', () => {
+    localStorage.removeItem('scion-chat-draft-c1');
+    expect(saveDraftForConversation('c1', 'first')).toBe(true);
+    expect(localStorage.getItem('scion-chat-draft-c1')).toBe('first');
+    expect(saveDraftForConversation('c1', 'second')).toBe(false);
+    expect(localStorage.getItem('scion-chat-draft-c1')).toBe('first');
+    localStorage.removeItem('scion-chat-draft-c1');
+  });
+
+  it('ignores an empty key or text', () => {
+    expect(saveDraftForConversation('', 'x')).toBe(false);
+    expect(saveDraftForConversation('c1', '')).toBe(false);
   });
 });
