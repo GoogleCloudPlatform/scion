@@ -984,6 +984,21 @@ describe('scion-chat-message delivery state', () => {
     const icon = state?.querySelector('sl-icon');
     expect(icon?.getAttribute('name')).toBe('pause-circle');
   });
+
+  it('shows a "Not delivered to any agent" hint for dispatchState=no_recipient', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'no_recipient',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('no-recipient')).toBe(true);
+    expect(state?.classList.contains('dispatched')).toBe(false);
+    expect(state?.textContent).toContain('Not delivered to any agent');
+    expect(state?.textContent).toContain('mention an agent');
+    const icon = state?.querySelector('sl-icon');
+    expect(icon?.getAttribute('name')).toBe('info-circle');
+  });
 });
 
 declare global {

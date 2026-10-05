@@ -4331,7 +4331,7 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
     };
   }
 
-  it.each(['deferred', 'failed'])(
+  it.each(['deferred', 'failed', 'no_recipient'])(
     'keeps dispatchState=%s visible even when it is not the last own message',
     async (dispatchState) => {
       const el = document.createElement('scion-chat-thread') as ScionChatThread;

@@ -2047,6 +2047,10 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		reason := unreachable.Reason
 		storeMsg.DispatchFailureReason = &reason
+	} else if !isDM {
+		// A thread message that reaches this point resolved no agent
+		// recipient, so no agent was given it: never report "dispatched".
+		storeMsg.DispatchState = store.MessageDispatchNoRecipient
 	}
 
 	// B15 dual-write: resolve-or-create conversation for human-to-human
@@ -2178,6 +2182,9 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		Type:        storeMsg.Type,
 		CreatedAt:   now,
 		Attachments: attachmentRefs,
+	}
+	if storeMsg.DispatchState == store.MessageDispatchNoRecipient {
+		resp.DispatchState = storeMsg.DispatchState
 	}
 	if unreachable != nil {
 		resp.DispatchState = storeMsg.DispatchState

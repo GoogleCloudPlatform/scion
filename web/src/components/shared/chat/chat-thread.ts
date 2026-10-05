@@ -2125,7 +2125,13 @@ export class ScionChatThread extends LitElement {
     // "failed" — the sender must be told their message was saved for
     // catch-up rather than dispatched, on every message it happened to,
     // not just the most recent one.
-    if (!dispatchState || dispatchState === 'failed' || dispatchState === 'deferred') {
+    // "no_recipient" likewise stays visible: no agent got the message.
+    if (
+      !dispatchState ||
+      dispatchState === 'failed' ||
+      dispatchState === 'deferred' ||
+      dispatchState === 'no_recipient'
+    ) {
       return dispatchState;
     }
     if (msg.id !== lastOwnMessageId) return '';
