@@ -219,29 +219,23 @@ func TestNoRecipient_UnresolvedOrSelfMentionIsNoRecipient(t *testing.T) {
 	}
 }
 
-func TestMatchHumanMentionIDs(t *testing.T) {
-	members := []chatMemberEntry{
-		{ID: "u1", Kind: "user", DisplayName: "Alice Smith", Email: "alice@example.com"},
-		{ID: "u2", Kind: "user", DisplayName: "Bob", Email: "bob@example.com"},
-	}
-	cases := []struct {
-		names []string
-		want  []string
-	}{
-		{nil, nil},
-		{[]string{"nobody"}, nil},
-		{[]string{"Alice-Smith"}, []string{"u1"}},
-		{[]string{"alice smith"}, []string{"u1"}},
-		{[]string{"bob@example.com", "alice", "bob"}, []string{"u2", "u1"}},
-	}
-	for _, c := range cases {
-		got := matchHumanMentionIDs(members, c.names)
-		if strings.Join(got, ",") != strings.Join(c.want, ",") {
-			t.Errorf("matchHumanMentionIDs(%v) = %v, want %v", c.names, got, c.want)
+func TestMentionMatchesMember(t *testing.T) {
+	m := chatMemberEntry{ID: "u1", Kind: "user", DisplayName: "Alice Smith", Email: "alice@example.com"}
+	for name, want := range map[string]bool{
+		"Alice-Smith":       true,
+		"alice smith":       true,
+		"ALICE@example.com": true,
+		"alice":             true,
+		"smith":             false,
+		"nobody":            false,
+		"":                  false,
+	} {
+		if got := mentionMatchesMember(name, m); got != want {
+			t.Errorf("mentionMatchesMember(%q) = %v, want %v", name, got, want)
 		}
 	}
-	if got := matchHumanMentionIDs(nil, []string{"alice"}); got != nil {
-		t.Errorf("no members: got %v, want nil", got)
+	if mentionMatchesMember("", chatMemberEntry{ID: "u2"}) {
+		t.Error("a member with no name or email must not match")
 	}
 }
 
@@ -437,37 +431,6 @@ func TestNoRecipient_MemberLookupErrorKeepsDispatched(t *testing.T) {
 	}
 }
 
-// failNthGetTopicStore fails exactly the nth GetTopic call.
-type failNthGetTopicStore struct {
-	WebChatStore
-	n     int
-	calls int
-}
-
-func (f *failNthGetTopicStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
-	f.calls++
-	if f.calls == f.n {
-		return nil, errors.New("get topic: connection reset by peer")
-	}
-	return f.WebChatStore.GetTopic(ctx, id)
-}
-
-// A failed topic lookup while resolving the default agent (the second
-// GetTopic of a send; the first authorizes it) keeps dispatched.
-func TestNoRecipient_TopicLookupErrorKeepsDispatched(t *testing.T) {
-	srv, s, topicID, _, _ := noRecipientSetup(t)
-	srv.mu.RLock()
-	wcs := srv.webChatStore
-	srv.mu.RUnlock()
-	srv.SetWebChatStore(&failNthGetTopicStore{WebChatStore: wcs, n: 2})
-
-	code, resp, m := unreachableSend(t, srv, s, topicID, "thanks")
-	if code != 201 {
-		t.Fatalf("expected 201, got %d (body=%v)", code, resp)
-	}
-	requireDispatchedNotNoRecipient(t, "topic lookup error", resp, m)
-}
-
 // seedRefMessage persists a message in threadID with the given sender
 // fields, as a quote-reply target.
 func seedRefMessage(t *testing.T, s store.Store, projectID, threadID, sender, senderID string) string {
@@ -483,9 +446,10 @@ func seedRefMessage(t *testing.T, s store.Store, projectID, threadID, sender, se
 	return id
 }
 
-// Only a quote-reply to the sender's own user message in this thread is
-// unaddressed. Any other in-thread reference keeps the previous state; a
-// reference to another thread is ignored and mentions decide.
+// Only a quote-reply to the sender's own user message, in any thread, is
+// unaddressed (and then mentions decide). Any other reference, including
+// one in another thread or one that cannot be found, keeps the previous
+// state.
 func TestNoRecipient_QuoteReplyRefKinds(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	d := &brokerMockDispatcher{}
@@ -532,7 +496,10 @@ func TestNoRecipient_QuoteReplyRefKinds(t *testing.T) {
 		{"own user ref", seedRefMessage(t, s, proj.ID, topicID, "user:dev@localhost", DevUserID),
 			"ok", store.MessageDispatchNoRecipient},
 		{"another person in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:x@example.com", api.NewUUID()),
-			"ok", store.MessageDispatchNoRecipient},
+			"ok", store.MessageDispatchDispatched},
+		{"agent in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "agent:"+foreign.Slug, foreign.ID),
+			"ok", store.MessageDispatchDispatched},
+		{"missing ref", api.NewUUID(), "ok", store.MessageDispatchDispatched},
 		{"own ref in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
 			"ok", store.MessageDispatchNoRecipient},
 		{"own ref in another thread, human mention", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
@@ -572,5 +539,39 @@ func TestNoRecipient_MissingMemberUserSkipped(t *testing.T) {
 	}
 	if resp["dispatchState"] != store.MessageDispatchNoRecipient {
 		t.Fatalf("expected response no_recipient, got %v", resp["dispatchState"])
+	}
+}
+
+// Two members share a display name and the sender is one of them: a
+// mention of that name still addresses the other member, whatever order the
+// members are listed in.
+func TestNoRecipient_SharedNameWithSenderStillAddressed(t *testing.T) {
+	for _, senderFirst := range []bool{true, false} {
+		name := "sender listed last"
+		if senderFirst {
+			name = "sender listed first"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s, topicID, _, _, projectID := noRecipientSetupProject(t)
+			ctx := t.Context()
+			dev, err := s.GetUser(ctx, DevUserID)
+			if err != nil {
+				t.Fatalf("GetUser(dev): %v", err)
+			}
+			dev.DisplayName = "Alex"
+			if err := s.UpdateUser(ctx, dev); err != nil {
+				t.Fatalf("UpdateUser(dev): %v", err)
+			}
+			if senderFirst {
+				bindProjectMember(t, s, projectID, DevUserID)
+				addHumanMember(t, s, projectID, "alex2@example.com", "Alex")
+			} else {
+				addHumanMember(t, s, projectID, "alex2@example.com", "Alex")
+				bindProjectMember(t, s, projectID, DevUserID)
+			}
+
+			_, resp, m := unreachableSend(t, srv, s, topicID, "@alex can you look")
+			requireDispatchedNotNoRecipient(t, name, resp, m)
+		})
 	}
 }

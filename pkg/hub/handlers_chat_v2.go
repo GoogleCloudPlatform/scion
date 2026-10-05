@@ -900,6 +900,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Authorize ---
 	var projectID string
+	// threadTopic is the topic loaded for authorization; default-agent
+	// resolution below reuses it rather than reading it again.
+	var threadTopic *WebChatTopic
 	isDM := strings.HasPrefix(key, "dm:")
 	if isDM {
 		// Validate DM key format before any further processing.
@@ -922,6 +925,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		projectID = topic.ProjectID
+		threadTopic = topic
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
 			NotFound(w, "Project")
@@ -1059,11 +1063,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	} else if projectID != "" {
-		topic, err := wcs.GetTopic(ctx, key)
-		if err != nil {
-			routingLookupFailed = true
-		}
-		if err == nil && topic != nil && topic.DefaultAgent != "" {
+		topic := threadTopic
+		if topic != nil && topic.DefaultAgent != "" {
 			da, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
 			// foreignProjectDefault stays out of scope here (DEF-31): a
 			// default naming a real agent from a different project keeps the
@@ -1200,7 +1201,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// No agent recipient was resolved. A thread message is no_recipient
 	// unless a lookup failed or it is addressed to a person.
 	noRecipient := !isDM && !routingLookupFailed &&
-		s.threadMessageUnaddressed(ctx, key, projectID, plan.MentionNames, body.ReplyToID, user.ID())
+		s.threadMessageUnaddressed(ctx, projectID, plan.MentionNames, body.ReplyToID, user.ID())
 	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman

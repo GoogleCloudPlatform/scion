@@ -22,45 +22,32 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// matchHumanMentionIDs resolves @mention names against a project's human
-// members and returns the matched user IDs in mention order, without
-// duplicates. A name matches a member's display name, its hyphenated slug
-// (the form the web autocomplete inserts, e.g. "John Smith" -> "john-smith"),
-// their email, or the email's local part, case-insensitively.
+// mentionMatchesMember reports whether an @mention name refers to a
+// project human member: their display name, its hyphenated slug (the form
+// the web autocomplete inserts, e.g. "John Smith" -> "john-smith"), their
+// email, or the email's local part, case-insensitively.
 //
-// It is a pure function: no store access and no side effects. The human
-// mention notification path (fireHumanMentionNotifications) mirrors these
-// rules in its own copy; the two should be unified later.
-func matchHumanMentionIDs(humanMembers []chatMemberEntry, mentionNames []string) []string {
-	if len(humanMembers) == 0 || len(mentionNames) == 0 {
-		return nil
-	}
-	lookup := make(map[string]string)
-	for _, m := range humanMembers {
-		if m.DisplayName != "" {
-			lookup[strings.ToLower(m.DisplayName)] = m.ID
-			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != strings.ToLower(m.DisplayName) {
-				lookup[slug] = m.ID
-			}
-		}
-		if m.Email != "" {
-			lookup[strings.ToLower(m.Email)] = m.ID
-			if at := strings.IndexByte(m.Email, '@'); at > 0 {
-				lookup[strings.ToLower(m.Email[:at])] = m.ID
-			}
+// It is a pure function. The human mention notification path
+// (fireHumanMentionNotifications) mirrors these rules in its own copy; the
+// two should be unified later.
+func mentionMatchesMember(name string, m chatMemberEntry) bool {
+	n := strings.ToLower(name)
+	if m.DisplayName != "" {
+		display := strings.ToLower(m.DisplayName)
+		if n == display || n == strings.ReplaceAll(display, " ", "-") {
+			return true
 		}
 	}
-	var out []string
-	seen := make(map[string]bool)
-	for _, name := range mentionNames {
-		id, ok := lookup[strings.ToLower(name)]
-		if !ok || seen[id] {
-			continue
+	if m.Email != "" {
+		email := strings.ToLower(m.Email)
+		if n == email {
+			return true
 		}
-		seen[id] = true
-		out = append(out, id)
+		if at := strings.IndexByte(email, '@'); at > 0 && n == email[:at] {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
 // threadMessageUnaddressed reports whether a thread message that resolved
@@ -69,22 +56,21 @@ func matchHumanMentionIDs(humanMembers []chatMemberEntry, mentionNames []string)
 // whenever the message may be addressed to someone or that cannot be
 // decided:
 //
-//   - it quote-replies to a message in this thread that anyone other than
-//     the sender's own user identity sent (another person, an agent, a
-//     bridged sender with no user ID, or any other sender kind);
+//   - it quote-replies to anything but the sender's own user message, in
+//     any thread (another person, an agent, a bridged sender with no user
+//     ID, any other sender kind), or to a message that cannot be found;
 //   - it @mentions a project member other than the sender;
 //   - a lookup it needs fails.
-func (s *Server) threadMessageUnaddressed(ctx context.Context, key, projectID string, mentionNames []string, replyToID, senderUserID string) bool {
+func (s *Server) threadMessageUnaddressed(ctx context.Context, projectID string, mentionNames []string, replyToID, senderUserID string) bool {
 	if replyToID != "" {
 		refMsgs, err := s.store.GetMessagesByIDs(ctx, []string{replyToID})
 		if err != nil {
 			return false
 		}
-		if ref := refMsgs[replyToID]; ref != nil && ref.ThreadID == key {
-			ownMessage := strings.HasPrefix(ref.Sender, "user:") && ref.SenderID == senderUserID
-			if !ownMessage {
-				return false
-			}
+		ref := refMsgs[replyToID]
+		ownMessage := ref != nil && strings.HasPrefix(ref.Sender, "user:") && ref.SenderID == senderUserID
+		if !ownMessage {
+			return false
 		}
 	}
 	if len(mentionNames) == 0 {
@@ -105,9 +91,15 @@ func (s *Server) mentionsProjectHuman(ctx context.Context, projectID string, men
 	if err != nil {
 		return false, err
 	}
-	for _, id := range matchHumanMentionIDs(members, mentionNames) {
-		if id != senderUserID {
-			return true, nil
+	// Check every member rather than resolving each name to one ID: two
+	// members can share a display name (or one's name can equal another's
+	// email local part), and a match on the sender must not hide a match on
+	// someone else.
+	for _, name := range mentionNames {
+		for _, m := range members {
+			if m.ID != senderUserID && mentionMatchesMember(name, m) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
