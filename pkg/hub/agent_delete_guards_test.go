@@ -964,17 +964,38 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 }
 
 // admissionClaimStore seeds a newer delete failure right after the
-// reincarnate handler creates its record: after the gate, before the worker.
+// reincarnate handler's claim transaction creates its record and commits:
+// after the gate, before the worker.
 type admissionClaimStore struct {
 	store.Store
 	t *testing.T
 }
 
-func (a *admissionClaimStore) CreateAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation) error {
+func (a *admissionClaimStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	rec := &admissionClaimTx{}
+	if err := a.Store.WithTx(ctx, func(tx store.Store) error {
+		rec.Store = tx
+		return fn(rec)
+	}); err != nil {
+		return err
+	}
+	if rec.agentID != "" {
+		seedAgentDeletion(a.t, a.Store, rec.agentID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	}
+	return nil
+}
+
+// admissionClaimTx records the agent a reincarnation record is created for.
+type admissionClaimTx struct {
+	store.Store
+	agentID string
+}
+
+func (a *admissionClaimTx) CreateAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation) error {
 	if err := a.Store.CreateAgentReincarnation(ctx, rec); err != nil {
 		return err
 	}
-	seedAgentDeletion(a.t, a.Store, rec.AgentID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	a.agentID = rec.AgentID
 	return nil
 }
 

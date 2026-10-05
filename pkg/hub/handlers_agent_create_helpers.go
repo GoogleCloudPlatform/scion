@@ -1350,7 +1350,15 @@ func (s *Server) handleExistingAgent(
 		// fall-through create below mints a credential for the new agent
 		// row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
+		// The row delete runs as a hard-delete lifecycle transaction, so the
+		// agent's delegation edges are deactivated, the hard-delete hooks run
+		// and the agent_hard_delete audit record is written atomically with it.
+		if err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
+				return err
+			}
+			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
+		}); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}

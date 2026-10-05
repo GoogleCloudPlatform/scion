@@ -151,6 +151,18 @@ func TestReactivateEdgesForDelegateStoreIsExact(t *testing.T) {
 		store.Deactivation{Cause: store.EdgeDeactivationCreateCompensation, OpID: "op-this"})
 	require.NoError(t, err)
 
+	// The read selects the same edges the reactivate writes, and writes nothing.
+	listed, err := s.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
+		store.EdgeDeactivationAgentSoftDelete, "op-this")
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, target.ID, listed[0].ID)
+	assert.Equal(t, "user-1", listed[0].DelegatorID)
+	assert.False(t, allEdgesFor(t, s, "agent-r")[target.ID].Active, "the read writes nothing")
+	_, err = s.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
+		store.EdgeDeactivationAgentSoftDelete, "")
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "an empty op ID selects nothing")
+
 	n, err = s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
 		store.EdgeDeactivationAgentSoftDelete, "op-this")
 	require.NoError(t, err)

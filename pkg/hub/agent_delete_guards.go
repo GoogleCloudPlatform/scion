@@ -421,6 +421,7 @@ func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
 	a.DeletedAt = fresh.DeletedAt
+	a.SoftDeleteOpID = fresh.SoftDeleteOpID
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt
