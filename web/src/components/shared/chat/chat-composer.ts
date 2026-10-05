@@ -295,6 +295,15 @@ export class ScionChatComposer extends LitElement {
   /** Debounce timer for saving drafts to localStorage. */
   private _draftTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The draft text this composer last read from or wrote to storage for its
+   * conversation ('' for none). A flush only writes when `text` differs from
+   * it, so an entry written elsewhere (e.g. text handed over from the quick
+   * message dialog) is not overwritten or removed by a composer that never
+   * changed its draft.
+   */
+  private _persistedText = '';
+
   static override styles = css`
     :host {
       display: block;
@@ -952,10 +961,12 @@ export class ScionChatComposer extends LitElement {
 
   /** Restore a draft from localStorage for the current conversationKey. */
   private restoreDraft(): void {
+    this._persistedText = '';
     if (!this.conversationKey) return;
     try {
       const key = `scion-chat-draft-${this.conversationKey}`;
       const saved = localStorage.getItem(key);
+      this._persistedText = saved ?? '';
       if (saved !== null) {
         this.text = saved;
         this.runeCount = countRunes(this.text);
@@ -977,6 +988,7 @@ export class ScionChatComposer extends LitElement {
         } else {
           localStorage.removeItem(key);
         }
+        this._persistedText = this.text;
       } catch {
         // localStorage may throw in private browsing mode — silently ignore.
       }
@@ -993,6 +1005,7 @@ export class ScionChatComposer extends LitElement {
     if (!this.conversationKey) return;
     try {
       localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+      this._persistedText = '';
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -1001,6 +1014,11 @@ export class ScionChatComposer extends LitElement {
   /**
    * Immediately persist the current draft text under the given key.
    * Cancels any pending debounced save so it is not double-written. (#1152)
+   *
+   * Writes only when `text` differs from what this composer last persisted
+   * (see `_persistedText`): an unchanged composer leaves the stored entry
+   * alone, while a composer whose text was cleared (sent, edit saved or
+   * cancelled) still removes it.
    */
   private flushDraft(key: string): void {
     if (this._draftTimer !== null) {
@@ -1009,12 +1027,14 @@ export class ScionChatComposer extends LitElement {
     }
     if (!key) return;
     try {
+      if (this.text === this._persistedText) return;
       const storageKey = `scion-chat-draft-${key}`;
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
       } else {
         localStorage.removeItem(storageKey);
       }
+      this._persistedText = this.text;
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
