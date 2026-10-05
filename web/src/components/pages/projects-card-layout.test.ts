@@ -74,6 +74,22 @@ describe('project card layout', () => {
     expect(span?.textContent?.trim()).toBe(name);
   });
 
+  it('keeps the linked badge inside the wrapping span', () => {
+    const container = document.createElement('div');
+    render(
+      page.renderProjectCard({
+        id: 'p2',
+        name: 'linked_project',
+        slug: 'linked_project',
+        agentCount: 0,
+        ownerName: 'Owner',
+        projectType: 'linked',
+      }),
+      container
+    );
+    expect(container.querySelector('.resource-name > span sl-tooltip')).not.toBeNull();
+  });
+
   it('lets a long unbroken name and git remote wrap instead of spilling past the card', () => {
     expect(rules.get('.project-header > div') ?? '').toMatch(/min-width:\s*0/);
     expect(rules.get('.resource-name > span') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
