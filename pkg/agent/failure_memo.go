@@ -34,7 +34,8 @@ const (
 
 // FailureMemo remembers recent resolution failures by key for
 // FailureMemoTTL, in memory only, holding at most FailureMemoMaxEntries
-// unexpired entries. Both the broker's GitHubResolutionCache and the Hub's
+// entries; expired ones are kept until a lookup or an at-limit sweep drops
+// them, and are never served. Both the broker's GitHubResolutionCache and the Hub's
 // gh:// resolution use it for GitHub not-found results. The zero value is
 // ready to use and safe for concurrent use.
 type FailureMemo struct {
