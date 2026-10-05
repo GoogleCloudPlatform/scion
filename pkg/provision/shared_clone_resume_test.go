@@ -52,7 +52,7 @@ func interruptedClone(t *testing.T, ws, bare string, moveNames ...string) string
 	t.Helper()
 	scratch := filepath.Join(ws, cloneTempDirPrefix+"stopped")
 	run(t, "git", "clone", bare, scratch)
-	require.NoError(t, writeCloneManifest(scratch))
+	require.NoError(t, writeCloneManifest(scratch, sharedPlainInput(ws, bare).GitClone))
 	for _, n := range moveNames {
 		require.NoError(t, os.Rename(filepath.Join(scratch, n), filepath.Join(ws, n)))
 	}
@@ -291,4 +291,93 @@ func TestRedactCloneURL_Shapes(t *testing.T) {
 	}
 	err := cloneError("git@github.com:org/private.git", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n", nil)
 	assert.Contains(t, err.Error(), "git clone github.com:org/private.git")
+}
+
+// When moving entries back after a failed move does not complete, the
+// scratch directory and its manifest are kept, and the next start finishes
+// the move.
+func TestGitCloneWorkspace_IncompleteMoveBackKeepsScratch(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bare := initBareRepoWithTree(t)
+	ws := t.TempDir()
+	in := sharedPlainInput(ws, bare)
+
+	origMove, origBack := moveRenameFile, moveBackFile
+	t.Cleanup(func() { moveRenameFile, moveBackFile = origMove, origBack })
+	moveRenameFile = func(oldpath, newpath string) error {
+		if filepath.Base(oldpath) == "src" {
+			return errors.New("injected move failure")
+		}
+		return origMove(oldpath, newpath)
+	}
+	moveBackFile = func(oldpath, newpath string) error { return errors.New("injected move-back failure") }
+
+	err := ProvisionShared(in)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errMoveBackIncomplete), "got %v", err)
+	assert.FileExists(t, filepath.Join(ws, "README.md"), "the entry that could not be moved back stays")
+	scratch, serr := completedCloneScratch(ws)
+	require.NoError(t, serr)
+	require.NotEmpty(t, scratch, "the scratch dir and its manifest are kept")
+	assert.NoFileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+
+	moveRenameFile, moveBackFile = origMove, origBack
+	require.NoError(t, ProvisionShared(in))
+	assertCleanCheckout(t, ws)
+	assert.FileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+}
+
+// An interrupted clone of another repository or branch is not finished.
+func TestProvisionShared_SharedPlain_InterruptedMoveOfOtherRepoRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bare := initBareRepoWithTree(t)
+	other := initBareRepoWithTree(t)
+
+	ws := t.TempDir()
+	interruptedClone(t, ws, bare, "README.md")
+	err := ProvisionShared(sharedPlainInput(ws, other))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "of "+bare+" branch \"main\"")
+	assert.Contains(t, err.Error(), "the project clones "+other+" branch \"main\"")
+	assert.NoDirExists(t, filepath.Join(ws, ".git"))
+
+	ws2 := t.TempDir()
+	interruptedClone(t, ws2, bare, "README.md")
+	in := sharedPlainInput(ws2, bare)
+	in.GitClone.Branch = "develop"
+	err = ProvisionShared(in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "branch \"develop\"")
+	assert.NoDirExists(t, filepath.Join(ws2, ".git"))
+
+	// A manifest written by the same repository and branch still resumes.
+	require.NoError(t, ProvisionShared(sharedPlainInput(ws, bare)))
+	assertCleanCheckout(t, ws)
+}
+
+// A scratch directory left by a clone stopped just after its move (only its
+// manifest left) is removed on the next start, marked or not, and does not
+// show in git status.
+func TestProvisionShared_SharedPlain_FinishedScratchRemoved(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bare := initBareRepoWithTree(t)
+	for _, marked := range []bool{true, false} {
+		ws := t.TempDir()
+		if marked {
+			writeMarker(t, ws)
+		}
+		scratch := interruptedClone(t, ws, bare, "README.md", "src", ".git")
+		clones := countGitClones(t)
+
+		require.NoError(t, ProvisionShared(sharedPlainInput(ws, bare)), "marked=%v", marked)
+		assert.NoDirExists(t, scratch, "marked=%v", marked)
+		assert.Equal(t, 0, clones())
+		assertCleanCheckout(t, ws)
+	}
+}
+
+func TestRedactCloneURL_UserWithAt(t *testing.T) {
+	assert.Equal(t, "host:org/repo.git", redactCloneURL("user:p@ss@host:org/repo.git"))
+	assert.Equal(t, "host:org/repo@v1", redactCloneURL("git@host:org/repo@v1"))
+	assert.Equal(t, "host:path", redactCloneURL("a@b@c@host:path"))
 }

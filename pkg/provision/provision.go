@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1106,6 +1107,9 @@ var (
 	writeLockFile  = os.WriteFile
 	renameFile     = os.Rename
 	moveRenameFile = renameNoReplace
+	// moveBackFile moves an entry back into the scratch directory when a
+	// clone move fails.
+	moveBackFile = renameNoReplace
 )
 
 // lchownFile is an indirection over os.Lchown, used by chownProjectTree, so
@@ -2221,7 +2225,9 @@ func lockLooksAbandoned(dir, path string) bool {
 //     clone manifest, and no .git in the workspace). gitCloneWorkspace then
 //     finishes the move, or refuses with the entries named.
 //
-// A workspace with a .git, or with any other entry, is left as it is.
+// A workspace with a .git is left as it is, apart from removing a scratch
+// directory left by a clone stopped just after its move; one with any other
+// content is left as it is.
 //
 // This relies on every start taking the provisioning file lock before it
 // looks at the workspace (no store.AdvisoryLocker; see acquireProvisionLock).
@@ -2235,7 +2241,9 @@ func markedWorkspaceNeedsClone(in ProvisionInput) bool {
 		return false
 	}
 	if _, err := os.Lstat(filepath.Join(dest, ".git")); err == nil {
-		return false
+		// Cloned. A scratch directory left by a clone stopped just after
+		// its move still needs removing (gitCloneWorkspace does that).
+		return hasFinishedCloneScratch(dest)
 	}
 	if scratch, err := completedCloneScratch(dest); err != nil || scratch != "" {
 		// An interrupted move (or more than one finished clone, which
@@ -2404,6 +2412,13 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 	if _, statErr := os.Stat(filepath.Join(dest, ".git")); statErr == nil {
 		slog.Warn("ProvisionShared: workspace already has a .git dir, reusing prior clone",
 			"project_id", in.ProjectID, "path", dest)
+		removed, err := removeFinishedCloneScratch(dest)
+		if err != nil {
+			return err
+		}
+		if removed {
+			excludeProvisioningFiles(in)
+		}
 		return nil
 	}
 
@@ -2440,7 +2455,7 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 		_ = os.RemoveAll(tmpDir)
 		return cloneErr
 	}
-	if err := writeCloneManifest(tmpDir); err != nil {
+	if err := writeCloneManifest(tmpDir, in.GitClone); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return err
 	}
@@ -2467,7 +2482,13 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 	}
 
 	if err := moveDirContentsUp(tmpDir, dest); err != nil {
-		// moveDirContentsUp has moved its entries back; drop the clone.
+		if errors.Is(err, errMoveBackIncomplete) {
+			// Some of the clone's entries are still in the workspace:
+			// keep the scratch directory and its manifest so the next
+			// start can finish the move.
+			return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
+		}
+		// Everything was moved back; drop the clone.
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
 	}
@@ -2500,15 +2521,19 @@ func excludeProvisioningFiles(in ProvisionInput) {
 	}
 }
 
-// writeCloneManifest writes cloneManifestFile into scratch, listing its
-// entries. A repository whose top level has an entry with that name cannot
-// be provisioned this way.
-func writeCloneManifest(scratch string) error {
+// writeCloneManifest writes cloneManifestFile into scratch: a header naming
+// the repository (without credentials) and branch the clone came from, a
+// blank line, then the clone's entries, one per line. A repository whose
+// top level has an entry with that name cannot be provisioned this way.
+func writeCloneManifest(scratch string, gc *api.GitCloneConfig) error {
 	entries, err := os.ReadDir(scratch)
 	if err != nil {
 		return fmt.Errorf("read dir %s: %w", scratch, err)
 	}
 	var b strings.Builder
+	b.WriteString(cloneManifestHeader + "\n")
+	b.WriteString("url=" + manifestURL(gc) + "\n")
+	b.WriteString("branch=" + manifestBranch(gc) + "\n\n")
 	for _, e := range entries {
 		if e.Name() == cloneManifestFile {
 			return fmt.Errorf("the repository has a top-level entry named %s, which workspace provisioning uses itself", cloneManifestFile)
@@ -2519,19 +2544,54 @@ func writeCloneManifest(scratch string) error {
 	return writeFileAtomic(filepath.Join(scratch, cloneManifestFile), []byte(b.String()), 0o644)
 }
 
-// readCloneManifest returns the entry names listed in scratch's manifest.
-func readCloneManifest(scratch string) (map[string]bool, error) {
+// cloneManifestHeader is the first line of a clone manifest.
+const cloneManifestHeader = "scion-clone-manifest 1"
+
+// cloneManifest is a parsed clone manifest.
+type cloneManifest struct {
+	url, branch string
+	entries     map[string]bool
+}
+
+func manifestURL(gc *api.GitCloneConfig) string {
+	if gc == nil {
+		return ""
+	}
+	return redactCloneURL(gc.URL)
+}
+
+func manifestBranch(gc *api.GitCloneConfig) string {
+	if gc == nil {
+		return ""
+	}
+	return gc.Branch
+}
+
+// readCloneManifest parses scratch's manifest.
+func readCloneManifest(scratch string) (cloneManifest, error) {
 	data, err := os.ReadFile(filepath.Join(scratch, cloneManifestFile))
 	if err != nil {
-		return nil, err
+		return cloneManifest{}, err
 	}
-	names := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if line != "" {
-			names[line] = true
+	header, body, ok := strings.Cut(string(data), "\n\n")
+	lines := strings.Split(header, "\n")
+	if !ok || len(lines) == 0 || lines[0] != cloneManifestHeader {
+		return cloneManifest{}, fmt.Errorf("%s is not a clone manifest", filepath.Join(scratch, cloneManifestFile))
+	}
+	m := cloneManifest{entries: map[string]bool{}}
+	for _, line := range lines[1:] {
+		if v, ok := strings.CutPrefix(line, "url="); ok {
+			m.url = v
+		} else if v, ok := strings.CutPrefix(line, "branch="); ok {
+			m.branch = v
 		}
 	}
-	return names, nil
+	for _, line := range strings.Split(body, "\n") {
+		if line != "" {
+			m.entries[line] = true
+		}
+	}
+	return m, nil
 }
 
 // finishCloneScratch removes a scratch directory whose entries have all been
@@ -2541,6 +2601,62 @@ func finishCloneScratch(scratch string) error {
 		return fmt.Errorf("remove %s: %w", filepath.Join(scratch, cloneManifestFile), err)
 	}
 	return os.Remove(scratch)
+}
+
+// finishedCloneScratch reports whether p is a scratch directory left by a
+// clone whose move completed: it holds nothing but its manifest (a process
+// stopped after .git was moved, before the scratch directory was removed).
+func finishedCloneScratch(p string) bool {
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != cloneManifestFile {
+			return false
+		}
+	}
+	return true
+}
+
+// removeFinishedCloneScratch removes the finishedCloneScratch directories in
+// dir, and reports whether it removed any.
+func removeFinishedCloneScratch(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	removed := false
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if !finishedCloneScratch(p) {
+			continue
+		}
+		if err := finishCloneScratch(p); err != nil {
+			return removed, err
+		}
+		removed = true
+	}
+	return removed, nil
+}
+
+// hasFinishedCloneScratch reports whether dir holds a finishedCloneScratch
+// directory.
+func hasFinishedCloneScratch(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), cloneTempDirPrefix) && e.Type()&os.ModeType == os.ModeDir &&
+			finishedCloneScratch(filepath.Join(dir, e.Name())) {
+			return true
+		}
+	}
+	return false
 }
 
 // completedCloneScratch returns the scratch directory in dir that holds a
@@ -2580,10 +2696,16 @@ func completedCloneScratch(dir string) (string, error) {
 // workspace and the scratch directory as they are. Nothing is replaced.
 func resumeCloneMove(in ProvisionInput, scratch string) error {
 	dest := in.Resolved.HostPath
-	manifest, err := readCloneManifest(scratch)
+	m, err := readCloneManifest(scratch)
 	if err != nil {
 		return fmt.Errorf("read clone manifest in %s: %w", scratch, err)
 	}
+	if wantURL, wantBranch := manifestURL(in.GitClone), manifestBranch(in.GitClone); m.url != wantURL || m.branch != wantBranch {
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) of %s branch %q, but the project clones %s branch %q; "+
+			"refusing to finish it: remove the clone's entries from the workspace and %s, then start the agent again",
+			dest, scratch, m.url, m.branch, wantURL, wantBranch, scratch)
+	}
+	manifest := m.entries
 	remaining := map[string]bool{}
 	scratchEntries, err := os.ReadDir(scratch)
 	if err != nil {
@@ -2717,7 +2839,7 @@ func redactCloneURL(rawURL string) string {
 	if !strings.Contains(rawURL, "://") {
 		// scp-style "user@host:path", or a local path: keep host and path,
 		// drop the user.
-		if at := strings.Index(rawURL, "@"); at >= 0 && strings.Contains(rawURL[at:], ":") {
+		if at := scpUserEnd(rawURL); at >= 0 {
 			return rawURL[at+1:]
 		}
 		if !strings.Contains(rawURL, "@") {
@@ -2732,6 +2854,22 @@ func redactCloneURL(rawURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+// scpHostPath matches the "host:path" part of an scp-style URL.
+var scpHostPath = regexp.MustCompile(`^[^@:/]+:`)
+
+// scpUserEnd returns the index of the "@" that ends the user part of an
+// scp-style URL ("user@host:path"): the last "@" followed by "host:". The
+// user part may itself contain "@" or ":". It returns -1 when there is none.
+func scpUserEnd(rawURL string) int {
+	end := -1
+	for i := 0; i < len(rawURL); i++ {
+		if rawURL[i] == '@' && scpHostPath.MatchString(rawURL[i+1:]) {
+			end = i
+		}
+	}
+	return end
 }
 
 // sanitizeCloneOutput removes rawURL's credentials, query string and
@@ -2770,7 +2908,8 @@ func sanitizeCloneOutput(text, rawURL string) string {
 // Any ".git" entry is moved LAST, after every other entry has already
 // landed in dest. If a move fails partway through, the entries this call
 // already moved are moved back into src, so dest is left as it was and src
-// still holds the whole clone. A process killed partway through leaves
+// still holds the whole clone (if moving an entry back fails, the error
+// wraps errMoveBackIncomplete). A process killed partway through leaves
 // working-tree files but no .git in dest, never the reverse, so the
 // ".git present" reuse check can never mistake it for a finished clone; the
 // manifest left in src lets the next start finish the move
@@ -2782,14 +2921,20 @@ func moveDirContentsUp(src, dest string) error {
 	}
 
 	var moved []string
-	rollback := func() {
+	rollback := func(cause error) error {
+		complete := true
 		for i := len(moved) - 1; i >= 0; i-- {
 			name := moved[i]
-			if err := renameNoReplace(filepath.Join(dest, name), filepath.Join(src, name)); err != nil {
+			if err := moveBackFile(filepath.Join(dest, name), filepath.Join(src, name)); err != nil {
+				complete = false
 				slog.Warn("moveDirContentsUp: could not move an entry back after a failed move",
 					"src", src, "dest", dest, "name", name, "error", err)
 			}
 		}
+		if !complete {
+			return fmt.Errorf("%w (%w: some moved entries are still in %s)", cause, errMoveBackIncomplete, dest)
+		}
+		return cause
 	}
 
 	move := func(name string) error {
@@ -2810,18 +2955,22 @@ func moveDirContentsUp(src, dest string) error {
 			continue
 		}
 		if err := move(e.Name()); err != nil {
-			rollback()
-			return fmt.Errorf("move %s to %s: %w", e.Name(), dest, err)
+			return rollback(fmt.Errorf("move %s to %s: %w", e.Name(), dest, err))
 		}
 	}
 	if gitEntryName != "" {
 		if err := move(gitEntryName); err != nil {
-			rollback()
-			return fmt.Errorf("move %s to %s: %w", gitEntryName, dest, err)
+			return rollback(fmt.Errorf("move %s to %s: %w", gitEntryName, dest, err))
 		}
 	}
 	return nil
 }
+
+// errMoveBackIncomplete marks a moveDirContentsUp failure after which some
+// entries could not be moved back into src. src then still has its clone
+// manifest and must be kept, so the next start can finish the move
+// (resumeCloneMove).
+var errMoveBackIncomplete = errors.New("moving entries back into the scratch directory did not complete")
 
 // renameNoReplaceFallback renames oldpath to newpath unless newpath exists.
 // The existence check and the rename are two steps, so it is used only where
