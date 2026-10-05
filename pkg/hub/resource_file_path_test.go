@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -28,23 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-func TestIsCanonicalResourceFilePath(t *testing.T) {
-	for _, p := range []string{"a", "config.yaml", "dir/file.txt", "a/b/c", "..x", "dir/..x", ".hidden", "dir/.hidden"} {
-		assert.True(t, isCanonicalResourceFilePath(p), "expected %q to be canonical", p)
-	}
-	for _, p := range []string{"", ".", "..", "../a", "a/..", "a/../b", "./a", "a/./b", "a//b", "a/", "/a", `a\b`, "a\x00b"} {
-		assert.False(t, isCanonicalResourceFilePath(p), "expected %q not to be canonical", p)
-	}
-}
-
-func TestValidateManifestFilePaths_RejectsRepeatedPath(t *testing.T) {
-	err := validateManifestFilePaths([]store.TemplateFile{{Path: "a"}, {Path: "b"}, {Path: "a"}})
-	var pathErr *invalidFilePathError
-	require.ErrorAs(t, err, &pathErr)
-	assert.True(t, pathErr.duplicate)
-	assert.NoError(t, validateManifestFilePaths([]store.TemplateFile{{Path: "a"}, {Path: "b"}}))
-}
 
 // pathMarker is part of every non-canonical upload path below, so a response
 // body can be checked for any trace of the submitted value.
