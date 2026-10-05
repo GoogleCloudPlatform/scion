@@ -561,6 +561,35 @@ describe('project-detail — agent list window', () => {
     localStorage.clear();
   });
 
+  it('shows a provision-only agent as created (not started) in list and grid (ptone/scion#2929)', async () => {
+    const projectId = 'p-provisioned';
+    localStorage.setItem('scion-view-project-agents', 'list');
+    const agents = [
+      makeAgent(1, { projectId, phase: 'created', provisionedOnly: true }),
+      makeAgent(2, { projectId, phase: 'created' }),
+    ];
+    const requests: AgentsRequest[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests }))
+    );
+    const el = await createComponent(projectId);
+    const badges = () =>
+      Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).map((b) => [
+        b.getAttribute('label'),
+        b.getAttribute('title'),
+      ]);
+    const expected = [
+      ['created (not started)', 'Not started yet. Use Start, or run: scion start agent-1'],
+      ['created', null],
+    ];
+    expect(badges().sort()).toEqual(expected);
+
+    viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+    await el.updateComplete;
+    expect(badges().sort()).toEqual(expected);
+  });
+
   describe('sorted/paged mode — list view, updated sort, at the fit threshold', () => {
     it('page load issues exactly one agents request (the fit request); every client-only interaction issues zero; label commit and lifecycle refresh issue exactly one each', async () => {
       const projectId = 'p-w10-list';

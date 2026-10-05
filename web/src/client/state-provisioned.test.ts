@@ -16,7 +16,7 @@
 
 /**
  * ptone/scion#2929: status deltas always carry `provisionedOnly`, so the
- * merged value follows the hub after a stop or a failed start.
+ * merged value follows each delta, true or false.
  */
 
 // @vitest-environment happy-dom
@@ -65,7 +65,9 @@ function shown(sm: StateManager): boolean {
 }
 
 describe('provisionedOnly SSE merge', () => {
-  it('a failed start that stays in created clears the status', () => {
+  // Only the merge is tested here. The hub does not publish a status
+  // delta on a failed start, so the web shows that case on the next refetch.
+  it('a status delta with provisionedOnly false clears the status', () => {
     const sm = managerWith(true);
     expect(shown(sm)).toBe(true);
     emit(sm, 'agent.a1.status', { phase: 'created', provisionedOnly: false });

@@ -15,13 +15,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { render } from 'lit';
 import {
   ACTIVITY_DISPLAY,
+  agentStatusBadge,
   isProvisionedOnly,
-  provisionedLabel,
-  provisionedStartHint,
   stateLabel,
 } from './agent-state-display.js';
+import type { Agent } from './types.js';
 
 describe('stateLabel', () => {
   it("shows the 'blocked' activity as 'waiting on others' (ptone/scion#1571)", () => {
@@ -61,16 +62,29 @@ describe('provision-only status (ptone/scion#2929)', () => {
     expect(isProvisionedOnly({ phase: 'provisioning', provisionedOnly: true })).toBe(false);
   });
 
-  it('labels the status badge with the CLI wording', () => {
-    expect(provisionedLabel(po, 'created')).toBe('created (not started)');
-    expect(provisionedLabel({ ...po, provisionedOnly: false }, 'created')).toBe('created');
-    expect(provisionedLabel({ ...po, phase: 'starting' }, 'starting')).toBe('starting');
+  const badge = (agent: Partial<Agent>, opts?: Parameters<typeof agentStatusBadge>[1]) => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent, opts), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('labels the status badge with the CLI wording and a start hint', () => {
+    const el = badge(po, { size: 'small' });
+    expect(el.getAttribute('status')).toBe('created');
+    expect(el.getAttribute('label')).toBe('created (not started)');
+    expect(el.getAttribute('title')).toContain('scion start po-agent');
+    expect(el.getAttribute('size')).toBe('small');
   });
 
-  it('gives a start hint only for a provision-only agent', () => {
-    const hint = provisionedStartHint(po) ?? '';
-    expect(hint).toContain('Start');
-    expect(hint).toContain('scion start po-agent');
-    expect(provisionedStartHint({ ...po, provisionedOnly: false })).toBeUndefined();
+  it('renders other agents unchanged', () => {
+    const plain = badge({ ...po, provisionedOnly: false });
+    expect(plain.getAttribute('label')).toBe(stateLabel('created'));
+    expect(plain.hasAttribute('title')).toBe(false);
+    expect(plain.hasAttribute('size')).toBe(false);
+    const busy = badge({ name: 'a', phase: 'running', activity: 'blocked' });
+    expect(busy.getAttribute('status')).toBe('blocked');
+    expect(busy.getAttribute('label')).toBe('waiting on others');
+    const custom = badge({ name: 'a', phase: 'running' }, { status: 'running', label: 'running' });
+    expect(custom.getAttribute('label')).toBe('running');
   });
 });

@@ -23,6 +23,11 @@
  * across the web UI.
  */
 
+import { html } from 'lit';
+import type { TemplateResult } from 'lit';
+import { ifDefined } from 'lit/directives/if-defined.js';
+
+import { getAgentDisplayStatus } from './types.js';
 import type { Agent, AgentPhase, AgentActivity } from './types.js';
 
 /**
@@ -134,8 +139,6 @@ export function stateLabel(status: string): string {
 /** Status label for a provision-only agent; the same wording as the CLI. */
 export const PROVISIONED_ONLY_LABEL = 'created (not started)';
 
-type ProvisionedAgent = Pick<Agent, 'name' | 'phase' | 'provisionedOnly'>;
-
 /**
  * Whether to show `agent` as provisioned but not started. The hub computes
  * `provisionedOnly`; the phase check hides a stale flag as soon as an SSE
@@ -145,13 +148,28 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
   return agent.provisionedOnly === true && agent.phase === 'created';
 }
 
-/** The status badge label: `label`, or the provision-only label. */
-export function provisionedLabel(agent: ProvisionedAgent, label: string): string {
-  return isProvisionedOnly(agent) ? PROVISIONED_ONLY_LABEL : label;
+interface AgentStatusBadgeOptions {
+  /** Badge status; defaults to getAgentDisplayStatus(agent). */
+  status?: string;
+  /** Badge label; defaults to stateLabel(status). */
+  label?: string;
+  size?: 'small' | 'medium' | 'large';
 }
 
-/** The next step for a provision-only agent, used as the badge title. */
-export function provisionedStartHint(agent: ProvisionedAgent): string | undefined {
-  if (!isProvisionedOnly(agent)) return undefined;
-  return `Not started yet. Use Start, or run: scion start ${agent.name}`;
+/**
+ * An agent status badge. Use it for every agent status badge: it shows a
+ * provision-only agent as "created (not started)" with a start hint.
+ */
+export function agentStatusBadge(
+  agent: Agent,
+  { status = getAgentDisplayStatus(agent), label, size }: AgentStatusBadgeOptions = {}
+): TemplateResult {
+  const po = isProvisionedOnly(agent);
+  const hint = po ? `Not started yet. Use Start, or run: scion start ${agent.name}` : undefined;
+  return html`<scion-status-badge
+    status=${status}
+    label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}
+    title=${ifDefined(hint)}
+    size=${ifDefined(size)}
+  ></scion-status-badge>`;
 }
