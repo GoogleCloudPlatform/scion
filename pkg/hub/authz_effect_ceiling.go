@@ -272,10 +272,27 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 	return true
 }
 
-// roleFitsCeiling reports whether every scope of role passes
-// ceilingAllowsScope under c.
+// ceilingOptionalRoleScopes are role scopes that do not decide whether a
+// role fits a ceiling. A child whose ceiling does not allow one still gets
+// the role; the mint filter (ceilingAllowsScope at issue time) leaves the
+// scope out of its tokens. The artifact scopes joined the agent roles after
+// UAT selector sets were in use, so making them optional keeps every token
+// that fit a role before still fitting it, while a child only uses the
+// artifact service when its source could. project:artifact:write is listed
+// although no role carries it yet, so adding it to a role later needs no
+// change here.
+var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
+	ScopeProjectArtifactRead:  true,
+	ScopeProjectArtifactWrite: true,
+}
+
+// roleFitsCeiling reports whether every scope of role, other than the
+// ceilingOptionalRoleScopes, passes ceilingAllowsScope under c.
 func roleFitsCeiling(c store.EffectCeiling, role AgentRole) bool {
 	for _, scope := range ScopesForRole(role) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		if !ceilingAllowsScope(c, scope) {
 			return false
 		}

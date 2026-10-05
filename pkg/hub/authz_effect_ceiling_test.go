@@ -157,11 +157,16 @@ func uatCeilingFromSelectors(t *testing.T, selectors ...string) store.EffectCeil
 }
 
 // readonlyRoleUATSelectors returns the UAT selectors that cover the
-// readonly role's scopes: the seven read selectors of the worked example.
+// readonly role's required scopes: the seven read selectors of the worked
+// example. Ceiling-optional role scopes (ceilingOptionalRoleScopes) are left
+// out: they never decide whether a ceiling fits the role.
 func readonlyRoleUATSelectors(t *testing.T) []string {
 	t.Helper()
 	readSelectors := []string{}
 	for _, scope := range ScopesForRole(AgentRoleReadOnly) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		for _, permID := range agentScopeCoverage([]AgentTokenScope{scope}) {
 			p, _ := registryPermission(permID)
 			if p.UATScope != "" {
@@ -212,11 +217,12 @@ func TestUATChildRoleCappedWithinCeiling(t *testing.T) {
 		})
 	}
 
-	// The baseline cap carries exactly project:read and the four self-op
-	// scopes, all of which pass the ceiling filter.
+	// The baseline cap carries project:read, the four self-op scopes and the
+	// ceiling-optional project:artifact:read. The minimal set holds no
+	// artifact permission, so the ceiling filter issues all but the last.
 	capped, _, _ := childRoleWithinCeiling(minimal, AgentRoleFull, false)
 	want := []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward}
-	assert.ElementsMatch(t, want, ScopesForRole(capped))
+	assert.ElementsMatch(t, append(append([]AgentTokenScope{}, want...), ScopeProjectArtifactRead), ScopesForRole(capped))
 	assert.ElementsMatch(t, want, filterScopes(ScopesForRole(capped), minimal, ScopeCeilings{}))
 }
 
@@ -658,14 +664,14 @@ func TestMintCandidateScopesAndFilter(t *testing.T) {
 
 	a.AppliedConfig.AgentRole = string(AgentRoleReadOnly)
 	a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "sa-1"}
-	assert.Equal(t, []AgentTokenScope{ScopeProjectRead, GCPTokenScopeForSA("sa-1")}, f.authz(f.store, false, false).mintCandidateScopes(a))
+	assert.Equal(t, []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead, GCPTokenScopeForSA("sa-1")}, f.authz(f.store, false, false).mintCandidateScopes(a))
 
 	readCoverage := agentScopeCoverage([]AgentTokenScope{ScopeProjectRead})
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, boundedCeiling(append(readCoverage, "agent.create")...), provSession)
 	got, err := f.authz(f.store, false, true).ceilingFilteredAgentScopes(ctx, a, f.authz(f.store, false, true).mintCandidateScopes(a))
 	require.NoError(t, err)
 	assert.Equal(t, []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward, ScopeAgentCreate}, got,
-		"the dev-auth full override is narrowed by the bounded ceiling; the GCP scope needs gcp_service_account.assign")
+		"the dev-auth full override is narrowed by the bounded ceiling; the GCP scope needs gcp_service_account.assign; project:artifact:read needs artifact.read")
 
 	// project:read needs every permission it covers.
 	got = filterScopes([]AgentTokenScope{ScopeProjectRead}, boundedCeiling("project.read"), ScopeCeilings{})

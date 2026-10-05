@@ -5351,6 +5351,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
 	s.mux.HandleFunc("/api/v1/conduit", s.guarded("/api/v1/conduit", s.handleConduit))
 
+	// Artifact service (pkg/artifacts), behind the hub.artifacts experiment.
+	// The patterns are literal here, not mounted through
+	// artifacts.Service.RegisterRoutes, because the route-metadata tests and
+	// the route-authz manifest lint read registrations from this file;
+	// TestArtifactRoutesMatchService pins them to artifacts.RoutePatterns().
+	artifactsHandler := s.artifactsHandler()
+	s.mux.Handle("/api/v1/artifacts", s.artifactsGuard("/api/v1/artifacts", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
+
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
 
