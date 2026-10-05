@@ -2848,7 +2848,7 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	newAgentsSlug := "project:" + newSlug + ":agents"
 	// The group is found by slug, so check it is this project's system
 	// agents group before re-slugging it (ptone/scion#2683).
-	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil {
+	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil && group != nil {
 		if !isRenamableProjectAgentsGroup(group, project.ID) {
 			s.projectsLogger().Warn("skipping project agents group slug migration: group at old slug is not this project's system agents group",
 				"project_id", project.ID, "old_slug", oldAgentsSlug, "group_id", group.ID,
@@ -2871,7 +2871,7 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	newMembersSlug := "project:" + newSlug + ":members"
 	// The group is found by slug, so check it is this project's system
 	// members group before re-slugging it (ptone/scion#2683).
-	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil {
+	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil && group != nil {
 		if !isRenamableProjectMembersGroup(group, project.ID) {
 			s.projectsLogger().Warn("skipping project members group slug migration: group at old slug is not this project's system members group",
 				"project_id", project.ID, "old_slug", oldMembersSlug, "group_id", group.ID,
