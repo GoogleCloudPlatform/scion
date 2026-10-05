@@ -24,6 +24,8 @@ vi.mock('../confirm-dialog.js', () => ({
 const {
   confirmWake,
   errorMessageFromBody,
+  isSendInProgressBody,
+  jsonResponse,
   saveDraftForConversation,
   wakeConfirmMessage,
   wakeOfferFromErrorBody,
@@ -94,5 +96,23 @@ describe('saveDraftForConversation', () => {
   it('ignores an empty key or text', () => {
     expect(saveDraftForConversation('', 'x')).toBe(false);
     expect(saveDraftForConversation('c1', '')).toBe(false);
+  });
+});
+
+describe('isSendInProgressBody', () => {
+  it('recognises only the send_in_progress code', () => {
+    expect(isSendInProgressBody({ error: { code: 'send_in_progress' } })).toBe(true);
+    expect(isSendInProgressBody({ error: { code: 'agent_not_running' } })).toBe(false);
+    expect(isSendInProgressBody({ error: 'send_in_progress' })).toBe(false);
+    expect(isSendInProgressBody(null)).toBe(false);
+  });
+});
+
+describe('jsonResponse', () => {
+  it('rebuilds a readable JSON response with the given status', async () => {
+    const res = jsonResponse({ error: { code: 'conflict' } }, 409);
+    expect(res.status).toBe(409);
+    expect(res.ok).toBe(false);
+    await expect(res.json()).resolves.toEqual({ error: { code: 'conflict' } });
   });
 });

@@ -127,6 +127,8 @@ test.describe('wake on send', () => {
       expect(await composerValue(page)).toBe(DRAFT);
     }).toPass();
     await expect(page.locator('scion-chat-message', { hasText: DRAFT })).toHaveCount(0);
+    // Cancel is a choice, not a failure: no error is shown.
+    await expect(page.locator('.send-error')).toHaveCount(0);
     expect(send.bodies).toHaveLength(1);
   });
 });

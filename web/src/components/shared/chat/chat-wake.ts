@@ -33,6 +33,20 @@ import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 /** Client-only dispatch state shown on the optimistic bubble while waking. */
 export const WAKING_DISPATCH_STATE = 'waking';
 
+/**
+ * How long a wake send keeps confirming its outcome after a dropped
+ * connection. Comfortably past the hub's own wake budget (90s resume plus
+ * 30s per recipient plus slack), so the hub has answered by then.
+ */
+export const WAKE_CONFIRM_BUDGET_MS = 240_000;
+
+/** Delay between wake-send confirmation retries. */
+export const WAKE_RETRY_DELAY_MS = 3_000;
+
+/** Shown when a wake send's outcome could not be confirmed. */
+export const WAKE_OUTCOME_UNKNOWN_MESSAGE =
+  'Could not confirm whether the message was delivered. Check the conversation before sending it again.';
+
 /** The agent a send offered to wake. */
 export interface WakeOffer {
   agentId: string;
@@ -107,4 +121,21 @@ export function saveDraftForConversation(conversationKey: string, text: string):
     // localStorage may throw in private browsing mode.
     return false;
   }
+}
+
+/** Whether a parsed 409 body says a send with the same key is still running. */
+export function isSendInProgressBody(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const err = (data as { error?: unknown }).error;
+  return (
+    !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'send_in_progress'
+  );
+}
+
+/** Rebuilds a JSON response whose body was already read. */
+export function jsonResponse(data: unknown, status: number): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }

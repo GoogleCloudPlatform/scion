@@ -52,7 +52,12 @@ import type { ChatAgentMember } from './chat-members.js';
 import {
   WAKING_DISPATCH_STATE,
   confirmWake,
+  WAKE_CONFIRM_BUDGET_MS,
+  WAKE_OUTCOME_UNKNOWN_MESSAGE,
+  WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
+  isSendInProgressBody,
+  jsonResponse,
   saveDraftForConversation,
   wakeOfferFromErrorBody,
   type WakeOffer,
@@ -510,6 +515,12 @@ export class ScionChatThread extends LitElement {
    * the wait cannot be overwritten when a failed wake restores the draft.
    */
   @state() private wakingConversationKey = '';
+  /** Conversations with a v2 send in flight (see handleChatSendV2). */
+  private _sendingConversations = new Set<string>();
+  /** Delay between wake-send confirmation retries; tests shorten it. */
+  private wakeRetryDelayMs = WAKE_RETRY_DELAY_MS;
+  /** How long a wake send keeps confirming its outcome; tests shorten it. */
+  private wakeConfirmBudgetMs = WAKE_CONFIRM_BUDGET_MS;
   @state() private pinnedToBottom = true;
   /** Whether the user expanded a one-line send error to its full text. */
   @state() private sendErrorExpanded = false;
@@ -2361,9 +2372,18 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, attachmentIds, onSuccess } = e.detail;
+    const { text, attachmentIds, onSuccess, onError } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
-    if (!hasContent || this.sending) return;
+    if (!hasContent) return;
+    // One send at a time per conversation. The guard is per conversation,
+    // not per thread element: chat.ts reuses one element across
+    // conversations, and a wake send can stay in flight for minutes. A
+    // refused send hands its draft back rather than dropping it.
+    if (this._sendingConversations.has(this.conversationKey)) {
+      this.sendError = 'Still sending the previous message';
+      onError?.(this.sendError);
+      return;
+    }
 
     // Check for /default slash command
     if (text.startsWith('/default ')) {
@@ -2394,12 +2414,9 @@ export class ScionChatThread extends LitElement {
       onError,
     } = detail;
     let wakeOffer: WakeOffer | null = null;
-    // Messages already known before this send: after a network error on a
-    // wake send, a new own row with the same text means it was delivered.
-    const knownIds = wake ? new Set(this.messageMap.keys()) : null;
-
-    this.sending = true;
-    if (wake) this.wakingConversationKey = this.conversationKey;
+    const inFlightKey = this.conversationKey;
+    this._sendingConversations.add(inFlightKey);
+    if (wake) this.wakingConversationKey = inFlightKey;
     this.sendError = null;
     // Sending is the other way mark-unread's suppression lifts (besides
     // navigating away and back): you cannot both have just marked a
@@ -2444,6 +2461,18 @@ export class ScionChatThread extends LitElement {
     // whatever conversation/project the thread has since moved on to.
     const sendConversationKey = this.conversationKey;
     const sendProjectId = this.resolvePathLinkProjectId(optimisticMsg);
+    // The user may switch conversations while the send is in flight (for
+    // minutes, for a wake). Its outcome must then neither touch the open
+    // conversation's view nor land its draft in that conversation's composer.
+    const switchedAway = (): boolean => sendConversationKey !== this.conversationKey;
+    const failSend = (message: string): void => {
+      if (switchedAway()) {
+        this.returnDraftElsewhere(sendConversationKey, text);
+        return;
+      }
+      this.sendError = message;
+      onError?.(message);
+    };
 
     try {
       const body: Record<string, unknown> = {
@@ -2488,13 +2517,14 @@ export class ScionChatThread extends LitElement {
         body.metadata = metadata;
       }
 
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages`,
+      const res = await this.postChatSend(
+        `/api/v1/chat/conversations/${encodeURIComponent(sendConversationKey)}/messages`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        }
+        },
+        wake
       );
 
       if (!res.ok) {
@@ -2504,25 +2534,21 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
-        // Restore reply-to state so the reply bar comes back for retry.
-        this.composerReplyTo = savedReplyTo;
+        // Restore reply-to state so the reply bar comes back for retry
+        // (not into a conversation the user has since switched to).
+        if (!switchedAway()) this.composerReplyTo = savedReplyTo;
         if (!wake && res.status === 409) {
           // Read the body once: it is either a wake offer or an ordinary
           // conflict whose message is shown as usual.
           const data: unknown = await res.json().catch(() => null);
           wakeOffer = wakeOfferFromErrorBody(data);
           if (!wakeOffer) {
-            this.sendError = errorMessageFromBody(data, 'Failed to send message');
-            onError?.(this.sendError);
+            failSend(errorMessageFromBody(data, 'Failed to send message'));
           }
-        } else if (wake && sendConversationKey !== this.conversationKey) {
-          this.returnDraftElsewhere(sendConversationKey, text);
         } else {
-          this.sendError = await extractApiError(
-            res,
-            wake ? 'Failed to wake agent' : 'Failed to send message'
+          failSend(
+            await extractApiError(res, wake ? 'Failed to wake agent' : 'Failed to send message')
           );
-          onError?.(this.sendError ?? 'Failed to send message');
         }
       } else {
         // W7: Parse attachment refs from the send response.
@@ -2544,68 +2570,75 @@ export class ScionChatThread extends LitElement {
         // instead of deleting it. This avoids a visible flicker (message
         // disappearing then reappearing) between the delete and the backfill
         // delivering the real message.
-        const optimistic = this.messageMap.get(idempotencyKey);
-        if (optimistic && resData?.id) {
+        if (switchedAway()) {
+          // Sent, but the user has moved on: leave the open conversation's
+          // view alone (its own history shows the message on return).
           this.messageMap.delete(idempotencyKey);
           this._pendingIdempotencyKeys.delete(idempotencyKey);
-          // If SSE already delivered the real message, keep it as the ground truth
-          // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
-          const sseVersion = this.messageMap.get(resData.id);
-          if (sseVersion) {
-            // nc-delivery-unreachable review FYI 1: never downgrade a
-            // terminal `failed` state — skip applying this HTTP response's
-            // dispatch fields if the SSE-delivered version is already failed
-            // and this response would move it back to dispatched/pending.
-            const wouldDowngrade =
-              sseVersion.dispatchState === 'failed' &&
-              (dispatchState === 'dispatched' || dispatchState === 'pending');
-            let updatedSseVersion = sseVersion;
-            if (!wouldDowngrade) {
-              // Strip any prior dispatchFailureReason/Code before
-              // conditionally re-adding the response's, so a stale value is
-              // dropped rather than left behind when the response omits it.
-              updatedSseVersion = withDispatchFailure(
-                sseVersion,
-                dispatchState,
-                resData?.dispatchFailureReason || undefined,
-                resData?.dispatchFailureCode || undefined
-              );
-            }
-            // Preserve optimistic agent recipient if SSE version lacks it.
-            if (
-              optimistic.recipient?.startsWith('agent:') &&
-              !updatedSseVersion.recipient?.startsWith('agent:')
-            ) {
-              updatedSseVersion = {
-                ...updatedSseVersion,
-                recipient: optimistic.recipient,
-                recipientId: optimistic.recipientId,
-              };
-            }
-            this.messageMap.set(resData.id, updatedSseVersion);
-          } else {
-            // Symmetric with the sseVersion branch above: a stale
-            // dispatchFailureReason/Code is dropped, not left behind on this
-            // reused object, when the response omits it.
-            const updatedOptimistic: Message = {
-              ...withDispatchFailure(
-                optimistic,
-                dispatchState,
-                resData?.dispatchFailureReason || undefined,
-                resData?.dispatchFailureCode || undefined
-              ),
-              id: resData.id,
-            };
-            this.messageMap.set(resData.id, updatedOptimistic);
-          }
         } else {
-          // Fallback: remove if we cannot remap (should not happen).
-          this.messageMap.delete(idempotencyKey);
-          this._pendingIdempotencyKeys.delete(idempotencyKey);
+          const optimistic = this.messageMap.get(idempotencyKey);
+          if (optimistic && resData?.id) {
+            this.messageMap.delete(idempotencyKey);
+            this._pendingIdempotencyKeys.delete(idempotencyKey);
+            // If SSE already delivered the real message, keep it as the ground truth
+            // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
+            const sseVersion = this.messageMap.get(resData.id);
+            if (sseVersion) {
+              // nc-delivery-unreachable review FYI 1: never downgrade a
+              // terminal `failed` state — skip applying this HTTP response's
+              // dispatch fields if the SSE-delivered version is already failed
+              // and this response would move it back to dispatched/pending.
+              const wouldDowngrade =
+                sseVersion.dispatchState === 'failed' &&
+                (dispatchState === 'dispatched' || dispatchState === 'pending');
+              let updatedSseVersion = sseVersion;
+              if (!wouldDowngrade) {
+                // Strip any prior dispatchFailureReason/Code before
+                // conditionally re-adding the response's, so a stale value is
+                // dropped rather than left behind when the response omits it.
+                updatedSseVersion = withDispatchFailure(
+                  sseVersion,
+                  dispatchState,
+                  resData?.dispatchFailureReason || undefined,
+                  resData?.dispatchFailureCode || undefined
+                );
+              }
+              // Preserve optimistic agent recipient if SSE version lacks it.
+              if (
+                optimistic.recipient?.startsWith('agent:') &&
+                !updatedSseVersion.recipient?.startsWith('agent:')
+              ) {
+                updatedSseVersion = {
+                  ...updatedSseVersion,
+                  recipient: optimistic.recipient,
+                  recipientId: optimistic.recipientId,
+                };
+              }
+              this.messageMap.set(resData.id, updatedSseVersion);
+            } else {
+              // Symmetric with the sseVersion branch above: a stale
+              // dispatchFailureReason/Code is dropped, not left behind on this
+              // reused object, when the response omits it.
+              const updatedOptimistic: Message = {
+                ...withDispatchFailure(
+                  optimistic,
+                  dispatchState,
+                  resData?.dispatchFailureReason || undefined,
+                  resData?.dispatchFailureCode || undefined
+                ),
+                id: resData.id,
+              };
+              this.messageMap.set(resData.id, updatedOptimistic);
+            }
+          } else {
+            // Fallback: remove if we cannot remap (should not happen).
+            this.messageMap.delete(idempotencyKey);
+            this._pendingIdempotencyKeys.delete(idempotencyKey);
+          }
+          this.messages = Array.from(this.messageMap.values())
+            .filter((m) => m.type !== 'mention')
+            .sort(compareMessageOrder);
         }
-        this.messages = Array.from(this.messageMap.values())
-          .filter((m) => m.type !== 'mention')
-          .sort(compareMessageOrder);
 
         // The send response never carries the server's authoritative
         // createdAt, so this is recorded "provisional": the client's own
@@ -2634,28 +2667,56 @@ export class ScionChatThread extends LitElement {
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort(compareMessageOrder);
-      // Restore reply-to state so the reply bar comes back for retry.
-      this.composerReplyTo = savedReplyTo;
-      const errorText = err instanceof Error ? err.message : 'Failed to send message';
-      // A wake send runs long; if the connection drops, the hub may still
-      // have delivered it. Restoring the draft then would invite a resend
-      // and a duplicate, so check the history first.
-      if (knownIds && (await this.wakeSendLanded(text, knownIds, sendConversationKey))) {
-        this.composerReplyTo = null;
-        onSuccess();
-      } else if (wake && sendConversationKey !== this.conversationKey) {
-        this.returnDraftElsewhere(sendConversationKey, text);
-      } else {
-        this.sendError = errorText;
-        onError?.(errorText);
-      }
+      // Restore reply-to state so the reply bar comes back for retry
+      // (not into a conversation the user has since switched to).
+      if (!switchedAway()) this.composerReplyTo = savedReplyTo;
+      // For a wake send, postChatSend already retried with the same
+      // idempotency key until the budget ran out: the outcome is unknown.
+      failSend(
+        wake
+          ? WAKE_OUTCOME_UNKNOWN_MESSAGE
+          : err instanceof Error
+            ? err.message
+            : 'Failed to send message'
+      );
     } finally {
-      this.sending = false;
-      if (wake) this.wakingConversationKey = '';
+      this._sendingConversations.delete(inFlightKey);
+      if (wake && this.wakingConversationKey === inFlightKey) this.wakingConversationKey = '';
     }
 
     if (wakeOffer) {
-      await this.offerWake(detail, wakeOffer);
+      await this.offerWake(detail, wakeOffer, sendConversationKey);
+    }
+  }
+
+  /**
+   * POST a send. A wake send runs long enough that the connection can drop
+   * while the hub is still working, so its outcome is confirmed by retrying
+   * the identical request (same idempotency key): the hub answers with the
+   * original message once that send has finished (200), sends it now if it
+   * never arrived (201), or 409 send_in_progress while it is still running,
+   * in which case this waits and asks again. A message is therefore
+   * delivered at most once. Throws when the outcome stays unknown for
+   * WAKE_CONFIRM_BUDGET_MS.
+   */
+  private async postChatSend(url: string, init: RequestInit, wake: boolean): Promise<Response> {
+    if (!wake) return apiFetch(url, init);
+    const giveUpAt = Date.now() + this.wakeConfirmBudgetMs;
+    for (;;) {
+      let lastError: unknown = null;
+      try {
+        const res = await apiFetch(url, init);
+        if (res.status !== 409) return res;
+        const data: unknown = await res.json().catch(() => null);
+        // Any other conflict is a real answer: hand it back intact.
+        if (!isSendInProgressBody(data)) return jsonResponse(data, 409);
+      } catch (err) {
+        lastError = err;
+      }
+      if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
+        throw lastError ?? new Error(WAKE_OUTCOME_UNKNOWN_MESSAGE);
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
     }
   }
 
@@ -2665,8 +2726,16 @@ export class ScionChatThread extends LitElement {
    * The composer stays cleared while the dialog is open, so the draft is
    * restored exactly once, by whichever path ends the send.
    */
-  private async offerWake(detail: ChatSendDetail, offer: WakeOffer): Promise<void> {
-    const conversationKey = this.conversationKey;
+  private async offerWake(
+    detail: ChatSendDetail,
+    offer: WakeOffer,
+    conversationKey: string
+  ): Promise<void> {
+    // The offer may arrive after the user already switched away.
+    if (conversationKey !== this.conversationKey) {
+      this.returnDraftElsewhere(conversationKey, detail.text);
+      return;
+    }
     const confirmed = await confirmWake(offer);
     // A conversation switch while the dialog was open must neither deliver
     // the message nor drop the draft into the new conversation's composer.
@@ -2680,30 +2749,6 @@ export class ScionChatThread extends LitElement {
     }
     // The resend saves and clears the reply bar again.
     await this.sendV2(detail, true);
-  }
-
-  /**
-   * After a network error on a wake send: reload the recent history and
-   * report whether a new own message with the same text arrived, i.e. the
-   * hub delivered it before the connection dropped.
-   */
-  private async wakeSendLanded(
-    text: string,
-    knownIds: Set<string>,
-    conversationKey: string
-  ): Promise<boolean> {
-    if (conversationKey !== this.conversationKey) return false;
-    try {
-      await this.runBackfillV2();
-    } catch {
-      return false;
-    }
-    const self = this.selfUserId();
-    for (const m of this.messageMap.values()) {
-      if (knownIds.has(m.id) || this._pendingIdempotencyKeys.has(m.id)) continue;
-      if (m.senderId === self && m.msg === text) return true;
-    }
-    return false;
   }
 
   /**
