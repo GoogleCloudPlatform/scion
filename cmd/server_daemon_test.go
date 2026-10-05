@@ -777,6 +777,17 @@ func TestProbeServerStatus_BrokerProbe(t *testing.T) {
 	assert.True(t, st.BrokerRunning)
 	assert.Equal(t, "degraded", st.BrokerStatus)
 	assert.Equal(t, "status: degraded", st.BrokerHealthReason)
+
+	// Same rule as 9810: a status that is not a scion status, or none,
+	// means not detected, and is never echoed as degraded.
+	for _, body := range []string{`{"status":"ok"}`, `{}`} {
+		other := serveHealth(t, body)
+		st = probeServerStatus(client, unreachableHTTPURL(t), unreachableHTTPURL(t), other.URL)
+		assert.False(t, st.BrokerRunning, body)
+		assert.Empty(t, st.BrokerStatus, body)
+		assert.Empty(t, st.BrokerHealthReason, body)
+		assert.Equal(t, "  Runtime Broker:  not detected", formatServerStatusComponents(st)[1], body)
+	}
 }
 
 // TestProbeServerStatus_CombinedModeHubDegradedBrokerHealthy: the converse —
@@ -793,5 +804,8 @@ func TestProbeServerStatus_CombinedModeHubDegradedBrokerHealthy(t *testing.T) {
 	assert.Equal(t, "degraded", status.HubStatus)
 	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.HubHealthReason)
 	assert.Equal(t, "colocated_broker: unhealthy: registration failed", status.WebHealthReason)
+	assert.Equal(t, "degraded", status.WebStatus)
+	assert.True(t, status.BrokerRunning)
+	assert.Empty(t, status.BrokerStatus)
 	assert.Empty(t, status.BrokerHealthReason)
 }

@@ -609,15 +609,17 @@ type serverStatusInfo struct {
 	HubStatus    string `json:"hubStatus,omitempty"`
 	WebStatus    string `json:"webStatus,omitempty"`
 	BrokerStatus string `json:"brokerStatus,omitempty"`
-	// HubHealthReason names the non-healthy checks (see
+	// HubHealthReason names the hub's own non-healthy checks (see
 	// healthProblemReason, e.g. "colocated_broker: unhealthy: registration
-	// failed") when either probe (the combined web+hub probe on 8080, or the
-	// standalone Hub probe on 9810) answered with a non-healthy status —
-	// degraded or unhealthy. Empty when the Hub is healthy or unreachable.
+	// failed"): from the nested "hub" object in combined mode (port 8080),
+	// or from the top level on a standalone Hub (port 9810). Broker-only
+	// problems are not included; see BrokerHealthReason and
+	// WebHealthReason. Empty when the Hub is healthy or not detected.
 	HubHealthReason string `json:"hubHealthReason,omitempty"`
 	// WebHealthReason is set only when the 8080 (combined web+hub) probe
 	// itself reported a non-healthy status — i.e. the process actually
-	// serving the Web Frontend is the degraded one. Kept separate from
+	// serving the Web Frontend is the degraded one. In combined mode this is
+	// the composite (hub and broker) reason. Kept separate from
 	// HubHealthReason so a standalone Hub-only deployment (port 9810, no
 	// web server running at all) does not get an incorrect "Web Frontend:
 	// degraded" line just because the Hub is degraded.
@@ -738,13 +740,19 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 		if resp.StatusCode == http.StatusOK && readErr == nil {
 			var health healthProbeComponent
 			if json.Unmarshal(body, &health) == nil {
-				// Any parseable answer means the broker is running (it only
-				// ever reports healthy or degraded). A degraded broker
-				// names its problem checks on its own line.
-				status.BrokerRunning = true
-				if health.Status != "" && health.Status != probeStatusHealthy {
+				// Same rule as the standalone 9810 probe: degraded is up
+				// (and names its problem checks), unhealthy is not, and a
+				// status that is not a scion status means not detected.
+				switch health.Status {
+				case probeStatusHealthy:
+					status.BrokerRunning = true
+				case probeStatusDegraded, probeStatusUnhealthy:
+					status.BrokerRunning = health.Status == probeStatusDegraded
 					status.BrokerStatus = health.Status
 					status.BrokerHealthReason = brokerProblemReason(health)
+				default:
+					// Not a scion broker status (e.g. {"status":"ok"} from
+					// some other service on this port, or no status).
 				}
 			}
 		}
