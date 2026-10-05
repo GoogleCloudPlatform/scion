@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -251,12 +252,33 @@ func unresolvedMessages() map[string]unresolvedMessage {
 		"bot mention, no default": {func() *discordgo.MessageCreate { return botMention(luOtherUser, "hello") }, "", true, false},
 		"bot mention plus agent":  {func() *discordgo.MessageCreate { return botMention(luOtherUser, "@worker hello") }, "worker", true, false},
 		"reply to agent message": {func() *discordgo.MessageCreate {
-			m := luChannelMessage(luOtherUser, "go ahead")
-			m.Type = discordgo.MessageTypeReply
-			m.ReferencedMessage = &discordgo.Message{ID: "agent-msg", WebhookID: "wh-1", Author: &discordgo.User{ID: "wh-1", Username: "worker"}}
-			return m
+			return replyTo(luOtherUser, &discordgo.Message{ID: "agent-msg", WebhookID: luPluginWebhook, Author: &discordgo.User{ID: luPluginWebhook, Username: "worker"}})
 		}, "", true, false},
+		"reply to bot message": {func() *discordgo.MessageCreate {
+			return replyTo(luOtherUser, &discordgo.Message{ID: "bot-msg", Author: &discordgo.User{ID: "BOT123", Bot: true}})
+		}, "", true, false},
+		"reply to another webhook's message": {func() *discordgo.MessageCreate {
+			return replyTo(luOtherUser, &discordgo.Message{ID: "other-msg", WebhookID: "wh-other", Author: &discordgo.User{ID: "wh-other", Username: "worker"}})
+		}, "", false, false},
 	}
+}
+
+// luPluginWebhook is the ID of the webhook the plugin posts agent messages
+// with in luChannel.
+const luPluginWebhook = "wh-plugin"
+
+// replyTo returns a channel message from authorID replying to ref.
+func replyTo(authorID string, ref *discordgo.Message) *discordgo.MessageCreate {
+	m := luChannelMessage(authorID, "go ahead")
+	m.Type = discordgo.MessageTypeReply
+	m.ReferencedMessage = ref
+	return m
+}
+
+// usePluginWebhook makes luPluginWebhook the broker's webhook for luChannel.
+func usePluginWebhook(b *DiscordBroker, e *linkedUserEnv) {
+	b.webhooks = NewWebhookManager(e.session, discardLogger())
+	b.webhooks.cache[luChannel] = &discordgo.Webhook{ID: luPluginWebhook}
 }
 
 // agentCacheStates are the agent-cache contents an unresolved sender's
@@ -287,6 +309,7 @@ func unresolvedSenderReplies(t *testing.T, senderName, msgName string, routed bo
 	}
 	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
 	b.config = &Config{RoutedInboundEnabled: routed}
+	usePluginWebhook(b, e)
 	sc.setup(t, e, b)
 	cs := &countingStore{Store: b.store}
 	b.store = cs
@@ -341,17 +364,122 @@ func TestUnresolvedSender_Replies(t *testing.T) {
 }
 
 func TestUnresolvedSender_SameReplyWhetherOrNotAgentsCached(t *testing.T) {
-	for senderName := range unresolvedSenders {
-		for msgName := range unresolvedMessages() {
-			for cacheName, cache := range agentCacheStates {
-				t.Run(senderName+"/"+msgName+"/"+cacheName, func(t *testing.T) {
-					uncached := unresolvedSenderReplies(t, senderName, msgName, false, nil)
-					cached := unresolvedSenderReplies(t, senderName, msgName, false, cache)
-					assert.Equal(t, uncached, cached, "same replies with and without cached agents")
-				})
+	for _, routed := range []bool{false, true} {
+		for senderName := range unresolvedSenders {
+			for msgName := range unresolvedMessages() {
+				for cacheName, cache := range agentCacheStates {
+					t.Run(fmt.Sprintf("routed=%v/%s/%s/%s", routed, senderName, msgName, cacheName), func(t *testing.T) {
+						uncached := unresolvedSenderReplies(t, senderName, msgName, routed, nil)
+						cached := unresolvedSenderReplies(t, senderName, msgName, routed, cache)
+						assert.Equal(t, uncached, cached, "same replies with and without cached agents")
+					})
+				}
 			}
 		}
 	}
+}
+
+func TestUnresolvedSender_DefaultAgentReplyIsThrottledPerSender(t *testing.T) {
+	const luThirdUser = "du-carol"
+	for _, senderName := range []string{"link without email", "lookup failure"} {
+		for _, routed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("routed=%v/%s", routed, senderName), func(t *testing.T) {
+				sc := unresolvedSenders[senderName]
+				e := newLinkedUserEnv(t)
+				e.linkChannel(t)
+				e.setDefaultAgent(t, "worker")
+				b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+				b.config = &Config{RoutedInboundEnabled: routed}
+				// A third sender in the same state.
+				require.NoError(t, e.store.CreateUserMapping(context.Background(), &DiscordUserMapping{
+					DiscordUserID: luThirdUser, DiscordUsername: "carol", ScionUserID: "scion-user-3", LinkedAt: time.Now(),
+				}))
+				sc.setup(t, e, b)
+				var d deliveries
+				b.InboundHandler = d.handler
+
+				b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "hello"))
+				b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "hello again"))
+				b.handleIncomingMessage(e.session, luChannelMessage(luThirdUser, "hi"))
+				b.handleIncomingMessage(e.session, botMention(luOtherUser, "are you there"))
+				b.handleIncomingMessage(e.session, botMention(luOtherUser, "still there?"))
+
+				assert.Equal(t, []string{sc.want, sc.want, sc.want, sc.want}, channelReplies(t, e.discord),
+					"one reply per sender for unaddressed text; addressing the bot is always answered")
+				assert.Empty(t, d.topics)
+			})
+		}
+	}
+}
+
+func TestAgentListFailureReply_IsThrottledPerSender(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   string
+	}{
+		"denied":     {http.StatusForbidden, deniedBody("list", "agent"), luDeniedAgents},
+		"stale link": {http.StatusForbidden, staleNotFoundBody, staleLinkText},
+		"hub outage": {http.StatusInternalServerError, serverErrorBody, agentListUnavailableText},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			e.linkBob(t)
+			e.setDefaultAgent(t, "worker")
+			e.hub.failRequest(http.MethodGet, luAgentsPath, tc.status, tc.body)
+			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+			var d deliveries
+			b.InboundHandler = d.handler
+			// An unaddressed message for the default agent with a leading
+			// @mention that cannot be checked.
+			unaddressed := func(author string) *discordgo.MessageCreate { return luChannelMessage(author, "@nobody hello") }
+
+			b.handleIncomingMessage(e.session, unaddressed(luDiscordUser))
+			b.handleIncomingMessage(e.session, unaddressed(luDiscordUser))
+			b.handleIncomingMessage(e.session, botMention(luDiscordUser, "@nobody hi"))
+			b.handleIncomingMessage(e.session, botMention(luDiscordUser, "@nobody hi"))
+
+			replies := channelReplies(t, e.discord)
+			require.Len(t, replies, 3, "one reply for repeated unaddressed text, every addressed message answered")
+			for _, r := range replies {
+				assert.Contains(t, r, strings.Split(tc.want, " (")[0])
+			}
+
+			// Another sender still gets their own reply.
+			b.handleIncomingMessage(e.session, unaddressed(luOtherUser))
+			assert.Len(t, channelReplies(t, e.discord), 4)
+			assert.Empty(t, d.topics)
+		})
+	}
+}
+
+func TestAgentListDenial_DefaultRoutingReplyIsThrottled(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+	e.setDefaultAgent(t, "worker")
+	e.hub.failRequest(http.MethodGet, luAgentsPath, http.StatusForbidden, deniedBody("list", "agent"))
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+	var d deliveries
+	b.InboundHandler = d.handler
+
+	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "please build it"))
+	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "please build it now"))
+
+	assert.Equal(t, []string{luDeniedAgents}, channelReplies(t, e.discord))
+	assert.Empty(t, d.topics)
+}
+
+func TestIsReplyToBot_OnlyThePluginsOwnMessages(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+	usePluginWebhook(b, e)
+
+	assert.True(t, b.isReplyToBot(replyTo(luOtherUser, &discordgo.Message{Author: &discordgo.User{ID: "BOT123"}}), "BOT123"), "plain bot message")
+	assert.True(t, b.isReplyToBot(replyTo(luOtherUser, &discordgo.Message{WebhookID: luPluginWebhook, Author: &discordgo.User{ID: luPluginWebhook}}), "BOT123"), "agent message via the plugin's webhook")
+	assert.False(t, b.isReplyToBot(replyTo(luOtherUser, &discordgo.Message{WebhookID: "wh-other", Author: &discordgo.User{ID: "wh-other"}}), "BOT123"), "another integration's webhook")
+	assert.False(t, b.isReplyToBot(replyTo(luOtherUser, &discordgo.Message{Author: &discordgo.User{ID: "someone"}}), "BOT123"), "another user's message")
+	assert.False(t, b.isReplyToBot(luChannelMessage(luOtherUser, "hi"), "BOT123"), "not a reply")
 }
 
 func TestUnresolvedSender_NeverSeenSenderUnaddressedTextGetsNoReply(t *testing.T) {

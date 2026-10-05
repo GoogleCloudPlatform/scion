@@ -417,3 +417,48 @@ func TestAskUserReply_DeliveryErrorGetsActionableText(t *testing.T) {
 		})
 	}
 }
+
+func TestAskUserModal_DeliveryErrorGetsActionableText(t *testing.T) {
+	for name, tc := range deliveryFailureBodies {
+		t.Run(name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+			e.hub.failRequest(http.MethodPost, "/api/v1/broker/inbound", http.StatusForbidden, tc.body)
+			require.NoError(t, e.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
+				RequestID: "req-1", MessageID: "m-1", ChannelID: luChannel, AgentSlug: "worker", ProjectID: luProject,
+				Choices: []string{"yes", "no"}, ExpiresAt: time.Now().Add(time.Hour),
+			}))
+			i := luInteraction(discordgo.InteractionModalSubmit, discordgo.ModalSubmitInteractionData{
+				CustomID: "ask:modal:req-1",
+				Components: []discordgo.MessageComponent{
+					&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						&discordgo.TextInput{CustomID: "response", Value: "go ahead"},
+					}},
+				},
+			})
+
+			HandleModalSubmit(e.session, i, e.store, b.deliverInbound, discardLogger())
+
+			require.NotEmpty(t, e.hub.callsTo(http.MethodPost, "/api/v1/broker/inbound"), "the reply reached the hub")
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.want))
+		})
+	}
+}
+
+func TestHandleSetupProject_DeniedProjectOutsideUsersListSaysThisHub(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.hub.setProjects("empty")
+	e.hub.failRequest(http.MethodGet, luAgentsPath, http.StatusForbidden, deniedBody("list", "agent"))
+
+	i := luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{CustomID: "setup:proj:" + luProject})
+	e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
+
+	bodies := e.discord.allBodies()
+	assert.Contains(t, bodies, jsonText(t, "Your Scion account (alice@example.com) doesn't have permission to list agents in this hub. Ask a project owner."))
+	assert.NotContains(t, bodies, "**"+luProject+"**")
+	assert.NotContains(t, bodies, " "+luProject+".")
+	link, err := e.store.GetChannelLink(context.Background(), luChannel)
+	require.NoError(t, err)
+	assert.Nil(t, link, "a denied project is not linked")
+}

@@ -101,6 +101,42 @@ func (wm *WebhookManager) getOrCreateWebhook(channelID string) (*discordgo.Webho
 	return wh, nil
 }
 
+// owns reports whether webhookID is the webhook this plugin uses in
+// channelID. It reads Discord's webhook list on a cache miss but never
+// creates a webhook.
+func (wm *WebhookManager) owns(channelID, webhookID string) bool {
+	if webhookID == "" {
+		return false
+	}
+	wm.mu.RLock()
+	wh, ok := wm.cache[channelID]
+	wm.mu.RUnlock()
+	if ok {
+		return wh.ID == webhookID
+	}
+
+	webhooks, err := wm.session.ChannelWebhooks(channelID)
+	if err != nil {
+		wm.log.Debug("Failed to list channel webhooks", "channel_id", channelID, "error", err)
+		return false
+	}
+	botUserID := ""
+	if wm.session.State != nil && wm.session.State.User != nil {
+		botUserID = wm.session.State.User.ID
+	}
+	for _, wh := range webhooks {
+		if wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID {
+			wm.mu.Lock()
+			if _, cached := wm.cache[channelID]; !cached {
+				wm.cache[channelID] = wh
+			}
+			wm.mu.Unlock()
+			return wh.ID == webhookID
+		}
+	}
+	return false
+}
+
 // invalidate removes a cached webhook for a channel, forcing re-discovery
 // on the next send.
 func (wm *WebhookManager) invalidate(channelID string) {

@@ -211,6 +211,11 @@ type DiscordBroker struct {
 
 	threadParents map[string]string // channelID -> parentID (cached thread lookups)
 
+	// replyCooldown holds when a throttled reply was last sent, keyed by
+	// channel, sender and reply kind.
+	replyCooldown   map[string]time.Time
+	replyCooldownMu sync.Mutex
+
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
 	downloadsPath  string            // override for file download directory; empty = default
@@ -1367,6 +1372,16 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	agentListErrText := func() string {
 		return hubErrorText(agentsErr, senderMapping.ScionEmail, link.ProjectSlug, agentListUnavailableText)
 	}
+	// replyAgentListErr tells the sender why their message was not routed.
+	// A message addressed to the bot is always answered; otherwise the
+	// reply is sent at most once per cooldown per sender and kind.
+	addressedToBot := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
+	replyAgentListErr := func() {
+		if !addressedToBot && b.shouldSuppressReply(channelID, m.Author.ID, "agent_list:"+agentListErrorKind(agentsErr)) {
+			return
+		}
+		s.ChannelMessageSend(channelID, agentListErrText())
+	}
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1394,7 +1409,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		// If bot was mentioned but no agent resolved, send error feedback.
 		if isBotMentioned(m, botUserID) {
 			if agentsErr != nil {
-				s.ChannelMessageSend(channelID, agentListErrText())
+				replyAgentListErr()
 				return
 			}
 			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
@@ -1409,7 +1424,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// A sender the hub denies (including a link it no longer accepts) is
 	// never routed; they are told why instead.
 	if isForbiddenHubError(agentsErr) {
-		s.ChannelMessageSend(channelID, agentListErrText())
+		replyAgentListErr()
 		return
 	}
 
@@ -1436,7 +1451,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 && agentsErr != nil {
 			// Without an agent list the mention cannot be checked.
-			s.ChannelMessageSend(channelID, agentListErrText())
+			replyAgentListErr()
 			return
 		}
 		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 {
@@ -2112,33 +2127,99 @@ const msgSomethingWentWrong = "Something went wrong. Please try again."
 // link could not be read, is also told when the message would go to the
 // default agent. Other messages are ignored.
 func (b *DiscordBroker) replyUnresolvedSender(s *discordgo.Session, m *discordgo.MessageCreate, channelID, botUserID, effectiveDefault string, mapping *DiscordUserMapping, lookupErr error) {
-	addressed := isBotMentioned(m, botUserID) || isReplyToBot(m, botUserID)
-	text := msgRegisterToInteract
+	addressed := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
+	text, kind := msgRegisterToInteract, ""
 	switch {
 	case lookupErr != nil:
-		text = msgSomethingWentWrong
-		addressed = addressed || defaultAgentApplies(m, botUserID, effectiveDefault)
+		text, kind = msgSomethingWentWrong, "lookup_failed"
 	case mapping != nil:
-		text = staleLinkText
-		addressed = addressed || defaultAgentApplies(m, botUserID, effectiveDefault)
+		text, kind = staleLinkText, "stale_link"
 	}
 	if !addressed {
-		return
+		// A message that would go to the default agent is answered for a
+		// link that needs attention, at most once per cooldown per sender.
+		if kind == "" || !defaultAgentApplies(m, botUserID, effectiveDefault) {
+			return
+		}
+		if b.shouldSuppressReply(channelID, m.Author.ID, "unresolved_sender:"+kind) {
+			return
+		}
 	}
 	s.ChannelMessageSend(channelID, text)
 }
 
+// replyCooldownDuration is how long a throttled reply is not repeated to
+// the same sender in the same channel.
+const replyCooldownDuration = 5 * time.Minute
+
+// shouldSuppressReply reports whether a reply of kind to senderID in
+// channelID was already sent within replyCooldownDuration; otherwise it
+// records this one and returns false.
+func (b *DiscordBroker) shouldSuppressReply(channelID, senderID, kind string) bool {
+	key := channelID + ":" + senderID + ":" + kind
+	now := time.Now()
+
+	b.replyCooldownMu.Lock()
+	defer b.replyCooldownMu.Unlock()
+	if b.replyCooldown == nil {
+		b.replyCooldown = make(map[string]time.Time)
+	}
+	if len(b.replyCooldown) > 1000 {
+		for k, t := range b.replyCooldown {
+			if now.Sub(t) >= replyCooldownDuration {
+				delete(b.replyCooldown, k)
+			}
+		}
+	}
+	if last, ok := b.replyCooldown[key]; ok && now.Sub(last) < replyCooldownDuration {
+		return true
+	}
+	b.replyCooldown[key] = now
+	return false
+}
+
+// agentListErrorKind names the kind of agent-list failure, for keying
+// throttled replies.
+func agentListErrorKind(err error) string {
+	switch {
+	case isStaleLinkError(err):
+		return "stale_link"
+	case isForbiddenHubError(err):
+		return "forbidden"
+	default:
+		return "unavailable"
+	}
+}
+
 // isReplyToBot reports whether the message replies to a message from the
-// bot or from an agent.
-func isReplyToBot(m *discordgo.MessageCreate, botUserID string) bool {
+// bot, or from an agent through a webhook this plugin owns.
+func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID string) bool {
 	ref := m.ReferencedMessage
 	if ref == nil {
 		return false
 	}
-	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID {
+	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID && ref.WebhookID == "" {
 		return true
 	}
-	return agentFromReply(ref, botUserID) != ""
+	if ref.WebhookID == "" {
+		return false
+	}
+	b.mu.RLock()
+	webhooks := b.webhooks
+	b.mu.RUnlock()
+	if webhooks == nil {
+		return false
+	}
+	channels := []string{m.ChannelID}
+	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
+		channels = append(channels, parentID)
+	}
+	for _, ch := range channels {
+		if webhooks.owns(ch, ref.WebhookID) {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to
