@@ -151,3 +151,29 @@ func TestHandleSetup_ProjectReadWithLinkedUser(t *testing.T) {
 	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
 	assert.Contains(t, f.slack.lastText(t), "Project One")
 }
+
+func TestHandleAgents_DeniedShowsActionableText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects/proj-1/agents", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"Insufficient permissions","details":{"resource_type":"agent","denied_action":"list"}}}`)
+
+	f.run(t, "agents")
+
+	assert.Equal(t,
+		"Your Scion account (alice@example.com) doesn't have permission to list agents in proj-one. Ask a project owner.",
+		f.slack.lastText(t))
+}
+
+func TestHandleStatus_StaleAccountLinkShowsReRegisterText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "gone@example.com")
+	f.hub.on("GET", "/api/v1/projects/proj-1/agents", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"on-behalf-of principal not found"}}`)
+
+	f.run(t, "status alpha")
+
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}

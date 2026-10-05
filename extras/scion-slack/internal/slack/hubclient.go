@@ -128,7 +128,7 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list projects: %w", parseHubError(resp))
 	}
 
 	var result hubProjectsResponse
@@ -164,7 +164,7 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list fresh projects: %w", parseHubError(resp))
 	}
 
 	var result hubProjectsResponse
@@ -199,7 +199,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID, linked
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list user projects: %w", parseHubError(resp))
 	}
 
 	var result hubProjectsResponse
@@ -234,7 +234,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID, linkedUser st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list agents: %w", parseHubError(resp))
 	}
 
 	var result hubAgentsResponse

@@ -75,6 +75,10 @@ type hubError struct {
 	StatusCode int
 	Code       string `json:"code"`
 	Message    string `json:"message"`
+	// ResourceType and DeniedAction are set on a denied request when the hub
+	// names what was denied (e.g. "agent" and "list").
+	ResourceType string `json:"-"`
+	DeniedAction string `json:"-"`
 }
 
 func (e *hubError) Error() string {
@@ -86,6 +90,11 @@ func (e *hubError) userFacingMessage() string {
 	case "agent_not_found":
 		return "Target agent not found. Use `/scion agents` to see available agents."
 	case "forbidden":
+		if e.isStaleAccountLink() {
+			return staleAccountLinkText
+		}
+		return "You don't have permission to message this agent."
+	case "message_denied":
 		return "You don't have permission to message this agent."
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
@@ -110,6 +119,10 @@ func parseHubError(resp *http.Response) *hubError {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details struct {
+				ResourceType string `json:"resource_type"`
+				DeniedAction string `json:"denied_action"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == "" {
@@ -119,6 +132,8 @@ func parseHubError(resp *http.Response) *hubError {
 	}
 	he.Code = envelope.Error.Code
 	he.Message = envelope.Error.Message
+	he.ResourceType = envelope.Error.Details.ResourceType
+	he.DeniedAction = envelope.Error.Details.DeniedAction
 	return he
 }
 

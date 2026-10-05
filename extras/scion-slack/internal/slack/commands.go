@@ -108,6 +108,10 @@ func handleSetup(ctx context.Context, client *slackapi.Client, store Store, hubC
 		projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID, linkedUserPrincipal(mapping))
 		if err != nil {
 			log.Warn("Failed to list user projects", "error", err)
+			if text := deniedRequestText(err, mapping.ScionEmail, ""); text != "" {
+				postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+				return
+			}
 		}
 	}
 	if len(projects) == 0 {
@@ -189,6 +193,10 @@ func handleAgents(ctx context.Context, client *slackapi.Client, store Store, hub
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, linkedUser)
 	if err != nil {
 		log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		if text := deniedRequestText(err, strings.TrimPrefix(linkedUser, "user:"), link.ProjectSlug); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
+		}
 		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch agents. Please try again later.")
 		return
 	}
@@ -235,6 +243,10 @@ func handleStatus(ctx context.Context, client *slackapi.Client, store Store, hub
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, linkedUser)
 	if err != nil {
 		log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		if text := deniedRequestText(err, strings.TrimPrefix(linkedUser, "user:"), link.ProjectSlug); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
+		}
 		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch agent status. Please try again.")
 		return
 	}
