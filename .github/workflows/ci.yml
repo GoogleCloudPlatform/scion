@@ -384,6 +384,16 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-launch-store-postgres
 
+      # The pkg/hub web chat store has its own Postgres SQL (it is not an
+      # Ent store), so its Postgres tests read SCION_TEST_POSTGRES_DSN rather
+      # than the enttest URL. This step points them at the same service;
+      # they touch only webchat_* tables. See the Makefile target's comment.
+      - name: Run web chat store tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-webchat-postgres
+
       # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
       # test. It runs the SQLite and Postgres cases (about 2-3 minutes,
       # including the binary build) and runs
