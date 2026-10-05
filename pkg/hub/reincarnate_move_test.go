@@ -23,10 +23,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// moveTestExportID is the export identity marker both test brokers report.
+const moveTestExportID = "6f1c2a8e-0d4b-4c1e-9a57-3b2f8e1d0c99"
+
 func moveTestStorage(server, export, subPathRoot string, healthy bool) *api.BrokerWorkspaceStorage {
 	return &api.BrokerWorkspaceStorage{
 		Backend: api.WorkspaceStorageBackendNFS,
-		NFS:     &api.BrokerNFSWorkspaceStorage{Server: server, Export: export, SubPathRoot: subPathRoot, Healthy: healthy},
+		NFS: &api.BrokerNFSWorkspaceStorage{Server: server, Export: export, SubPathRoot: subPathRoot, Healthy: healthy,
+			ExportID: moveTestExportID},
 	}
 }
 
@@ -51,7 +55,8 @@ type moveTestProbeCalls map[string]int
 // brokers that pass every check.
 func eligibleMoveInput(calls moveTestProbeCalls) moveEligibilityInput {
 	return moveEligibilityInput{
-		Agent:     &store.Agent{ID: "agent-1", Runtime: "kubernetes", AppliedConfig: &store.AgentAppliedConfig{}},
+		Agent: &store.Agent{ID: "agent-1", Runtime: "kubernetes", WorkspacePlacement: api.WorkspacePlacementExport,
+			AppliedConfig: &store.AgentAppliedConfig{}},
 		Src:       moveTestBroker("src"),
 		Dst:       moveTestBroker("dst"),
 		CloneMode: true,
@@ -59,6 +64,7 @@ func eligibleMoveInput(calls moveTestProbeCalls) moveEligibilityInput {
 			Reachable:        func(b *store.RuntimeBroker) bool { calls["reachable:"+b.ID]++; return true },
 			CanDispatch:      func(*store.RuntimeBroker) bool { calls["dispatch"]++; return true },
 			CanUseAsProvider: func(*store.RuntimeBroker) bool { calls["provider"]++; return true },
+			ServesProject:    func(*store.RuntimeBroker) bool { calls["serves"]++; return true },
 			Capacity:         func(*store.RuntimeBroker) string { calls["capacity"]++; return "" },
 		},
 	}
@@ -86,14 +92,62 @@ func TestEvaluateMoveEligibility_FullPass(t *testing.T) {
 		t.Fatalf("got %d checks, want %d", len(v.Checks), len(moveCheckOrder))
 	}
 	for i, c := range v.Checks {
-		if c.Name != moveCheckOrder[i] || c.Result != MoveCheckPassed || c.Message != "" {
+		if c.Name != moveCheckOrder[i] || c.Result != MoveCheckPassed {
 			t.Errorf("check %d = %+v, want %s passed", i, c, moveCheckOrder[i])
+		}
+		// Only workspace_on_export explains its pass: the directory itself
+		// is confirmed on the target at move time.
+		if c.Name == moveCheckWorkspaceOnExport {
+			if !strings.Contains(c.Message, "at move time") {
+				t.Errorf("workspace_on_export message %q does not say the workspace is confirmed at move time", c.Message)
+			}
+		} else if c.Message != "" {
+			t.Errorf("check %s passed with message %q", c.Name, c.Message)
 		}
 	}
 	for _, k := range []string{"reachable:dst", "reachable:src", "dispatch", "provider", "passthrough", "capacity"} {
 		if calls[k] != 1 {
 			t.Errorf("probe %s called %d times, want 1", k, calls[k])
 		}
+	}
+	if calls["serves"] != 0 {
+		t.Errorf("serves-project probe called %d times for a user move, want 0", calls["serves"])
+	}
+}
+
+// With no pinned profile, the move resolves the target's own default
+// profile, even when the source's default differs (A6).
+func TestEvaluateMoveEligibility_ResolvesTargetDefaultProfile(t *testing.T) {
+	in := eligibleMoveInput(moveTestProbeCalls{})
+	in.Dst.DefaultProfile = "gke"
+	in.Dst.Profiles = append(in.Dst.Profiles, store.BrokerProfile{Name: "gke", Type: "kubernetes", Available: true})
+	v, ref := evaluateMoveEligibility(in)
+	if ref != nil {
+		t.Fatalf("unexpected refusal: %+v", ref)
+	}
+	if v.Profile != "gke" || v.RuntimeType != "kubernetes" {
+		t.Errorf("profile = %q/%q, want the target default gke/kubernetes", v.Profile, v.RuntimeType)
+	}
+}
+
+// An agent moving itself to a broker that serves its project passes access
+// on the serves-project check alone: it needs no dispatch scope and no
+// provider-link right, and those probes are not consulted (A8).
+func TestEvaluateMoveEligibility_SelfMoveToServingBroker(t *testing.T) {
+	calls := moveTestProbeCalls{}
+	in := eligibleMoveInput(calls)
+	in.SelfMove = true
+	in.Probes.CanDispatch = func(*store.RuntimeBroker) bool { calls["dispatch"]++; return false }
+	in.Probes.CanUseAsProvider = func(*store.RuntimeBroker) bool { calls["provider"]++; return false }
+	v, ref := evaluateMoveEligibility(in)
+	if ref != nil {
+		t.Fatalf("unexpected refusal: %+v", ref)
+	}
+	if !v.Eligible {
+		t.Fatal("verdict not eligible")
+	}
+	if calls["serves"] != 1 || calls["dispatch"] != 0 || calls["provider"] != 0 {
+		t.Errorf("probe calls = %v, want serves once and no dispatch/provider", calls)
 	}
 }
 
@@ -114,7 +168,7 @@ func TestEvaluateMoveEligibility_SharedWorkspaceOnAnyRuntime(t *testing.T) {
 func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 	cases := []struct {
 		name       string
-		mutate     func(in *moveEligibilityInput)
+		mutate     func(in *moveEligibilityInput, calls moveTestProbeCalls)
 		check      string
 		status     int
 		code       string
@@ -124,27 +178,27 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 	}{
 		{
 			name:   "workspace mode",
-			mutate: func(in *moveEligibilityInput) { in.WorkspaceModeError = "worktree workspaces cannot move" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.WorkspaceModeError = "worktree workspaces cannot move" },
 			check:  moveCheckWorkspaceMode, status: http.StatusBadRequest, code: ErrCodeValidationError,
 			msgContain: "worktree workspaces cannot move",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
 			name:   "target descriptor absent (old broker)",
-			mutate: func(in *moveEligibilityInput) { in.Dst.WorkspaceStorage = nil },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Dst.WorkspaceStorage = nil },
 			check:  moveCheckWorkspaceStorage, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
 			msgContain: "broker dst-name does not advertise workspace storage",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
 			name:   "source descriptor absent (old broker)",
-			mutate: func(in *moveEligibilityInput) { in.Src.WorkspaceStorage = nil },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Src.WorkspaceStorage = nil },
 			check:  moveCheckWorkspaceStorage, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
 			msgContain: "broker src-name does not advertise workspace storage",
 		},
 		{
 			name: "target is local storage",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Dst.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendLocal}
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
@@ -152,7 +206,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "different export",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Dst.WorkspaceStorage = moveTestStorage("10.0.0.2", "/vol2", "projects", true)
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
@@ -160,7 +214,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "different subpath root",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Dst.WorkspaceStorage = moveTestStorage("10.0.0.2", "/vol1", "other", true)
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
@@ -168,51 +222,96 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
+			name: "target reports no export identity marker",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.Dst.WorkspaceStorage.NFS.ExportID = ""
+			},
+			check: moveCheckSameExport, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
+			msgContain: "broker dst-name has not reported the export identity marker (projects/.scion-export-id",
+			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
+		},
+		{
+			name: "source reports no export identity marker (old broker)",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.Src.WorkspaceStorage.NFS.ExportID = ""
+			},
+			check: moveCheckSameExport, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
+			msgContain: "broker src-name has not reported the export identity marker",
+		},
+		{
+			name: "same export settings, different export identity",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.Dst.WorkspaceStorage.NFS.ExportID = "0a0a0a0a-0000-4000-8000-000000000000"
+			},
+			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
+			msgContain: "see different export identity markers (" + moveTestExportID + " and 0a0a0a0a-0000-4000-8000-000000000000)",
+			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
+		},
+		{
 			name:   "gcs-synced workspace",
-			mutate: func(in *moveEligibilityInput) { in.Agent.AppliedConfig.WorkspaceStoragePath = "gs://bucket/ws" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.AppliedConfig.WorkspaceStoragePath = "gs://bucket/ws" },
 			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: "GCS-synced",
 		},
 		{
+			name:   "workspace placement unknown",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.WorkspacePlacement = "" },
+			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
+			msgContain: "workspace placement is unknown (it has not started since placements were recorded); re-provision the agent once",
+			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
+		},
+		{
+			name:   "workspace placement local",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.WorkspacePlacement = api.WorkspacePlacementLocal },
+			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
+			msgContain: `not on the shared NFS export on broker src-name (placement "local")`,
+		},
+		{
+			name:   "workspace placement unrecognised",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.WorkspacePlacement = "pvc" },
+			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
+			msgContain: `placement "pvc" is not recognised as the shared NFS export; re-provision the agent once`,
+		},
+		{
 			name:   "clone-per-agent on docker",
-			mutate: func(in *moveEligibilityInput) { in.Agent.Runtime = "docker" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Agent.Runtime = "docker" },
 			check:  moveCheckWorkspaceOnExport, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: `runtime "docker"`,
 		},
 		{
 			name:   "unknown target profile",
-			mutate: func(in *moveEligibilityInput) { in.Profile = "gpu" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Profile = "gpu" },
 			check:  moveCheckTargetProfile, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: `has no profile "gpu"`,
 		},
 		{
 			name:   "no target default profile",
-			mutate: func(in *moveEligibilityInput) { in.Dst.DefaultProfile = "" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Dst.DefaultProfile = "" },
 			check:  moveCheckTargetProfile, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: "has no default profile",
 		},
 		{
 			name:   "target profile unavailable",
-			mutate: func(in *moveEligibilityInput) { in.Dst.Profiles[0].Available = false },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Dst.Profiles[0].Available = false },
 			check:  moveCheckTargetProfile, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: `profile "k8s" is not available`,
 		},
 		{
 			name:   "clone-per-agent onto docker profile",
-			mutate: func(in *moveEligibilityInput) { in.Profile = "local" },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Profile = "local" },
 			check:  moveCheckTargetProfile, status: http.StatusConflict, code: ErrCodeConflict,
 			msgContain: `runtime type "docker"`,
 		},
 		{
 			name:   "target mount unhealthy",
-			mutate: func(in *moveEligibilityInput) { in.Dst.WorkspaceStorage.NFS.Healthy = false },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Dst.WorkspaceStorage.NFS.Healthy = false },
 			check:  moveCheckTargetHealth, status: http.StatusServiceUnavailable, code: ErrCodeRuntimeBrokerUnavail,
 			msgContain: "NFS export mount unhealthy",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
 			name: "target unreachable",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.Reachable = func(b *store.RuntimeBroker) bool { return b.ID != "dst" }
 			},
 			check: moveCheckTargetHealth, status: http.StatusServiceUnavailable, code: ErrCodeRuntimeBrokerUnavail,
@@ -221,7 +320,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "no dispatch permission",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.CanDispatch = func(*store.RuntimeBroker) bool { return false }
 			},
 			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
@@ -230,7 +329,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "cannot link target as provider",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.CanUseAsProvider = func(*store.RuntimeBroker) bool { return false }
 			},
 			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
@@ -238,7 +337,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "passthrough denied on target",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.Passthrough = func(*store.RuntimeBroker) string { return "broker not trusted" }
 			},
 			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
@@ -246,21 +345,41 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 			notCalled:  []string{"capacity"},
 		},
 		{
+			name: "self-move with a passthrough identity",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.SelfMove = true
+				in.Probes.Passthrough = func(*store.RuntimeBroker) string { calls["passthrough"]++; return "" }
+			},
+			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
+			msgContain: "this agent cannot move itself; ask a user to move you",
+			notCalled:  []string{"passthrough", "serves", "dispatch", "provider", "capacity"},
+		},
+		{
+			name: "self-move to a broker not serving the project",
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
+				in.SelfMove = true
+				in.Probes.ServesProject = func(*store.RuntimeBroker) bool { return false }
+			},
+			check: moveCheckAccess, status: http.StatusConflict, code: ErrCodeConflict,
+			msgContain: "target broker dst-name does not serve this project",
+			notCalled:  []string{"dispatch", "provider", "capacity"},
+		},
+		{
 			name:   "target lacks agent move (live phase-1 case)",
-			mutate: func(in *moveEligibilityInput) { in.Dst.Capabilities.AgentMove = false },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Dst.Capabilities.AgentMove = false },
 			check:  moveCheckCapability, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
 			msgContain: "broker dst-name does not support agent move",
 			notCalled:  []string{"reachable:src", "capacity"},
 		},
 		{
 			name:   "source lacks agent move",
-			mutate: func(in *moveEligibilityInput) { in.Src.Capabilities = nil },
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) { in.Src.Capabilities = nil },
 			check:  moveCheckCapability, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
 			msgContain: "broker src-name does not support agent move",
 		},
 		{
 			name: "source offline",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.Reachable = func(b *store.RuntimeBroker) bool { return b.ID != "src" }
 			},
 			check: moveCheckCapability, status: http.StatusPreconditionFailed, code: ErrCodeRuntimeBrokerUnavail,
@@ -269,7 +388,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		},
 		{
 			name: "target at agent limit",
-			mutate: func(in *moveEligibilityInput) {
+			mutate: func(in *moveEligibilityInput, calls moveTestProbeCalls) {
 				in.Probes.Capacity = func(*store.RuntimeBroker) string { return "broker dst-name is at its agent limit (5 of 5)" }
 			},
 			check: moveCheckCapacity, status: http.StatusTooManyRequests, code: ErrCodeQuotaExceeded,
@@ -281,7 +400,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := moveTestProbeCalls{}
 			in := eligibleMoveInput(calls)
-			tc.mutate(&in)
+			tc.mutate(&in, calls)
 
 			v, ref := evaluateMoveEligibility(in)
 			if ref == nil {

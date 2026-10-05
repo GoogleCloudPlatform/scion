@@ -154,6 +154,19 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// failed report arriving during a stop/suspend returns a Conflict
 	// HTTPStatus — in both of those cases the agent may still be relying on
 	// its current credential.
+	// A succeeded report carries the launch's start echo: record where it
+	// placed the agent's workspace (narrow write, see
+	// recordWorkspacePlacement), only when the store applied the report.
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied &&
+		req.Agent != nil && validWorkspacePlacementReport(req.Agent.WorkspacePlacement) {
+		if err := s.store.SetAgentWorkspacePlacement(ctx, agentID, req.Agent.WorkspacePlacement); err != nil {
+			s.agentLifecycleLog.Warn("launch report: failed to record the agent's workspace placement",
+				"agent_id", agentID, "error", err)
+		} else {
+			updated.WorkspacePlacement = req.Agent.WorkspacePlacement
+		}
+	}
+
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
 	}

@@ -1056,6 +1056,10 @@ type RemoteAgentInfo struct {
 	// the runtime entry the broker created or found (ptone/scion#2550).
 	// Older brokers omit it.
 	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement mirrors runtimebroker.AgentResponse.WorkspacePlacement:
+	// where the start this answers placed the agent's workspace. Empty
+	// when no start resolved it (provision-only, older brokers).
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // Server is the Hub API HTTP server.
