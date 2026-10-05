@@ -462,8 +462,9 @@ func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testin
 	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
-// unprivilegedUser makes the agent's owner a user with no broker or
-// project rights, and returns a request func acting as that user.
+// unprivilegedUser makes the agent's owner a user with no broker rights and
+// only the project member role, and returns a request func acting as that
+// user.
 func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(ReincarnateAgentRequest) *httptest.ResponseRecorder) {
 	t.Helper()
 	ctx := context.Background()
@@ -472,6 +473,10 @@ func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(Reincarn
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	require.NoError(t, f.s.CreateUser(ctx, user))
+	// Reincarnating the agent records the user as its delegator, which
+	// needs agent.create in the project. The project member role grants
+	// it and no broker read.
+	createTestUserWithProjectRole(t, f.s, user.ID, user.Email, f.project.ID, store.ProjectRoleMember)
 	f.agent.OwnerID = user.ID
 	f.agent.CreatedBy = user.ID
 	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
