@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -345,7 +346,7 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 
 	var scopeCap *Capabilities
 	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
+		scopeCap = s.skillListCapabilities(ctx, filter.Scope, filter.ScopeID, scopeResult.Scopes)
 	}
 
 	writeJSON(w, http.StatusOK, ListSkillsResponse{
@@ -354,6 +355,73 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
+}
+
+// skillListCapabilities returns the list-level capabilities for a skills
+// list request. "create" is reported when the caller can create a skill in
+// at least one scope the request covers: any scope when no scope filter is
+// given, otherwise only the filtered scope (and, for project and user
+// scopes, the filtered scopeId when one is set). Each scope is checked the
+// same way createSkill authorizes a create in it. Listing is not reported
+// as a capability: a 200 response already means the caller may list.
+//
+// projects is the caller's project list scope from ResolveListScopes; it
+// supplies the candidate projects for a project-scope check without a
+// scopeId.
+func (s *Server) skillListCapabilities(ctx context.Context, scopeFilter, scopeIDFilter string, projects ScopeSet) *Capabilities {
+	scopes := []string{scopeFilter}
+	if scopeFilter == "" {
+		scopes = []string{store.SkillScopeUser, store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore}
+	}
+	for _, scope := range scopes {
+		if s.canCreateSkillInScope(ctx, scope, scopeIDFilter, projects) {
+			return &Capabilities{Actions: []string{string(ActionCreate)}}
+		}
+	}
+	return &Capabilities{Actions: []string{}}
+}
+
+// canCreateSkillInScope reports whether the caller in ctx could create a
+// skill in scope (restricted to scopeID when it is set), following the
+// authorization branches of createSkill.
+func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID string, projects ScopeSet) bool {
+	switch scope {
+	case store.SkillScopeUser:
+		// createSkill always places a user-scoped skill in the caller's own
+		// user scope, so another user's scope is never creatable.
+		userIdent := GetUserIdentityFromContext(ctx)
+		return userIdent != nil && (scopeID == "" || scopeID == userIdent.ID())
+	case store.SkillScopeGlobal, store.SkillScopeCore:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate)).Allowed
+	case store.SkillScopeProject:
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			own := agentIdent.ProjectID()
+			return own != "" && agentIdent.HasScope(ScopeAgentCreate) && (scopeID == "" || scopeID == own)
+		}
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		candidates := projects.ProjectIDs()
+		switch {
+		case scopeID != "":
+			candidates = []string{scopeID}
+		case projects.IsAll():
+			// An unrestricted caller's project list is not enumerated; ask
+			// whether it may create in project scope at all.
+			candidates = []string{""}
+		}
+		for _, projectID := range candidates {
+			if s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeProject, projectID), ActionCreate).Allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // agentSkillAccessScope derives an agent's list predicate from the same
@@ -404,13 +472,58 @@ func isAgentIdentity(identity Identity) bool {
 	return ok
 }
 
+// readSkillWriteBody decodes a create or update skill request body into v.
+// Skills no longer carry a visibility setting (access follows the skill's
+// scope), so a body that still sends one is rejected with 400 rather than
+// having the field silently dropped. The body must be a single JSON value:
+// trailing data is rejected, so the visibility check always covers exactly
+// the value decoded into v. The body is limited by readRawBody (413 when
+// exceeded). On failure it writes the error response and returns false.
+func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	body, err := readRawBody(w, r)
+	if err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Request body too large", nil)
+			return false
+		}
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	var value json.RawMessage
+	if err := dec.Decode(&value); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		BadRequest(w, "Invalid request body: unexpected data after the JSON value")
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(value, &fields) == nil {
+		for name := range fields {
+			// encoding/json matches struct fields case-insensitively, so
+			// treat the key the same way.
+			if strings.EqualFold(name, "visibility") {
+				ValidationError(w, "visibility is not supported: access to a skill is determined by its scope",
+					map[string]interface{}{"field": "visibility"})
+				return false
+			}
+		}
+	}
+	if err := json.Unmarshal(value, v); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	return true
+}
+
 // createSkill creates a new skill record.
 func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateSkillRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readSkillWriteBody(w, r, &req) {
 		return
 	}
 
@@ -579,8 +692,7 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	var updates UpdateSkillRequest
-	if err := readJSON(r, &updates); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readSkillWriteBody(w, r, &updates) {
 		return
 	}
 
@@ -1450,17 +1562,19 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(skillRef.URI, "gh://") {
 			if !ghProjectAllowed {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
+					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
 					Message: "you do not have permission to resolve GitHub skills for this project",
 				})
 				continue
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
 			if err != nil {
-				code := "resolve_failed"
+				code := agent.SkillErrCodeResolveFailed
 				var rl *agent.GitHubRateLimitError
 				if errors.As(err, &rl) {
 					code = agent.GitHubRateLimitedCode
+				} else if isGHNotFound(err) {
+					code = agent.SkillErrCodeNotFound
 				}
 				resolveErrors = append(resolveErrors, ResolveSkillError{
 					URI: skillRef.URI, Code: code, Message: err.Error(),
@@ -1982,6 +2096,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 	}
 
+	// A ref GitHub reported as not found for this cache key within the last
+	// agent.FailureMemoTTL fails again now, without asking GitHub. A fresh or
+	// stale entry above still wins.
+	if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
+		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
+		return nil, ferr
+	}
+
 	// A miss during a rate-limit cooldown fails now, without starting a
 	// flight: no request could be sent for this identity anyway.
 	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
@@ -2040,6 +2162,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, cacheKey); gerr == nil && hit {
 				return entry, nil
 			}
+		}
+		if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
+			slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
+			return nil, ferr
 		}
 
 		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
@@ -2165,14 +2291,18 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		var err error
 		commitSHA, err = ghResolveCommitSHA(ctx, cooldown, cooldownID, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+			err = fmt.Errorf("failed to resolve commit SHA: %w", err)
+			s.rememberGHNotFound(cacheKey, err)
+			return nil, err
 		}
 		refSHAMemo.set(memoKey, commitSHA)
 	}
 
 	fileEntries, err := ghListContents(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list contents: %w", err)
+		err = fmt.Errorf("failed to list contents: %w", err)
+		s.rememberGHNotFound(cacheKey, err)
+		return nil, err
 	}
 
 	if len(fileEntries) == 0 {
@@ -2203,6 +2333,9 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		OriginalURI: rawURI,
 	}
 
+	// A successful resolution replaces any remembered not found for this
+	// key, whether or not the store write below succeeds.
+	s.ghFailures.Clear(cacheKey)
 	if s.ghResolutionStore != nil {
 		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
 			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",
