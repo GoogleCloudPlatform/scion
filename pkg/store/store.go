@@ -395,7 +395,8 @@ type AgentStore interface {
 	// SetAgentWorkspacePlacement records where the agent's broker placed its
 	// workspace on the latest start (see Agent.WorkspacePlacement). It is a
 	// narrow single-column write that neither checks nor bumps
-	// state_version. Returns ErrNotFound if the agent doesn't exist.
+	// state_version. Returns ErrNotFound if the agent doesn't exist or is
+	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
 	// UpdateAgentExposedPorts updates only exposed port registrations.
