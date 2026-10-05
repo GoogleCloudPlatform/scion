@@ -61,6 +61,16 @@ export class ScionChatShell extends LitElement {
       touch-action: manipulation;
     }
 
+    /* Below the chat page's mobile breakpoint a horizontal drag belongs to
+       its panel swipe, so a drag that starts on the header must not become
+       Chromium's overscroll history-back either (see the panel rule in
+       pages/chat.ts). Pinch-zoom is kept. */
+    @media (max-width: 768px) {
+      :host {
+        touch-action: pan-y pinch-zoom;
+      }
+    }
+
     .main {
       flex: 1;
       display: flex;

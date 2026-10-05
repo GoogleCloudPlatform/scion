@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	entgroup "github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -270,6 +271,11 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 	if err := c.DeleteAgentIdentityKeys(ctx, id); err != nil {
 		return err
 	}
+	// agent_recovery is keyed by the agent ID with no FK; cascade explicitly.
+	if _, err := c.client.AgentRecovery.Delete().
+		Where(agentrecovery.IDEQ(uid.String())).Exec(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -295,6 +301,14 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		}
 		if _, err := c.client.NotificationSubscription.Delete().
 			Where(notificationsubscription.AgentIDIn(agentIDs...)).Exec(ctx); err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(agentIDs))
+		for _, id := range agentIDs {
+			ids = append(ids, id.String())
+		}
+		if _, err := c.client.AgentRecovery.Delete().
+			Where(agentrecovery.IDIn(ids...)).Exec(ctx); err != nil {
 			return err
 		}
 		if _, err := c.client.Agent.Delete().
@@ -412,6 +426,14 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		if len(removedIDs) > 0 {
 			if _, err := tx.AgentIdentityKey.Delete().
 				Where(agentidentitykey.AgentIDIn(removedIDs...)).Exec(ctx); err != nil {
+				return 0, err
+			}
+			removed := make([]string, 0, len(removedIDs))
+			for _, id := range removedIDs {
+				removed = append(removed, id.String())
+			}
+			if _, err := tx.AgentRecovery.Delete().
+				Where(agentrecovery.IDIn(removed...)).Exec(ctx); err != nil {
 				return 0, err
 			}
 		}
