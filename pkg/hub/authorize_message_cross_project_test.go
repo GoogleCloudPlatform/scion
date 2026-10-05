@@ -746,14 +746,22 @@ func TestCheckEffectiveMembership(t *testing.T) {
 			MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: store.GroupMemberRoleMember}))
 		return grp.ID
 	}
-	bind := func(t *testing.T, rdID, principalType, principalID string, notBefore, expiresAt *time.Time) {
+	bindIn := func(t *testing.T, scopeID, rdID, principalType, principalID string, notBefore, expiresAt *time.Time) {
 		t.Helper()
 		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rdID,
 			PrincipalType: principalType, PrincipalID: principalID,
-			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+			ScopeType: store.RoleScopeProject, ScopeID: scopeID, CreatedBy: "test",
 			NotBefore: notBefore, ExpiresAt: expiresAt})
 		require_NoError(t, err)
 	}
+	bind := func(t *testing.T, rdID, principalType, principalID string, notBefore, expiresAt *time.Time) {
+		t.Helper()
+		bindIn(t, projectID, rdID, principalType, principalID, notBefore, expiresAt)
+	}
+	otherProjectID := tid("msg-eff-other-project")
+	require_NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: otherProjectID, Name: "eff other", Slug: "msg-eff-other-project", Created: time.Now(), Updated: time.Now(),
+	}))
 	expect := func(t *testing.T, userID string, wantMember bool, wantRole string) {
 		t.Helper()
 		result := srv.CheckEffectiveMembership(ctx, userID, projectID)
@@ -799,6 +807,35 @@ func TestCheckEffectiveMembership(t *testing.T) {
 		uid := newUser(t, "future-custom")
 		future := time.Now().Add(time.Hour)
 		bind(t, newCustomRole(t, "future"), store.RoleBindingPrincipalUser, uid, &future, nil)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("direct custom binding in another project is not a member", func(t *testing.T) {
+		uid := newUser(t, "other-direct-custom")
+		bindIn(t, otherProjectID, newCustomRole(t, "other-direct"), store.RoleBindingPrincipalUser, uid, nil, nil)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("group-derived custom binding in another project is not a member", func(t *testing.T) {
+		uid := newUser(t, "other-group-custom")
+		gid := newGroupWith(t, "other-custom", uid)
+		bindIn(t, otherProjectID, newCustomRole(t, "other-group"), store.RoleBindingPrincipalGroup, gid, nil, nil)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("expired group-derived custom binding is not a member", func(t *testing.T) {
+		uid := newUser(t, "expired-group-custom")
+		gid := newGroupWith(t, "expired-custom", uid)
+		past := time.Now().Add(-time.Hour)
+		bind(t, newCustomRole(t, "expired-group"), store.RoleBindingPrincipalGroup, gid, nil, &past)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("not-yet-active group-derived custom binding is not a member", func(t *testing.T) {
+		uid := newUser(t, "future-group-custom")
+		gid := newGroupWith(t, "future-custom", uid)
+		future := time.Now().Add(time.Hour)
+		bind(t, newCustomRole(t, "future-group"), store.RoleBindingPrincipalGroup, gid, &future, nil)
 		expect(t, uid, false, "")
 	})
 }

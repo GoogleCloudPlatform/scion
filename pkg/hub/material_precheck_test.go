@@ -463,6 +463,52 @@ func TestAgentSecretRead_CustomOnlyProjectBindingAdmits(t *testing.T) {
 	}
 }
 
+// TestAgentSecretRead_CustomBindingInOtherProjectDoesNotAdmit covers check
+// 5: a custom role binding scoped to a different project is not membership
+// in the agent's project, even when it carries secret.use and
+// project.secret_read, and it is not system authority for secret.use (it is
+// project-scoped).
+func TestAgentSecretRead_CustomBindingInOtherProjectDoesNotAdmit(t *testing.T) {
+	f := newMaterialFixture(t, "custom-other-project")
+	ctx := context.Background()
+
+	// Remove the fixture's own owner membership so only the other-project
+	// binding remains.
+	bindings, err := f.Store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.UserID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.ProjectID {
+			require.NoError(t, f.Store.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	otherProjectID := tid("project-custom-other-project-peer")
+	require.NoError(t, f.Store.CreateProject(ctx, &store.Project{
+		ID: otherProjectID, Name: "peer", Slug: "proj-custom-other-project-peer", Created: time.Now(), Updated: time.Now(),
+	}))
+	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "other-project-secret-reader-" + f.UserID,
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"secret.use", "project.secret_read"},
+	})
+	require.NoError(t, err)
+	_, err = f.Store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.UserID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          otherProjectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
+	_, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
+		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
+	}
+}
+
 // TestAgentSecretRead_SystemRoleExactPermissionAdmitted covers check 5's
 // system-authority leg: a system-scope role holding the exact secret.use
 // permission establishes target-applicable authority for the project, even

@@ -70,7 +70,7 @@ The **receiving project's inbound policy** is directional:
 | Policy | Meaning |
 |--------|---------|
 | `none` | Accept no agent messages from other projects. |
-| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project. |
+| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project (any active project role binding, built-in or custom). |
 | `any` | Accept an eligible agent from any project on this Hub. |
 
 All policies require the external **sender** to use `hub` mode. The
