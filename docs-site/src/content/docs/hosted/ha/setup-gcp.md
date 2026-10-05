@@ -1010,8 +1010,8 @@ gcloud run deploy scion-hub \
 An HA Hub needs at least two running replicas, so that losing one instance
 (crash, host maintenance, scale-in) never leaves the Hub with zero warm
 replicas. With `--min-instances=1` there is no failover peer, and the
-deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)). `--max-instances=3` leaves
-room for Cloud Run to scale up under load.
+deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
+`--max-instances=3` leaves room for Cloud Run to scale up under load.
 :::
 
 :::caution[Cloud Run Timeout Warning]
