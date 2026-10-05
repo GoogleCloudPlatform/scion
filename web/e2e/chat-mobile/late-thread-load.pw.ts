@@ -16,6 +16,10 @@
  * A slow answer for a thread the user has already left must not bring that
  * thread back: its URL, its header and its messages all stay on the thread
  * the user moved to.
+ *
+ * Only the body of thread A's history is held: its headers arrive at once,
+ * as a large response's do, so the thread's check when the headers land
+ * passes and only its check once the body is read can drop the page.
  */
 
 import { test, expect, type Page } from '@playwright/test';
@@ -61,22 +65,31 @@ async function backToRail(page: Page): Promise<void> {
   if ((await back.count()) > 0) await back.first().click();
 }
 
-test('a late history for a thread the user left does not bring it back', async ({ page }) => {
-  let releaseA: () => void = () => {};
-  const heldA = new Promise<void>((resolve) => (releaseA = resolve));
-  let requestedA = false;
+/** Hold `Response.json()` for thread A's history until the page releases it. */
+async function holdThreadABody(page: Page): Promise<void> {
+  await page.addInitScript((threadId) => {
+    const w = window as unknown as { __bodyHeld?: boolean; __releaseBody?: () => void };
+    const released = new Promise<void>((resolve) => (w.__releaseBody = resolve));
+    const json = Response.prototype.json;
+    Response.prototype.json = async function (this: Response): Promise<unknown> {
+      if (this.url.includes(`/conversations/${threadId}/messages`)) {
+        w.__bodyHeld = true;
+        await released;
+      }
+      return json.call(this);
+    };
+  }, THREAD_A.id);
+}
 
+test('a late history for a thread the user left does not bring it back', async ({ page }) => {
   await openChatRail(page, async (p) => {
+    await holdThreadABody(p);
     await p.route(/\/api\/v1\/chat\/conversations\/([^/?]+)\/messages/, async (route) => {
       const url = route.request().url();
-      if (url.includes(`/conversations/${THREAD_A.id}/`)) {
-        requestedA = true;
-        await heldA;
-        const items = messagesFor(THREAD_A.id);
-        await route.fulfill({ json: { items, messages: items } });
-        return;
-      }
-      const items = url.includes(`/conversations/${THREAD_B.id}/`) ? messagesFor(THREAD_B.id) : [];
+      const threadId = [THREAD_A.id, THREAD_B.id].find((id) =>
+        url.includes(`/conversations/${id}/`)
+      );
+      const items = threadId ? messagesFor(threadId) : [];
       await route.fulfill({ json: { items, messages: items } });
     });
   });
@@ -85,7 +98,9 @@ test('a late history for a thread the user left does not bring it back', async (
   await backToRail(page);
   await page.locator('.thread-item', { hasText: THREAD_A.name }).first().click();
   await expect(page).toHaveURL(`/chat/${PROJECT_A.slug}/${THREAD_A.id}`);
-  await expect.poll(() => requestedA).toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __bodyHeld?: boolean }).__bodyHeld))
+    .toBe(true);
 
   await backToRail(page);
   await page.locator('.thread-item', { hasText: THREAD_B.name }).first().click();
@@ -93,7 +108,7 @@ test('a late history for a thread the user left does not bring it back', async (
   await expect(page).toHaveURL(pathB);
   await expect(page.getByText(`${THREAD_B.id} message 2`)).toBeVisible({ timeout: 10_000 });
 
-  releaseA();
+  await page.evaluate(() => (window as unknown as { __releaseBody: () => void }).__releaseBody());
   // Give the released answer time to land and render if it were going to.
   await page.waitForTimeout(500);
 
