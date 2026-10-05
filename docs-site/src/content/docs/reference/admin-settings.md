@@ -46,11 +46,13 @@ Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config`
 
 On a workstation Hub the file edit follows the request body field by field:
 
-- Each field the body carries is set, an explicit empty value (`""`, `false`, `0`, `[]`) included, so the loaded setting equals what was sent. Where an absent key and an empty value load the same (the key's block exists), the key is removed rather than written empty. Where they differ, the empty value is written: `{"server":{"hub":{"cors":{"enabled":false}}}}` on a file without a `cors` block writes `cors: {enabled: false}`, because an absent `cors` block means CORS is on.
-- `null` removes the key or block.
+- Each field the body carries is written exactly as sent, an explicit empty value (`""`, `false`, `0`, `[]`) included. Only `null` removes a key or block.
+- The Hub then compares the settings it would load from the edited file with the settings it loads today (the server config the Hub builds, the typed settings, and the `active_profile`/`workspace_path` merge over the built-in defaults). Fields whose effective value does not change are not written, not listed in `file_keys` and not reported as needing a restart. If nothing effective changes, the file is not written, so saving an unchanged form writes nothing. For example, `""` for a key the file does not have changes nothing and is skipped. `[]` for `server.hub.cors.allowed_origins` replaces the default list with an empty one and is written.
+- A field whose value in the edited file would not be what was sent is rejected with `422 unsaved_keys_rejected` naming it, and nothing is saved.
 - Fields the body leaves out are kept.
-- `server.broker.broker_id` and `broker_token` are written by the Hub itself. A save may send them back unchanged (the token as `********`), but changing or clearing them is rejected with `422 hub_owned_keys_rejected`. `{"server":{"broker":null}}` removes the rest of the broker block and keeps them.
-- Values that are already in the file are not rewritten and are not listed as needing a restart, so saving an unchanged form writes nothing.
+- Creating a `cors` block (`server.hub.cors` or `server.broker.cors`) without sending `enabled` also writes `enabled` with its current value. Inside the block a missing `enabled` means off, while a missing block means on, so adding an origin does not silently turn CORS off.
+- `server.broker.broker_id` and `broker_token` are written by the Hub itself. A save may send them back unchanged (the token as `********`), but changing or clearing them is rejected with `422 hub_owned_keys_rejected`. A `null` on a block that contains them (`{"server":null}` or `{"server":{"broker":null}}`) removes everything else in that block and keeps them.
+- The admin UI sends only the fields you changed since the page loaded, so defaults the form shows for keys the file does not have are never written.
 - The file is edited in place: comments, key order and keys the Hub does not know survive. A `settings.yaml` that uses YAML anchors or aliases on an edited path cannot be edited in place, and the save is rejected with `422` (edit that file by hand).
 
 Some workstation fields are overridden at every start by the workstation defaults and `scion server start` flags, so a value in `settings.yaml` has no effect: `server.broker.enabled` and `server.broker.host` (`--enable-runtime-broker`, `--host`), `server.hub.host` (`--host`), `server.auth.dev_mode` (`--dev-auth`), `server.storage.provider` (`--storage-bucket`) and `server.secrets.backend`. The admin UI shows them read-only with a "Set by workstation startup defaults / server flags" badge.
@@ -246,4 +248,4 @@ The admin UI provides structured feedback on save:
 | **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
-| **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` | Shows the message and the offending keys; nothing was saved |
+| **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |
