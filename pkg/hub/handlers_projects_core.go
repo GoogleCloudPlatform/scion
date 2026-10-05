@@ -719,11 +719,7 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 // during a rolling upgrade, so the guards keep protecting such a group
 // (ptone/scion#2556).
 func hasProjectMembersGroupMarker(g *store.Group) bool {
-	if g == nil || g.ProjectID == "" || g.Annotations == nil {
-		return false
-	}
-	return g.Annotations[store.AnnotationProjectMembersGroup] == "true" ||
-		g.Annotations[store.LegacyAnnotationProjectMembersGroup] == "true"
+	return store.IsProjectMembersGroup(g)
 }
 
 // changesProjectMembersGroupMarker reports whether replacing the stored

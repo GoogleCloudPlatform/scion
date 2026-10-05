@@ -654,6 +654,21 @@ const (
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 
+// IsProjectMembersGroup reports whether g is a system project members group:
+// it belongs to a project and carries either members-group marker key with
+// the value "true".
+//
+// Project members groups are system-managed. They cannot be the principal of
+// a role binding or be nested as a child of another group; the store
+// refuses both with ErrProjectMembersGroupPrincipal.
+func IsProjectMembersGroup(g *Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[LegacyAnnotationProjectMembersGroup] == "true"
+}
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,

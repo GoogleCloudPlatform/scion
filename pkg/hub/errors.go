@@ -329,6 +329,11 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
+		// Must precede ErrInvalidInput, which it wraps.
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidRequest
+		message = storeMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
