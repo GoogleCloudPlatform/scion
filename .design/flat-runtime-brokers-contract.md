@@ -284,7 +284,7 @@ Registration **authorization** is unchanged and is not part of these rules: the 
 - **R6 Authorization match.** `createBrokerRegistration` authorizes a re-registration against the row returned by `FindExistingBroker`, then pins the mutation to that row. Both steps must use the same rule.
   - P1.2 gives `FindExistingBroker` the descriptor. With a descriptor, it matches by ID only and never matches a flat row by name. The handler uses that one result for both the authorization decision and the pinned mutation.
   - Flat re-registration keeps the existing re-register permission gate.
-- **R8 Auto-provide and links (see section 17).** `autoProvide` on a flat registration is stored as sent. The flat contract does not extend auto-provide or automatic linking: **a flat row receives no automatic cross-project link.** When a new project is created, the auto-provide link (`handlers_env_secrets.go`, provider plus default) **skips flat rows, whatever the experiment state**. For a flat row, `autoProvide` therefore only marks it as available to add, which matches ptone/scion#3340. Links to a flat row form only through the paths that exist today and that ptone/scion#3340 governs: an owner adding the provider, the caller-authorized link at create time, and the co-located convenience link (R7). Whatever ptone/scion#3340 decides for links applies to flat rows unchanged.
+- **R8 Auto-provide and links (see section 17).** `autoProvide` on a flat registration is stored as sent. The flat contract does not extend auto-provide or automatic linking: **a flat row receives no automatic cross-project link.** When a new project is created, the auto-provide link (`handlers_env_secrets.go`, provider plus default) **skips flat rows, whatever the experiment state**. For a flat row, `autoProvide` therefore only marks it as available to add, which matches ptone/scion#3340. A link to a flat row is created **only by an explicit link action**: the existing project providers endpoint `POST /api/v1/projects/{id}/providers` (`handleProjectProviders`, which needs project-update permission), reached by `scion runtime-broker provide` or hubclient `Projects().AddProvider`. No automatic path links a flat row. That covers project-creation auto-provide, the create-time link in `resolveRuntimeBroker`, the co-located registration (R7) and the deprecated `RegisterProject` (which refuses flat rows). Whatever ptone/scion#3340 decides for explicit links applies to flat rows unchanged.
 - **R9 Activation acknowledgement (reverse negotiation; architecture decision).** A Hub that predates this contract (today's Hub, a P1.1-only Hub, or an older replica during a rolling Hub upgrade) decodes registration leniently. It drops `runtimeTarget`, matches by name first, and either re-registers an existing legacy row (rewriting its auto-provide, GCP host fields and labels) or creates a legacy row with the flat ID. The architecture decision for this workstream is that **a flat instance refuses to activate against such a Hub; there is no automatic downgrade to legacy.** R9 governs the HTTP registration and join of a remote flat instance (built in P2.1). R10 applies the same acknowledgement semantics to the P1 embedded path and to every remote activation.
   - **Acknowledgement.** Registration must acknowledge both the requested Runtime Broker ID and the agreed `runtimeTarget` binding: the response `brokerId` equals the identity's `runtimeBrokerId`, **and** the response `runtimeTarget` equals the identity's target (ID and type). The join response is checked the same way. The pure check is `brokeridentity.CheckActivationAck(id, phase, brokerID, target)` (P1.1; types in section 4). It returns a typed `*brokeridentity.AckError` (`Phase` is `"register"` or `"join"`) with one of two **distinct** codes. **Evaluation order (frozen):** (1) a response `brokerId` different from the identity gives `runtime_target_binding_conflict`; (2) otherwise a nil `runtimeTarget` gives `runtime_target_ack_missing`; (3) otherwise a different target ID or type gives `runtime_target_binding_conflict`. An unaware Hub that adopts by name returns another row's ID **and** no `runtimeTarget`, so it hits (1). The name-adoption test fixtures carry no `runtimeTarget`.
     - **`runtime_target_ack_missing`** (unsupported protocol/feature): the response carries no `runtimeTarget`. Message: "the Hub did not acknowledge the runtime target binding for Runtime Broker <id>; it does not support flat Runtime Brokers. Finish the Hub rollout (every replica, with hub.flat_runtime_brokers on) before enabling this instance".
@@ -331,8 +331,7 @@ Registration **authorization** is unchanged and is not part of these rules: the 
     - This is startup compatibility validation, repeated at each activation. It is **not** periodic credential monitoring or target-health polling.
   - **Both phases:** every serving Hub replica must be upgraded. One successful activation does not prove the next replica is compatible, so the per-dispatch expected-target guards (412/409) stay in force.
 - **R7 Embedded side duties.** The embedded flat path (`RegisterEmbeddedFlatRuntimeBroker`, called from startup in place of `registerGlobalProjectAndBroker`):
-  - creates the global project and its provider link for the flat ID if they are missing;
-  - sets the project's default Runtime Broker only when it has none;
+  - creates the global project if it is missing (as today), but **creates no provider link and sets no default Runtime Broker for the flat row** (section 17). A project reaches the flat instance only through an explicit link;
   - records `SetEmbeddedBrokerID(flatID)`, so the Hub-default passthrough gate identifies the flat instance as the embedded Runtime Broker;
   - activates only on a bound result (R10), and reports any refusal (412 `experiment_disabled` at first boot, `ErrExecutionScopeChanged`, an identity error, an R3 or R2 refusal, an ack code) through `EmbeddedBrokerRegistrationFailed`. It never falls back to the legacy identity.
 
@@ -476,6 +475,7 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 | `runtime_target_binding_conflict` | — (instance-side, not HTTP) | `ErrCodeRuntimeTargetBindingConflict` | api | `runtimeBrokerId`, `phase`, `expected`, `got` | Registration/join response acknowledges a different Runtime Broker ID or target (R9). Startup error; instance not activated |
 | `flat_runtime_broker_remote_unsupported` | — (instance-side startup error) | `ErrCodeFlatRuntimeBrokerRemoteUnsupported` | api | `instanceKey` | P1: `server.broker.instances` without a Hub in the same process, with or without saved credentials (R10) |
 | `flat_runtime_broker_not_registered` | — (instance-side startup error) | `ErrCodeFlatRuntimeBrokerNotRegistered` | api | `instanceKey`, `runtimeBrokerId` | P2.1: remote activation with no instance-scoped credentials (R10) |
+| `runtime_broker_not_linked` | 422 | `ErrCodeRuntimeBrokerNotLinked` | hub | `runtimeBrokerId`, `projectId` | Create resolves to a flat row with no explicit link to the project; flat rows are never linked automatically (section 17) |
 | `experiment_disabled` | 412 | `ErrCodeExperimentDisabled` | hub | `experiment` | Flat registration/create with `hub.flat_runtime_brokers` off |
 
 Notes on the codes:
@@ -496,7 +496,7 @@ Notes on the codes:
   - agent token and dispatch.
 
   **Frozen order:**
-  1. **Resolve** the Runtime Broker (pure). Linking is split out of `resolveRuntimeBroker`; the in-resolver project-update `CheckAccess` and the offline 503 stay in this step, before any link.
+  1. **Resolve** the Runtime Broker (pure). Linking is split out of `resolveRuntimeBroker`. **A flat row is never linked here.** If the resolved Runtime Broker (explicit, or the Hub default) is flat and not linked to the project, the resolver answers 422 `runtime_broker_not_linked` ("Runtime Broker <id> is not linked to project <p>; link it explicitly (scion runtime-broker provide, or POST /api/v1/projects/{id}/providers) before creating agents on it") and writes nothing. For legacy rows, today's create-time link is unchanged; the in-resolver project-update `CheckAccess` and the offline 503 stay in this step, before any link.
   2. **Access (the single authorization rule, section 17):** `checkBrokerDispatchAccess`, unchanged. The existing pure checks that follow it today stay here, unchanged and in their current order: `requireEmptyPerAgentBrokerCapability` (412), GCP passthrough authorization, and service-account assignment validation.
   3. **Read the existing agent** (`GetAgentBySlug`, a pure read moved up from its current position) and decide which `handleExistingAgent` branch applies, without executing it.
   4. **Branch:**
@@ -768,6 +768,8 @@ Hub (`pkg/hub/flat_runtime_broker_contract_test.go`, plus one new file in `cmd/`
 - `TestFlatScheduledCreate_PinsPlacement`: a scheduled create on a flat `providers[0]` is pinned in the `CreateAgent` transaction and sends the expected target. Neither the passthrough nor the project active profile is applied, and `flatCreatePlacement` runs before `applyScheduledProjectDefaultGCPIdentity`/`deriveAgentConfig`.
 - `TestFlatScheduledCreate_ExperimentOffRefused`: refused before any write, and the scheduler records a failed run.
 - `TestFlatAutoProvide_NoAutomaticProjectLink`: a new project gets no provider link or default to an auto-provided flat row, with the experiment on and off.
+- `TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked`: create with `runtimeBrokerId` of an unlinked flat row gives 422 `runtime_broker_not_linked`; no provider row and no project default are written.
+- `TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly`: the P1 slice path. Link the flat row with `POST /api/v1/projects/{id}/providers`, then create with only `runtimeBrokerId`; the agent is pinned.
 - `TestFlatCreate_AuthorizationBeforeFlatChecks`: a caller denied by `canDispatchToBroker` gets the existing authorization error, even when a flat check would also fail. No flat code is returned and nothing is written.
 - `TestFlatCreate_FlatChecksDoNotGrantDispatch`: a request that passes every flat check but fails `canDispatchToBroker` is denied.
 - `TestFlatReincarnate_MoveStillNotImplemented`: a non-dry-run move of a pinned agent gets 501, unchanged.
@@ -789,7 +791,7 @@ Hub (`pkg/hub/flat_runtime_broker_contract_test.go`, plus one new file in `cmd/`
 - `TestFlatRegistration_EmbeddedConflictingRowNotActivated` (F‑arrange): a stored different target gives `runtime_target_changed`/binding conflict; not activated; reported through `EmbeddedBrokerRegistrationFailed`.
 - `TestFlatRegistration_EmbeddedLegacyRowNotActivated` (F‑arrange): a legacy row with the flat ID gives `runtime_broker_not_flat`; not activated; no automatic cleanup.
 - `TestFlatRegistration_EmbeddedNameCollisionNotAdopted` (F‑arrange)
-- `TestFlatRegistration_EmbeddedSideDuties` (F‑arrange): provider link, default only when unset, `SetEmbeddedBrokerID`, and refusal reported without a legacy fallback.
+- `TestFlatRegistration_EmbeddedSideDuties` (F‑arrange): no provider link and no default for the flat row, `SetEmbeddedBrokerID`, and refusal reported without a legacy fallback.
 - `TestLegacyRegistration_NameCollidingWithFlatRowRefused_Brokerauth`
 - `TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded` (in `cmd/`)
 - `TestLegacyEmbeddedRegistration_SkipsFlatRowByName` (in `cmd/`)
@@ -869,36 +871,41 @@ Runtime Broker (`pkg/runtimebroker/flat_runtime_broker_contract_test.go`). All a
 
 ## 17. Authorization layering (ptone/scion#3340)
 
-This section states which layer decides what, so a flat dispatch has **exactly one** authorization rule. It uses only the public description of ptone/scion#3340:
-- linking a Runtime Broker to a project needs an explicit project-owner action, and auto-provide makes a Runtime Broker available to add, not linked;
-- dispatch is authorized by the explicit project/Runtime Broker link;
-- hosted co-located Runtime Brokers keep their auto-link convenience and can be removed by an owner;
-- existing links are grandfathered.
+This section states which layer decides what, so a flat dispatch has **exactly one** authorization rule. It uses only the public description of ptone/scion#3340 (explicit project-owner links; dispatch authorized by the link; existing links grandfathered).
 
-| Layer | Owner | Decides | Codes |
+**Dispatch authorization: one seam.** Dispatch to a Runtime Broker for a project is authorized **only** by `canDispatchToBroker` (`pkg/hub/handlers_agent_create_helpers.go`).
+- `checkBrokerDispatchAccess` is its response-writing wrapper and adds no rule.
+- The resolver's selection filter calls the same function.
+- After ptone/scion#3340 phase 1, `canDispatchToBroker` authorizes on an active project/Runtime Broker link, or the Runtime Broker acting as itself.
+- The flat contract adds **no** other dispatch authorization check.
+
+**Link creation is separate from dispatch authorization.** A link to a flat row comes **only** from the explicit link action (`POST /api/v1/projects/{id}/providers`, under that endpoint's own project-update permission; `scion runtime-broker provide`). This is the action ptone/scion#3340 turns into owner election. Flat rows **never** receive an automatic link, co-located (P1) included (R7, R8; section 9 step 1 answers 422 `runtime_broker_not_linked` rather than linking).
+
+**Flat correctness checks are not authorization.** These are: R9/R10 activation, target binding (R3/R4), the expected-target mismatch, stale pins, the profile refusal and the `hub.flat_runtime_brokers` feature gate. They decide whether a request reaches the **right identity and target**. Passing them grants nothing. Their codes are never 401/403, and none of them reads permissions.
+
+| Layer | Decides | Owner | Codes |
 |---|---|---|---|
-| **Hub authorization** | today's code; ptone/scion#3340 after its phase 1 | Whether the caller may dispatch to this Runtime Broker for this project, and whether a project/Runtime Broker link may be created | Today's authorization responses (401/403/404, and `checkBrokerDispatchAccess`'s responses) |
-| **Flat correctness checks** | this appendix (P1) | Whether the request reaches the **right identity and target**: R9/R10 activation refusal, target binding (R3/R4), the expected-target mismatch, stale pins, the profile refusal, and the experiment feature gate | `runtime_target_*`, `runtime_broker_not_flat`, `runtime_broker_name_conflict`, `runtime_profile_unsupported`, `experiment_disabled`, and the instance-side codes |
+| Dispatch authorization | Whether the caller may dispatch to this Runtime Broker for this project | `canDispatchToBroker` (today; ptone/scion#3340 after its phase 1) | Today's authorization responses |
+| Link creation | Whether a project is linked to a Runtime Broker | The explicit providers endpoint (ptone/scion#3340 owner election) | That endpoint's responses; `runtime_broker_not_linked` when a create targets an unlinked flat row |
+| Flat correctness | Right identity and target | This appendix (P1) | `runtime_target_*`, `runtime_broker_not_flat`, `runtime_broker_name_conflict`, `runtime_profile_unsupported`, `experiment_disabled`, the instance-side codes |
 
-**Rules:**
-- **One authorization rule.** Whether a caller may dispatch to a Runtime Broker for a project is decided only by `(*hub.Server).canDispatchToBroker`. Its response-writing wrapper `checkBrokerDispatchAccess` delegates to it, and the create-time link in `resolveRuntimeBroker` keeps its project-update `CheckAccess`. The scheduler path's authorization is unchanged: it dispatches only to the project's own provider links. Lifecycle paths keep their existing per-agent action authorization. The flat contract adds **no** second authorization check: no flat check reads permissions, and none can admit a request the authorization rule denies.
-- **Flat checks are not permission.** Passing every flat check grants nothing. Flat codes are never 401/403 and never stand in for an authorization result.
-- **Order and precedence (all before any write):**
-  1. resolve (pure);
-  2. **authorization** (`canDispatchToBroker` via `checkBrokerDispatchAccess`; the in-resolver project-update `CheckAccess` for a create-time link);
-  3. the existing step-2 checks (section 9);
-  4. the existing-agent read and branch;
-  5. the flat correctness checks, in the section 9 precedence;
-  6. link, then writes.
+**Order and precedence (all before any write):**
+1. resolve (pure; never links a flat row);
+2. dispatch authorization (`canDispatchToBroker` via `checkBrokerDispatchAccess`);
+3. the existing step-2 checks (section 9);
+4. the existing-agent read and branch;
+5. the flat correctness checks, in the section 9 precedence;
+6. a legacy-row create-time link, if any, then the writes.
 
-  If authorization fails, its error is returned and no flat check is evaluated or reported. The lifecycle pre-check `checkPinnedPlacement` likewise runs after the path's existing authorization. Registration follows the same layering: R6 authorization first, then R1–R4.
-- **Links.** The flat contract does not extend auto-provide or automatic linking (R8). Flat rows get no automatic cross-project link, and today's link paths, and ptone/scion#3340's changes to them, apply to flat rows unchanged. The P1 co-located flat instance's global-project provider link (R7) is the co-located convenience link that ptone/scion#3340 keeps, and an owner can remove it. This agrees with R8: R7 links only the embedded process's own global project, and project-creation auto-provide never links a flat row.
-- **Forward rule.** When ptone/scion#3340 phase 1 lands, it changes the authorization rule in one place: the body of `canDispatchToBroker`, or a successor that `checkBrokerDispatchAccess` and the resolver's selection filter call in its place. Where links form is changed in the existing link paths. The flat checks, their order after authorization, and their codes need no change.
-- This section describes layering only. It is not a security assessment of either layer.
+If dispatch authorization fails, its error is returned and no flat check is evaluated or reported. The lifecycle pre-check `checkPinnedPlacement` runs after the path's existing per-agent action authorization. The scheduler dispatches only to the project's own links. Registration follows the same layering: R6's existing registration authorization, then R1–R4.
+
+**P1 slice path.** The test project obtains its link to the co-located flat instance explicitly, with `scion runtime-broker provide --broker <id> --project <p>` or `POST /api/v1/projects/{id}/providers`. Creates then send only `runtimeBrokerId` (`TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly`).
+
+**Forward rule.** ptone/scion#3340 phase 1 changes dispatch authorization in one place, the body of `canDispatchToBroker` (or a successor that `checkBrokerDispatchAccess` and the resolver's selection filter call in its place), and changes link creation in the explicit link paths. The flat checks, their order after authorization, and their codes need no change.
 
 ## Change log
 
-- **r7 addendum (convergence with ptone/scion#3340):** new section 17 (authorization layering: one authorization rule, `canDispatchToBroker`; flat checks are correctness only; order and precedence; links not extended; R7 is the co-located convenience link; forward seam). R8 now skips flat rows for project-creation auto-provide whatever the experiment state. Cross-references in sections 6, 9 and 10. Layering tests added.
+- **r7 addendum (convergence with ptone/scion#3340, as corrected):** new section 17. Dispatch is authorized only by `canDispatchToBroker`; link creation only by the explicit providers endpoint; flat checks are correctness only; order and precedence frozen; forward seam. Flat rows never receive an automatic link, the P1 co-located instance included: R7 creates no link or default; R8 project-creation auto-provide skips flat rows; the resolver answers 422 `runtime_broker_not_linked` instead of linking. The P1 slice links explicitly. Cross-references in sections 6, 9 and 10. Tests added.
 - **r7 B1 (review round 6; placement decision and architecture amendments):** P1 is co-located only; the embedded path validates a bound result against the persisted identity with the `CheckActivationAck` semantics; remote flat hosting fails closed in P1 even with saved credentials (`flat_runtime_broker_remote_unsupported`); P2.1 remote registration (user-authorized, acknowledgements validated before saving) and **required** activation validation on every remote start are frozen, with carriers, codes and tests; no HMAC self-registration; startup compatibility, not periodic monitoring; version matrix split into P1 co-located and P2.1 rows; P1/P2 scope notes.
 - **r7 non-blocking fixes (review round 6, N1–N3, T1–T5):** `CheckActivationAck` evaluation order; join-phase leftovers (rotated secret, row shown online) and their recovery; an unaware replica's missing field separated from an experiment-off replica's own refusal; frozen `brokeridentity` types; old-Hub definition; heartbeat `runtimeTarget` naming; move-check order and API doc update; nullable `runtime_broker_id` matching. Round-6 B1 (activation placement) is pending a decision.
 - **r6 addendum (architecture decision on r5 B1):** refuse activation, no automatic downgrade. Two distinct acknowledgement codes (`runtime_target_ack_missing`, `runtime_target_binding_conflict`) and a pure `CheckActivationAck` (P1.1). Refusal is not a zero-side-effect guarantee; nothing is cleaned up automatically. All serving replicas must be capable with the experiment on, and dispatch keeps its expected-target guard. P2 forward rule: per-instance rejection. Activation compatibility is separate from credential monitoring. Mixed-replica and no-cleanup tests added; the version table is aligned.
