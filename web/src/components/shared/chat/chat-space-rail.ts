@@ -1046,7 +1046,9 @@ export class ScionChatSpaceRail extends LitElement {
     const wasCollapsed = _changedProperties.get('collapsedSpaces') as Set<string> | undefined;
     if (wasCollapsed) {
       for (const id of wasCollapsed) {
+        // A load already in flight (the header click's own) is not a retry.
         if (this.collapsedSpaces.has(id) || this.threadsBySpace.has(id)) continue;
+        if (this.loadingThreads.has(id)) continue;
         if (this._threadLoadFailures.has(id)) {
           this._threadLoadFailures.delete(id);
           this._threadLoadEpoch.delete(id);
@@ -1574,6 +1576,12 @@ export class ScionChatSpaceRail extends LitElement {
    * so the change is applied to it the normal way (row and badge). A list
    * requested after it already shows the new state; then only the space
    * badge can be behind, if the spaces list predates the change too.
+   *
+   * `at` is when the read-state event arrived, after the read POST returned,
+   * so a spaces request sent while the POST was in flight counts as older
+   * even if the server already rolled the read in; the badge can then drop
+   * one too many (floored at zero). The window is narrow and main has the
+   * same race class.
    */
   private applyPendingReadState(
     projectId: string,

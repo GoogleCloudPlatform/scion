@@ -624,9 +624,31 @@ describe('space rail — failed thread loads', () => {
       );
     });
 
+    const before = threadRequests().length;
     el.handleCollapsedSpaceClick(el.spaces[1]);
 
     expect(await selected).toBe('p1-general');
+    await flush();
+    // One fetch: the expand does not retry the click's own load in flight.
+    expect(threadRequests().slice(before)).toEqual(['p1']);
+  });
+
+  it('a space deep link after failures, then the routed expand, fetches the list once', async () => {
+    server.threadStatus = { p1: 500 };
+    const el = await mount();
+    el.expandSpace('p1');
+    await flush();
+    el.handleSpaceHeaderClick(el.spaces[1]); // collapse
+    await el.updateComplete;
+    server.threadStatus = {};
+    const before = threadRequests().length;
+
+    const threads = el.threadsFor('p1');
+    el.expandSpace('p1');
+    await threads;
+    await flush();
+
+    expect(threadRequests().slice(before)).toEqual(['p1']);
   });
 });
 
@@ -735,5 +757,61 @@ describe('space rail — lazy paths', () => {
     // ...which answers the first but not the second: the trailing pass
     // must fetch again rather than reuse it.
     expect(spacesRequests()).toBe(3);
+  });
+});
+
+describe('space rail — queued read state branches', () => {
+  /** Lets the clock move between requests and changes. */
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 3));
+
+  it('list older, rollup newer: clears the row without touching the badge again', async () => {
+    server.spaces = [space(0), { ...space(1), unreadCount: 2 }];
+    server.threadUnread = true;
+    server.holdThreads = true;
+    const el = await mount({ selectedKey: 'p1-general', selectedProjectId: 'p1' });
+    await flush();
+    await tick();
+    el.markThreadRead('p1-general');
+    await tick();
+    server.spaces = [space(0), { ...space(1), unreadCount: 1 }]; // server rolled the read in
+    await el.reload();
+    await flush();
+    server.held.shift()!.release();
+    await flush();
+    await el.updateComplete;
+    expect(el.threadsBySpace.get('p1')[0].hasUnread).toBe(false);
+    expect(el.spaces.find((s: ChatSpace) => s.projectId === 'p1').unreadCount).toBe(1);
+  });
+
+  it('list newer, rollup older: refreshes the rollup once', async () => {
+    server.spaces = [space(0), { ...space(1), unreadCount: 1 }];
+    server.holdThreads = true;
+    const el = await mount();
+    el.expandSpace('p0');
+    await flush();
+    await tick();
+    el.markThreadRead('p1-general'); // queued: p0 is loading
+    await tick();
+    const before = spacesRequests();
+    el.expandSpace('p1');
+    await flush();
+    server.held.find((h) => h.projectId === 'p1')!.release();
+    await flush();
+    await el.updateComplete;
+    expect(spacesRequests()).toBe(before + 1);
+  });
+
+  it('a queued unread applies as unread', async () => {
+    server.holdThreads = true;
+    const el = await mount({ selectedKey: 'p1-general', selectedProjectId: 'p1' });
+    await flush();
+    await tick();
+    el.markThreadUnread('p1-general');
+    await tick();
+    server.held.shift()!.release();
+    await flush();
+    await el.updateComplete;
+    expect(el.threadsBySpace.get('p1')[0].hasUnread).toBe(true);
+    expect(el.spaces.find((s: ChatSpace) => s.projectId === 'p1').unreadCount).toBe(1);
   });
 });
