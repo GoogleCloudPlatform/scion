@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +54,58 @@ func TestSeedMaintenanceOperations(t *testing.T) {
 
 	// Seeding is idempotent.
 	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	ops, err = s.ListMaintenanceOperations(ctx)
+	require.NoError(t, err)
+	assert.Len(t, ops, len(defaultSeedOperations))
+}
+
+// TestSeedMaintenanceOperations_PartialAndRepeated covers the upsert path
+// (ptone/scion#366): a store that already holds some seed keys gets only the
+// missing ones, existing rows (and their state) are left untouched, and
+// repeated or concurrent seeding never errors.
+func TestSeedMaintenanceOperations_PartialAndRepeated(t *testing.T) {
+	require.GreaterOrEqual(t, len(defaultSeedOperations), 2, "test needs at least two seed operations")
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+
+	// Pre-create one seed key, already in a non-default state.
+	first := defaultSeedOperations[0]
+	require.NoError(t, s.client.MaintenanceOperation.Create().
+		SetKey(first.Key).
+		SetTitle("pre-existing title").
+		SetCategory(first.Category).
+		SetStatus(store.MaintenanceStatusCompleted).
+		Exec(ctx))
+	before, err := s.GetMaintenanceOperation(ctx, first.Key)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+
+	ops, err := s.ListMaintenanceOperations(ctx)
+	require.NoError(t, err)
+	assert.Len(t, ops, len(defaultSeedOperations), "every seed key exactly once")
+
+	after, err := s.GetMaintenanceOperation(ctx, first.Key)
+	require.NoError(t, err)
+	assert.Equal(t, before.ID, after.ID, "existing row must not be replaced")
+	assert.Equal(t, "pre-existing title", after.Title, "existing row must not be overwritten")
+	assert.Equal(t, store.MaintenanceStatusCompleted, after.Status, "existing row's state must be preserved")
+
+	// Concurrent seeders (e.g. hub replicas starting together) must all succeed.
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.SeedMaintenanceOperations(ctx)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		assert.NoError(t, err, "concurrent seeder %d", i)
+	}
 	ops, err = s.ListMaintenanceOperations(ctx)
 	require.NoError(t, err)
 	assert.Len(t, ops, len(defaultSeedOperations))
