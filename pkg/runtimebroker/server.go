@@ -252,6 +252,10 @@ type Server struct {
 	// launches (design t1-async-create-v11.md §3.8.1, §7 P1b-1). It is an
 	// optimisation only -- correctness comes from the Hub's answers.
 	launchRegistry *launchRegistry
+	// startsInFlight tracks the starts running on the start, restart and
+	// synchronous create handlers (start_tracker.go). The heartbeat reports
+	// them, stop waits for its agent's, and Shutdown waits for all.
+	startsInFlight *startTracker
 	// launchInstanceID identifies this broker process as a launch owner
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
@@ -359,6 +363,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
 		launchRegistry:          newLaunchRegistry(),
+		startsInFlight:          newStartTracker(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
@@ -1165,6 +1170,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		nfsCancel()
 	}
 
+	// Cancel every start still running on a start, restart or create
+	// handler and wait for Run's deferred cleanup, before the hub
+	// connections and the HTTP server drain, so no start outlives the
+	// starts this process last reported in flight.
+	// One deadline covers both this wait and the HTTP drain below.
+	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
+	defer cancel()
+	if !s.startsInFlight.cancelAllAndWait(ctx) {
+		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
+	}
+
 	// Stop all hub connections
 	s.hubMu.RLock()
 	for _, conn := range s.hubConnections {
@@ -1177,9 +1193,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	slog.Info("Runtime Broker API server shutting down...")
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	return srv.Shutdown(ctx)
 }

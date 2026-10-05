@@ -583,7 +583,7 @@ type AgentInfo struct {
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
 	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
-	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550)
+	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
@@ -661,6 +661,10 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
+	// ProvisionedOnly: the Hub reports the agent provisioned but not
+	// started (ptone/scion#2929). No omitempty: an explicit false lets a
+	// client that merges responses clear a previously seen true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
@@ -851,6 +855,25 @@ func ContextWithFreshProvision(ctx context.Context) context.Context {
 // dispatch as a fresh provision.
 func IsFreshProvisionFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(freshProvisionContextKey{}).(bool)
+	return v
+}
+
+type runIDContextKey struct{}
+
+// ContextWithRunID returns a new context carrying the run ID of the start
+// that is provisioning the agent (ptone/scion#2550), so provisioning can
+// record it in agent-info.json as the run that owns the agent's files
+// (ptone/scion#2675). An empty runID returns ctx unchanged.
+func ContextWithRunID(ctx context.Context, runID string) context.Context {
+	if runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, runIDContextKey{}, runID)
+}
+
+// RunIDFromContext returns the run ID set by ContextWithRunID, or "".
+func RunIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(runIDContextKey{}).(string)
 	return v
 }
 

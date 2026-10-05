@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
+	"github.com/google/uuid"
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
@@ -698,6 +699,21 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
+	}
+
+	// A provision-only create carries no run (the hub mints runs only for
+	// starts), yet it may reuse, or newly provision, files under a name an
+	// earlier same-named agent's late delete still targets by that agent's
+	// run. Record a provision owner so such a delete leaves these files
+	// alone (ptone/scion#2675). The agent's own delete names no run until
+	// it is started, and its first start records its run in place of this.
+	// If a runtime entry for the name still exists in this project (or the
+	// runtime cannot be listed), the files stay that entry's run's.
+	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+			slog.Warn("Provision: failed to record the provision owner in agent-info.json",
+				"agent", opts.Name, "error", err)
+		}
 	}
 
 	// If a task was provided, write it to prompt.md for later execution
@@ -1930,6 +1946,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
+	// Record the run that owns these files (ptone/scion#2675): a delete
+	// naming a different run then leaves them alone. A provision with no run
+	// (provision-only, reprovision) keeps whatever run already owned them,
+	// since the files still belong to that run's runtime entry.
+	info.RunID = api.RunIDFromContext(ctx)
+	if info.RunID == "" {
+		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
+	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -2242,6 +2266,73 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 		return nil
 	}
 	return &info
+}
+
+// hasRuntimeEntry reports whether the runtime holds an entry for opts.Name
+// in its project, or cannot tell (a List error).
+func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOptions) bool {
+	if m.Runtime == nil {
+		return false
+	}
+	projectName := ""
+	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
+		projectName = config.GetProjectName(projectDir)
+	}
+	projectID := ""
+	if opts.Env != nil {
+		projectID = opts.Env["SCION_PROJECT_ID"]
+	}
+	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if matchAgentProject(e, projectName, projectID) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProvisionOwnerPrefix prefixes the owner a provision-only create records
+// in agent-info.json runId in place of a run (see Provision). It never
+// equals a run ID the hub sends.
+const ProvisionOwnerPrefix = "provision-"
+
+// readAgentInfoRunID returns the runId recorded in the agent-info.json at
+// path, or "" if the file is missing, unreadable or carries none.
+func readAgentInfoRunID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		RunID string `json:"runId"`
+	}
+	if json.Unmarshal(data, &info) != nil {
+		return ""
+	}
+	return info.RunID
+}
+
+// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
+// the run that owns the agent's files (ptone/scion#2675). It is "" for an
+// agent provisioned before run IDs were recorded, one provisioned but never
+// started, or one whose agent-info.json is missing or unreadable.
+func GetSavedRunID(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.RunID
+	}
+	return ""
+}
+
+// SetSavedRunID records runID in the agent's agent-info.json as the run that
+// owns the agent's files (ptone/scion#2675). It is a no-op when
+// agent-info.json does not exist yet.
+func SetSavedRunID(agentName string, projectPath string, runID string) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.RunID = runID
+	})
 }
 
 func GetSavedProfile(agentName string, projectPath string) string {
