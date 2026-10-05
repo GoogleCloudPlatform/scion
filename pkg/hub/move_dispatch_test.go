@@ -93,3 +93,12 @@ func TestDeleteAgentQuery_LocalOnly(t *testing.T) {
 	assert.Contains(t, deleteAgentQuery(context.Background(), "p", DeleteAgentOptions{DeleteFiles: true, LocalOnly: true}), "&localOnly=true")
 	assert.False(t, strings.Contains(deleteAgentQuery(context.Background(), "p", DeleteAgentOptions{DeleteFiles: true}), "localOnly"))
 }
+
+// A broker without AgentMove would ignore the expected workspace and
+// provision an empty one, so the move's provision is never sent to it.
+func TestDispatchAgentProvisionForMove_RefusesBrokerWithoutAgentMove(t *testing.T) {
+	d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{Reprovision: true})
+	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir")
+	require.True(t, errors.Is(err, errBrokerLacksAgentMove), "err = %v", err)
+	assert.Nil(t, client.lastCreateReq, "nothing may be sent")
+}

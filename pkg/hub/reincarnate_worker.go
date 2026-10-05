@@ -532,7 +532,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.rollbackMove(ctx, md, agentID, move, srcAgent.Runtime)
+			s.rollbackMove(ctx, md, agentID, move, srcAgent)
 			s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg, previous)
 			return
 		}
@@ -585,15 +585,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	if move != nil {
-		// The source's exposed ports die with its container, and the
-		// broker reservation follows the agent to the target. When the
-		// target has no room the source reservation is restored and the
-		// agent stays stopped on the source.
+		// The source's exposed ports die with its container.
 		s.clearExposedPortsForAgent(ctx, agentID)
-		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "target broker quota: "+err.Error(), previous)
-			return
-		}
 	}
 
 	provisioningNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning, reincarnationStepMaxAttempts, nil)
@@ -603,6 +596,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 	if !ok {
 		return
+	}
+	if move != nil {
+		// The broker reservation follows the agent to the target, moved
+		// only once this worker owns the provisioning step. When the
+		// target has no room the source reservation is restored and the
+		// agent stays stopped on the source.
+		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), previous)
+			return
+		}
 	}
 	// Step: write the new AppliedConfig. The Task is replaced by the hub-built
 	// preamble plus handoff — this is the new generation's first harness
@@ -741,9 +744,18 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
 		errMsg := "start failed: " + err.Error()
-		// A move rolls back whatever the outcome: the localOnly delete on
-		// the target removes a container the start may have left.
-		if move == nil && !reincarnationStartLeftNoContainer(err) {
+		// A move follows the same rule: on an ambiguous outcome the agent
+		// stays assigned to the target at gen N+1, with its reservation
+		// there (a container may be running there), and the source is
+		// left alone; only a start that definitely left no container is
+		// rolled back to the source.
+		if !reincarnationStartLeftNoContainer(err) {
+			if move != nil {
+				if cerr := s.store.SetAgentReincarnationSourceCleanup(ctx, reincarnationID, sourceCleanupSkippedAmbiguousStart); cerr != nil {
+					s.agentLifecycleLog.Warn("move: failed to record the skipped source cleanup",
+						"agent_id", agentID, "reincarnation_id", reincarnationID, "error", cerr)
+				}
+			}
 			// Ambiguous outcome (a timeout, a transport error, a lost or
 			// unreadable response, a proxy error, a deferred start, or a
 			// broker failure from inside Manager.Start): a gen N+1
@@ -1042,6 +1054,7 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 		return
 	}
 	s.writeFailedAgent(ctx, agentID, errMsg, restoreConfig, failNow)
+	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
 // writeFailedAgent is the agent-row half shared by failReincarnation (the
@@ -1113,6 +1126,7 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 		return false
 	}
 	s.writeFailedAgent(ctx, rec.AgentID, errMsg, restoreConfig, failNow)
+	s.reconcileFailedMove(ctx, rec.ID)
 	return true
 }
 

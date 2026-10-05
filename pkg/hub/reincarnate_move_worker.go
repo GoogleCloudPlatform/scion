@@ -141,13 +141,14 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 }
 
 // rollbackMove undoes a move that failed after the agent was assigned to
-// the target broker and before it started there, leaving the agent on the
-// source: a best-effort localOnly delete of whatever the target created,
-// the broker reservation moved back, and the agent's broker and runtime
-// restored. The caller then marks the reincarnation failed, which restores
-// the previous applied config. srcRuntime is the agent's runtime on the
-// source.
-func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID string, mv *reincarnationMove, srcRuntime string) {
+// the target broker and before it definitely started there, leaving the
+// agent on the source as it was: a best-effort localOnly delete of whatever
+// the target created; the agent's broker, runtime, run and workspace
+// placement restored from src (the agent as it was on the source); and,
+// only once that assignment is restored, the broker reservation moved back.
+// The caller then marks the reincarnation failed, which restores the
+// previous applied config.
+func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID string, mv *reincarnationMove, src *store.Agent) {
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		s.agentLifecycleLog.Error("move rollback: failed to load agent; it may be left assigned to the target broker",
@@ -158,17 +159,33 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 		s.agentLifecycleLog.Warn("move rollback: could not remove the agent's state on the target broker; left in place",
 			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "error", err)
 	}
-	s.releaseBrokerQuota(ctx, cur)
-	s.reassertBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
-	srcID := mv.SourceBrokerID
+	// The target's start may have recorded its own run; put the source's
+	// back (unless a newer run was recorded since), so later deletes and
+	// launch reports address the run that exists on the source.
+	if cur.RunID != src.RunID {
+		if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, cur.RunID, src.RunID); err != nil {
+			s.agentLifecycleLog.Warn("move rollback: failed to restore the agent's source run ID",
+				"agent_id", agentID, "error", err)
+		}
+	}
+	srcID, srcRuntime := mv.SourceBrokerID, src.Runtime
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: cur.ReincarnationState,
 		runtimeBrokerID:    &srcID,
 		runtime:            &srcRuntime,
 	}, reincarnationStepMaxAttempts+3); err != nil {
-		s.agentLifecycleLog.Error("move rollback: failed to restore the agent to the source broker",
+		s.agentLifecycleLog.Error("move rollback: failed to restore the agent to the source broker; the reservation stays on the target",
 			"agent_id", agentID, "source_broker_id", mv.SourceBrokerID, "error", err)
+		return
 	}
+	if src.WorkspacePlacement != "" {
+		if err := s.store.SetAgentWorkspacePlacement(ctx, agentID, src.WorkspacePlacement); err != nil {
+			s.agentLifecycleLog.Warn("move rollback: failed to restore the agent's workspace placement",
+				"agent_id", agentID, "error", err)
+		}
+	}
+	s.releaseBrokerQuota(ctx, cur)
+	s.reassertBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
 }
 
 // cleanUpMoveSource removes the agent's broker-local state from the source
@@ -178,7 +195,14 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 // source's run.
 func (s *Server) cleanUpMoveSource(ctx context.Context, md agentMoveDispatcher, reincarnationID string, src *store.Agent) {
 	outcome := store.SourceCleanupDone
-	if err := md.DispatchAgentDeleteLocalOnly(ctx, src); err != nil {
+	if src.RunID == "" {
+		// Without a run ID the source broker would resolve the delete by
+		// name alone, which on a runtime namespace shared with the target
+		// could remove the agent's new entry there. Leave the source alone.
+		outcome = sourceCleanupSkippedNoRunID
+		s.agentLifecycleLog.Warn("move: the agent has no run ID on the source broker; its local state there is left in place",
+			"agent_id", src.ID, "source_broker_id", src.RuntimeBrokerID, "agent", src.Slug)
+	} else if err := md.DispatchAgentDeleteLocalOnly(ctx, src); err != nil {
 		outcome = "failed:" + err.Error()
 		s.agentLifecycleLog.Warn("move: could not remove the agent's state on the source broker; left in place",
 			"agent_id", src.ID, "source_broker_id", src.RuntimeBrokerID, "agent", src.Slug, "error", err)
@@ -186,5 +210,39 @@ func (s *Server) cleanUpMoveSource(ctx context.Context, md agentMoveDispatcher, 
 	if err := s.store.SetAgentReincarnationSourceCleanup(ctx, reincarnationID, outcome); err != nil {
 		s.agentLifecycleLog.Warn("move: failed to record the source cleanup outcome",
 			"agent_id", src.ID, "reincarnation_id", reincarnationID, "outcome", outcome, "error", err)
+	}
+}
+
+// Skipped source cleanup outcomes recorded on a move's record.
+const (
+	sourceCleanupSkippedNoRunID        = "skipped:no-run-id"
+	sourceCleanupSkippedAmbiguousStart = "skipped:ambiguous-start"
+	sourceCleanupSkippedInterrupted    = "skipped:interrupted"
+)
+
+// reconcileFailedMove runs whenever a move's record is failed (by the worker
+// or the stale sweep). The agent row's runtime broker is the truth: on the
+// source, the broker reservation is moved back there (released, then
+// re-asserted); on the target, it already follows the agent. A record with
+// no source cleanup outcome yet records skipped:interrupted. A plain
+// reincarnation's record is left alone.
+func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string) {
+	rec, err := s.store.GetAgentReincarnation(ctx, reincarnationID)
+	if err != nil || rec.SourceBrokerID == "" {
+		return
+	}
+	a, err := s.store.GetAgent(ctx, rec.AgentID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("failed move: could not load the agent to reconcile its reservation",
+			"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
+	} else if a.RuntimeBrokerID == rec.SourceBrokerID {
+		s.releaseBrokerQuota(ctx, a)
+		s.reassertBrokerReservation(ctx, a)
+	}
+	if rec.SourceCleanup == "" {
+		if err := s.store.SetAgentReincarnationSourceCleanup(ctx, rec.ID, sourceCleanupSkippedInterrupted); err != nil {
+			s.agentLifecycleLog.Warn("failed move: could not record the skipped source cleanup",
+				"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
+		}
 	}
 }

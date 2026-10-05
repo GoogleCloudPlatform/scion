@@ -44,19 +44,13 @@ type agentMoveDispatcher interface {
 var _ agentMoveDispatcher = (*HTTPAgentDispatcher)(nil)
 
 // errBrokerLacksAgentMove is returned, before anything is sent, when a
-// localOnly delete targets a broker that does not advertise AgentMove.
-var errBrokerLacksAgentMove = errors.New("runtime broker does not advertise the agent move capability; refusing to send a localOnly delete")
+// localOnly delete or a provision-for-move targets a broker that does not
+// advertise AgentMove.
+var errBrokerLacksAgentMove = errors.New("runtime broker does not advertise the agent move capability; refusing to send it a move request")
 
-// DispatchAgentProvisionForMove implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error {
-	if expectNFSWorkspace == "" {
-		return errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required")
-	}
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace)
-}
-
-// DispatchAgentDeleteLocalOnly implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, agent *store.Agent) error {
+// requireAgentMoveBroker loads agent.RuntimeBrokerID and returns
+// errBrokerLacksAgentMove unless it advertises AgentMove.
+func (d *HTTPAgentDispatcher) requireAgentMoveBroker(ctx context.Context, agent *store.Agent) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -66,6 +60,30 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, 
 	}
 	if broker.Capabilities == nil || !broker.Capabilities.AgentMove {
 		return errBrokerLacksAgentMove
+	}
+	return nil
+}
+
+// DispatchAgentProvisionForMove implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error {
+	if expectNFSWorkspace == "" {
+		return errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required")
+	}
+	// A broker without AgentMove would ignore the expected workspace and
+	// provision an empty one; nothing is sent to it.
+	if err := d.requireAgentMoveBroker(ctx, agent); err != nil {
+		return err
+	}
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace)
+}
+
+// DispatchAgentDeleteLocalOnly implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	if err := d.requireAgentMoveBroker(ctx, agent); err != nil {
+		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)

@@ -21,11 +21,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/stretchr/testify/require"
 )
 
 // worktreeRemovingManager records RemoveNFSAgentFiles calls and returns err.
@@ -158,4 +161,31 @@ func TestDeleteAgent_LocalOnlyKeepsNFSAgentFilesAndBranch(t *testing.T) {
 	if len(mgr.calls) != 0 {
 		t.Fatalf("RemoveNFSAgentFiles must not be called for a localOnly delete: %q", mgr.calls)
 	}
+}
+
+// localOnly never reaches the NFS export: the manager is asked to delete the
+// agent from the broker-local project directory only, nothing under the
+// export's mount root is removed, and RemoveNFSAgentFiles is not called.
+func TestDeleteAgent_LocalOnlyNeverTouchesExport(t *testing.T) {
+	mgr := &worktreeRemovingManager{filteringMockManager: &filteringMockManager{}}
+	srv, home, _ := newWorktreeRemovalServer(t, mgr)
+	mountRoot := t.TempDir()
+	srv.config.NFSConfig = &config.V1NFSConfig{MountRoot: mountRoot, SubPathRoot: "projects",
+		Shares: []config.V1NFSShare{{ID: "share-1", Server: "10.0.0.2", Export: "/vol"}}}
+	ws := filepath.Join(mountRoot, "share-1", "projects", scopeProjA, "agents", "dev", "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "work.txt"), []byte("kept"), 0o644))
+	scionDir, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-a", scopeProjA, scionDir)}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true&localOnly=true")
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	require.Empty(t, mgr.calls, "RemoveNFSAgentFiles must not be called")
+	mgr.mu.Lock()
+	deletedFrom := mgr.lastDeleteProjectPath
+	mgr.mu.Unlock()
+	rel, err := filepath.Rel(mountRoot, deletedFrom)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(rel, ".."), "localOnly deleted from %q, under the export mount root %q", deletedFrom, mountRoot)
+	require.FileExists(t, filepath.Join(ws, "work.txt"))
 }

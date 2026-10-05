@@ -1843,6 +1843,14 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// to the source broker after moving the agent to another broker on the
 	// same export, where the workspace now lives on (design ptone/scion#2727
 	// §3.5). Only brokers advertising the AgentMove capability honour it.
+	//
+	// localOnly still runs the manager's normal file deletion below
+	// (DeleteTarget: the broker-local agent directory and home, and any
+	// worktree under the broker's project directory). That is safe only
+	// because a hub-native project's directory on the broker is
+	// broker-local (~/.scion/projects/<slug>), never on the export, and
+	// linked projects cannot move. Keep it so: localOnly must never reach a
+	// path under the NFS export (TestDeleteAgent_LocalOnlyNeverTouchesExport).
 	localOnly := query.Get("localOnly") == "true"
 	if localOnly {
 		removeBranch = false

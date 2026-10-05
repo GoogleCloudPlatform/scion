@@ -282,10 +282,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
 		linkedProjectPath == "" && effectiveWorkspace != ""
-	if workspaceModeErr == "" && !emptyPerAgentMove && (agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)))) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
 		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"

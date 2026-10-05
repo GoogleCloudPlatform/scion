@@ -90,6 +90,11 @@ type reincarnateTestDispatcher struct {
 	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
 	localOnlyDeleteErr   map[string]error
 	startBrokers         []string
+	// runStore, when set, makes DispatchAgentStart mint and record a run
+	// on the row first, like the real dispatcher's beginRun, and record
+	// startPlacement (when set), like a target's start report.
+	runStore       store.Store
+	startPlacement string
 
 	rerenderErr error
 	// rerenderEcho, when set, runs on a successful re-render against the
@@ -162,8 +167,17 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 	defer d.mu.Unlock()
 	return append([]string(nil), d.moveProvisionCalls...), append([]string(nil), d.localOnlyDeleteCalls...), append([]string(nil), d.startBrokers...)
 }
-func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, task string, resume bool) error {
+func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
+	if d.runStore != nil {
+		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
+		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID); err == nil {
+			agent.RunID = runID
+		}
+		if d.startPlacement != "" {
+			_ = d.runStore.SetAgentWorkspacePlacement(ctx, agent.ID, d.startPlacement)
+		}
+	}
 	d.startBrokers = append(d.startBrokers, agent.RuntimeBrokerID)
 	d.startCalls++
 	d.lastStartTask = task
