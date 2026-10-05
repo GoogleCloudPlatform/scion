@@ -444,8 +444,9 @@ describe('hub members: live updates from the store', () => {
     const page = await mountPage();
     try {
       expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      page.v2AgentMembers = [{ id: 'sentinel', kind: 'agent', displayName: 'sentinel' }];
       globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
-      expect(page.v2AgentMembers).toEqual([]);
+      expect(ids(page.v2AgentMembers)).toEqual(['sentinel']);
     } finally {
       unmount(page);
     }
@@ -670,6 +671,45 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
 
       expect(ids(page.v2HumanMembers)).toEqual(['h1']);
       expect(ids(page.v2Members)).toEqual(['h1', 'sp1']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('the hub view claims the sidebar on its load, not on a publish: after a failed store read the poll walks the users', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      harness.server.status = 500;
+      harness.store.invalidate('resync');
+      await settle();
+      const spaceReads = (): number =>
+        vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members')
+          .length;
+      vi.mocked(apiFetch).mockImplementation((url) =>
+        Promise.resolve(
+          url === '/api/v1/chat/spaces/p1/members'
+            ? new Response(
+                JSON.stringify({
+                  humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+                  agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                }),
+                { status: 200 }
+              )
+            : new Response('{}', { status: 200 })
+        )
+      );
+      await page.loadV2Members('p1');
+      page.loadHubMembers();
+      await settle();
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      const usersBefore = usersRequests();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(spaceReads()).toBe(1);
+      expect(usersRequests()).toBeGreaterThan(usersBefore);
     } finally {
       unmount(page);
     }
