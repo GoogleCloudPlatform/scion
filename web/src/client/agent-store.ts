@@ -23,12 +23,13 @@
  * so a list is fetched once and then kept current from SSE.
  *
  * By default, lists are walked in the server's compact view. A compact row
- * merges into the feed's row for that agent and never strips the fields a
- * full row holds; the feed is the store's own, so compact rows never reach
- * the global `stateManager`. A compact row is authoritative for its
- * endpoint's compact keys: the compact view omits empty values, so a
- * compact key the row lacks (a cleared activity or labels) is deleted from
- * the feed's row. `_messageability` is a compact key of the hub list only.
+ * merges into the feed's row for that agent: it never strips the full-only
+ * fields a row holds (from a single-agent read), and it is authoritative
+ * for its endpoint's compact keys. The compact view omits empty values, so
+ * a compact key the row lacks (a cleared activity or labels) is deleted
+ * from the feed's row. `_messageability` is a compact key of the hub list
+ * only. The feed is the store's own, so compact rows never reach the global
+ * `stateManager`.
  *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
@@ -383,7 +384,7 @@ const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
  * a row lacks (see {@link mergeCompactRow}), so the set must not hold a key
  * the server does not send. The hub ships and serves this client, so the
  * two do not skew in practice; a hub without the compact view lists full
- * rows, which also omit empty values and hold the creator name only inside
+ * rows, which omit most empty values and hold the creator name only inside
  * `appliedConfig`.
  * `deletion` is not in the set: a row without it comes from a hub that does
  * not send it, so the held value stays.
