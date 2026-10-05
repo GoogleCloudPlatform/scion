@@ -31,7 +31,8 @@ make it a Hub-connected context: there, `--global` uses the local global directo
 
 An explicit flag wins over `SCION_PROJECT_ID`. This applies to commands that go through the Hub
 pre-flight check, and to the `conversation`, `notifications` and `messages` commands.
-`SCION_PROJECT` does not select a project; it is used only to detect a send within the same project.
+`SCION_PROJECT` does not select a project; it is used only to detect a send within the same
+project.
 
 In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
 `global`) when the local global directory is not linked to a Hub project. If the Hub has no Global

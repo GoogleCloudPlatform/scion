@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -26,9 +27,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hub link follow-ups (template sync and the broker list) target the hub
-// project ID, not the local project_id the link started from, when the
-// hub picks a different ID.
+// hub link follow-ups (adding the local broker as a provider, template
+// sync and the broker list) target the hub project ID, not the local
+// project_id the link started from, when the hub picks a different ID.
 func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 	const localID = "local-id"
 	tests := []struct {
@@ -61,6 +62,7 @@ func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 				mu           sync.Mutex
 				brokerQuery  []string
 				syncTargetID []string
+				providerPath []string
 			)
 			origOffer := offerTemplateSyncOnLinkFn
 			t.Cleanup(func() { offerTemplateSyncOnLinkFn = origOffer })
@@ -93,6 +95,16 @@ func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 					brokerQuery = append(brokerQuery, r.URL.Query().Get("projectId"))
 					mu.Unlock()
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{"brokers": []interface{}{}})
+				case strings.HasSuffix(r.URL.Path, "/providers") && r.Method == http.MethodPost:
+					mu.Lock()
+					providerPath = append(providerPath, r.URL.Path)
+					mu.Unlock()
+					// Answer 404 like an unknown route: runHubLink only logs
+					// an AddProvider failure, so the link still completes.
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error": map[string]interface{}{"code": "not_found", "message": "not found"},
+					})
 				default:
 					w.WriteHeader(http.StatusNotFound)
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -111,6 +123,10 @@ func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, []string{tt.wantHubID}, brokerQuery, "broker list project filter")
+			// setupProvideTest writes hub.brokerId, so runHubLink adds the
+			// local broker as a provider of the linked hub project.
+			assert.Equal(t, []string{"/api/v1/projects/" + tt.wantHubID + "/providers"},
+				providerPath, "AddProvider project")
 		})
 	}
 }
