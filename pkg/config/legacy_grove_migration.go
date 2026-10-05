@@ -1338,17 +1338,6 @@ func planLegacyKeyActions(root *yaml.Node, renames []legacyYAMLKeyRename) []lega
 	return actions
 }
 
-// resolveAlias follows n through any YAML anchors/aliases (`grove-id: *v`) to
-// the node it actually refers to, so value comparisons and the in-memory
-// override read the real value rather than the anchor name. Returns nil for
-// a dangling alias. Non-alias nodes are returned unchanged.
-func resolveAlias(n *yaml.Node) *yaml.Node {
-	for n != nil && n.Kind == yaml.AliasNode {
-		n = n.Alias
-	}
-	return n
-}
-
 // allActionsSurgical reports whether every action is a pure key rename (no
 // canonical key already present for any of them), the only case where the
 // byte-level rewrite path applies.
@@ -1522,50 +1511,6 @@ func runeColumnToByteOffset(line []byte, column int, firstLine bool) (int, bool)
 		return prefix + byteIdx, true
 	}
 	return 0, false
-}
-
-// findChildMapping returns root itself for name == "", or the mapping node
-// of the top-level key name within root (nil if absent or not a mapping,
-// following an alias first so `hub: *anchor` resolves to the real mapping).
-func findChildMapping(root *yaml.Node, name string) *yaml.Node {
-	if name == "" {
-		return root
-	}
-	_, val := findMapKey(root, name)
-	val = resolveAlias(val)
-	if val == nil || val.Kind != yaml.MappingNode {
-		return nil
-	}
-	return val
-}
-
-// findMapKey returns the key and value nodes for name in mapping's Content
-// (alternating key/value pairs), or nil, nil if mapping is nil or has no
-// such key.
-func findMapKey(mapping *yaml.Node, name string) (key, value *yaml.Node) {
-	if mapping == nil {
-		return nil, nil
-	}
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value == name {
-			return mapping.Content[i], mapping.Content[i+1]
-		}
-	}
-	return nil, nil
-}
-
-// deleteMapKey removes name's key/value pair from mapping's Content, if
-// present.
-func deleteMapKey(mapping *yaml.Node, name string) {
-	if mapping == nil {
-		return
-	}
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value == name {
-			mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
-			return
-		}
-	}
 }
 
 // writeConflictBackup writes orig, unchanged, to path+".grove-migration.bak"
