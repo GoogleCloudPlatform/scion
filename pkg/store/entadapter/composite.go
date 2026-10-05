@@ -321,11 +321,15 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // (including the group-membership delete) and the row deletes commit or roll
 // back together.
 //
-// On PostgreSQL the agent-ID query locks the project's agent rows FOR UPDATE,
-// in ID order, before their memberships are deleted. Every path that deletes
-// agent memberships then takes locks agent -> membership -> agent delete,
-// matching PurgeDeletedAgents and finalize-hard (which also lock in ID order),
-// so they cannot deadlock (40P01) against this delete.
+// On PostgreSQL the agent-ID query (lockProjectAgentIDs, shared with
+// LockProjectAgents) locks the project's agent rows FOR UPDATE, in ascending
+// ID order, before their memberships are deleted. Every path that deletes
+// agent memberships takes locks agent -> membership -> agent delete, with the
+// agent locks in ascending ID order: DeleteAgent and finalize-hard (one
+// agent), PurgeDeletedAgents (ascending across all batches), this method, and
+// ProjectDeletionService, which calls LockProjectAgents before its
+// project-group cascade deletes any membership. So none of them can deadlock
+// (40P01) against another on overlapping agents.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
@@ -334,13 +338,7 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	agentQuery := c.client.Agent.Query().
-		Where(agent.ProjectIDEQ(uid)).
-		Order(ent.Asc(agent.FieldID))
-	if c.client.Driver().Dialect() == dialect.Postgres {
-		agentQuery = agentQuery.ForUpdate()
-	}
-	agentIDs, err := agentQuery.IDs(ctx)
+	agentIDs, err := lockProjectAgentIDs(ctx, c.client, uid)
 	if err != nil {
 		return err
 	}
@@ -447,8 +445,14 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Ascending ID order, so the batches (and the per-batch locks below)
+	// lock rows in ID order across the whole purge, not just within one
+	// batch. Otherwise a later batch could lock a lower ID than an earlier
+	// one and deadlock against DeleteProject, which locks a project's agents
+	// in one ascending pass.
 	candidateIDs, err := tx.Agent.Query().
 		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+		Order(ent.Asc(agent.FieldID)).
 		IDs(ctx)
 	if err != nil {
 		return 0, err
@@ -466,7 +470,8 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		// The set is re-read under the eligibility predicate, and locked where
 		// the database supports row locks, so a candidate restored in between
 		// keeps its memberships just as it keeps its row. Rows are locked in
-		// ID order so concurrent purges take overlapping locks in one order.
+		// ID order, and the batches themselves are in ID order (see
+		// candidateIDs), so the whole purge locks in ascending ID order.
 		eligibleQuery := tx.Agent.Query().
 			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
 			Order(ent.Asc(agent.FieldID))

@@ -158,6 +158,13 @@ test-fixture-coverage:
 # TestCompositeDeleteProject_ prefixes also select the PostgreSQL-only
 # *_LockOrderNoDeadlock tests, which check that both deletes lock agent rows
 # before deleting their memberships (the purge/finalize order).
+# TestCompositeDeleteProject_LocksAgentsInIDOrder pins the ascending order of
+# that lock, and the TestPurgeDeletedAgents_ prefix selects
+# TestPurgeDeletedAgents_CrossBatchLockOrderNoDeadlock (purge batches in ID
+# order). A fourth run covers the production project-delete path in pkg/hub
+# (TestProjectDeletionService_LockOrderNoDeadlock: ProjectDeletionService
+# locks the project's agents before its project-group cascade deletes agent
+# memberships), selected by name so only that test runs here.
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
@@ -212,6 +219,16 @@ test-launch-store-postgres:
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 20m -v \
+		-run '^TestProjectDeletionService_LockOrderNoDeadlock$$' \
+		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-hub.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
 		exit 1; \
 	fi
 

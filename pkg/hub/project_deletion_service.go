@@ -264,6 +264,17 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			})
 		}
 
+		// 7b. Lock the project's agent rows (PostgreSQL: FOR UPDATE, in
+		// agent-ID order) before the cascade deletes any group or
+		// membership. A project-scoped group can contain agent memberships,
+		// and purge, finalize-hard and DeleteAgent lock the agent before
+		// deleting its memberships; deleting memberships first here would
+		// invert that order and could deadlock (40P01). DeleteProject below
+		// re-locks the same rows in the same order, which is a no-op.
+		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project agents for deletion: %w", err)
+		}
+
 		// 8. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
 		if err != nil {

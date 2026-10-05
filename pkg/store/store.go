@@ -967,6 +967,17 @@ type ProjectStore interface {
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
 
+	// LockProjectAgents locks every agent row of the project (soft-deleted
+	// ones included) in ascending agent-ID order. On PostgreSQL this is
+	// SELECT ... FOR UPDATE ordered by ID; on SQLite it is a plain read.
+	//
+	// Must be called inside a transaction (WithTx). Call it before deleting
+	// any group membership that may belong to one of the project's agents
+	// (for example a project-scoped group), so the transaction locks agent
+	// rows before membership rows, in ID order, like every other path that
+	// deletes agent memberships. Not finding any agents is not an error.
+	LockProjectAgents(ctx context.Context, projectID string) error
+
 	// UpdateProjectMessagingPolicy updates only the cross-project inbound
 	// policy and its revision using optimistic concurrency. The
 	// expectedRevision must match the current revision; returns
