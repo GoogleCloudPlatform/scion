@@ -25,10 +25,10 @@
  * By default, lists are walked in the server's compact view. A compact row
  * merges into the feed's row for that agent and never strips the fields a
  * full row holds; the feed is the store's own, so compact rows never reach
- * the global `stateManager`. A merge cannot clear a field either: the
- * compact view omits empty values, so a field the server clears (labels,
- * activity, phase, ...) keeps its last value in the feed until a full row
- * replaces it.
+ * the global `stateManager`. A compact row is authoritative for its
+ * endpoint's compact keys: the compact view omits empty values, so a
+ * compact key the row lacks (a cleared activity or labels) is deleted from
+ * the feed's row. `_messageability` is a compact key of the hub list only.
  *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
@@ -377,12 +377,66 @@ const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether merging a probe row into the row held would change a field the
- * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}). A merge never clears
- * a field the probe row omits, so only the probe row's own fields count.
+ * The keys of a compact row from a project's agent list: the hub's compact
+ * item, which omits a key whose value is empty. A merge deletes any of these
+ * a row lacks (see {@link mergeCompactRow}), so the set must not hold a key
+ * the server does not send.
  */
-function differsBeyondHeartbeat(row: Agent, held: Agent): boolean {
+const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
+  'id',
+  'slug',
+  'name',
+  'template',
+  'projectId',
+  'project',
+  'labels',
+  'phase',
+  'activity',
+  'containerStatus',
+  'messageMode',
+  'ancestry',
+  'createdBy',
+  'creatorName',
+  'created',
+  'updated',
+  'lastActivityEvent',
+  '_capabilities',
+]);
+
+/** The keys of a compact row from the hub's agent list, which adds messageability. */
+const HUB_COMPACT_KEYS: ReadonlySet<string> = new Set([...PROJECT_COMPACT_KEYS, '_messageability']);
+
+/** The compact keys of the endpoint that lists `q`. */
+function compactKeysOf(q: AgentQuery): ReadonlySet<string> {
+  return q.scope === 'hub' ? HUB_COMPACT_KEYS : PROJECT_COMPACT_KEYS;
+}
+
+/**
+ * `row`, a compact row, merged into `held`, the feed's row for the same
+ * agent. The row is authoritative for its endpoint's compact keys: the
+ * compact view omits empty values, so a compact key the row lacks was
+ * cleared and is deleted. Every other field `held` has (the full fields of
+ * a single-agent read) is kept.
+ */
+function mergeCompactRow(held: Agent | undefined, row: Agent, keys: ReadonlySet<string>): Agent {
+  if (!held) return row;
+  const merged = { ...held, ...row } as Record<string, unknown>;
+  for (const key of keys) if (!(key in row)) delete merged[key];
+  return merged as unknown as Agent;
+}
+
+/**
+ * Whether merging a probe row into the row held would change a field the
+ * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}): one of the probe
+ * row's own fields differs, or a compact key the row lacks (see
+ * {@link mergeCompactRow}) is set on the held row, which the merge clears.
+ */
+function differsBeyondHeartbeat(row: Agent, held: Agent, keys: ReadonlySet<string>): boolean {
   const before = held as unknown as Record<string, unknown>;
+  for (const key of keys) {
+    if (PROBE_UNCOMPARED_FIELDS.has(key) || key in row) continue;
+    if (before[key] !== undefined) return true;
+  }
   for (const [key, value] of Object.entries(row)) {
     if (PROBE_UNCOMPARED_FIELDS.has(key)) continue;
     const other = before[key];
@@ -927,11 +981,19 @@ export class AgentStore {
         if (this.carriedTombstones.size > 0) {
           rows = rows.filter((row) => !this.carriedTombstones.has(row.id));
         }
-        // Only a full hub walk replaces feed rows. Every other walk merges:
-        // compact rows omit the full fields a row may hold (from a
-        // single-agent read), and the project list omits fields the hub
-        // rows carry.
-        feed.seedAgents(rows, { token, partial: this.view === 'compact' || entry.key !== 'hub' });
+        if (this.view === 'compact') {
+          // Compact rows merge: they omit the full fields a row may hold
+          // (from a single-agent read), and clear the compact keys they lack.
+          const keys = compactKeysOf(entry.query);
+          feed.seedAgents(
+            rows.map((row) => mergeCompactRow(feed.getAgent(row.id), row, keys)),
+            { token }
+          );
+        } else {
+          // Only a full hub walk replaces feed rows: the project list omits
+          // fields the hub rows carry.
+          feed.seedAgents(rows, { token, partial: entry.key !== 'hub' });
+        }
       } finally {
         feed.endSeedEpoch(token);
       }
@@ -1123,6 +1185,7 @@ export class AgentStore {
       entry.overflowBackoffMs > 0 && this.now() - (entry.walkedAt ?? 0) < entry.overflowBackoffMs;
     const extraPages = backingOff ? 0 : AGENT_PROBE_MAX_EXTRA_PAGES;
     const token = feed.beginSeedEpoch();
+    const keys = compactKeysOf(entry.query);
     const changed: Agent[] = [];
     const listed = new Set(entry.agents.map((a) => a.id));
     let total: number | undefined;
@@ -1149,7 +1212,7 @@ export class AgentStore {
             !listed.has(row.id) ||
             (rowUpdated !== undefined &&
               (heldUpdated === undefined || rowUpdated > heldUpdated) &&
-              differsBeyondHeartbeat(row, held))
+              differsBeyondHeartbeat(row, held, keys))
           ) {
             changed.push(row);
           }
@@ -1168,7 +1231,10 @@ export class AgentStore {
       }
       if (this.feed !== feed) return;
       const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
-      feed.seedAgents(fresh, { token, partial: true });
+      feed.seedAgents(
+        fresh.map((row) => mergeCompactRow(feed.getAgent(row.id), row, keys)),
+        { token }
+      );
       // Only a merged probe that caught up moves the mark. An interrupted
       // one reads the same pages again; one that did not catch up leaves
       // the mark to the walk it hands off to, so if that walk fails, later

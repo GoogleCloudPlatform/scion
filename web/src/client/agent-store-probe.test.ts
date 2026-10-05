@@ -52,6 +52,13 @@ function row(id: string, updated: number, extra: Partial<Agent> = {}): Agent {
   return agent(id, { updated: t(updated), _capabilities: CAPS, ...extra });
 }
 
+/** `a` with its activity cleared, which the compact view then omits. */
+function withoutActivity(a: Agent): Agent {
+  const rest = { ...a };
+  delete rest.activity;
+  return rest;
+}
+
 function ids(snapshot: AgentListSnapshot | undefined): string[] {
   return (snapshot?.agents ?? []).map((a) => a.id);
 }
@@ -1188,6 +1195,73 @@ describe('AgentStore delta probe', () => {
     expect(ids(h.store.peek(P1)).sort()).toEqual(['a1', 'a2']);
     expect(mark).not.toHaveBeenCalled();
     expect(h.feeds[0].isAgentSetComplete('compact')).toBe(false);
+  });
+
+  it('clears an offline activity a stopped and restarted agent no longer has, and keeps full fields', async () => {
+    const h = await loaded([row('a1', 1, { activity: 'offline' })]);
+    h.feeds[0].seedAgents([
+      { ...(h.feeds[0].getAgent('a1') as Agent), harnessConfig: 'claude' } as Agent,
+    ]);
+    let publishes = 0;
+    h.store.retain(HUB, () => publishes++);
+    await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
+    await h.emitAgent('status', { agentId: 'a1', phase: 'running' });
+    expect(h.feeds[0].getAgent('a1')?.activity).toBe('offline');
+    const before = publishes;
+
+    h.server.agents[0] = withoutActivity(row('a1', 10, { phase: 'running' }));
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(h.server.walks()).toBe(1);
+    expect(publishes).toBe(before + 1);
+    const a1 = h.feeds[0].getAgent('a1');
+    expect(a1 !== undefined && 'activity' in a1).toBe(false);
+    expect(a1?.harnessConfig).toBe('claude');
+    expect(find(h.store.peek(HUB), 'a1')).toBe(a1);
+  });
+
+  it('does not publish when a probe row only drops a field the probe does not compare', async () => {
+    const h = await loaded([row('a1', 1, { containerStatus: 'Up 1 minute' } as Partial<Agent>)]);
+    let publishes = 0;
+    h.store.retain(HUB, () => publishes++);
+    const held = find(h.store.peek(HUB), 'a1');
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(publishes).toBe(0);
+    expect(find(h.store.peek(HUB), 'a1')).toBe(held);
+  });
+
+  it('clears labels the server removed', async () => {
+    const h = await loaded([row('a1', 1, { labels: { team: 'red' } })]);
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(find(h.store.peek(HUB), 'a1')?.labels).toBeUndefined();
+  });
+
+  it('keeps the messageability a project probe row does not carry', async () => {
+    const h = await loaded([
+      row('a1', 1, {
+        activity: 'offline',
+        _messageability: { canMessage: true },
+      } as Partial<Agent>),
+    ]);
+    h.server.projectRow = ({ _messageability: _omitted, ...rest }): Agent => rest as Agent;
+    h.store.retain(P1, () => {});
+    await h.store.ensure(P1);
+    h.server.agents[0] = withoutActivity(
+      row('a1', 10, { _messageability: { canMessage: true } } as Partial<Agent>)
+    );
+    await tick();
+
+    expect(h.server.probes('/api/v1/projects/')).toBe(1);
+    const a1 = h.feeds[0].getAgent('a1');
+    expect(a1?.activity).toBeUndefined();
+    expect(a1?._messageability).toEqual({ canMessage: true });
   });
 
   it('merges compact rows into full rows without dropping full fields', async () => {

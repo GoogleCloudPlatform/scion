@@ -935,6 +935,99 @@ describe('AgentStore compact rows', () => {
   });
 });
 
+describe('AgentStore compact rows clear the compact keys they omit', () => {
+  /** The server clears `activity` when an agent stops; the compact view then omits it. */
+  function withoutActivity(a: Agent): Agent {
+    const rest = { ...a };
+    delete rest.activity;
+    return rest;
+  }
+
+  it('a walk clears an offline activity after a stop and restart, and keeps full fields', async () => {
+    const h = createHarness([agent('a1', { phase: 'running', activity: 'offline' })]);
+    h.store.retain(HUB, () => {});
+    h.feeds[0]?.seedAgents([agent('a1', { harnessConfig: 'claude', activity: 'offline' })]);
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    expect(h.feeds[0]?.getAgent('a1')?.activity).toBe('offline');
+
+    h.server.agents = [withoutActivity({ ...agent('a1'), phase: 'running' })];
+    await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
+    await h.emitAgent('status', { agentId: 'a1', phase: 'running' });
+    expect(h.feeds[0]?.getAgent('a1')?.activity).toBe('offline');
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    const row = h.feeds[0]?.getAgent('a1');
+    expect(row).toBeDefined();
+    expect('activity' in (row as object)).toBe(false);
+    expect(row?.phase).toBe('running');
+    expect(row?.harnessConfig).toBe('claude');
+    expect(find(h.store.peek(HUB), 'a1')).toBe(row);
+  });
+
+  it('a walk clears labels the server removed', async () => {
+    const h = createHarness([agent('a1', { labels: { team: 'red' } })]);
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+
+    h.server.agents = [agent('a1')];
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.feeds[0]?.getAgent('a1')?.labels).toBeUndefined();
+    expect(find(h.store.peek(HUB), 'a1')?.labels).toBeUndefined();
+  });
+
+  it('a project walk clears its compact keys but keeps the messageability only the hub list carries', async () => {
+    const h = createHarness([
+      agent('a1', {
+        activity: 'offline',
+        _messageability: { canMessage: true },
+      } as Partial<Agent>),
+    ]);
+    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row as Agent;
+    h.store.retain(HUB, () => {});
+    h.store.retain(P1, () => {});
+    const hub = h.store.ensure(HUB);
+    await h.connect();
+    await hub;
+
+    h.server.agents = [
+      withoutActivity(agent('a1', { _messageability: { canMessage: true } } as Partial<Agent>)),
+    ];
+    await h.store.ensure(P1);
+
+    const row = h.feeds[0]?.getAgent('a1');
+    expect(row?.activity).toBeUndefined();
+    expect(row?._messageability).toEqual({ canMessage: true });
+    expect(find(h.store.peek(P1), 'a1')).toBe(row);
+  });
+
+  it('an activity delta during a walk survives a row that omits activity', async () => {
+    const h = createHarness([agent('a1', { activity: 'offline' })]);
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+
+    h.server.agents = [withoutActivity(agent('a1'))];
+    const release = h.server.pause();
+    h.store.invalidate('manual');
+    await settle();
+    await h.emitAgent('status', { agentId: 'a1', activity: 'working' });
+    release();
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    expect(h.feeds[0]?.getAgent('a1')?.activity).toBe('working');
+  });
+});
+
 describe('AgentStore eviction', () => {
   const P2 = { scope: 'project', projectId: 'p2' } as const;
 
