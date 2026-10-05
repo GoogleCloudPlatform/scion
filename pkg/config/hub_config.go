@@ -1312,7 +1312,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 
 	// Fixup for list fields that might be loaded as a single comma-separated string from env vars.
 	// This happens because koanf's env provider doesn't automatically split strings for slice fields.
-	splitEnvCommaLists(config)
+	normalizeListSettings(config)
 
 	// D11-fix: normalize AdminEmails for ALL list shapes (YAML list, env-var,
 	// comma-separated). Apply TrimSpace + ToLower and drop empty entries so
@@ -1760,7 +1760,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 
 	// Fixup for list fields that might be loaded as a single comma-separated
 	// string from env vars (koanf's env provider doesn't auto-split slices).
-	splitEnvCommaLists(gc)
+	normalizeListSettings(gc)
 
 	// D11-fix: normalize AdminEmails (same as primary config load path).
 	gc.Hub.AdminEmails = SanitizeEmailList(gc.Hub.AdminEmails)
@@ -1768,7 +1768,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	return nil
 }
 
-// splitEnvCommaLists normalizes list settings after load (from env or
+// normalizeListSettings normalizes list settings after load (from env or
 // file). koanf's env provider loads a list env var as one string (it does
 // not split slices), e.g. SCION_SERVER_HUB_CORSALLOWEDORIGINS=https://a,https://b.
 //
@@ -1781,8 +1781,10 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 //   - The hub and broker CORS origins, methods and headers lists are
 //     normalized at every length: each item is split on commas and trimmed,
 //     and empty items are dropped. An empty CORS list behaves like a list of
-//     blank entries (no origin matches; methods/headers join to "").
-func splitEnvCommaLists(gc *GlobalConfig) {
+//     blank entries (no origin matches; methods/headers join to ""), so this
+//     only widens matching: a padded or comma-joined entry, including " * ",
+//     now takes effect.
+func normalizeListSettings(gc *GlobalConfig) {
 	for _, list := range []*[]string{&gc.Hub.AdminEmails, &gc.Auth.AuthorizedDomains} {
 		if len(*list) == 1 && strings.Contains((*list)[0], ",") {
 			*list = parseCommaSeparatedList((*list)[0])

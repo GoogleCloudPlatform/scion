@@ -1811,7 +1811,7 @@ func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
 	}
 }
 
-// TestLoadGlobalConfig_ListFieldNormalization pins splitEnvCommaLists on
+// TestLoadGlobalConfig_ListFieldNormalization pins normalizeListSettings on
 // both load paths. CORS lists are normalized at every length (each item
 // split on commas, trimmed, empty items dropped). authorized_domains keeps
 // its original behaviour exactly: only a single comma-containing element is
@@ -1860,6 +1860,16 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 			v1:     "  hub:\n    cors:\n      allowed_methods: [\"GET\", \" \", \" POST\"]\n",
 			get:    func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
 
+		// A padded "*" now takes effect (CORS normalization only widens matching).
+		{name: "file padded star origin hub",
+			legacy: "hub:\n  corsAllowedOrigins: [\" * \"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\" * \"]\n",
+			get:    hubOrigins, want: []string{"*"}},
+		{name: "file padded star origin broker",
+			legacy: "runtimeBroker:\n  corsAllowedOrigins: [\" * \"]\n",
+			v1:     "  broker:\n    cors:\n      allowed_origins: [\" * \"]\n",
+			get:    func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedOrigins }, want: []string{"*"}},
+
 		// authorized_domains: unchanged behaviour.
 		{name: "domains env comma list split", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "a.com, b.com"},
 			get: domains, want: []string{"a.com", "b.com"}},
@@ -1869,6 +1879,25 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 			get: domains, want: []string{"   "}},
 		{name: "domains env padded single kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": " a.com "},
 			get: domains, want: []string{" a.com "}},
+	}
+	// admin_emails: unchanged behaviour (comma split of a single element,
+	// then SanitizeEmailList trims, lowercases and drops empty entries).
+	admins := func(gc *GlobalConfig) []string { return gc.Hub.AdminEmails }
+	rows = append(rows,
+		row{name: "admins env empty", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": ""}, get: admins, want: []string{}},
+		row{name: "admins env padded single", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": "  A@x.com  "}, get: admins, want: []string{"a@x.com"}},
+	)
+	for _, f := range []struct {
+		name, list string
+		want       []string
+	}{
+		{"admins file two blanks", `["", " "]`, []string{}},
+		{"admins file padded comma-joined single", `[" a@x.com,b@x.com "]`, []string{"a@x.com", "b@x.com"}},
+	} {
+		rows = append(rows, row{name: f.name,
+			legacy: "hub:\n  adminEmails: " + f.list + "\n",
+			v1:     "  hub:\n    admin_emails: " + f.list + "\n",
+			get:    admins, want: f.want})
 	}
 	for _, f := range []struct {
 		name, list string
