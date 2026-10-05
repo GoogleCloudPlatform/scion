@@ -17,10 +17,13 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -100,6 +103,94 @@ var globalConfigReadLayer1Keys = map[string]bool{
 	"server.hub.public_url": true,
 }
 
+// schemaToGlobalConfigPath maps the schema keys whose GlobalConfig field is
+// not the mechanical translation (see globalConfigPathFor).
+var schemaToGlobalConfigPath = map[string]string{
+	"server.hub.public_url": "hub.endpoint", // ConvertV1ServerToGlobalConfig
+}
+
+// globalConfigModeExceptions lists "<ENV_VAR>@<mode>" pairs, where mode is
+// legacy or settings, in which a schema env var legitimately does not reach
+// GlobalConfig. Each entry must cite the issue that tracks it, e.g.
+// "SCION_SERVER_OIDCLOGIN_ENABLED@legacy": "ptone/scion#3038" if that name
+// were advertised in the schema. None are needed today.
+var globalConfigModeExceptions = map[string]string{}
+
+// globalConfigPathFor maps a schema path (server.hub.read_timeout) to the
+// GlobalConfig koanf path (hub.read_timeout, matched loosely by structLeaf):
+// strip "server.", and server.broker is GlobalConfig.RuntimeBroker.
+func globalConfigPathFor(schemaPath string) string {
+	if p, ok := schemaToGlobalConfigPath[schemaPath]; ok {
+		return p
+	}
+	p := strings.TrimPrefix(schemaPath, "server.")
+	if rest, ok := strings.CutPrefix(p, "broker."); ok {
+		p = "runtimeBroker." + rest
+	}
+	return p
+}
+
+func normKey(s string) string { return strings.ToLower(strings.ReplaceAll(s, "_", "")) }
+
+// structLeaf follows a dotted path through v by koanf tag (ignoring case
+// and underscores, so read_timeout finds readTimeout) and returns the leaf.
+// A nil pointer on the way means the leaf is absent.
+func structLeaf(v reflect.Value, path string) (reflect.Value, bool) {
+	for _, seg := range strings.Split(path, ".") {
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+		found := false
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Type().Field(i)
+			tag := strings.Split(f.Tag.Get("koanf"), ",")[0]
+			if tag == "" || tag == "-" {
+				continue
+			}
+			if normKey(tag) == normKey(seg) {
+				v = v.Field(i)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return reflect.Value{}, false
+		}
+	}
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return reflect.Value{}, false
+		}
+		v = v.Elem()
+	}
+	return v, true
+}
+
+// leafEquals reports whether a GlobalConfig leaf holds the env value s.
+func leafEquals(v reflect.Value, s string) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if v.Type() == reflect.TypeOf(time.Duration(0)) {
+		d, err := time.ParseDuration(s)
+		return err == nil && time.Duration(v.Int()) == d
+	}
+	if v.Kind() == reflect.Slice {
+		parts := make([]string, v.Len())
+		for i := range parts {
+			parts[i] = fmt.Sprint(v.Index(i).Interface())
+		}
+		return strings.Join(parts, ",") == s
+	}
+	return fmt.Sprint(v.Interface()) == s
+}
+
 // sampleEnvValues returns candidate values for an env override of entry, in
 // the order to try. Several are offered so that at least one differs from
 // the field's default.
@@ -153,8 +244,9 @@ func jsonPathValue(t *testing.T, v interface{}, path string) (interface{}, bool)
 // settings schema advertises (x-env-var) and checks the value reaches the
 // config the hub actually reads for that key: the opsettings env koanf for
 // Layer-1 keys, LoadVersionedSettings for broker identity
-// (config.VersionedSettingsReadServerKeys), and GlobalConfig for every other
-// Layer-0 key. The list of names is derived from the schema, so a new
+// (config.VersionedSettingsReadServerKeys), and the specific GlobalConfig
+// field for every other Layer-0 key, on both the legacy and the
+// settings.yaml load paths. The list of names is derived from the schema, so a new
 // x-env-var whose spelling no loader maps to the field fails here
 // (ptone/scion#1081).
 func TestSchemaServerEnvVars_ReachHubConfig(t *testing.T) {
@@ -177,21 +269,47 @@ func TestSchemaServerEnvVars_ReachHubConfig(t *testing.T) {
 			t.Errorf("config.VersionedSettingsReadServerKeys entry %q has no x-env-var in the schema; remove it", k)
 		}
 	}
+	seenEnv := map[string]bool{}
+	for _, e := range server {
+		seenEnv[e.EnvVar] = true
+	}
+	for k := range globalConfigModeExceptions {
+		name, mode, _ := strings.Cut(k, "@")
+		if !seenEnv[name] || (mode != "legacy" && mode != "settings") {
+			t.Errorf("globalConfigModeExceptions entry %q names no schema env var or an unknown mode; remove it", k)
+		}
+	}
 	for k := range globalConfigReadLayer1Keys {
 		if !seenPaths[k] || !IsLayer1Key(k) {
 			t.Errorf("globalConfigReadLayer1Keys entry %q is not a Layer-1 key with an x-env-var; remove it", k)
 		}
 	}
 
-	// One HOME and config dir for every load: GlobalConfig derives
-	// defaults (e.g. the sqlite URL) from them, so they must not vary
-	// between the baseline and the per-variable loads.
-	t.Setenv("HOME", t.TempDir())
-	configDir := t.TempDir()
-	baselineGC, err := config.LoadGlobalConfig(configDir)
-	if err != nil {
-		t.Fatalf("baseline LoadGlobalConfig: %v", err)
+	// GlobalConfig is checked on both load paths: the legacy one (no
+	// settings.yaml, so server.yaml + env) and the settings.yaml one
+	// (loadServerFromSettingsFile + applyEnvOverrides), which bind env
+	// names differently.
+	legacyHome := t.TempDir()
+	settingsHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(settingsHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(settingsHome, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  mode: workstation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcModes := []struct{ name, home string }{{"legacy", legacyHome}, {"settings", settingsHome}}
+	configDir := t.TempDir()
+	baseline := map[string]*config.GlobalConfig{}
+	for _, m := range gcModes {
+		t.Setenv("HOME", m.home)
+		gc, err := config.LoadGlobalConfig(configDir)
+		if err != nil {
+			t.Fatalf("baseline LoadGlobalConfig (%s): %v", m.name, err)
+		}
+		baseline[m.name] = gc
+	}
+	t.Setenv("HOME", legacyHome)
 
 	for _, e := range server {
 		t.Run(e.EnvVar, func(t *testing.T) {
@@ -224,18 +342,39 @@ func TestSchemaServerEnvVars_ReachHubConfig(t *testing.T) {
 				}
 
 			default:
-				for _, v := range samples {
+				gcPath := globalConfigPathFor(e.Path)
+				for _, m := range gcModes {
+					if reason, skip := globalConfigModeExceptions[e.EnvVar+"@"+m.name]; skip {
+						t.Logf("%s: skipped in %s mode: %s", e.EnvVar, m.name, reason)
+						continue
+					}
+					base, ok := structLeaf(reflect.ValueOf(baseline[m.name]), gcPath)
+					if !ok {
+						base = reflect.Value{}
+					}
+					v := samples[0]
+					for _, cand := range samples {
+						if !ok || !leafEquals(base, cand) {
+							v = cand
+							break
+						}
+					}
+					t.Setenv("HOME", m.home)
 					t.Setenv(e.EnvVar, v)
 					gc, err := config.LoadGlobalConfig(configDir)
 					if err != nil {
-						t.Fatalf("LoadGlobalConfig with %s=%q: %v", e.EnvVar, v, err)
+						t.Fatalf("LoadGlobalConfig (%s) with %s=%q: %v", m.name, e.EnvVar, v, err)
 					}
-					if !reflect.DeepEqual(gc, baselineGC) {
-						return
+					got, found := structLeaf(reflect.ValueOf(gc), gcPath)
+					if !found || !leafEquals(got, v) {
+						var shown interface{} = "<absent>"
+						if found {
+							shown = got.Interface()
+						}
+						t.Errorf("%s=%q (%s mode): GlobalConfig %s = %v; the hub never sees it",
+							e.EnvVar, v, m.name, gcPath, shown)
 					}
 				}
-				t.Errorf("%s (%s, read via GlobalConfig) does not change GlobalConfig for any of %q; the hub never sees it",
-					e.EnvVar, e.Path, samples)
 			}
 		})
 	}
