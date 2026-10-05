@@ -42,7 +42,9 @@ const nfsWorkspaceExportHint = "workspace_storage nfs needs the broker to be abl
 const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
 
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
-// (<subpath_root>/<projectID>/workspace), and the directory of every shared
+// (<subpath_root>/<projectID>/workspace), its provisioning state directory
+// (<subpath_root>/<projectID>/provision, see runtime.NFSProvisionStateSubPath),
+// and the directory of every shared
 // dir served from the same claim (<subpath_root>/<projectID>/shared-dirs/<name>),
 // exist before a Kubernetes pod that mounts them by subPath is created.
 //
@@ -129,6 +131,19 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 		leaves = append(leaves, agentDir)
 	}
 	leaves = append(leaves, workspaceLeaf)
+	if agentName == "" {
+		// Shared-plain and worktree-per-agent: the provisioning init
+		// container keeps its sentinel and lock in the project's
+		// provisioning state directory (<project>/provision), which it
+		// mounts by subPath next to the workspace. Same derivation as the
+		// runtime's mount, and the same leaf modes, so both the broker and
+		// the init container can take the lock in it.
+		stateLeaf, err := runtime.NFSProvisionStateSubPath(rel, projectID)
+		if err != nil {
+			return false, fmt.Errorf("workspace_storage nfs: %w", err)
+		}
+		leaves = append(leaves, stateLeaf)
+	}
 	if len(sharedDirNames) > 0 {
 		dirs := make([]api.SharedDir, 0, len(sharedDirNames))
 		for _, name := range sharedDirNames {

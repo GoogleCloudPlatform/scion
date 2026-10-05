@@ -161,10 +161,7 @@ func resolveSharedDirs(
 	// computed something unexpected (round 2 review finding F1). This also
 	// protects the K8s subPath, since it comes from the same
 	// ServerRelativePath.
-	subPathRoot := sdCfg.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	for _, name := range names {
 		sd, ok := res.SharedDirs[name]
 		if !ok {

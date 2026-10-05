@@ -154,6 +154,91 @@ type routingResult struct {
 	Def152DerivedRecipient bool
 }
 
+// outboundThreadState is the result of outboundThreadConversationState.
+type outboundThreadState int
+
+const (
+	// outboundThreadMissing: nothing the resolver would reuse exists, so it
+	// would mint a new, participant-less group conversation.
+	outboundThreadMissing outboundThreadState = iota
+	// outboundThreadExists: a live webchat topic or a native conversation
+	// with the thread's external_ref exists and will be reused.
+	outboundThreadExists
+	// outboundThreadDeleted: the thread is a webchat topic that has been
+	// soft-deleted. The resolver would reuse its conversation, but nobody can
+	// see it any more.
+	outboundThreadDeleted
+)
+
+// outboundThreadGateApplies reports whether the ptone/scion#2026
+// existing-thread check applies to an outbound send on channel (after S2
+// reply affinity). It applies only to native delivery: the web channel or no
+// channel. External channel plugins (Slack, Teams, Google Chat, ...) deliver
+// to the ThreadID themselves, so for them the thread need not exist as a
+// conversation on the Hub. ChannelToSurfaceStrict is used rather than
+// ChannelToSurface because the latter maps unknown channel names (plugins
+// can be registered under any name) to "native".
+//
+// An empty channel is gated on purpose, even though on a broker deployment
+// with no reply affinity it can fan out to plugin spokes (Slack and Teams
+// accept an empty channel and deliver to the ThreadID). A direct API caller
+// sending a plugin-format thread_id with no channel therefore gets a 422 and
+// must name the channel. The CLI cannot reach this case: --thread-id
+// requires --channel.
+func outboundThreadGateApplies(channel string) bool {
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	return err == nil && surface == "native"
+}
+
+// outboundThreadConversationState reports whether a free-text thread key
+// (extRef = "thread:<project>:<threadID>") names a conversation that
+// ResolveOrCreateConversationByKey would reuse rather than mint, and whether
+// that conversation is still visible:
+//
+//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//     has no conversation_id yet also counts; the resolver refuses to mint
+//     for it and reports its own error.
+//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//     than the resolver, which reuses a deleted topic's conversation.
+//   - otherwise, a native conversation whose external_ref is extRef: exists.
+//   - otherwise: missing.
+//
+// Lookup failures other than "not found" are returned as errors.
+//
+// The check and the resolver's upsert are not atomic: if the conversation is
+// deleted in between, the resolver mints a fresh row. The window is tiny and
+// needs a concurrent deletion, so it is accepted.
+func outboundThreadConversationState(
+	ctx context.Context,
+	cr messaging.ConversationReader,
+	tl messaging.TopicConversationLookup,
+	extRef, threadID string,
+) (outboundThreadState, error) {
+	if tl != nil {
+		_, err := tl.GetTopicConversationID(ctx, threadID)
+		if err == nil {
+			return outboundThreadExists, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
+		}
+		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		if err == nil {
+			return outboundThreadDeleted, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup (including deleted): %w", err)
+		}
+	}
+	if _, err := cr.GetConversationByExternalRef(ctx, "native", extRef); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, nil
+		}
+		return outboundThreadMissing, fmt.Errorf("conversation lookup: %w", err)
+	}
+	return outboundThreadExists, nil
+}
+
 // resolveOutboundRouting consolidates recipient resolution, conversation
 // authorization, and transport selection into a single routing decision.
 // Returns a routingResult that the handler uses to build the message envelope
@@ -542,6 +627,41 @@ func (s *Server) resolveOutboundRouting(
 			s.mu.RLock()
 			wcs := s.webChatStore
 			s.mu.RUnlock()
+			// #2026: on native delivery (web or no channel), a free-text
+			// (non-dm:) thread_id may only address a thread conversation that
+			// already exists and is visible. Minting one here would create a
+			// participant-less group conversation that the recipient never
+			// sees, while the sender is told "sent". Reject instead, before
+			// any conversation or message row is written. External channels
+			// are exempt: their plugin delivers to the ThreadID itself.
+			if kind == "group" && outboundThreadGateApplies(req.Channel) {
+				var tl messaging.TopicConversationLookup
+				if wcs != nil {
+					tl = wcs
+				}
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				if stateErr != nil {
+					s.messageLog.Error("thread conversation lookup failed",
+						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"thread conversation lookup failed", nil)
+					return nil, stateErr
+				}
+				switch state {
+				case outboundThreadMissing:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
+							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+				case outboundThreadDeleted:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
+							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
+				}
+			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 			}
@@ -1330,6 +1450,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"status":       "sent",
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
+	}
+	// #2026: report the conversation the message landed in, so a caller
+	// that addressed a thread or a user can tell where it went.
+	if result.ConversationID != "" {
+		respBody["conversation_id"] = result.ConversationID
 	}
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults

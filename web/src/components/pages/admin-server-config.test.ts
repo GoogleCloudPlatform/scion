@@ -1891,4 +1891,66 @@ describe('scion-page-admin-server-config', () => {
       expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
     });
   });
+  describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
+    const maskedServer = {
+      notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
+      oauth: { web: { github: { client_id: 'cid', client_secret: '********' } } },
+      github_app: { app_id: 42, private_key: '********', webhook_secret: '********' },
+    };
+    const withServer = (tier: string, extra: Record<string, unknown>) => {
+      const base = makeBaseConfig({ settings_tier: tier });
+      return { ...base, server: { ...base.server, ...extra } };
+    };
+
+    it('DB mode payload omits unedited masked notification_channels and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('db', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server).toBeDefined();
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildLayer1Payload())).not.toContain('********');
+    });
+
+    it('file mode payload omits unedited masked notification_channels, oauth and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('file', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.oauth).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildFilePayload())).not.toContain('********');
+    });
+
+    it('DB mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        github_app: { app_id: 42, webhooks_enabled: true },
+      };
+      element = await createComponent(createFetchHandler(withServer('db', plain)));
+      const el = element as any;
+      // Pin github_app: loadGitHubAppConfig may replace it after load.
+      el.rawConfig.server.github_app = plain.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.github_app).toEqual(plain.github_app);
+    });
+
+    it('file mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        oauth: { web: { github: { client_id: 'cid' } } },
+      };
+      element = await createComponent(createFetchHandler(withServer('file', plain)));
+      const server = (element as any).buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.oauth).toEqual(plain.oauth);
+    });
+  });
 });
