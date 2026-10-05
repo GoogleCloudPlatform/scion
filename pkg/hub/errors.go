@@ -86,6 +86,11 @@ const (
 	ErrCodeClockSkew        = "clock_skew"
 	ErrCodeReplayDetected   = "replay_detected"
 
+	// ErrCodeUserNotFound is returned (401) when a hub-issued user token
+	// names a user that no longer exists, for example after the account
+	// was deleted. Such tokens stop working immediately.
+	ErrCodeUserNotFound = "user_not_found"
+
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
 
