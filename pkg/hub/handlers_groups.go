@@ -729,11 +729,17 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	case store.GroupMemberTypeGroup:
 		// Try as ID first, then as slug
-		if _, err := s.store.GetGroup(ctx, req.MemberID); err != nil {
-			if err == store.ErrNotFound {
-				memberGroup, slugErr := s.store.GetGroupBySlug(ctx, req.MemberID)
+		memberGroup, err := s.store.GetGroup(ctx, req.MemberID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				var slugErr error
+				memberGroup, slugErr = s.store.GetGroupBySlug(ctx, req.MemberID)
 				if slugErr != nil {
-					ValidationError(w, "group not found: "+req.MemberID, nil)
+					if errors.Is(slugErr, store.ErrNotFound) {
+						ValidationError(w, "group not found: "+req.MemberID, nil)
+						return
+					}
+					writeErrorFromErr(w, slugErr, "")
 					return
 				}
 				resolvedID = memberGroup.ID
@@ -741,6 +747,13 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 				writeErrorFromErr(w, err, "")
 				return
 			}
+		}
+		// Project members groups are system-managed and cannot be nested
+		// as a child of another group.
+		if store.IsProjectMembersGroup(memberGroup) {
+			ValidationError(w, projectMembersGroupPrincipalMessage,
+				projectMembersGroupPrincipalDetails(memberGroup.ID))
+			return
 		}
 	case store.GroupMemberTypeAgent:
 		if _, err := s.store.GetAgent(ctx, req.MemberID); err != nil {
