@@ -474,7 +474,8 @@ type AgentStore interface {
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
 
-	// BeginLaunch starts a new launch for agentID. The caller must start its
+	// BeginLaunch starts a new launch for agentID. A create start claim on the
+	// row is linked to the new launch (see SettleEndedLaunchClaim). The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
 	// previous active launch on the row becomes implicitly superseded (its ID
 	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
@@ -563,6 +564,115 @@ type AgentStore interface {
 	// NULL: running for phase running or starting, stopped otherwise. It
 	// returns the number of rows written. Idempotent.
 	BackfillRunIntent(ctx context.Context) (int, error)
+
+	// --- Start claim (see start_claim.go) ---
+	// These, plus a create launch's terminal write, are the only writers of
+	// the start_claim_* columns. None of them bumps state_version, and
+	// UpdateAgent and CreateAgent never write the columns. Every time is read
+	// from the store clock inside the method's transaction, under the row
+	// lock; callers pass durations only. Each opens its own transaction and
+	// must not be called from inside WithTx.
+
+	// ClaimAgentStart takes a live claim of a start kind (any kind except
+	// StartClaimStop) for agentID, owned by owner, with a lease of ttl, and
+	// records run intent running in the same write (run_intent_at strictly
+	// increasing, as SetRunIntent). It requires that no claim is held, the
+	// agent is not deleted or being deleted, and no reincarnation is in
+	// flight. Returns *ClaimHeldError when a claim is held, ErrClaimPredicate
+	// when the agent is otherwise not eligible, and ErrNotFound when it does
+	// not exist.
+	ClaimAgentStart(ctx context.Context, agentID, owner string, kind StartClaimKind, target string, ttl time.Duration) (StartClaim, error)
+
+	// ClaimAgentStop takes a live claim of kind StartClaimStop, used while a
+	// queued stop recorded at intentAt is applied. It requires that no claim
+	// is held and that run intent is still stopped at exactly intentAt; it
+	// does not change run intent. Errors as ClaimAgentStart.
+	ClaimAgentStop(ctx context.Context, agentID, owner string, intentAt time.Time, ttl time.Duration) (StartClaim, error)
+
+	// RenewAgentStart extends a live claim's lease to now+ttl. It applies
+	// only when the row still holds claimID, owned by owner, live, with an
+	// unexpired lease. held=false (no error) means the claim is lost. An
+	// error means the outcome is unknown.
+	RenewAgentStart(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (held bool, err error)
+
+	// MarkStartUnconfirmed moves a live claim to unconfirmed with a hold of
+	// hold, under the same predicate as RenewAgentStart.
+	MarkStartUnconfirmed(ctx context.Context, agentID, claimID, owner string, hold time.Duration) (held bool, err error)
+
+	// ReleaseAgentStart clears a live claim, under the same predicate as
+	// RenewAgentStart.
+	ReleaseAgentStart(ctx context.Context, agentID, claimID, owner string) (held bool, err error)
+
+	// ReleaseSupersededStart clears claimID, in any state and of any kind,
+	// when run intent is stopped at exactly stopIntentAt: a stop accepted at
+	// stopIntentAt superseded it. A claim taken after that stop wrote a newer
+	// run_intent_at, so an older stop never releases it.
+	ReleaseSupersededStart(ctx context.Context, agentID, claimID string, stopIntentAt time.Time) (released bool, err error)
+
+	// DemoteExpiredStartClaim moves claimID from live to unconfirmed, with
+	// the kind's hold from holds, when its lease has expired on the store
+	// clock and the agent has no active launch. A renew that commits first
+	// wins.
+	DemoteExpiredStartClaim(ctx context.Context, agentID, claimID string, holds StartClaimHolds) (demoted bool, err error)
+
+	// DemoteOwnerStartClaims moves every live claim whose owner starts with
+	// ownerPrefix to unconfirmed, whatever its lease, except on agents with
+	// an active launch. Used when a hub replica restarts under the same pod
+	// name: claims owned by its previous process can no longer be renewed.
+	// excludeOwner (this process's own owner value) is never demoted.
+	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
+
+	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
+	// agent has no active launch.
+	ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (released bool, err error)
+
+	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a create
+	// claim (claimID) linked to the agent's launch (the launch the claim was
+	// linked to at BeginLaunch), when that launch has ended without settling
+	// it. No-op when the launch is active, the claim changed, the claim is
+	// not linked to the agent's current launch, or the end reason settles
+	// nothing. A claim taken after a launch ended is never linked to it.
+	SettleEndedLaunchClaim(ctx context.Context, agentID, claimID string) (changed bool, err error)
+
+	// ListAgentsWithStartClaim returns every non-deleted agent that holds a
+	// start claim.
+	ListAgentsWithStartClaim(ctx context.Context) ([]*Agent, error)
+
+	// StoreClock reads the store clock: Postgres now(), or the single SQLite
+	// process's clock. The columns written on this clock are run_intent_at,
+	// every start_claim_* time, agent_recovery observed_at and
+	// first_absent_at, broker_target_inventory last_complete_inventory_at
+	// and the launch_* times; comparisons against them (hold expiry,
+	// observation freshness) use it. Broker last_heartbeat and connected_at
+	// are written on the hub process clock instead, so on Postgres they are
+	// not comparable with store-clock times.
+	StoreClock(ctx context.Context) (time.Time, error)
+
+	// ClaimAgentReincarnation records a reincarnation as pending (state
+	// pending, reincarnation_updated_at=at) and bumps state_version, when the
+	// row is still at expectedVersion, holds no start claim, and has no
+	// reincarnation in flight. Returns the new state_version.
+	// ErrVersionConflict when the version moved, *ClaimHeldError when a start
+	// claim is held, ErrClaimPredicate when a reincarnation is in flight.
+	ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error)
+
+	// --- Runtime observations (see start_claim.go) ---
+
+	// RecordRecoveryObservations writes one heartbeat's observations in one
+	// transaction: it reads the store clock, upserts each observation whose
+	// target is in completeTargets (observations of other targets are
+	// ignored), keeping first_absent_at across consecutive absent
+	// observations, and upserts broker_target_inventory for each complete
+	// target. Returns the store-clock time written.
+	RecordRecoveryObservations(ctx context.Context, brokerID string, completeTargets []string, obs []RecoveryObservation) (time.Time, error)
+
+	// GetRecoveryObservations returns the stored observations of the given
+	// agents, keyed by agent ID. Agents with none are absent from the map.
+	GetRecoveryObservations(ctx context.Context, agentIDs []string) (map[string]RecoveryObservationRecord, error)
+
+	// ListBrokerTargetInventory returns a broker's per-target complete
+	// inventory times.
+	ListBrokerTargetInventory(ctx context.Context, brokerID string) ([]BrokerTargetInventory, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
