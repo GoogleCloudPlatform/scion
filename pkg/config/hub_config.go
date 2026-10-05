@@ -342,6 +342,20 @@ func (c *HubServerConfig) ResolveHubName() string {
 	return hostname
 }
 
+// HubNamePattern is the server.hub.hub_name pattern in
+// settings-v1.schema.json (a lowercase DNS-label style name, usable as a GCP
+// label value). Bootstrap does not enforce it; see HubNameMatchesSchema.
+const HubNamePattern = `^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`
+
+var hubNameRE = regexp.MustCompile(HubNamePattern)
+
+// HubNameMatchesSchema reports whether name matches HubNamePattern. The hub
+// only warns at startup on a mismatch (the name still loads), but the admin
+// server-config API rejects a non-matching value as a new hub_name.
+func HubNameMatchesSchema(name string) bool {
+	return hubNameRE.MatchString(name)
+}
+
 // validAgentEndpointLabelRE matches one DNS label made only of letters,
 // digits, '_', and '-', each dot-separated label matched individually so that
 // a leading or trailing '-' is rejected per label rather than only at the

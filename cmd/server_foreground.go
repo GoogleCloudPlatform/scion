@@ -1656,6 +1656,20 @@ func resolveHubIDFromEnv() string {
 	return config.ResolveHubIDFromEnv()
 }
 
+// warnNonConformingHubName logs a warning when a configured hub_name does
+// not match the settings schema pattern. It is not fatal: the name still
+// loads, but the admin server-config API rejects such a value if an admin
+// tries to set it (an unchanged echo is accepted). It reports whether it
+// warned.
+func warnNonConformingHubName(name string) bool {
+	if name == "" || config.HubNameMatchesSchema(name) {
+		return false
+	}
+	slog.Warn("server.hub.hub_name does not match the settings schema pattern; it is used as is, but cannot be set to this value through the admin server-config API",
+		"hub_name", name, "pattern", config.HubNamePattern)
+	return true
+}
+
 // resolveHubNameFromEnv resolves the hub display name from environment variables,
 // falling back to os.Hostname(). This is used during early logging init before
 // the full config is loaded. SCION_SERVER_HUB_HUBNAME (the standard koanf-derived
@@ -1968,6 +1982,7 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running

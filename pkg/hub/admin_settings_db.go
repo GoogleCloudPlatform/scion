@@ -158,6 +158,9 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
+	// hub_name: the effective value (DB, else bootstrap), so a client that
+	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
+	resp.Server.Hub.HubName = effectiveHubName(ops)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(r.Context(), ops)
@@ -389,6 +392,11 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
 			dbVal, exists := dbMap[key]
+			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
+				// The DB row does not override this key; the bootstrap
+				// value stays in effect.
+				continue
+			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
 				if koanfPath == "" {
@@ -410,6 +418,87 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		return nil
 	}
 	return result
+}
+
+// bootstrapAppliesWhenAbsent reports whether a section key keeps its
+// bootstrap value when a managed DB row omits it. That is the case for
+// endpoints hub_name: ApplySnapshot skips an empty HubName, and a managed
+// endpoints row carries hub_name only after an admin changes it.
+func bootstrapAppliesWhenAbsent(section, key string) bool {
+	return section == "endpoints" && key == "hub_name"
+}
+
+// effectiveHubName returns the hub_name in effect: the operational snapshot
+// value when set, otherwise the bootstrap value (ApplySnapshot keeps the
+// bootstrap value when the snapshot HubName is empty). GET server-config
+// returns this value.
+func effectiveHubName(ops *OperationalSettings) string {
+	if name := ops.Snapshot().HubName; name != "" {
+		return name
+	}
+	if ops.bootstrapKoanf != nil {
+		return ops.bootstrapKoanf.String("server.hub.hub_name")
+	}
+	return ""
+}
+
+// dropEchoedHubName removes server.hub.hub_name from keys when the request
+// sends the effective value back unchanged, and reports whether hub_name is
+// still a change to write. An echo is not written and not validated, so a
+// GET body echoed back never fails because of a bootstrap hub_name that
+// does not match the schema pattern.
+func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective string) ([]string, bool) {
+	idx := -1
+	for i, k := range keys {
+		if k == "server.hub.hub_name" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return keys, false
+	}
+	sent := ""
+	if req.Server != nil && req.Server.Hub != nil {
+		sent = req.Server.Hub.HubName
+	}
+	if sent != effective {
+		return keys, true
+	}
+	if req.Server != nil && req.Server.Hub != nil {
+		req.Server.Hub.HubName = ""
+	}
+	return append(keys[:idx:idx], keys[idx+1:]...), false
+}
+
+// carryForwardEndpointsHubName copies hub_name from the current endpoints
+// row into doc when the row is managed (an admin-written value, already
+// validated). A seeded row's hub_name is the bootstrap value, which stays in
+// effect without being written into the managed row.
+func carryForwardEndpointsHubName(ctx context.Context, ops *OperationalSettings, doc json.RawMessage) (json.RawMessage, error) {
+	row, err := ops.store.GetHubSetting(ctx, "endpoints")
+	if errors.Is(err, store.ErrNotFound) {
+		return doc, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading current endpoints row: %w", err)
+	}
+	if row.Origin != "managed" || len(row.Value) == 0 {
+		return doc, nil
+	}
+	var current opsettings.EndpointsSettings
+	if err := json.Unmarshal(row.Value, &current); err != nil {
+		return nil, fmt.Errorf("decoding current endpoints row: %w", err)
+	}
+	if current.HubName == "" {
+		return doc, nil
+	}
+	var d opsettings.EndpointsSettings
+	if err := json.Unmarshal(doc, &d); err != nil {
+		return nil, fmt.Errorf("decoding endpoints doc: %w", err)
+	}
+	d.HubName = current.HubName
+	return json.Marshal(&d)
 }
 
 // detectKeySource determines which bootstrap layer provides a given section key.
@@ -505,6 +594,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// clearing) by walking the raw request body.
 	koanfKeys := extractKoanfKeysFromRequest(&req.ServerConfigUpdateRequest)
 	koanfKeys = appendPresenceAwareKeys(koanfKeys, rawBody)
+	// A client that echoes the GET body sends hub_name back unchanged; that
+	// must neither write nor be validated (ptone/scion#2073).
+	koanfKeys, hubNameChanged := dropEchoedHubName(koanfKeys, &req.ServerConfigUpdateRequest, effectiveHubName(ops))
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
@@ -586,6 +678,18 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs["access"] = doc
 		accessBaseRev = rev
+	}
+
+	// Endpoints is replaced whole; keep a managed hub_name the request did
+	// not change.
+	if doc, ok := sectionDocs["endpoints"]; ok && !hubNameChanged {
+		doc, err := carryForwardEndpointsHubName(r.Context(), ops, doc)
+		if err != nil {
+			slog.Error("PUT server-config: failed to carry forward hub_name", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["endpoints"] = doc
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -1007,6 +1111,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PublicURL != "" {
 				keys = append(keys, "server.hub.public_url")
 			}
+			if hub.HubName != "" {
+				keys = append(keys, "server.hub.hub_name")
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -1197,6 +1304,11 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+	// hub_name: present in hub but empty → add the key (clears a managed
+	// hub_name; handlePutServerConfigDB drops it when it is an echo).
+	if !keySet["server.hub.hub_name"] && hubFP.has("hub_name") {
+		keys = append(keys, "server.hub.hub_name")
 	}
 
 	// Map-of-objects sections: present as null or {} → add the key to clear.
@@ -1471,6 +1583,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			} else if hubFP.has("public_url") {
 				d.PublicURL = "" // explicitly cleared
 			}
+			// hub_name reaches here only when it changes (an echo of the
+			// effective value is dropped by dropEchoedHubName). An explicit
+			// "" clears it: omitted from the doc, so the bootstrap value
+			// applies again. An unchanged managed value is carried forward
+			// by carryForwardEndpointsHubName.
+			d.HubName = req.Server.Hub.HubName
 		}
 		if req.ImageRegistry != nil {
 			d.ImageRegistry = *req.ImageRegistry
