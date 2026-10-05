@@ -141,6 +141,19 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// A succeeded report carries the launch's start echo: record where it
+	// placed the agent's workspace (narrow write, see
+	// recordWorkspacePlacement), only when the store applied the report.
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied &&
+		req.Agent != nil && validWorkspacePlacementReport(req.Agent.WorkspacePlacement) {
+		if err := s.store.SetAgentWorkspacePlacement(ctx, agentID, req.Agent.WorkspacePlacement); err != nil {
+			s.agentLifecycleLog.Warn("launch report: failed to record the agent's workspace placement",
+				"agent_id", agentID, "error", err)
+		} else {
+			updated.WorkspacePlacement = req.Agent.WorkspacePlacement
+		}
+	}
+
 	// A "failed" report the store actually applied (HTTPStatus==0, not a
 	// conflict/stale-launch rejection, and Result==Applied rather than
 	// Completed) means this launch ended in a broker-confirmed failure before

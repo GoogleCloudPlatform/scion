@@ -49,9 +49,8 @@ import (
 // engine, so a delete that claims and finishes between them can still emit
 // this (unmarked) created after its deleted. Web clients drop an unmarked
 // created for an ID they tombstoned on deleted (ptone/scion#2886), which
-// covers it there. MessageBrokerProxy.handleLifecycleEvent is not covered:
-// it subscribes on any created, so a created lost to this window leaves a
-// subscription for the deleted agent's slug.
+// covers it there. MessageBrokerProxy.handleLifecycleEvent re-checks the row
+// by the same rule before subscribing (createdAgentLive, ptone/scion#3056).
 func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Agent) {
 	fresh, err := s.store.GetAgent(ctx, agent.ID)
 	switch {
@@ -65,14 +64,10 @@ func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Age
 		s.events.PublishAgentCreated(ctx, agent)
 		return
 	}
-	if !fresh.DeletedAt.IsZero() {
-		s.agentLifecycleLog.Debug("skipping agent.created publish: agent soft-deleted",
-			"agent_id", agent.ID)
-		return
-	}
-	if deleteStopNoop(fresh) {
-		s.agentLifecycleLog.Debug("skipping agent.created publish: delete in progress",
-			"agent_id", agent.ID, "deletion_state", fresh.DeletionState, "deletion_claim", fresh.DeletionClaim)
+	if deletedOrDeleteHeld(fresh) {
+		s.agentLifecycleLog.Debug("skipping agent.created publish: agent soft-deleted or delete in progress",
+			"agent_id", agent.ID, "soft_deleted", !fresh.DeletedAt.IsZero(),
+			"deletion_state", fresh.DeletionState, "deletion_claim", fresh.DeletionClaim)
 		return
 	}
 	s.events.PublishAgentCreated(ctx, fresh)
