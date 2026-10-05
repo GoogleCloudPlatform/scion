@@ -1208,9 +1208,14 @@ describe('scion-page-admin-server-config', () => {
       }
     );
 
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
     it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
       element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
       const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
       el.defaultGCPIdentityMode = 'assign';
       el.defaultGCPIdentitySAID = 'sa-123';
 
@@ -1222,6 +1227,7 @@ describe('scion-page-admin-server-config', () => {
     it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
       element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
       const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
       el.defaultGCPIdentityMode = 'block';
       el.defaultGCPIdentitySAID = 'stale-sa';
 
@@ -1230,9 +1236,10 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
     });
 
-    // In the db tier the page locks a field when it is not a Layer-1 key
-    // (deployment-managed); the same rule as the env-pinned file case
-    // applies to the account (ptone/scion#2720).
+    // In the db tier env vars do not lock Layer-1 fields; the page locks a
+    // field only when it is not a Layer-1 key (deployment-managed). The
+    // same rule as the env-pinned file case applies to the account
+    // (ptone/scion#2720).
     it.each(['', 'block', 'assign'])(
       'buildLayer1Payload keeps the GCP service account when the mode is read-only (form mode=%j)',
       async (formMode) => {
@@ -1240,9 +1247,7 @@ describe('scion-page-admin-server-config', () => {
           createFetchHandler(makeBaseConfig({ settings_tier: 'db' }))
         );
         const el = element as any;
-        el.layer1Keys = new Set(
-          [...el.layer1Keys].filter((k: string) => k !== 'default_gcp_identity_mode')
-        );
+        el.layer1Keys = new Set(['default_gcp_identity_service_account_id']);
         el.defaultGCPIdentityMode = formMode;
         el.defaultGCPIdentitySAID = 'sa-123';
 
