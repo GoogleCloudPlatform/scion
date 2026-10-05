@@ -12,9 +12,11 @@ import (
 	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
+	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
@@ -108,5 +110,28 @@ func TestLoopbackProvidersIgnoreOTELResourceEnv(t *testing.T) {
 				t.Fatalf("%s scion.agent.id = %q", signal, v)
 			}
 		}
+	}
+}
+
+// TestLoopbackResourceNilResourceDropsAllAttributes pins the nil-resource
+// choice: no panic, and an empty allowlist rather than a pass-through, so
+// nothing from the environment can reach GCP admission.
+func TestLoopbackResourceNilResourceDropsAllAttributes(t *testing.T) {
+	if opt := loopbackResourceDialOption(nil); opt == nil {
+		t.Fatal("loopbackResourceDialOption(nil) returned nil")
+	}
+	allowed := loopbackResourceAllowlist(nil)
+	if len(allowed) != 0 {
+		t.Fatalf("allowlist for nil resource = %v, want empty", allowed)
+	}
+	req := &colmetricpb.ExportMetricsServiceRequest{ResourceMetrics: []*metricpb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+			{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "env"}}},
+			{Key: "host.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "leak"}}},
+		}},
+	}}}
+	pinLoopbackRequestResource(req, allowed)
+	if attrs := req.ResourceMetrics[0].Resource.Attributes; len(attrs) != 0 {
+		t.Fatalf("resource attributes after pinning with nil resource = %v, want none", attrs)
 	}
 }
