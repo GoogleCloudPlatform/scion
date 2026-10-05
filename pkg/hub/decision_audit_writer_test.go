@@ -553,14 +553,20 @@ func TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath(t *testing.T) {
 
 // abortingDecisionAuditStore aborts the writer during each write, then
 // returns err: the drain deadline passes right after the write failed.
+// With ctxErr set it returns the write ctx's error instead, as a store
+// does when the abort cancels an in-flight query.
 type abortingDecisionAuditStore struct {
 	store.Store
-	e   *StoreDecisionAuditEmitter
-	err error
+	e      *StoreDecisionAuditEmitter
+	err    error
+	ctxErr bool
 }
 
-func (s *abortingDecisionAuditStore) CreateDecisionAudit(context.Context, *store.DecisionAuditRecord) error {
+func (s *abortingDecisionAuditStore) CreateDecisionAudit(ctx context.Context, _ *store.DecisionAuditRecord) error {
 	s.e.abort()
+	if s.ctxErr {
+		return ctx.Err()
+	}
 	return s.err
 }
 
@@ -588,6 +594,26 @@ func TestDecisionAuditWriter_FailedWriteKeepsReasonWhenAbortFollows(t *testing.T
 			assert.Zero(t, e.droppedCount(DecisionAuditDropShutdown, "deny"))
 		})
 	}
+}
+
+// TestDecisionAuditWriter_AbortDuringLastAttemptIsShutdown checks that
+// a write cancelled by the abort on its last attempt counts as a
+// shutdown drop, not write_failed: no backoff follows, so only the
+// Canceled check can label it.
+func TestDecisionAuditWriter_AbortDuringLastAttemptIsShutdown(t *testing.T) {
+	fs := &abortingDecisionAuditStore{ctxErr: true}
+	cfg := testDecisionAuditConfig()
+	cfg.maxAttempts = 1
+	e := newTestDecisionAuditEmitter(t, fs, cfg)
+	fs.e = e
+
+	e.EmitDecisionAudit(context.Background(), auditRec("deny", "d1"))
+	waitFor(t, "drop counted", func() bool {
+		return e.droppedCount(DecisionAuditDropWriteFailed, "deny")+
+			e.droppedCount(DecisionAuditDropShutdown, "deny") == 1
+	})
+	assert.Equal(t, int64(1), e.droppedCount(DecisionAuditDropShutdown, "deny"))
+	assert.Zero(t, e.droppedCount(DecisionAuditDropWriteFailed, "deny"))
 }
 
 func TestDecisionAuditWriter_CloseLifecycle(t *testing.T) {

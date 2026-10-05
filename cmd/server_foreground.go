@@ -369,12 +369,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// WebServer's), so neither listener's Shutdown closes the decision
 		// audit writer; exit.run does, before the store closer deferred
 		// above and before the OTel providers registered below flush, so
-		// the drain's drops and write latencies are exported. On a signal
-		// it runs after wg.Wait, once both listeners have drained, so
-		// records from requests served during the drain are written. On an
-		// error or early return there is no wg.Wait: a listener may still
-		// be draining, and records from requests that finish after the
-		// close are counted as shutdown drops.
+		// the drain's drops and write latencies are exported. On SIGINT
+		// (Ctrl-C, `scion server stop`) it runs after wg.Wait, once both
+		// listeners have drained, so records from requests served during
+		// the drain are written. On an error or early return there is no
+		// wg.Wait: a listener may still be serving or draining, and
+		// records from requests that finish after the close are counted
+		// as shutdown drops.
 		hubSrv.DeferDecisionAuditClose()
 		exit := &hubExitSequence{closeDecisionAudit: hubSrv.CloseDecisionAudit}
 		defer exit.run()
@@ -3825,7 +3826,9 @@ func (h *hubExitSequence) run() {
 	h.closeDecisionAudit(context.Background())
 	for i := len(h.flushes) - 1; i >= 0; i-- {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = h.flushes[i](ctx)
+		if err := h.flushes[i](ctx); err != nil {
+			log.Printf("WARNING: hub OTel flush on exit: %v", err)
+		}
 		cancel()
 	}
 }
