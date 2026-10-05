@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 var doctorCmd = &cobra.Command{
@@ -631,7 +632,7 @@ func checkTelemetryPipeline(failures *int) {
 }
 
 func checkWorkspaceGit(failures *int) {
-	if os.Getenv("SCION_WORKSPACE_GIT") == "" {
+	if !util.ParseBoolEnv("SCION_WORKSPACE_GIT", false) {
 		return
 	}
 
