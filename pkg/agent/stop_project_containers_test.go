@@ -57,8 +57,8 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 			}
 			return allContainers, nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			deletedIDs = append(deletedIDs, id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			deletedIDs = append(deletedIDs, ref.ID)
 			return nil
 		},
 	}
@@ -108,7 +108,7 @@ func TestStopProjectContainers_SkipsEmptyContainerID(t *testing.T) {
 				},
 			}, nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
 			deleteCount++
 			return nil
 		},
