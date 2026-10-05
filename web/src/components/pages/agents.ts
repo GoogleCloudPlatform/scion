@@ -53,7 +53,7 @@ import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
-import '../shared/provisioned-badge.js';
+import { renderProvisionedBadge } from '../shared/provisioned-badge.js';
 import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
@@ -1412,7 +1412,7 @@ export class ScionPageAgents extends LitElement {
             .deletion=${this.deletionLease.view(agent)}
             size="small"
           ></scion-deletion-badge>
-          <scion-provisioned-badge .agent=${agent} size="small"></scion-provisioned-badge>
+          ${renderProvisionedBadge(agent, 'small')}
           <scion-message-mode-badge
             mode=${agent.messageMode || 'project'}
             size="small"
@@ -1509,7 +1509,7 @@ export class ScionPageAgents extends LitElement {
             .deletion=${this.deletionLease.view(agent)}
             size="small"
           ></scion-deletion-badge>
-          <scion-provisioned-badge .agent=${agent} size="small"></scion-provisioned-badge>
+          ${renderProvisionedBadge(agent, 'small')}
         </td>
         <td class="hide-mobile">
           <scion-message-mode-badge

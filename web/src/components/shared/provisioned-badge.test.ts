@@ -17,8 +17,9 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, afterEach } from 'vitest';
-import './provisioned-badge.js';
-import type { ScionProvisionedBadge } from './provisioned-badge.js';
+import { render } from 'lit';
+import { renderProvisionedBadge } from './provisioned-badge.js';
+import type { ScionStatusBadge } from './status-badge.js';
 import type { Agent } from '../../shared/types.js';
 import { isProvisionedOnly } from '../../shared/agent-state-display.js';
 
@@ -34,42 +35,36 @@ describe('isProvisionedOnly', () => {
   });
 });
 
-describe('scion-provisioned-badge', () => {
+describe('renderProvisionedBadge', () => {
   afterEach(() => {
     document.body.innerHTML = '';
   });
 
-  async function render(agent: BadgeAgent | null): Promise<ScionProvisionedBadge> {
-    const el = document.createElement('scion-provisioned-badge');
-    el.agent = agent;
-    document.body.appendChild(el);
-    await el.updateComplete;
+  async function mount(agent: BadgeAgent, size?: 'small'): Promise<ScionStatusBadge | null> {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    render(renderProvisionedBadge(agent, size), host);
+    const el = host.querySelector('scion-status-badge');
+    await el?.updateComplete;
     return el;
   }
 
-  it('renders nothing and is hidden for a normal created agent', async () => {
-    const el = await render({ name: 'a', phase: 'created' });
-    expect(el.hasAttribute('hidden')).toBe(true);
-    expect(el.shadowRoot?.querySelector('.badge')).toBeNull();
+  it('renders nothing for a normal created agent', async () => {
+    expect(await mount({ name: 'a', phase: 'created' })).toBeNull();
   });
 
-  it('renders nothing for null', async () => {
-    const el = await render(null);
-    expect(el.hasAttribute('hidden')).toBe(true);
-    expect(el.shadowRoot?.querySelector('.badge')).toBeNull();
+  it('renders nothing once a start moved the agent out of created', async () => {
+    expect(await mount({ name: 'a', phase: 'starting', provisionedOnly: true })).toBeNull();
   });
 
-  it('shows the badge with a start hint, and clears once started', async () => {
-    const el = await render({ name: 'po-agent', phase: 'created', provisionedOnly: true });
-    const badge = el.shadowRoot?.querySelector('.badge');
-    expect(el.hasAttribute('hidden')).toBe(false);
-    expect(badge?.textContent?.trim()).toBe('provisioned, not started');
-    expect(badge?.getAttribute('title')).toContain('scion start po-agent');
-    expect(badge?.getAttribute('title')).toContain('Start');
-
-    el.agent = { name: 'po-agent', phase: 'starting', provisionedOnly: true };
-    await el.updateComplete;
-    expect(el.shadowRoot?.querySelector('.badge')).toBeNull();
-    expect(el.hasAttribute('hidden')).toBe(true);
+  it('shows the label and a start hint for a provision-only agent', async () => {
+    const el = await mount({ name: 'po-agent', phase: 'created', provisionedOnly: true }, 'small');
+    expect(el).not.toBeNull();
+    expect(el!.getAttribute('label')).toBe('provisioned, not started');
+    expect(el!.getAttribute('size')).toBe('small');
+    const hint = el!.getAttribute('title') ?? '';
+    expect(hint).toContain('Start');
+    expect(hint).toContain('scion start po-agent');
+    expect(el!.shadowRoot?.textContent).toContain('provisioned, not started');
   });
 });

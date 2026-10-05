@@ -60,7 +60,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
-import '../shared/provisioned-badge.js';
+import { renderProvisionedBadge } from '../shared/provisioned-badge.js';
 import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
@@ -1330,7 +1330,7 @@ export class ScionPageAgentDetail extends LitElement {
               .deletion=${this.deletionLease.view(agent)}
               live
             ></scion-deletion-badge>
-            <scion-provisioned-badge .agent=${agent}></scion-provisioned-badge>
+            ${renderProvisionedBadge(agent)}
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1572,7 +1572,7 @@ export class ScionPageAgentDetail extends LitElement {
                 .deletion=${this.deletionLease.view(agent)}
                 size="small"
               ></scion-deletion-badge>
-              <scion-provisioned-badge .agent=${agent} size="small"></scion-provisioned-badge>
+              ${renderProvisionedBadge(agent, 'small')}
             </span>
           </div>
           <div class="info-item">

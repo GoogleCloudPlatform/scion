@@ -14,15 +14,9 @@
  * limitations under the License.
  */
 
-/**
- * "Provisioned, not started" badge (ptone/scion#2929): `scion create`
- * provisions an agent without starting it, which otherwise reads as a
- * stuck start. Renders nothing unless the agent is provision-only.
- */
-
-import { LitElement, html, css, nothing } from 'lit';
+import { html, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import './status-badge.js';
 import type { Agent } from '../../shared/types.js';
 import {
   PROVISIONED_ONLY_LABEL,
@@ -30,71 +24,20 @@ import {
   provisionedStartHint,
 } from '../../shared/agent-state-display.js';
 
-@customElement('scion-provisioned-badge')
-export class ScionProvisionedBadge extends LitElement {
-  @property({ attribute: false })
-  agent: Pick<Agent, 'name' | 'phase' | 'provisionedOnly'> | null = null;
-
-  @property({ type: String })
-  size: 'small' | 'medium' = 'medium';
-
-  static override styles = css`
-    :host {
-      display: inline-flex;
-      min-width: 0;
-    }
-
-    :host([hidden]) {
-      display: none;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.25rem 0.625rem;
-      border-radius: 9999px;
-      font-weight: 500;
-      font-size: 0.875rem;
-      white-space: nowrap;
-      background: var(--scion-badge-neutral-bg, #f1f5f9);
-      color: var(--scion-badge-neutral-text, #475569);
-    }
-
-    .badge.small {
-      font-size: 0.8125rem;
-      padding: 0.125rem 0.5rem;
-      gap: 0.25rem;
-    }
-  `;
-
-  private get shown(): boolean {
-    return this.agent !== null && isProvisionedOnly(this.agent);
-  }
-
-  protected override willUpdate(): void {
-    // Take no space (and no flex gap) when there is nothing to show.
-    this.toggleAttribute('hidden', !this.shown);
-  }
-
-  override render(): TemplateResult | typeof nothing {
-    if (!this.shown) return nothing;
-    const hint = provisionedStartHint(this.agent!.name);
-    return html`
-      <span
-        class="badge ${this.size}"
-        title=${hint}
-        aria-label="${PROVISIONED_ONLY_LABEL}. ${hint}"
-      >
-        <sl-icon name="info-circle"></sl-icon>
-        <span>${PROVISIONED_ONLY_LABEL}</span>
-      </span>
-    `;
-  }
-}
-
-declare global {
-  interface HTMLElementTagNameMap {
-    'scion-provisioned-badge': ScionProvisionedBadge;
-  }
+/**
+ * "Provisioned, not started" badge with a start hint (ptone/scion#2929),
+ * or nothing when the agent is not provision-only.
+ */
+export function renderProvisionedBadge(
+  agent: Pick<Agent, 'name' | 'phase' | 'provisionedOnly'>,
+  size: 'small' | 'medium' = 'medium'
+): TemplateResult | typeof nothing {
+  if (!isProvisionedOnly(agent)) return nothing;
+  return html`<scion-status-badge
+    class="provisioned-badge"
+    status="created"
+    label=${PROVISIONED_ONLY_LABEL}
+    title=${provisionedStartHint(agent.name)}
+    size=${size}
+  ></scion-status-badge>`;
 }
