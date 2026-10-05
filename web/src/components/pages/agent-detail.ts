@@ -54,6 +54,7 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -291,6 +292,22 @@ export class ScionPageAgentDetail extends LitElement {
       display: flex;
       gap: 0.5rem;
       flex-shrink: 0;
+    }
+    /* On a phone the actions drop below the title and wrap, rather than
+       pushing the last of them off the right edge. */
+    @media (max-width: 640px) {
+      .header {
+        flex-wrap: wrap;
+      }
+      .header-info {
+        min-width: 0;
+        flex-basis: 100%;
+      }
+      .header-actions {
+        flex-wrap: wrap;
+        flex-shrink: 1;
+        min-width: 0;
+      }
     }
 
     /* ---- Error banner ---- */
@@ -1284,7 +1301,9 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .conversationKey=${this.currentUserId
+          ? `dm:agent:${this.agentId}:user:${this.currentUserId}`
+          : ''}
         .projectId=${agent.projectId || ''}
         .currentUserId=${this.currentUserId}
         ?isDM=${true}
@@ -1322,7 +1341,7 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
+              label=${stateLabel(getAgentDisplayStatus(agent))}
             ></scion-status-badge>
             <scion-deletion-badge
               .deletion=${this.deletionLease.view(agent)}
@@ -1577,7 +1596,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
@@ -1735,23 +1754,35 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `
@@ -1943,8 +1974,12 @@ export class ScionPageAgentDetail extends LitElement {
                       )}
                     </sl-select>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
-                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;"
+                        >
+                          Hub mode: sends within this project and to permitted agents in other
+                          projects. External messaging requires the Hub cross-project switch to be
+                          enabled.
                         </div>`
                       : nothing}
                   `
@@ -1957,7 +1992,9 @@ export class ScionPageAgentDetail extends LitElement {
                       ${modeDisplay.description}
                     </span>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;"
+                        >
                           External messaging requires the Hub cross-project switch to be enabled.
                         </div>`
                       : nothing}

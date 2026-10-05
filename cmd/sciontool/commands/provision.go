@@ -39,9 +39,14 @@ var provisionCmd = &cobra.Command{
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
 the environment and invokes the shared provisioning function. The sentinel
-file (.scion-provisioned) is placed inside the workspace directory itself
-because the init container's PVC subPath mount only exposes the workspace
-dir, not its parent.
+file (.scion-provisioned) and the provisioning lock are kept in the
+project's provisioning state directory, which the Kubernetes runtime mounts
+next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
+them is visible in the workspace. Without that variable (an older runtime)
+they are kept in the workspace directory itself, as before. A sentinel
+already in the workspace directory still counts as provisioned, and the
+lock in the workspace directory is taken before the one in the state
+directory, so older and newer images exclude each other.
 
 In clone-per-agent mode (SCION_WORKSPACE_MODE=clone-per-agent, with
 SCION_AGENT_SLUG and SCION_AGENT_BRANCH), the mounted directory is the
@@ -181,6 +186,30 @@ func runProvision(ctx context.Context) error {
 		}
 	}
 
+	// Shared-plain and worktree-per-agent: keep the sentinel and the lock
+	// in the provisioning state directory when the pod mounts one. The
+	// agent-directory modes keep them in the mounted agent directory,
+	// outside the workspace already.
+	sentinelDir := provisionWorkspace
+	legacyDir := ""
+	if !agentDir {
+		stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
+		if err != nil {
+			return err
+		}
+		if stateDir != "" {
+			// Without the broker's preparation (no setgid and group write),
+			// the node created the directory as root: give it to the
+			// workspace owner, the same condition under which the workspace
+			// chown stays strict.
+			if err := provision.PrepareStateDir(stateDir, provisionUID, provisionGID, provisionRequireChownSuccess(os.Getenv)); err != nil {
+				return fmt.Errorf("provision: %w", err)
+			}
+			sentinelDir = stateDir
+			legacyDir = provisionWorkspace
+		}
+	}
+
 	in := provision.ProvisionInput{
 		Ctx: ctx,
 		Resolved: provision.ResolvedWorkspace{
@@ -193,7 +222,8 @@ func runProvision(ctx context.Context) error {
 		Locker:      nil, // no advisory locker in init container
 		NFSUID:      provisionUID,
 		NFSGID:      provisionGID,
-		SentinelDir: provisionWorkspace,
+		SentinelDir: sentinelDir,
+		LegacyDir:   legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -300,8 +330,51 @@ func provisionRequireChownSuccess(getenv func(string) string) bool {
 	return !provision.ChownBestEffortRequested(getenv)
 }
 
+// provisionStateDirEnv names the provisioning state directory the
+// Kubernetes runtime mounts into the init container (shared-plain and
+// worktree-per-agent modes). An environment variable rather than a flag, so
+// an older sciontool ignores it and keeps the sentinel in the workspace.
+const provisionStateDirEnv = "SCION_PROVISION_STATE_DIR"
+
+// provisionStateDir returns the provisioning state directory from
+// SCION_PROVISION_STATE_DIR, or "" when it is unset. It must be a clean
+// absolute path other than /, and neither inside the workspace nor
+// containing it.
+func provisionStateDir(getenv func(string) string, workspace string) (string, error) {
+	dir := getenv(provisionStateDirEnv)
+	if dir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
+		return "", fmt.Errorf("provision: %s=%q must be a clean absolute path other than /", provisionStateDirEnv, dir)
+	}
+	ws := filepath.Clean(workspace)
+	if within(dir, ws) || within(ws, dir) {
+		return "", fmt.Errorf("provision: %s=%q must be outside the workspace %s", provisionStateDirEnv, dir, ws)
+	}
+	return dir, nil
+}
+
+// within reports whether path is dir or below it (both clean).
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && filepath.IsLocal(rel)
+}
+
 func runWaitForSentinel(ctx context.Context) error {
+	// The provisioning container writes the sentinel in the state directory
+	// when the pod mounts one; an older one (or an earlier provisioning)
+	// wrote it in the workspace, which is still accepted.
+	stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
+	if err != nil {
+		return err
+	}
+	dirs := []string{provisionWorkspace}
 	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
+	if stateDir != "" {
+		dirs = []string{stateDir, provisionWorkspace}
+		sentinelPath = filepath.Join(stateDir, provision.ProvisionSentinelFile)
+	}
 	timeout := time.Duration(provisionTimeout) * time.Second
 	interval := time.Duration(provisionPollInterval) * time.Second
 	start := time.Now()
@@ -310,7 +383,9 @@ func runWaitForSentinel(ctx context.Context) error {
 	log.Info("Waiting for sentinel %s (timeout=%s, interval=%s)", sentinelPath, timeout, interval)
 
 	for {
-		if _, err := os.Stat(sentinelPath); err == nil {
+		// Any error (including EACCES on a state directory the node just
+		// created as root) means "not yet".
+		if provision.SentinelPresent(dirs...) {
 			log.Info("Sentinel found after %s", time.Since(start).Truncate(time.Second))
 			return nil
 		}

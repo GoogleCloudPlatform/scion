@@ -16,7 +16,10 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -31,6 +34,7 @@ var (
 	reincarnateHandoffFile     string
 	reincarnateDryRun          bool
 	reincarnateHandoffTemplate bool
+	reincarnateBroker          string
 )
 
 // reincarnateFiveLineContract is the design §3.9 self-migration contract,
@@ -135,7 +139,12 @@ Run ` + "`scion reincarnate --handoff-template`" + ` to print the handoff's expe
 sections.
 
 Use --dry-run to see the planned changes (template, image, harness config,
-model, env keys, branch) without migrating anything.`,
+model, env keys, branch) without migrating anything.
+
+Use --broker <name|id> to move the agent to another runtime broker. Both
+brokers must mount the same NFS export, so the workspace moves without being
+copied. Only --dry-run is supported with --broker for now: it reports each
+eligibility check and changes nothing.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
@@ -151,6 +160,10 @@ model, env keys, branch) without migrating anything.`,
 		// the rest of RunE regardless of other flags or arguments.
 		if reincarnateHandoffTemplate {
 			_, err := fmt.Fprint(cmd.OutOrStdout(), reincarnateHandoffTemplateText)
+			return err
+		}
+
+		if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
 			return err
 		}
 
@@ -207,6 +220,9 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 }
 
 func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSelf bool) error {
+	if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
+		return err
+	}
 	PrintUsingHub(hubCtx.Endpoint)
 
 	projectID, err := GetProjectID(hubCtx)
@@ -220,8 +236,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	req := &hubclient.ReincarnateAgentRequest{
-		Handoff: handoff,
-		DryRun:  reincarnateDryRun,
+		Handoff:      handoff,
+		DryRun:       reincarnateDryRun,
+		TargetBroker: reincarnateBroker,
 	}
 
 	if reincarnateDryRun {
@@ -234,16 +251,26 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 
 	resp, err := agentSvc.Reincarnate(ctx, agentName, req)
 	if err != nil {
-		if apiclient.IsConflictError(err) {
+		if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
+			printMoveVerdict(os.Stderr, v)
+		}
+		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
 		}
 		return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
+	}
+
+	if err := checkHubSupportsMove(reincarnateBroker, resp); err != nil {
+		return err
 	}
 
 	if isJSONOutput() {
 		return outputJSON(resp)
 	}
 
+	if resp.MoveVerdict != nil {
+		printMoveVerdict(os.Stdout, resp.MoveVerdict)
+	}
 	printReincarnationPlan(resp.Plan)
 
 	if reincarnateDryRun {
@@ -256,6 +283,70 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		fmt.Println("This container will be stopped shortly as part of the migration.")
 	}
 	return nil
+}
+
+// validateReincarnateBrokerFlags refuses --broker without --dry-run before
+// any hub call: a hub that does not know --broker would ignore it and run a
+// real in-place reincarnation.
+func validateReincarnateBrokerFlags(broker string, dryRun bool) error {
+	if broker != "" && !dryRun {
+		return fmt.Errorf("--broker requires --dry-run: moving an agent between brokers is not supported yet")
+	}
+	return nil
+}
+
+// checkHubSupportsMove fails a --broker request whose response has no
+// target broker: the hub ignored --broker, so its plan is for the current
+// broker, not the requested one.
+func checkHubSupportsMove(broker string, resp *hubclient.ReincarnateAgentResponse) error {
+	if broker != "" && (resp == nil || resp.TargetBrokerID == "") {
+		return fmt.Errorf("this hub does not support --broker; upgrade the hub")
+	}
+	return nil
+}
+
+// moveVerdictFromError returns the move eligibility verdict carried in a
+// refused reincarnate request's error details, or nil.
+func moveVerdictFromError(err error) *hubclient.MoveVerdict {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Details == nil {
+		return nil
+	}
+	raw, ok := apiErr.Details["verdict"]
+	if !ok {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var v hubclient.MoveVerdict
+	if err := json.Unmarshal(b, &v); err != nil || len(v.Checks) == 0 {
+		return nil
+	}
+	return &v
+}
+
+// printMoveVerdict renders a move eligibility verdict: the brokers, the
+// resolved target profile, and each check's result.
+func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
+	ref := func(b hubclient.MoveBrokerRef) string {
+		if b.Name != "" {
+			return fmt.Sprintf("%s (%s)", b.Name, b.ID)
+		}
+		return b.ID
+	}
+	_, _ = fmt.Fprintf(w, "Move eligibility: %s -> %s\n", ref(v.SourceBroker), ref(v.TargetBroker))
+	if v.Profile != "" {
+		_, _ = fmt.Fprintf(w, "  %-28s %s (%s)\n", "Target profile:", v.Profile, valueOrNone(v.RuntimeType))
+	}
+	for _, c := range v.Checks {
+		line := fmt.Sprintf("  %-28s %s", c.Name+":", c.Result)
+		if c.Message != "" {
+			line += " - " + c.Message
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
 }
 
 // printReincarnationPlan renders a ReincarnationPlan as plain text: old vs
@@ -307,6 +398,7 @@ func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
+	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. Requires --dry-run for now")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	rootCmd.AddCommand(reincarnateCmd)
 }

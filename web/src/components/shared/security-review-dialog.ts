@@ -294,12 +294,12 @@ export class ScionSecurityReviewDialog extends LitElement {
           max-width: 100vw;
           margin: 0;
           border-radius: 0;
-          max-height: 100vh;
+          max-height: var(--scion-app-height, 100dvh);
         }
 
         sl-dialog::part(body) {
           overflow-y: auto;
-          max-height: calc(100vh - 8rem);
+          max-height: calc(var(--scion-app-height, 100dvh) - 8rem);
         }
 
         sl-dialog::part(footer) {

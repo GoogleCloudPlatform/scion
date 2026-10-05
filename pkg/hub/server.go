@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
 
@@ -178,6 +179,10 @@ type ServerConfig struct {
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
 	StalledThreshold time.Duration
+	// StartClaim holds the start-claim timing settings from the settings
+	// file (zero fields use defaults; out-of-range values are replaced by
+	// defaults with a warning). Hot-reloaded through ApplySnapshot.
+	StartClaim StartClaimSettings
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing (an
@@ -202,9 +207,9 @@ type ServerConfig struct {
 	// actually run, so New() rejects it and falls back to the default.
 	LaunchTimeout time.Duration
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
-	// (design §3.7). Today it only sets the reaper's staleness window (8x
-	// this value); it will also be sent to the broker as
-	// launchKeepaliveSeconds once the async dispatch path lands. Default 15.
+	// (design §3.7). It is sent to the broker as launchKeepaliveSeconds in
+	// each asynchronous create request, and sets the reaper's staleness
+	// window (8x this value). Default 15.
 	LaunchKeepaliveSeconds int
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
@@ -1178,9 +1183,8 @@ type Server struct {
 	// keysTargetLimiter is keyed per target agent. Both must allow a
 	// request; they are separate from chatSendLimiter's aggregate DM
 	// allowance (keys must not charge or evade it) and are shared by the
-	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
-	// in New and read without the lock; nil-safe. In-memory and per-Hub
-	// instance, not a distributed quota service (contract §5): N Hub
+	// /keys routes. Set once in New and read without the lock; nil-safe.
+	// In-memory and per-Hub instance, not a distributed quota service (contract §5): N Hub
 	// replicas behind a load balancer allow N times the configured rate in
 	// aggregate, and a Hub restart resets both buckets to full.
 	keysPrincipalLimiter *keysRateLimiter
@@ -1306,6 +1310,10 @@ type Server struct {
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
 
+	// startClaimCfg holds the current start-claim settings (see
+	// start_claim_settings.go); set at New and by ApplySnapshot.
+	startClaimCfg atomic.Pointer[StartClaimSettings]
+
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
 	authLog           *slog.Logger
@@ -1373,6 +1381,11 @@ type Server struct {
 	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
+
+	// ghFailures remembers, per cache key, that GitHub recently reported a
+	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
+	// It is in memory only, per hub process, and never written to the store.
+	ghFailures agent.FailureMemo
 
 	// ghCooldown holds gh:// resolution requests back per credential
 	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
@@ -1515,6 +1528,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	srv.setStartClaimSettings(cfg.StartClaim)
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale
@@ -1952,7 +1966,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
-	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
+	if err := srv.seedPlatformSkillInsertions(ctx, resources.PlatformSkillsFS()); err != nil {
 		slog.Warn("Failed to seed platform skill insertions", "error", err)
 	}
 

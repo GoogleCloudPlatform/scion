@@ -44,6 +44,7 @@ import {
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -320,11 +321,16 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary-600, #2563eb);
       }
 
+      /* On the narrowest phones the status group is wider than the page;
+         it scrolls sideways rather than clipping its last buttons. */
       .scope-toggle {
         display: inline-flex;
+        max-width: 100%;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
-        overflow: hidden;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
       }
 
       .scope-toggle button {
@@ -1402,7 +1408,7 @@ export class ScionPageAgents extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           >
           </scion-status-badge>
@@ -1499,7 +1505,7 @@ export class ScionPageAgents extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            label=${stateLabel(getAgentDisplayStatus(agent))}
             size="small"
           ></scion-status-badge>
           <scion-deletion-badge

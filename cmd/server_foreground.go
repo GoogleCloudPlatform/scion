@@ -145,6 +145,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if enableHub {
+		if err := validateHubWorkspaceStorage(cfg); err != nil {
+			return err
+		}
+	}
 
 	// 3. Resolve admin mode settings
 	adminMode := cfg.AdminMode
@@ -944,6 +949,25 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 
 	return cleanups, requestLogger, messageLogger, nil
+}
+
+// validateHubWorkspaceStorage fails hub startup when server.workspace_storage
+// cannot be used: an unknown backend, nfs without shares, a volume backend
+// without volume_name, or an invalid subpath_root. Without it the hub would
+// quietly fall back to ephemeral local project paths and only readiness
+// would notice. A broker-only process never calls this: it only logs
+// startup warnings (brokerNFSConfig, brokerWorkspaceStorageWarning).
+func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	// Defaults are applied during config load; applying them again is
+	// idempotent and keeps this check independent of the load path.
+	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
+	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
+		return fmt.Errorf("invalid server.workspace_storage: %w", err)
+	}
+	return nil
 }
 
 // loadAndReconcileConfig loads the server configuration file and reconciles
@@ -1816,6 +1840,12 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
 		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
 		Workstation:                  !hostedMode,
+		StartClaim: hub.StartClaimSettings{
+			LeaseTTL:              cfg.Hub.StartClaimLeaseTTL,
+			MaxDuration:           cfg.Hub.StartMaxDuration,
+			UnconfirmedHold:       cfg.Hub.StartUnconfirmedHold,
+			CreateUnconfirmedHold: cfg.Hub.StartCreateUnconfirmedHold,
+		},
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,
 			DisplayName: cfg.Auth.DisplayName,
@@ -2922,7 +2952,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
 
-		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
+		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage())
 		if regErr != nil {
 			// ERROR, not a warning: the co-located broker is how this process
 			// runs agents. Losing it silently left the Hub reporting healthy
@@ -3043,13 +3073,18 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// settings only, like shared_dir_storage: a project picked up from the
 	// working directory does not decide what the broker mounts.
 	var brokerNFS *config.V1NFSConfig
+	var workspaceStorageBackend string
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
+		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
 			log.Printf("WARNING: %s", nfsWarning)
+		}
+		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
+			log.Printf("WARNING: %s", warning)
 		}
 	}
 
@@ -3071,6 +3106,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
+		WorkspaceStorageBackend:       workspaceStorageBackend,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
