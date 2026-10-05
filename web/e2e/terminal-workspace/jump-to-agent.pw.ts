@@ -473,7 +473,7 @@ for (const slow of [false, true]) {
   });
 }
 
-test('typing straight after the header button becomes the query, while the palette module loads', async ({
+test('typing straight after the rail footer button becomes the query, while the palette module loads', async ({
   page,
 }) => {
   await slowPaletteModule(page);
@@ -481,7 +481,11 @@ test('typing straight after the header button becomes the query, while the palet
   await page.goto(`/terminals/${agentA}`);
   await expect.poll(() => attaches()).toBeGreaterThan(0);
 
-  await expectTypingRightAfterOpenFilters(page, () => paletteButton(page).click(), ptyInput);
+  await expectTypingRightAfterOpenFilters(
+    page,
+    () => page.locator('#terminal-workspace .terminal-jump-btn').click(),
+    ptyInput
+  );
 });
 
 test('typing straight after a reopen from a pane becomes the new query', async ({ page }) => {
