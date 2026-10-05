@@ -532,3 +532,32 @@ func TestChatDMs_StoreCallsDoNotScaleWithDMs(t *testing.T) {
 		})
 	}
 }
+
+// dmNilConversationStore returns a nil entry alongside the real ones from
+// the batched conversation read.
+type dmNilConversationStore struct {
+	store.Store
+}
+
+func (s *dmNilConversationStore) GetConversationsByExternalRefs(ctx context.Context, surface string, refs []string) (map[string]*store.Conversation, error) {
+	convs, err := s.Store.GetConversationsByExternalRefs(ctx, surface, refs)
+	if err != nil {
+		return nil, err
+	}
+	convs["dmnil-unresolved-ref"] = nil
+	return convs, nil
+}
+
+// TestChatDMs_EnvelopeToleratesNilConversations checks that a nil entry
+// in the batched conversation result is skipped, not dereferenced.
+func TestChatDMs_EnvelopeToleratesNilConversations(t *testing.T) {
+	srv, f, _ := newDMMixServer(t, true)
+	f.seedCases()
+	want := normalizeDMEntries(t, perDMReferenceEntries(t, srv, f.wcs, DevUserID))
+	srv.store = &dmNilConversationStore{Store: srv.store}
+
+	got := listDMs(t, srv)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("list with nil conversation entry differs:\n got %+v\nwant %+v", got, want)
+	}
+}

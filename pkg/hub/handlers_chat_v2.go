@@ -3639,7 +3639,9 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 	}
 	convIDs := make([]string, 0, len(convs))
 	for _, conv := range convs {
-		convIDs = append(convIDs, conv.ID)
+		if conv != nil {
+			convIDs = append(convIDs, conv.ID)
+		}
 	}
 	if len(convIDs) == 0 {
 		return result
