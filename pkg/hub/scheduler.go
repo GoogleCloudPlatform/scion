@@ -79,7 +79,7 @@ type Scheduler struct {
 	eventHandlers map[string]EventHandler
 
 	// Tick counter (monotonically increasing). Written by the ticker
-	// goroutine and read by handler goroutines and Status, so it is atomic.
+	// goroutine and read by Status from request goroutines, so it is atomic.
 	tickCount atomic.Uint64
 
 	// One-shot timers (in-memory)
@@ -173,7 +173,8 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 }
 
 // RegisterEventHandler registers a handler for a specific event type.
-// Must be called before Start(). Not safe for concurrent use.
+// Must be called before Start(). Not safe for concurrent use: after Start,
+// eventHandlers is read without a lock.
 func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
 	s.eventHandlers[eventType] = handler
 }
@@ -185,7 +186,8 @@ func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
 }
 
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
-// minutes. All handlers must be registered before Start is called.
+// minutes. All handlers must be registered before Start is called: after
+// Start, recurring is read without a lock by the ticker and Status.
 //
 // Tick-Zero Behavior: All recurring handlers run immediately on startup (tick 0)
 // because 0 % N == 0 for any interval N. This is intentional.
@@ -220,6 +222,8 @@ func (s *Scheduler) registerRecurring(name string, intervalMinutes int, fn func(
 //
 // If the store does not implement store.AdvisoryLocker, the handler runs
 // unguarded (correct for a single replica).
+//
+// Like RegisterRecurring, it must be called before Start.
 func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
 	s.registerRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn), true)
 }
