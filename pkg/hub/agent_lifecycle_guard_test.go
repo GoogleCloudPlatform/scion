@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -605,28 +607,39 @@ func assertCeilingFromSource(t *testing.T, srv *Server, requester Identity, got 
 
 // --- project delete ---
 
-// A project delete deactivates every active edge where an agent of the
-// project, soft-deleted or not, is the delegate or the delegator, inside
-// the delete transaction, with the hard-delete cause.
-func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	projectID := tid("pd-edges")
-	ownerID := tid("pd-edges-owner")
-	createRS3Project(t, s, projectID, ownerID)
+// projectEdgeFixture is a project with a live and a soft-deleted agent, and
+// a second project holding the other end of the edges.
+type projectEdgeFixture struct {
+	projectID string
+	ownerID   string
+	live      *store.Agent
+	soft      *store.Agent
+	outside   *store.Agent
+	bystander *store.Agent
+	// projectEdges are the edges the project delete deactivates; kept is
+	// the unrelated edge it leaves active.
+	projectEdges []*store.DelegationEdge
+	kept         *store.DelegationEdge
+}
 
-	other := &store.Project{ID: tid("pd-edges-other"), Name: "Other", Slug: "pd-edges-other"}
+func newProjectEdgeFixture(t *testing.T, s store.Store, prefix string) *projectEdgeFixture {
+	t.Helper()
+	ctx := context.Background()
+	f := &projectEdgeFixture{projectID: tid(prefix), ownerID: tid(prefix + "-owner")}
+	createRS3Project(t, s, f.projectID, f.ownerID)
+
+	other := &store.Project{ID: tid(prefix + "-other"), Name: "Other", Slug: prefix + "-other"}
 	require.NoError(t, s.CreateProject(ctx, other))
 
 	mk := func(projID, name string) *store.Agent {
-		a := &store.Agent{ID: tid(name), Slug: name, Name: name, ProjectID: projID}
+		a := &store.Agent{ID: tid(prefix + "-" + name), Slug: prefix + "-" + name, Name: name, ProjectID: projID}
 		require.NoError(t, s.CreateAgent(ctx, a))
 		return a
 	}
-	live := mk(projectID, "pd-live")
-	soft := mk(projectID, "pd-soft")
-	outside := mk(other.ID, "pd-outside")
-	bystander := mk(other.ID, "pd-bystander")
+	f.live = mk(f.projectID, "live")
+	f.soft = mk(f.projectID, "soft")
+	f.outside = mk(other.ID, "outside")
+	f.bystander = mk(other.ID, "bystander")
 
 	edge := func(delegatorType, delegatorID string, delegate *store.Agent) *store.DelegationEdge {
 		e := &store.DelegationEdge{
@@ -643,23 +656,40 @@ func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
 		require.NoError(t, s.CreateDelegationEdge(ctx, e))
 		return e
 	}
-	edge(store.DelegationPrincipalUser, ownerID, live)              // project agent as delegate
-	edge(store.DelegationPrincipalUser, ownerID, soft)              // soft-deleted project agent as delegate
-	edge(store.DelegationPrincipalAgent, live.ID, outside)          // project agent as delegator
-	kept := edge(store.DelegationPrincipalUser, ownerID, bystander) // unrelated
-	soft.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, soft))
-
-	req := ProjectDeleteRequest{
-		ProjectID: projectID,
-		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	f.projectEdges = []*store.DelegationEdge{
+		edge(store.DelegationPrincipalUser, f.ownerID, f.live),     // project agent as delegate
+		edge(store.DelegationPrincipalUser, f.ownerID, f.soft),     // soft-deleted project agent as delegate
+		edge(store.DelegationPrincipalAgent, f.live.ID, f.outside), // project agent as delegator
 	}
+	f.kept = edge(store.DelegationPrincipalUser, f.ownerID, f.bystander) // unrelated
+	f.soft.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, f.soft))
+	return f
+}
+
+func (f *projectEdgeFixture) request() ProjectDeleteRequest {
+	return ProjectDeleteRequest{
+		ProjectID: f.projectID,
+		Actor:     NewAuthenticatedUser(f.ownerID, f.ownerID+"@test.com", "Owner", "member", "web"),
+	}
+}
+
+// A project delete deactivates every active edge where an agent of the
+// project, soft-deleted or not, is the delegate or the delegator, inside
+// the delete transaction, with the hard-delete cause and the operation ID
+// recorded in the project_delete audit summary.
+func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	f := newProjectEdgeFixture(t, s, "pd-edges")
+
+	req := f.request()
 	result, decision := srv.deletionService.Delete(setTestIdentity(ctx, req.Actor), req)
 	require.Nil(t, decision)
 	require.NotNil(t, result)
 	assert.Equal(t, 3, result.CascadeSummary.DelegationEdges)
 
-	for _, a := range []*store.Agent{live, soft} {
+	for _, a := range []*store.Agent{f.live, f.soft} {
 		assert.Empty(t, activeEdgeIDs(t, s, a.ID), "no active edge delegates to project agent %s", a.Slug)
 		delegated, err := s.GetDelegationEdgesForDelegator(ctx, store.DelegationPrincipalAgent, a.ID)
 		require.NoError(t, err)
@@ -667,8 +697,101 @@ func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
 			assert.False(t, e.Active, "no active edge is delegated by project agent %s", a.Slug)
 		}
 	}
-	assert.Empty(t, activeEdgeIDs(t, s, outside.ID), "the edge delegated by the project agent is deactivated")
-	assert.Equal(t, []string{kept.ID}, activeEdgeIDs(t, s, bystander.ID), "an unrelated edge stays active")
+	assert.Empty(t, activeEdgeIDs(t, s, f.outside.ID), "the edge delegated by the project agent is deactivated")
+	assert.Equal(t, []string{f.kept.ID}, activeEdgeIDs(t, s, f.bystander.ID), "an unrelated edge stays active")
+
+	// The audit summary names the operation ID, and each deactivated edge
+	// carries that ID with the hard-delete cause.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "project_delete", TargetID: f.projectID})
+	require.NoError(t, err)
+	require.Len(t, audits, 1, "one project_delete record")
+	var sum map[string]any
+	require.NoError(t, json.Unmarshal([]byte(audits[0].AfterSummary), &sum))
+	opID, _ := sum["delegation_edge_op_id"].(string)
+	require.NotEmpty(t, opID, "the project_delete audit records the edge operation ID")
+	assert.Equal(t, opID, result.CascadeSummary.DelegationEdgeOpID)
+	for _, e := range f.projectEdges {
+		got, err := s.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, e.DelegateID, store.EdgeDeactivationAgentHardDelete, opID)
+		require.NoError(t, err)
+		ids := make([]string, 0, len(got))
+		for _, g := range got {
+			ids = append(ids, g.ID)
+			assert.Equal(t, store.EdgeDeactivationAgentHardDelete, g.Deactivation.Cause)
+			assert.Equal(t, opID, g.Deactivation.OpID)
+		}
+		assert.Equal(t, []string{e.ID}, ids, "edge %s is deactivated with cause agent_hard_delete under the audited operation ID", e.ID)
+	}
+}
+
+// A project delete with no agent edges records no edge operation ID.
+func TestProjectDeleteWithoutEdgesOmitsEdgeOpID(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("pd-noedges")
+	ownerID := tid("pd-noedges-owner")
+	createRS3Project(t, s, projectID, ownerID)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	_, decision := srv.deletionService.Delete(setTestIdentity(ctx, req.Actor), req)
+	require.Nil(t, decision)
+
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "project_delete", TargetID: projectID})
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	var sum map[string]any
+	require.NoError(t, json.Unmarshal([]byte(audits[0].AfterSummary), &sum))
+	assert.NotContains(t, sum, "delegation_edge_op_id")
+}
+
+// delegatorEdgeFaultStore fails DeactivateDelegationEdgesForDelegator inside
+// a transaction.
+type delegatorEdgeFaultStore struct {
+	store.Store
+	inTx bool
+}
+
+var errInjectedEdgeDeactivation = errors.New("injected edge deactivation fault")
+
+func (f *delegatorEdgeFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&delegatorEdgeFaultStore{Store: tx, inTx: true})
+	})
+}
+
+func (f *delegatorEdgeFaultStore) DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d store.Deactivation) (int, error) {
+	if f.inTx {
+		return 0, errInjectedEdgeDeactivation
+	}
+	return f.Store.DeactivateDelegationEdgesForDelegator(ctx, delegatorType, delegatorID, d)
+}
+
+// An edge deactivation error inside the delete transaction fails the
+// project delete and rolls back every edge write, the project row and the
+// audit record.
+func TestProjectDeleteEdgeDeactivationFaultRollsBack(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	f := newProjectEdgeFixture(t, s, "pd-edgefault")
+
+	svc := NewProjectDeletionService(&delegatorEdgeFaultStore{Store: s}, newTestAuthzService(s), slog.Default())
+	req := f.request()
+	result, decision := svc.Delete(setTestIdentity(ctx, req.Actor), req)
+	require.Nil(t, result)
+	require.NotNil(t, decision, "the edge fault fails the delete")
+	assert.Equal(t, http.StatusInternalServerError, decision.HTTPStatus)
+
+	_, err := s.GetProject(ctx, f.projectID)
+	require.NoError(t, err, "the project row is kept")
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "project_delete", TargetID: f.projectID})
+	require.NoError(t, err)
+	assert.Empty(t, audits, "no project_delete record")
+
+	for _, e := range append(f.projectEdges, f.kept) {
+		assert.Contains(t, activeEdgeIDs(t, s, e.DelegateID), e.ID, "edge %s stays active", e.ID)
+	}
 }
 
 // --- soft-delete operation ID carry-through ---
