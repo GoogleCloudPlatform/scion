@@ -201,8 +201,10 @@ func runProvision(ctx context.Context) error {
 			// Without the broker's preparation (no setgid and group write),
 			// the node created the directory as root: give it to the
 			// workspace owner, the same condition under which the workspace
-			// chown stays strict.
-			if err := provision.PrepareStateDir(stateDir, provisionUID, provisionGID, provisionRequireChownSuccess(os.Getenv)); err != nil {
+			// chown stays strict. 0 means the default 1000, as for the
+			// workspace.
+			uid, gid := provision.DefaultOwnerID(provisionUID), provision.DefaultOwnerID(provisionGID)
+			if err := prepareStateDir(stateDir, uid, gid, provisionRequireChownSuccess(os.Getenv)); err != nil {
 				return fmt.Errorf("provision: %w", err)
 			}
 			sentinelDir = stateDir
@@ -326,6 +328,10 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 // Kubernetes runtime marked the workspace directory as prepared by the
 // broker, created or found with setgid and group write
 // (provision.ChownBestEffortEnv set to exactly "1").
+// prepareStateDir is provision.PrepareStateDir; a variable so tests can
+// observe the owner it is given.
+var prepareStateDir = provision.PrepareStateDir
+
 func provisionRequireChownSuccess(getenv func(string) string) bool {
 	return !provision.ChownBestEffortRequested(getenv)
 }

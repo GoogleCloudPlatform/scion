@@ -203,6 +203,17 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	return cloudrun.NewInstancesClient(ctx)
 }
 
+// cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
+// as and owns its NFS workspace with: the broker's own ids for a
+// non-NFS backend, otherwise the configured NFS ids with 0 (unset)
+// meaning 1000, as in buildCommonRunArgs.
+func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
+	if cfg.WorkspaceBackendName != "nfs" {
+		return os.Getuid(), os.Getgid()
+	}
+	return nfsOwnerIDs(cfg.NFSUID, cfg.NFSGID)
+}
+
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Checked before anything is resolved or provisioned: this runtime
 	// always mounts the project's shared NFS workspace (see
@@ -220,15 +231,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	instanceID := cloudRunInstanceID(agentID)
 
-	uid := 1000
-	gid := 1000
-	if cfg.WorkspaceBackendName != "nfs" {
-		uid = os.Getuid()
-		gid = os.Getgid()
-	} else if cfg.NFSUID != 0 {
-		uid = cfg.NFSUID
-		gid = cfg.NFSGID
-	}
+	uid, gid := cloudRunOwnerIDs(cfg)
 
 	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
 	if err != nil {
