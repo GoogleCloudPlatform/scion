@@ -600,16 +600,80 @@ describe('scion-page-admin-server-config', () => {
       return captured!;
     }
 
-    it('the PUT payload carries Layer-0 keys for the server to split', async () => {
+    it('changed Layer-0 fields go in the PUT payload for the server to split', async () => {
       const payload = await capturePut(
         makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
-        () => {}
+        (el) => {
+          el.logLevel = 'debug';
+          el.dbDriver = 'sqlite';
+        }
       );
       const server = payload.server as Record<string, unknown> | undefined;
-      expect(server?.log_level).toBe('info');
-      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('postgres');
+      expect(server?.log_level).toBe('debug');
+      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('sqlite');
       // The masked database URL is left out so the stored value is kept.
       expect((server?.database as Record<string, unknown> | undefined)?.url).toBeUndefined();
+    });
+
+    it('a minimal workstation GET with no user change sends no Layer-0 leaves', async () => {
+      // The GET a hub returns for a stock workstation settings.yaml
+      // (review phase4-r4 finding 1).
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: {
+          hub: { soft_delete_retain_files: false, auto_suspend_stalled: false },
+          broker: { broker_id: 'b-1', broker_token: '********' },
+          auth: {},
+          github_app: {},
+        },
+      };
+      const payload = await capturePut(minimal, () => {});
+      expect(payload).not.toHaveProperty('active_profile');
+      expect(payload).not.toHaveProperty('workspace_path');
+      const server = (payload.server ?? {}) as Record<string, Record<string, unknown>>;
+      for (const block of [
+        'broker',
+        'database',
+        'storage',
+        'secrets',
+        'message_broker',
+        'native_chat',
+      ]) {
+        expect(server).not.toHaveProperty(block);
+      }
+      expect(server.hub ?? {}).not.toHaveProperty('port');
+      expect(server.auth ?? {}).not.toHaveProperty('dev_token');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('changing one Layer-0 field sends exactly that leaf', async () => {
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: { hub: {}, broker: { broker_id: 'b-1', broker_token: '********' }, auth: {} },
+      };
+      const payload = await capturePut(minimal, (el) => {
+        el.storageBucket = 'my-bucket';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.storage).toEqual({ bucket: 'my-bucket' });
+      expect(server).not.toHaveProperty('broker');
+      expect(payload).not.toHaveProperty('active_profile');
+    });
+
+    it('auto_provide shows as on when GET omits it', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          schema_version: '1',
+          settings_tier: 'db',
+          layer0_editable: true,
+          server: { broker: { broker_id: 'b-1' } },
+        })
+      );
+      expect((element as any).brokerAutoProvide).toBe(true);
     });
 
     it('clearing authorized_domains and public_url sends [] and ""', async () => {
@@ -623,24 +687,23 @@ describe('scion-page-admin-server-config', () => {
       const server = payload.server as Record<string, Record<string, unknown>>;
       expect(server.auth.authorized_domains).toEqual([]);
       expect(server.hub.public_url).toBe('');
-      // Merged with the Layer-0 part, not replaced by it.
-      expect(server.hub.port).toBe(8080);
+      // The unchanged Layer-0 port is not sent.
+      expect(server.hub).not.toHaveProperty('port');
     });
 
     it('cleared and switched-off Layer-0 fields are sent explicitly', async () => {
-      const payload = await capturePut(
-        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
-        (el) => {
-          el.logFormat = '';
-          el.storageBucket = '';
-          el.messageBrokerEnabled = false;
-          el.messageBrokerType = 'inprocess';
-        }
-      );
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.storage.bucket = 'old-bucket';
+      base.server.message_broker = { enabled: true, type: 'inprocess' };
+      const payload = await capturePut(base, (el) => {
+        el.logFormat = '';
+        el.storageBucket = '';
+        el.messageBrokerEnabled = false;
+      });
       const server = payload.server as Record<string, Record<string, unknown> | string>;
       expect(server.log_format).toBe('');
-      expect((server.storage as Record<string, unknown>).bucket).toBe('');
-      expect(server.message_broker).toEqual({ enabled: false, type: 'inprocess' });
+      expect(server.storage).toEqual({ bucket: '' });
+      expect(server.message_broker).toEqual({ enabled: false });
     });
 
     it('defaulted fields GET omitted are not sent from an untouched form', async () => {
@@ -655,14 +718,15 @@ describe('scion-page-admin-server-config', () => {
       expect(server).not.toHaveProperty('native_chat');
     });
 
-    it('defaulted fields are sent when GET had them or the user changed them', async () => {
+    it('defaulted fields are sent only when the user changed them', async () => {
       const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
       base.server.hub.gcp_iam_check_mode = 'enforce';
       const payload = await capturePut(base, (el) => {
         el.nativeChatEnabled = false;
       });
       const server = payload.server as Record<string, Record<string, unknown>>;
-      expect(server.hub.gcp_iam_check_mode).toBe('enforce');
+      // Unchanged since GET (even though GET had it): not sent.
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
       expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
       expect(server.native_chat).toEqual({ enabled: false });
     });

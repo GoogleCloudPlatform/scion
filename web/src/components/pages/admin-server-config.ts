@@ -40,6 +40,34 @@ import './admin-experiments.js';
 const MASKED_VALUE = '********';
 
 /**
+ * Returns the leaves of current that differ from base (plain objects are
+ * compared key by key; arrays and scalars as whole values).
+ */
+function diffPayload(
+  current: Record<string, unknown>,
+  base: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(current)) {
+    const b = base[k];
+    if (
+      v &&
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      b &&
+      typeof b === 'object' &&
+      !Array.isArray(b)
+    ) {
+      const sub = diffPayload(v as Record<string, unknown>, b as Record<string, unknown>);
+      if (Object.keys(sub).length > 0) out[k] = sub;
+    } else if (JSON.stringify(v) !== JSON.stringify(b)) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
  * Deep-merges src into dst (plain objects only; src wins for other values).
  * Used to combine the Layer-1 and Layer-0 parts of a workstation save.
  */
@@ -627,7 +655,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private brokerContainerHubEndpoint = '';
   @state() private brokerName = '';
   @state() private brokerNickname = '';
-  @state() private brokerAutoProvide = false;
+  @state() private brokerAutoProvide = true; // absent means on
 
   // Database
   @state() private dbDriver = '';
@@ -680,16 +708,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Native Chat — default ON, matching the server's absent-means-enabled rule.
   @state() private nativeChatEnabled = true;
   /**
-   * Values of the fields the form fills with a default when GET omits them,
-   * as loaded (undefined = GET omitted the field). A workstation save sends
-   * such a field only when GET had it or the user changed it, so saving an
-   * untouched form writes nothing.
+   * The Layer-0 / file-only part of the save payload as built right after
+   * the form was populated. A workstation save sends only the leaves that
+   * differ from it (see buildLayer0Payload), so an untouched form sends no
+   * Layer-0 leaves, whatever defaults the form filled in.
    */
-  private loadedDefaulted: {
-    gcpIamCheckMode?: string | undefined;
-    gcpIamDenyUnknownPolicy?: string | undefined;
-    nativeChatEnabled?: boolean | undefined;
-  } = {};
+  private layer0Snapshot: Record<string, unknown> = {};
 
   // Cross-project agent messaging (from admin/messaging API, not server-config)
   @state() private crossProjectMessagingEnabled = false;
@@ -1552,6 +1576,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const data = (await res.json()) as ServerConfigResponse;
       this.rawConfig = data;
       this.populateForm(data);
+      this.layer0Snapshot = this.buildLayer0Candidate();
       // Load GitHub App config before releasing the loading gate so values
       // are present when the form first renders (avoids Shoelace timing issues).
       await this.loadGitHubAppConfig();
@@ -1613,7 +1638,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private populateForm(data: ServerConfigResponse): void {
-    this.loadedDefaulted = {};
     // Server build info
     this.scionVersion = data.scion_version || '';
     this.scionCommit = data.scion_commit || '';
@@ -1683,9 +1707,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
         this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
         this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
-        this.loadedDefaulted.gcpIamCheckMode = srv.hub.gcp_iam_check_mode || undefined;
-        this.loadedDefaulted.gcpIamDenyUnknownPolicy =
-          srv.hub.gcp_iam_deny_unknown_policy || undefined;
       }
 
       // Broker
@@ -1697,7 +1718,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.brokerContainerHubEndpoint = srv.broker.container_hub_endpoint || '';
         this.brokerName = srv.broker.broker_name || '';
         this.brokerNickname = srv.broker.broker_nickname || '';
-        this.brokerAutoProvide = srv.broker.auto_provide || false;
+        // Absent means on (the server auto-provides when the key is unset).
+        this.brokerAutoProvide = srv.broker.auto_provide ?? true;
       }
 
       // Database
@@ -1739,7 +1761,6 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       // Native Chat — an absent section or an absent key means enabled.
       this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
-      this.loadedDefaulted.nativeChatEnabled = srv.native_chat?.enabled;
     }
 
     // Telemetry
@@ -2148,13 +2169,21 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
-   * Layer-0 and file-only fields for a workstation save. Every editable
-   * field is sent with its current form value, cleared ones as "" / false /
-   * [] (the hub removes or clears them and skips unchanged ones). Masked
-   * secrets still showing "********" are left out so the stored value is
-   * kept.
+   * Layer-0 and file-only fields for a workstation save: only the leaves the
+   * user changed since the form was populated (layer0Snapshot), a field
+   * changed to empty sent as "" / false / []. Unchanged fields, including
+   * every default the form filled in for a key GET omitted, are not sent.
    */
   private buildLayer0Payload(): Record<string, unknown> {
+    return diffPayload(this.buildLayer0Candidate(), this.layer0Snapshot);
+  }
+
+  /**
+   * Every editable Layer-0 / file-only field with its current form value.
+   * Masked secrets still showing "********" are left out so the stored
+   * value is kept.
+   */
+  private buildLayer0Candidate(): Record<string, unknown> {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
     const list = (v: string) =>
@@ -2178,17 +2207,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
-    // Defaulted fields: only when GET had them or the user changed them.
-    const ld = this.loadedDefaulted;
-    if (
-      ok('server.hub.gcp_iam_check_mode') &&
-      (ld.gcpIamCheckMode !== undefined || this.hubGcpIamCheckMode !== 'off')
-    )
-      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
-    if (
-      ok('server.hub.gcp_iam_deny_unknown_policy') &&
-      (ld.gcpIamDenyUnknownPolicy !== undefined || this.hubGcpIamDenyUnknownPolicy !== 'fail-open')
-    )
+    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
+    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy || '';
     if (Object.keys(hub).length > 0) server.hub = hub;
 
@@ -2234,10 +2254,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (ok('server.message_broker.type')) mb.type = this.messageBrokerType || '';
       server.message_broker = mb;
     }
-    if (
-      ok('server.native_chat.enabled') &&
-      (ld.nativeChatEnabled !== undefined || this.nativeChatEnabled !== true)
-    ) {
+    if (ok('server.native_chat.enabled')) {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
     const oauth = this.rawConfig?.server?.oauth;
@@ -2618,7 +2635,8 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       case 'unpersisted_keys_rejected':
       case 'unclassified_keys_rejected':
-      case 'hub_owned_keys_rejected': {
+      case 'hub_owned_keys_rejected':
+      case 'unsaved_keys_rejected': {
         // Nothing was saved; name the offending keys, as the docs say.
         const keys = Array.isArray(body.keys) ? (body.keys as string[]) : [];
         const message = (body.message as string) || 'Some settings could not be saved.';
