@@ -743,3 +743,23 @@ func TestPrepare_ImageLinkRecordIgnored(t *testing.T) {
 		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
 	})
 }
+
+// The image home must not be the agent home itself, by any path: the seed
+// fails instead of copying the home into itself.
+func TestPrepare_SkeletonSourceIsTheHome(t *testing.T) {
+	for _, src := range []func(e *prepEnv) string{
+		func(e *prepEnv) string { return e.home },
+		func(e *prepEnv) string { return e.home + "/." },
+		func(e *prepEnv) string { return filepath.Join(e.base, "mem", "..", "home") },
+	} {
+		e := newPrepEnv(t)
+		o := e.opts("s1")
+		o.SkeletonSource = src(e)
+		_, err := Prepare(o)
+		require.Error(t, err, "source %s", o.SkeletonSource)
+		var ce *ClassError
+		require.ErrorAs(t, err, &ce)
+		assert.Equal(t, ErrClassSeed, ce.Class)
+		assert.Contains(t, err.Error(), "is the agent home itself")
+	}
+}

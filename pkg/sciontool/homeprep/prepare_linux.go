@@ -414,11 +414,17 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 	if !srcInfo.IsDir() {
 		return SkeletonNone, nil
 	}
-	var rootSt unix.Stat_t
+	// The image home must not be the agent home itself (for example the
+	// same directory reached through another path), or the copy would read
+	// what it writes.
+	var rootSt, srcSt unix.Stat_t
 	if err := unix.Fstat(r.fd, &rootSt); err != nil {
 		return "", err
 	}
-	if st, ok := srcInfo.Sys().(*unix.Stat_t); ok && st.Dev == rootSt.Dev && st.Ino == rootSt.Ino {
+	if err := unix.Lstat(src, &srcSt); err != nil {
+		return "", err
+	}
+	if srcSt.Dev == rootSt.Dev && srcSt.Ino == rootSt.Ino {
 		return "", fmt.Errorf("the image home %s is the agent home itself", src)
 	}
 
