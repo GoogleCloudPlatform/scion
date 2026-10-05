@@ -76,7 +76,7 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
 
 ### What does not set `TZ`
 
-- **Runtime profiles.** There is no profile step. A `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key) (see [Removed: profile `timezone`](/scion/reference/orchestrator-settings/#removed-profile-timezone)).
+- **Runtime profiles.** There is no profile step. A `TZ` in a profile's `harness_overrides` env is not used, and profiles have no `env` key. See [Removed: profile `timezone`](/scion/reference/orchestrator-settings/#removed-profile-timezone).
 - **Broker-local values.** The Runtime Broker ignores `TZ` from:
   - broker-local templates;
   - the broker settings' harness-config entry `env`;
@@ -137,7 +137,7 @@ Two maintenance migrations relate to times. An admin runs them from **Admin → 
 
 | Key | What it does | When to run it |
 | :--- | :--- | :--- |
-| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows that the database driver cannot read are also repaired automatically, at Hub start, after a database snapshot. Such rows come from a Hub running in a zone that has no letter abbreviation and an offset that is not a whole hour (for example `Asia/Kathmandu`). For such a zone Go prints the four-digit numeric offset in place of the abbreviation, so the stored value ends in `+0545 +0545`. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
+| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows that the database driver cannot read are also repaired automatically, at Hub start, after a database snapshot. Such rows come from a Hub running in a zone that has no letter abbreviation and an offset that is not a whole hour (for example `Asia/Kathmandu`). For such a zone Go prints the four-digit numeric offset in place of the abbreviation, so the stored value contains `+0545 +0545`. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
 | `applied-config-tz-cleanup` | Converts `TZ` values that older Hubs saved in agents' applied config env into `legacy` pins, in one pass, and reports how many agents it converted. | Optional, because the Hub already converts each agent lazily. Run it **before** `applied-config-env-cleanup` to keep every saved `TZ` as a pin; if the env cleanup runs first, saved values with no live source are removed and those agents follow the chain instead. Safe to re-run, and it can run again after it completes; a second run converts 0. |
 
 The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed. To re-run one of these after it has completed, use `POST /api/v1/admin/maintenance/migrations/<key>/run`.

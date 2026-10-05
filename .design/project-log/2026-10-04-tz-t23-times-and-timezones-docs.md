@@ -80,4 +80,9 @@ Each fix was checked against the code at upstream 92c805cf:
 
 - **Profile `env` row.** Removed from the `orchestrator-settings.md` profiles table. Neither `V1ProfileConfig` (`pkg/config/settings_v1.go:2136`) nor `ProfileConfig` (`pkg/config/settings.go:59`) has an `Env` field. The schema's `profileConfig` has no `env` property and sets `additionalProperties: false`.
 - **"whatever zone".** Reworded to "regardless of the timezone the Hub host runs in". The meaning is unchanged.
-- **"numeric-abbreviation zone".** Spelled out. The affected zones have no letter abbreviation and an offset that is not a whole hour, so Go prints a four-digit numeric offset as the abbreviation (`TZ=Asia/Kathmandu date +%Z` gives `+0545`), and the stored value ends in `+0545 +0545`. Two-digit offsets such as `-03` (`America/Sao_Paulo`) can be read and are not affected, which matches the four-digit probe in `pkg/store/entadapter/timestamp_normalize.go`.
+- **"numeric-abbreviation zone".** Spelled out. The affected zones have no letter abbreviation and an offset that is not a whole hour, so Go prints a four-digit numeric offset as the abbreviation (`TZ=Asia/Kathmandu date +%Z` gives `+0545`), and the stored value contains `+0545 +0545`. Two-digit offsets such as `-03` (`America/Sao_Paulo`) can be read and are not affected, which matches the four-digit probe in `pkg/store/entadapter/timestamp_normalize.go`.
+
+## Review round 4 fixes
+
+- The `+0545 +0545` value is now described as what the stored value "contains", not how it "ends": stored `Time.String()` text can carry a ` m=...` monotonic suffix after the zone.
+- The two back-to-back parentheticals in the runtime-profiles bullet are split into two sentences.
