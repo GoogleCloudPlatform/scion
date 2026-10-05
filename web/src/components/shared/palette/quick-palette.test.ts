@@ -37,7 +37,7 @@ import type {
 } from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
-import { PaletteTypeahead } from './palette-typeahead.js';
+import { PALETTE_TYPEAHEAD_MAX_MS, PaletteTypeahead } from './palette-typeahead.js';
 
 function agentsGroup(
   candidates: Array<{
@@ -1274,6 +1274,27 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(optionLabels(el)[0]).toContain('Bravo');
     // Capture ended with the focus.
     expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it("applies what the host's type-ahead captured before it timed out", async () => {
+    const typeahead = new PaletteTypeahead();
+    vi.useFakeTimers();
+    try {
+      typeahead.start();
+      typeOutside('c');
+      typeOutside('o');
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(typeahead.isCapturing).toBe(false);
+    const el = await mountClosed(typeahead);
+    await show(el);
+    // Past the time limit, keys reach the old focus again.
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('co');
   });
 
   it('nothing is captured while the palette is closed', async () => {

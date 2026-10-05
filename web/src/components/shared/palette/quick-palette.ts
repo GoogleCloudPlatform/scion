@@ -94,9 +94,11 @@ export class ScionQuickPalette extends LitElement {
 
   /**
    * The host's type-ahead, when the host starts capturing keys at its open
-   * request (before this element exists, on a first open). Without one the
-   * palette uses its own, started when `open` turns true. Either way the
-   * captured text becomes the query once the input has focus.
+   * request (before this element exists, on a first open). The host starts
+   * and stops it; the palette only stops it when removed from the page.
+   * Without one the palette uses its own, started when `open` turns true and
+   * stopped when it turns false. Either way the captured text becomes the
+   * query once the input has focus.
    */
   @property({ attribute: false }) typeahead: PaletteTypeahead | null = null;
 
@@ -478,13 +480,16 @@ export class ScionQuickPalette extends LitElement {
     if (changed.has('open')) {
       if (this.open) {
         this._startVisualViewportTracking();
-        // Keys typed until the input takes focus belong to the query.
-        this.activeTypeahead.start();
+        // Keys typed until the input takes focus belong to the query. A
+        // host's type-ahead is the host's to start: it may already have
+        // captured text, and may have stopped at its time limit, keeping it.
+        if (!this.typeahead) this.ownTypeahead.start();
       } else {
         this._stopVisualViewportTracking();
-        // Only a close: a host may start its type-ahead before mounting
-        // this element closed, and that first render must not discard it.
-        if (changed.get('open') === true) this.activeTypeahead.stop();
+        // Only the palette's own: the host stops its type-ahead when it
+        // closes the palette, and may already have started it again for a
+        // reopen by the time this update runs.
+        this.ownTypeahead.stop();
       }
     }
     if (changedKeys.has('queryText')) {
