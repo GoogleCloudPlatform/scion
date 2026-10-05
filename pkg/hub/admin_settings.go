@@ -167,10 +167,14 @@ type ServerConfigUpdateRequest struct {
 // GET: Returns the current global settings.yaml contents (sensitive fields masked).
 // PUT: Updates global settings.yaml and optionally reloads applicable runtime settings.
 func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request) {
-	// In postgres mode, delegate to the DB-backed handlers that use
-	// OperationalSettings for Layer-1 reads/writes (design §3.8).
-	// File/SQLite mode keeps the exact current behavior (file read/write).
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Whenever OperationalSettings is wired (every DB driver, SQLite
+	// included, since #1432) delegate to the DB-backed handlers: Layer-1
+	// reads/writes go through the DB (design §3.8) and Layer-0 keys are
+	// rejected with 422 exactly as on postgres. Writing settings.yaml on a
+	// DB-backed SQLite hub let the next ops.Update re-apply the stale DB rows
+	// and silently revert the write (ptone/scion#1091). Only a hub with no
+	// OperationalSettings service keeps the file read/write path.
+	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetServerConfigDB(w, r, ops)
@@ -231,7 +235,8 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 // handleAdminServerConfigSectionReset handles
 // DELETE /api/v1/admin/server-config/sections/{name}
 // Resets a managed section back to bootstrap material by deleting the DB row.
-// Postgres mode only; admin-gated. Design §3.2.4.
+// Available whenever OperationalSettings is wired (any DB driver); admin-gated.
+// Design §3.2.4.
 func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -241,9 +246,9 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	}
 
 	ops := s.GetOperationalSettings()
-	if ops == nil || !s.IsPostgres() {
+	if ops == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"Section reset is only available in postgres mode", nil)
+			"Section reset requires DB-backed operational settings", nil)
 		return
 	}
 
@@ -647,8 +652,9 @@ func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profile
 // Returns a summary of what was reloaded and what requires a restart.
 //
 // This is the file-mode path: it loads GlobalConfig from settings.yaml,
-// builds a Layer1Snapshot, and delegates to applySnapshot. In postgres mode,
-// the OperationalSettings service provides the snapshot instead.
+// builds a Layer1Snapshot, and delegates to applySnapshot. It is used only by
+// a hub without OperationalSettings; with it (any DB driver) the service
+// provides the snapshot instead.
 func (s *Server) reloadSettings() map[string]interface{} {
 	results := map[string]interface{}{
 		"applied":          []string{},

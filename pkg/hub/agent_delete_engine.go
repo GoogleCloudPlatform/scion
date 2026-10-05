@@ -535,6 +535,13 @@ func (e *deletionEngine) run() deletionOutcome {
 
 	// Release quotas and the topic default binding (each bounded).
 	e.tailStep("release quotas", func() { s.releaseAgentQuotas(e.base, agent.ID, agent.RuntimeBrokerID) })
+	// Close the agent's conduit sessions and drop its registry rows (a
+	// no-op when no relay runs).
+	e.tailStep("forget conduit sessions", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.conduitForgetAgent(ctx, agent.ID)
+	})
 	e.tailStep("clear topic default", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 		defer cancel()

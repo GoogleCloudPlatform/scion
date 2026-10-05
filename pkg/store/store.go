@@ -401,6 +401,12 @@ type AgentStore interface {
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error
 
+	// SetAgentWorkspacePlacement records where the agent's broker placed its
+	// workspace on the latest start (see Agent.WorkspacePlacement). It is a
+	// narrow single-column write that neither checks nor bumps
+	// state_version. Returns ErrNotFound if the agent doesn't exist.
+	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
+
 	// UpdateAgentExposedPorts updates only exposed port registrations.
 	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
 

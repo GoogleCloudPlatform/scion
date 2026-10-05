@@ -68,6 +68,8 @@ const (
 	FieldRuntime = "runtime"
 	// FieldRuntimeBrokerID holds the string denoting the runtime_broker_id field in the database.
 	FieldRuntimeBrokerID = "runtime_broker_id"
+	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
+	FieldWorkspacePlacement = "workspace_placement"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -230,6 +232,7 @@ var Columns = []string{
 	FieldDetached,
 	FieldRuntime,
 	FieldRuntimeBrokerID,
+	FieldWorkspacePlacement,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
@@ -306,6 +309,8 @@ var (
 	DefaultCurrentModelCalls int
 	// DefaultDetached holds the default value on creation for the "detached" field.
 	DefaultDetached bool
+	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
+	DefaultWorkspacePlacement string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -554,6 +559,11 @@ func ByRuntime(opts ...sql.OrderTermOption) OrderOption {
 // ByRuntimeBrokerID orders the results by the runtime_broker_id field.
 func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByWorkspacePlacement orders the results by the workspace_placement field.
+func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
 }
 
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.

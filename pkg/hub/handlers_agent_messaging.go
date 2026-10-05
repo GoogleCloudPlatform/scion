@@ -1604,7 +1604,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	s.events.PublishAgentCreated(ctx, agent)
+	// Marked as a restore so web clients that tombstoned the ID on deleted
+	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
+	// row's Updated with the restore time, so that is the marker.
+	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker

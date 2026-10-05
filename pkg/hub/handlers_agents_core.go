@@ -2480,6 +2480,17 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	if isTerminalAgentPhase(dst.Phase) {
 		return
 	}
+	// A delete holds the re-read row (design ptone/scion#2483 §2.1: phase
+	// writers outside UpdateAgentStatus respect the deletion predicate). Its
+	// claim owns the status fields: copying the dispatch's phase would move
+	// a deleting row on, e.g. created to running, or overwrite the claim's
+	// stopping (ptone/scion#3055). The delete engine works from its claim
+	// snapshot (broker, run ID), and the claim's own state_version bump is
+	// what sends a pre-claim dispatch write here, so skipping the status
+	// fields is enough.
+	if deleteStopNoop(dst) {
+		return
+	}
 	if src.Phase != "" {
 		dst.Phase = src.Phase
 	}
@@ -4316,6 +4327,12 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	}
 	if transportError != "" {
 		resp["transportError"] = transportError
+	}
+	// Conduit grant verification keys (hub.conduit on): the agent's target
+	// refreshes its key set here as well as from each Welcome. Omitted when
+	// the experiment is off or the keys are unavailable.
+	if keys := s.conduitRefreshGrantKeys(r.Context()); len(keys) > 0 {
+		resp["conduit_grant_keys"] = keys
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
