@@ -606,4 +606,45 @@ describe('tray badge counts: user switch', () => {
     await afterCountSync();
     expect(badges(el)).toEqual(['2', '2']);
   });
+
+  it('clears the counts after sign-out and signing back in', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    unread = 0;
+    el.user = null;
+    await el.updateComplete;
+
+    await switchUser(el, { id: 'u1', email: 'u1@example.com', name: 'U1' });
+    expect(badges(el)).toEqual([]);
+    await afterCountSync();
+    expect(badges(el)).toEqual([]);
+  });
+
+  it('never renders the next user with the previous user counts', async () => {
+    unread = 2;
+    serveUnread();
+    const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+
+    // The counts are private; read them through a structural view.
+    const counts = el as unknown as { inboxCount: number; notificationCount: number };
+    const renders: { id: string | undefined; inbox: number; notif: number }[] = [];
+    const originalRender = el.render.bind(el);
+    el.render = (): ReturnType<typeof originalRender> => {
+      renders.push({ id: el.user?.id, inbox: counts.inboxCount, notif: counts.notificationCount });
+      return originalRender();
+    };
+
+    unread = 0;
+    await switchUser(el, { id: 'u2', email: 'u2@example.com', name: 'U2' });
+
+    const u2Renders = renders.filter((r) => r.id === 'u2');
+    expect(u2Renders.length).toBeGreaterThan(0);
+    for (const r of u2Renders) {
+      expect(r).toEqual({ id: 'u2', inbox: 0, notif: 0 });
+    }
+  });
 });
