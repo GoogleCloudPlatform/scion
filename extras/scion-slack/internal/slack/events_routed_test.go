@@ -681,13 +681,10 @@ func TestDeliverUserMessage_LegacyPath_HTTPPayloadShape(t *testing.T) {
 		"legacy payload must not contain 'default_agent' top-level field")
 }
 
-// TestDeliverUserMessage_SenderFallback_Legacy verifies that on the legacy path,
-// when the user mapping has no scion_email, the sender field falls back to
-// "slack:<username>". The legacy hub handleBrokerInbound uses the broker
-// identity for non-"user:" senders, and authorizeAgentMessage denies the
-// broker identity type — so this message is also denied on legacy, but it
-// reaches the hub (the adapter doesn't guard against it).
-func TestDeliverUserMessage_SenderFallback_Legacy(t *testing.T) {
+// TestDeliverUserMessage_LegacyNoEmail_BlockedBeforeHub verifies that on the
+// legacy path, when the user mapping has no scion_email, the adapter blocks
+// the message before reaching the hub and asks the user to re-link.
+func TestDeliverUserMessage_LegacyNoEmail_BlockedBeforeHub(t *testing.T) {
 	f := newRoutedTestFixture(t)
 	f.disableRouted()
 
@@ -703,17 +700,14 @@ func TestDeliverUserMessage_SenderFallback_Legacy(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Legacy path sends the message — the hub will deny it via authorizeAgentMessage
-	// since "slack:" is not a "user:" sender.
-	require.Len(t, f.legacyCalls, 1)
-	assert.Equal(t, "slack:slackonly", f.legacyCalls[0].Message.Sender)
+	assert.Len(t, f.legacyCalls, 0, "legacy endpoint must NOT be called for email-empty user")
+	assert.Len(t, f.routedCalls, 0)
 }
 
 // TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub verifies that on the
 // routed path, when the user mapping has no scion_email, the adapter blocks
-// the message before reaching the hub and shows an ephemeral registration
-// prompt. The hub requires "user:<email>" sender format and would reject
-// "slack:<username>" with 400.
+// the message before reaching the hub and asks the user to re-link their
+// account, the same as the legacy path.
 func TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub(t *testing.T) {
 	f := newRoutedTestFixture(t)
 	f.enableRouted()

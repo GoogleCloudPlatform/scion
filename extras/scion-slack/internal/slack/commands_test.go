@@ -12,6 +12,8 @@ import (
 	"time"
 
 	slackapi "github.com/slack-go/slack"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -364,4 +366,38 @@ func TestSetupCallback_DeniedShowsActionableText(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, link)
 	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleMsg_LinkWithoutEmailAsksToReRegister(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "")
+	delivered := false
+	deliver := func(topic string, msg *messages.StructuredMessage) *hubError {
+		delivered = true
+		return nil
+	}
+
+	HandleCommand(context.Background(), f.slack.client(), f.store, f.hub.client(), nil, deliver,
+		slackapi.SlashCommand{ChannelID: "C1", UserID: "U1", UserName: "alice", Text: "msg alpha hello"}, slog.Default())
+
+	assert.False(t, delivered, "no message is sent without a linked Scion email")
+	assert.Empty(t, f.hub.recorded())
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}
+
+func TestHandleMsg_SendsAsTheLinkedUser(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkChannel(t)
+	f.linkUser(t, "alice@example.com")
+	var sender string
+	deliver := func(topic string, msg *messages.StructuredMessage) *hubError {
+		sender = msg.Sender
+		return nil
+	}
+
+	HandleCommand(context.Background(), f.slack.client(), f.store, f.hub.client(), nil, deliver,
+		slackapi.SlashCommand{ChannelID: "C1", UserID: "U1", UserName: "alice", Text: "msg alpha hello"}, slog.Default())
+
+	assert.Equal(t, "user:alice@example.com", sender)
 }

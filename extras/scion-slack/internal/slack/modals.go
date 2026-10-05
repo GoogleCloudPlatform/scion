@@ -93,10 +93,12 @@ func HandleAskModalSubmit(
 
 	if deliverInbound != nil {
 		userID := callback.User.ID
-		sender := "slack:" + userID
-		if mapping, mapErr := store.GetUserMapping(ctx, userID); mapErr == nil && mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		// The response is sent as the linked user.
+		email, ok := requireLinkedUser(ctx, client, store, pending.ChannelID, userID, log)
+		if !ok {
+			return
 		}
+		sender := "user:" + email
 
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{

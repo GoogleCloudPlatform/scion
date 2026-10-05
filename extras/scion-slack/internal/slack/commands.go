@@ -279,21 +279,11 @@ func handleMsg(
 		return
 	}
 
-	mapping, err := store.GetUserMapping(ctx, cmd.UserID)
-	if err != nil {
-		log.Error("Failed to get user mapping", "error", err, "user_id", cmd.UserID)
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "An internal error occurred. Please try again later.")
+	email, ok := requireLinkedUser(ctx, client, store, cmd.ChannelID, cmd.UserID, log)
+	if !ok {
 		return
 	}
-	if mapping == nil {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Please link your Slack account first with `/scion register`.")
-		return
-	}
-
-	sender := "user:" + mapping.ScionEmail
-	if mapping.ScionEmail == "" {
-		sender = "slack:" + mapping.SlackUsername
-	}
+	sender := "user:" + email
 
 	cc := &ConversationContext{
 		SlackUserID:   cmd.UserID,
@@ -702,11 +692,12 @@ func handleAskOption(
 	choice := action.Value
 
 	if deliverInbound != nil {
-		sender := "slack:" + callback.User.ID
-		mapping, _ := store.GetUserMapping(ctx, callback.User.ID)
-		if mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		// The response is sent as the linked user.
+		email, ok := requireLinkedUser(ctx, client, store, pending.ChannelID, callback.User.ID, log)
+		if !ok {
+			return
 		}
+		sender := "user:" + email
 
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{
