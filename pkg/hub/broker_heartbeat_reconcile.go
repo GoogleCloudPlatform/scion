@@ -268,7 +268,14 @@ func (t *missingAgentTracker) forget(brokerID, agentID string) {
 // suspend, resume) in flight on this Hub process per agent. During such an
 // operation the container can be legitimately absent while the agent row
 // still says running (for example between the stop and the start of a
-// restart), so the missing-container reconcile skips the agent.
+// restart), so the missing-container reconcile skips the agent, and a
+// heartbeat does not apply a stopped/error phase over it
+// (heartbeatPhaseGuarded).
+//
+// It is a best-effort, in-memory hint, per hub replica: a heartbeat handled
+// by another replica, or by this one after a restart mid-dispatch, does not
+// see the operation and is applied as usual. Nothing correctness-critical may
+// depend on it.
 type lifecycleOpTracker struct {
 	mu       sync.Mutex
 	inFlight map[string]int

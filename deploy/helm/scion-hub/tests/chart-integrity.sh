@@ -51,7 +51,7 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # and B accuse the chart of dropping templates it never dropped. The chart will not default it -
 # a generated secret rotates on every upgrade - so the harness supplies one, exactly as it
 # supplies a base URL.
-BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid)
+BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
 BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real-secret)
 
 # HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.
@@ -633,7 +633,7 @@ fi
 # "a guard with this one exemption", which is exactly the state Phase 1 shipped.
 _e3="$("$HELM" template t "$CHART" "${BASE[@]}" \
          --set auth.requireStableSigningKey=true \
-         --set config.existingSecret=operator-settings 2>&1)"
+         --set auth.proxy.iap.audience= --set config.existingSecret=operator-settings 2>&1)"
 if printf '%s\n' "$_e3" | grep -qF 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
   pass "requireStableSigningKey=true is permitted under config.existingSecret"
 else
@@ -922,7 +922,7 @@ fi
 # the property the value check exists to protect - and it is asserted the only
 # way it can be from outside: two different short secrets must produce ONE
 # digest. E9's arm 2 remains the control that the digest is not simply dead.
-_e10_run() { "$HELM" template t "$CHART" "${BASE[@]}" --set auth.mode=oauth \
+_e10_run() { "$HELM" template t "$CHART" "${BASE[@]}" --set auth.mode=oauth --set auth.proxy.iap.audience= \
   --set-string auth.oauth.web.google.clientId=e10-client-id \
   --set-string auth.oauth.web.google.clientSecret="$1" 2>&1; }
 _e10_a="$(_e10_run def)"
@@ -984,7 +984,7 @@ _e11_render() { # $1 = out file, rest = helm args
   rm -rf "$_d"
 }
 _e11_on="$(mktemp)"; _e11_off="$(mktemp)"
-_e11_render "$_e11_on" "${BASE[@]}" --set auth.mode=oauth \
+_e11_render "$_e11_on" "${BASE[@]}" --set auth.mode=oauth --set auth.proxy.iap.audience= \
   --set-string auth.oauth.web.google.clientId=e11-client-id \
   --set-string auth.oauth.web.google.clientSecret=e11-client-secret-value
 _e11_render "$_e11_off" "${BASE[@]}"
