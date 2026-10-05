@@ -352,6 +352,20 @@ func (_c *AgentCreate) SetNillableRuntimeBrokerID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_c *AgentCreate) SetWorkspacePlacement(v string) *AgentCreate {
+	_c.mutation.SetWorkspacePlacement(v)
+	return _c
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableWorkspacePlacement(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetWorkspacePlacement(*v)
+	}
+	return _c
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
 	_c.mutation.SetWebPtyEnabled(v)
@@ -1158,6 +1172,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultDetached
 		_c.mutation.SetDetached(v)
 	}
+	if _, ok := _c.mutation.WorkspacePlacement(); !ok {
+		v := agent.DefaultWorkspacePlacement
+		_c.mutation.SetWorkspacePlacement(v)
+	}
 	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
 		v := agent.DefaultWebPtyEnabled
 		_c.mutation.SetWebPtyEnabled(v)
@@ -1483,6 +1501,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RuntimeBrokerID(); ok {
 		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeString, value)
 		_node.RuntimeBrokerID = value
+	}
+	if value, ok := _c.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+		_node.WorkspacePlacement = value
 	}
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
@@ -2218,6 +2240,24 @@ func (u *AgentUpsert) UpdateRuntimeBrokerID() *AgentUpsert {
 // ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
 func (u *AgentUpsert) ClearRuntimeBrokerID() *AgentUpsert {
 	u.SetNull(agent.FieldRuntimeBrokerID)
+	return u
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsert) SetWorkspacePlacement(v string) *AgentUpsert {
+	u.Set(agent.FieldWorkspacePlacement, v)
+	return u
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateWorkspacePlacement() *AgentUpsert {
+	u.SetExcluded(agent.FieldWorkspacePlacement)
+	return u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsert) ClearWorkspacePlacement() *AgentUpsert {
+	u.SetNull(agent.FieldWorkspacePlacement)
 	return u
 }
 
@@ -3655,6 +3695,27 @@ func (u *AgentUpsertOne) UpdateRuntimeBrokerID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRuntimeBrokerID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertOne) SetWorkspacePlacement(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertOne) ClearWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 
@@ -5406,6 +5467,27 @@ func (u *AgentUpsertBulk) UpdateRuntimeBrokerID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRuntimeBrokerID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertBulk) SetWorkspacePlacement(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertBulk) ClearWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
 	})
 }
 

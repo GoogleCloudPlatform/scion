@@ -114,6 +114,15 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).

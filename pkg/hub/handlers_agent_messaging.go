@@ -1566,8 +1566,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	restoredAt := time.Now()
 	agent.DeletedAt = time.Time{}
-	agent.Updated = time.Now()
+	agent.Updated = restoredAt
 
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
@@ -1594,7 +1595,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	s.events.PublishAgentCreated(ctx, agent)
+	// Marked as a restore so web clients that tombstoned the ID on deleted
+	// bring it back (ptone/scion#2951).
+	s.events.PublishAgentRestored(ctx, agent, restoredAt)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker
