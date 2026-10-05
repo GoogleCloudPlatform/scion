@@ -382,9 +382,10 @@ export class ScionPageChat extends LitElement {
    * rather than replacing them, so it captures this token without bumping
    * it.
    *
-   * The hub loads don't check this token: their own `v2Conversation` and
-   * {@link _hubMembersGeneration} checks keep them from publishing over a
-   * project view.
+   * The hub loads don't check this token: their own `v2Conversation`,
+   * {@link _hubMembersGeneration} and {@link _sidebarOwner} checks keep them
+   * from publishing over another view. The owner check is the only guard
+   * when a space claims the sidebar with no conversation open (mobile).
    */
   private _membersViewSeq = 0;
   /**
@@ -2015,24 +2016,6 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Update the members sidebar from SSE agent events.
-   *
-   * The chat scope subscribes to `project.{spaceId}.agent.>`, which the state
-   * manager routes through handleAgentEvent for every agent subject —
-   * `created` and `deleted` (membership) as well as `status` (phase/activity).
-   * All three land here as `agents-updated`, so this rebuilds the agent member
-   * list from the shared agent map rather than re-fetching over REST.
-   *
-   * The space members loader seeds that map (stateManager.seedAgents) so
-   * status deltas have a baseline to merge onto — without a baseline the
-   * state manager buffers the delta and never notifies.
-   *
-   * The hub view (no conversation, or a DM opened from it, which keeps the
-   * hub list) reads the agent store's retained hub list instead: it covers
-   * every readable project, while the chat scope covers only the rail's
-   * spaces, and its rows may be compact, which never enter the global map.
-   */
-  /**
    * setScope clears the shared agent map, and the chat scope is only set once
    * the rail reports its space IDs — which can land after the members have
    * already loaded and seeded. Re-seed so SSE status deltas keep a baseline.
@@ -2057,6 +2040,24 @@ export class ScionPageChat extends LitElement {
     return !this.v2Conversation.projectId && this._hubAgentsLive;
   }
 
+  /**
+   * Update the members sidebar from SSE agent events.
+   *
+   * The chat scope subscribes to `project.{spaceId}.agent.>`, which the state
+   * manager routes through handleAgentEvent for every agent subject —
+   * `created` and `deleted` (membership) as well as `status` (phase/activity).
+   * All three land here as `agents-updated`, so this rebuilds the agent member
+   * list from the shared agent map rather than re-fetching over REST.
+   *
+   * The space members loader seeds that map (stateManager.seedAgents) so
+   * status deltas have a baseline to merge onto — without a baseline the
+   * state manager buffers the delta and never notifies.
+   *
+   * The hub view (no conversation, or a DM opened from it, which keeps the
+   * hub list) reads the agent store's retained hub list instead: it covers
+   * every readable project, while the chat scope covers only the rail's
+   * spaces, and its rows may be compact, which never enter the global map.
+   */
   private _handleAgentsUpdated(): void {
     if (this._sidebarShowsHubView()) {
       const snapshot = agentStore.peek(HUB_AGENTS_QUERY);
@@ -2760,8 +2761,10 @@ export class ScionPageChat extends LitElement {
       const snapshot = await agentStore.ensure(HUB_AGENTS_QUERY, {
         signal: load.controller.signal,
       });
-      // The generation check is defence in depth: every bump also detaches
-      // this load, whose signal then rejects it before this line.
+      // The conversation and generation checks are defence in depth: every
+      // generation bump detaches this load, whose signal then rejects it
+      // before this line, and a project conversation claims the sidebar for
+      // its space, which the owner check below catches.
       if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
       // A space claimed the sidebar meanwhile (on mobile, with no
       // conversation and no generation bump): its members stay.
@@ -2836,8 +2839,9 @@ export class ScionPageChat extends LitElement {
    * requesting further pages once a conversation is open or the generation
    * moved on (`shouldContinue`, checked by `paginateAll` before every page),
    * but not for a space's claim: that walk keeps paging, so a hub view
-   * returning in the same generation joins it. A conversation that opened and closed again within
-   * one Lit update batch never bumps the generation, but `shouldContinue`
+   * returning in the same generation joins it. A conversation that opened
+   * and closed again within one Lit update batch never bumps the
+   * generation, but `shouldContinue`
    * (a live field read) still stops a page fetch for the moment it was open;
    * that walk rejects with {@link PaginationStoppedError} rather than
    * resolving with its partial result, and this returns true so the caller
