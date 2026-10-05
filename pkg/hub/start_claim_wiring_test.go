@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,33 +428,50 @@ func TestStartClaimWiring_RestartStatusWriteFailureIsNotAFailedStart(t *testing.
 	assert.NotEqual(t, "stopped", getAgent(t, f.s, a.ID).Phase, "no stopped state is recorded for a started container")
 }
 
-// A start whose claim is lost before dispatch rolls back the reservation it
-// made, although its run context is cancelled by then.
+// A start whose claim is lost before it dispatches is abandoned and undoes
+// its capacity hold: the reservation it made is released and the starting
+// phase restored, on a detached context (a database refuses work on a done
+// one), whether the claim is lost while the reservation is being made or
+// after the starting write, at the fence.
 func TestStartClaimWiring_FenceFailureRollsBackCapacity(t *testing.T) {
-	f, d, a := newClaimFixture(t)
-	ctx := context.Background()
-	setBrokerAgentCeiling(t, f.s, 5)
-	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	// The fence passes while the reservation is being made: the claim is
-	// lost (its run context cancelled) by the time the fence is checked.
-	f.srv.startClaimTestHook = func(r *startClaimRun) {
-		r.fenceAt = time.Now().Add(150 * time.Millisecond)
-		r.renewEvery = time.Hour
+	cases := []struct {
+		name  string
+		store func(s store.Store) ctxHonouringReleaseStore
+	}{
+		{"lost during the reservation", func(s store.Store) ctxHonouringReleaseStore {
+			return ctxHonouringReleaseStore{Store: s, reserveDelay: 400 * time.Millisecond}
+		}},
+		{"lost after the starting write", func(s store.Store) ctxHonouringReleaseStore {
+			return ctxHonouringReleaseStore{Store: s, startingDelay: 400 * time.Millisecond}
+		}},
 	}
-	d.start = func(ctx context.Context, cur *store.Agent) error {
-		t.Fatal("dispatched past the fence")
-		return nil
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, d, a := newClaimFixture(t)
+			ctx := context.Background()
+			setBrokerAgentCeiling(t, f.s, 5)
+			def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+			require.NoError(t, err)
+			// The fence passes while the delayed store call runs: the claim
+			// is lost (its run context cancelled) before the dispatch.
+			f.srv.startClaimTestHook = func(r *startClaimRun) {
+				r.fenceAt = time.Now().Add(150 * time.Millisecond)
+				r.renewEvery = time.Hour
+			}
+			d.start = func(ctx context.Context, cur *store.Agent) error {
+				t.Fatal("dispatched past the fence")
+				return nil
+			}
+			f.srv.store = tc.store(f.s)
+			f.srv.quotaService.store = f.srv.store
+			err = f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser})
+			require.ErrorIs(t, err, errStartClaimLost)
+			has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+			require.NoError(t, err)
+			assert.False(t, has, "the reservation made for the abandoned start is released")
+			assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "the starting phase is restored")
+		})
 	}
-	// A database refuses work on a done context, so the release must run
-	// on a detached one.
-	f.srv.store = ctxHonouringReleaseStore{Store: f.s, reserveDelay: 400 * time.Millisecond}
-	f.srv.quotaService.store = f.srv.store
-	err = f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser})
-	require.ErrorIs(t, err, errStartClaimLost)
-	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
-	require.NoError(t, err)
-	assert.False(t, has, "the reservation made for the abandoned start is released")
 }
 
 // A failed start keeps a reservation the agent already held.
@@ -526,10 +544,20 @@ func TestStartClaimWiring_WakeRunningWrittenUnderClaim(t *testing.T) {
 }
 
 // ctxHonouringReleaseStore refuses a reservation release on a done context,
-// as a real database does, and delays returning from a reservation.
+// as a real database does, and delays returning from a reservation or a
+// starting write.
 type ctxHonouringReleaseStore struct {
 	store.Store
-	reserveDelay time.Duration
+	reserveDelay  time.Duration // after a reservation is made
+	startingDelay time.Duration // after a write of phase starting
+}
+
+func (s ctxHonouringReleaseStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
+	err := s.Store.UpdateAgentStatus(ctx, id, upd)
+	if upd.Phase == string(state.PhaseStarting) {
+		time.Sleep(s.startingDelay)
+	}
+	return err
 }
 
 func (s ctxHonouringReleaseStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
@@ -551,4 +579,61 @@ func (s ctxHonouringReleaseStore) ReleaseReservation(ctx context.Context, limitI
 		return err
 	}
 	return s.Store.ReleaseReservation(ctx, limitID, resourceID)
+}
+
+// A live start claim defers a heartbeat's uncounted phase on any replica,
+// except a stop's or a wake's claim; an unconfirmed claim does not.
+func TestStartClaimWiring_HeartbeatGuardingClaim(t *testing.T) {
+	cases := []struct {
+		kind  store.StartClaimKind
+		state store.StartClaimState
+		want  bool
+	}{
+		{store.StartClaimUser, store.StartClaimLive, true},
+		{store.StartClaimRestart, store.StartClaimLive, true},
+		{store.StartClaimCreate, store.StartClaimLive, true},
+		{store.StartClaimRecovery, store.StartClaimLive, true},
+		{store.StartClaimReincarnate, store.StartClaimLive, true},
+		{store.StartClaimStop, store.StartClaimLive, false},
+		{store.StartClaimWake, store.StartClaimLive, false},
+		{store.StartClaimUser, store.StartClaimUnconfirmed, false},
+	}
+	srv, _ := testServer(t)
+	for _, tc := range cases {
+		a := &store.Agent{ID: "agent-claim-guard", StartClaimID: "c", StartClaimKind: tc.kind, StartClaimState: tc.state}
+		assert.Equal(t, tc.want, srv.heartbeatPhaseGuarded(a, "stopped"), "kind=%s state=%s", tc.kind, tc.state)
+		assert.False(t, srv.heartbeatPhaseGuarded(a, "running"), "a counted phase is never guarded")
+	}
+	assert.False(t, srv.heartbeatPhaseGuarded(&store.Agent{ID: "agent-no-claim"}, "stopped"))
+}
+
+// A restart run by another replica holds its claim across the stop leg: a
+// heartbeat this replica handles, reporting the old container stopped, does
+// not move the row off running or release its reservation. Once the claim
+// is released, the same report applies.
+func TestStartClaimWiring_HeartbeatDeferredUnderAnotherReplicasClaim(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+	require.NoError(t, err)
+	claim, err := f.s.ClaimAgentStart(ctx, a.ID, "other-replica", store.StartClaimRestart, "docker", time.Minute)
+	require.NoError(t, err)
+
+	stopped := brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: string(state.PhaseStopped), ContainerStatus: "Exited (0)", RuntimeTarget: "docker"},
+		}}},
+	}
+	f.send(stopped)
+	assert.Equal(t, string(state.PhaseRunning), getAgent(t, f.s, a.ID).Phase, "the stopped report is deferred under the claim")
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the reservation is kept under the claim")
+
+	_, err = f.s.ReleaseAgentStart(ctx, a.ID, claim.ID, "other-replica")
+	require.NoError(t, err)
+	f.send(stopped)
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "without the claim the report applies")
 }
