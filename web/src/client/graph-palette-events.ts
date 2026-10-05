@@ -18,7 +18,7 @@
  * Event contract between the header's palette button and the graph views
  * that host a "Jump to agent" palette (`GraphPaletteController`). The
  * header is not an ancestor of the page it sits above, so the two talk
- * through window-level events, the same as the chat and terminal palettes.
+ * through window-level events, the same as the chat palette.
  */
 
 /** Dispatched by the header's palette button, over a graph, to request the palette open. */
