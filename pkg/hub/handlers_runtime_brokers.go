@@ -651,6 +651,46 @@ type brokerHeartbeatRequest struct {
 	// by an older broker, in which case the stored descriptor is left
 	// unchanged.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the Attach field of the broker's stored
+	// profiles (see hubclient.BrokerHeartbeat.ProfileAttach). Omitted by
+	// an older broker, in which case the stored profiles are left
+	// unchanged.
+	ProfileAttach []brokerProfileAttach `json:"profileAttach,omitempty"`
+}
+
+// brokerProfileAttach is one profile's attach capability in a heartbeat.
+type brokerProfileAttach struct {
+	Name   string `json:"name"`
+	Attach bool   `json:"attach"`
+}
+
+// applyProfileAttach sets the Attach field of each stored profile named in
+// reported to the reported value, and reports whether any stored value
+// changed. Only profiles already registered are updated: a reported name
+// with no stored profile is ignored (the profile set itself is still
+// recorded at registration), and a stored profile the heartbeat does not
+// name keeps its value, which may be nil (read as supported).
+func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfileAttach) bool {
+	if len(reported) == 0 || len(profiles) == 0 {
+		return false
+	}
+	byName := make(map[string]bool, len(reported))
+	for _, r := range reported {
+		byName[r.Name] = r.Attach
+	}
+	changed := false
+	for i := range profiles {
+		v, ok := byName[profiles[i].Name]
+		if !ok {
+			continue
+		}
+		if profiles[i].Attach != nil && *profiles[i].Attach == v {
+			continue
+		}
+		profiles[i].Attach = &v
+		changed = true
+	}
+	return changed
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -768,7 +808,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// the descriptor alone: the capability check reads AgentMove from the
 	// Capabilities every heartbeat refreshes (an old broker reports none),
 	// and the target health check also probes live reachability.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil {
+	// ProfileAttach follows the same rule: only profiles the heartbeat
+	// names are updated, and only when their stored Attach differs.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || len(heartbeat.ProfileAttach) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
 				"broker_id", id, "error", err)
@@ -780,6 +822,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
 				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
+				changed = true
+			}
+			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
 				changed = true
 			}
 			if changed {

@@ -97,6 +97,12 @@ type HeartbeatService struct {
 	// health changes. Nil omits the field.
 	workspaceStorage func() *api.BrokerWorkspaceStorage
 
+	// profileAttach, when set, returns the attach capability of each
+	// profile whose attach support the broker currently knows, reported on
+	// every heartbeat so the hub's stored per-profile Attach follows
+	// runtime changes without a re-registration. Nil omits the field.
+	profileAttach func() []hubclient.ProfileAttachState
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -316,6 +322,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+	if s.profileAttach != nil {
+		heartbeat.ProfileAttach = s.profileAttach()
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the
