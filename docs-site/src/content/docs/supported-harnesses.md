@@ -84,9 +84,9 @@ When `SCION_THINKING_LEVEL` is set (0–100, from `--thinking-level` on `scion s
 | 51–75 | `high` |
 | 76–100 | `xhigh` |
 
-Values outside the 0–100 range are clamped. Claude Code does not accept `max` in this variable, so the top tier is `xhigh`. When a model does not support a level, Claude Code uses the highest level it supports below that one (for example, `xhigh` runs as `high` on Sonnet 4.6). See [Claude Code model configuration](https://code.claude.com/docs/en/model-config).
+Values outside the 0–100 range are clamped. The top tier is `xhigh` rather than `max` to avoid `max`'s excessive-token runs; `max` is still reachable by setting `CLAUDE_CODE_EFFORT_LEVEL` directly or with a custom `thinking:` table. When a model does not support a level, Claude Code uses the highest level it supports below that one (for example, `xhigh` runs as `high` on Sonnet 4.6). See [Claude Code model configuration](https://code.claude.com/docs/en/model-config).
 
-When the level is unset or blank, the variable is not set, so Claude Code keeps its own per-model default effort. A value that is not an integer (`abc`, `1.5`) also sets nothing, and logs a warning. The variable outranks `--effort`, `/effort` and the `effortLevel` setting in `settings.json`. If `CLAUDE_CODE_EFFORT_LEVEL` is already set in a template or harness-config `env:` block, the provisioner leaves it alone, and logs a warning if a thinking level was also requested.
+When the level is unset or blank, the variable is not set, so Claude Code keeps its own per-model default effort. A value that is not an integer (`abc`, `1.5`) also sets nothing, and logs a warning. The variable outranks `--effort`, `/effort` and the `effortLevel` setting in `settings.json`. If `CLAUDE_CODE_EFFORT_LEVEL` is already set in a template or harness-config `env:` block (even to an empty value), the provisioner leaves it alone, and logs a warning if a thinking level was also requested.
 
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.

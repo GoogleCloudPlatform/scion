@@ -437,14 +437,29 @@ class EffortTest(unittest.TestCase):
                 # warning; the requested-level warning must not fire.
                 self.assertFalse(any("no thinking block" in w for w in warnings), warnings)
 
-    def test_undocumented_value_is_written_with_warning(self) -> None:
-        """A customized table may name `max`, which the env var rejects."""
+    def test_preset_empty_env_is_not_clobbered(self) -> None:
+        """An empty pin still blocks the overlay in MergeEnvOverlay (presence wins)."""
+        env, effort, warnings = self._effort("90", preset="")
+        self.assertIsNone(effort)
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("CLAUDE_CODE_EFFORT_LEVEL=''", warnings[0])
+
+    def test_max_value_is_written_without_warning(self) -> None:
+        """A customized table may name `max`; the env var accepts it."""
         thinking = {"levels": [{"max": 100, "value": "max"}]}
         env, effort, warnings = self._effort("60", thinking=thinking)
         self.assertEqual(env, {"CLAUDE_CODE_EFFORT_LEVEL": "max"})
         self.assertEqual(effort, "max")
+        self.assertEqual(warnings, [])
+
+    def test_undocumented_value_is_written_with_warning(self) -> None:
+        thinking = {"levels": [{"max": 100, "value": "turbo"}]}
+        env, effort, warnings = self._effort("60", thinking=thinking)
+        self.assertEqual(env, {"CLAUDE_CODE_EFFORT_LEVEL": "turbo"})
+        self.assertEqual(effort, "turbo")
         self.assertEqual(len(warnings), 1)
-        self.assertIn("'max'", warnings[0])
+        self.assertIn("'turbo'", warnings[0])
 
 
 class ProvisionEffortWiringTest(unittest.TestCase):

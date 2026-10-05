@@ -48,7 +48,8 @@ model_aliases:
 # SCION_THINKING_LEVEL (0-100) -> CLAUDE_CODE_EFFORT_LEVEL in the harness env.
 # Applied by scion_harness.resolve_thinking in provision.py. Each level maps
 # to the value of the first entry whose max (inclusive) is >= the level.
-# CLAUDE_CODE_EFFORT_LEVEL does not accept `max`, so the top tier is xhigh.
+# The top tier is xhigh rather than max to avoid max's excessive-token runs;
+# max stays reachable via a preset CLAUDE_CODE_EFFORT_LEVEL or a custom table.
 # No default: when the level is unset, nothing is set and Claude Code keeps
 # its own per-model default effort.
 thinking:

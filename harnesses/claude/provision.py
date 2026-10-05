@@ -94,10 +94,13 @@ OPUS_5_5_FALLBACK_MODEL = "claude-opus-4-8"
 # Claude Code reads the session effort from this env var. It outranks the
 # --effort flag, /effort, and the effortLevel / modelSettings keys in
 # settings.json (https://code.claude.com/docs/en/model-config, "Precedence
-# Order"). Unlike --effort it does not accept `max`; a level the active model
-# does not support falls back to the highest supported level below it.
+# Order"). Accepted values per https://code.claude.com/docs/en/env-vars; a
+# level the active model does not support falls back to the highest supported
+# level below it. The bundled table tops out at xhigh rather than max to avoid
+# max's excessive-token runs; max stays reachable via a preset env var or a
+# custom thinking table.
 EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
-EFFORT_ENV_VALUES = frozenset({"low", "medium", "high", "xhigh", "auto"})
+EFFORT_ENV_VALUES = frozenset({"low", "medium", "high", "xhigh", "max", "auto"})
 
 AUTH = scion_harness.AuthSpec(
     harness="claude",
@@ -332,8 +335,10 @@ def _apply_effort(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> s
     Claude Code keeps its own per-model default effort.
 
     A CLAUDE_CODE_EFFORT_LEVEL already in the container environment (from a
-    template or harness-config `env:` entry) is an explicit pin. It would win
-    over the env overlay anyway, so it is left alone and nothing is written.
+    template or harness-config `env:` entry) is an explicit pin. The
+    supervisor's MergeEnvOverlay drops any overlay key that is present in the
+    runtime env, even with an empty value, so presence (not truthiness) is
+    what counts: the pin is left alone and nothing is written.
 
     Returns the effort value written to *env*, or None when none was written.
     """
@@ -348,8 +353,8 @@ def _apply_effort(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> s
             "`scion harness-config upgrade claude`)"
         )
 
-    preset = os.environ.get(EFFORT_ENV, "").strip()
-    if preset:
+    if EFFORT_ENV in os.environ:
+        preset = os.environ[EFFORT_ENV]
         if requested:
             ctx.warn(
                 f"{EFFORT_ENV}={preset!r} is set in the container environment and "
