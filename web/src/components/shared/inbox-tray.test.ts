@@ -168,6 +168,36 @@ describe('inbox tray: loading for the signed-in user', () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it('loads again when the same user signs back in after signing out', async () => {
+    const tray = await mount(user('u1'));
+    await setUser(tray, null);
+
+    await setUser(tray, user('u1'));
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+    // One SSE listener: one event, one refetch.
+    await messageEvent();
+    expect(listRequests()).toBe(3);
+  });
+
+  it('does not load for a user change while removed, and loads on re-add', async () => {
+    const tray = await mount(user('u1'));
+    tray.remove();
+
+    await setUser(tray, user('u2'));
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(listRequests()).toBe(1);
+
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
   it('polls on the fallback interval', async () => {
     await mount(user('u1'));
 
