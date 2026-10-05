@@ -491,6 +491,23 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent runtime observations (start claims) ----
+		{Table: "agent_recoveries", Rows: []row{
+			{
+				"id": agentID, "broker_id": brokerID, "observed_state": "absent",
+				"observed_target": "docker", "observed_at": baseTime,
+				"first_absent_at": baseTime, "observed_in_flight": false,
+			},
+		}},
+
+		// ---- Broker per-target complete inventory times ----
+		{Table: "broker_target_inventories", Rows: []row{
+			{
+				"id": "bt000000-0000-0000-0000-000000000001", "broker_id": brokerID,
+				"target": "docker", "last_complete_inventory_at": baseTime,
+			},
+		}},
+
 		// ---- Agent session metrics ----
 		{Table: "agent_session_metrics", Rows: []row{
 			{
