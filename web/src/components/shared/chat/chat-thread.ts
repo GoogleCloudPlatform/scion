@@ -3336,8 +3336,11 @@ export class ScionChatThread extends LitElement {
    * initial load if it is still running, else straight to the bottom if the
    * load already left the view to this jump. Either way a later load (a
    * Retry after a failed one) no longer counts this jump as started.
+   * Nothing to hand back once an earlier jump has landed since the open:
+   * the view stays on it.
    */
   private handOpenScrollBack(): void {
+    if (this._landedJumpSeq > this._jumpSeqAtOpen) return;
     this._jumpSeqAtOpen = this._jumpSeq;
     if (!this.loading && this._openScrollDeferred) {
       this._openScrollDeferred = false;

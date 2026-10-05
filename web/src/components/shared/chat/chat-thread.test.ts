@@ -7531,7 +7531,52 @@ describe('scion-chat-thread jump during the initial load', () => {
 
     expect(rendered(el, 'latest-3')).toBe(true);
     expect(bottom).toHaveBeenCalledTimes(1);
+    expect(el.shadowRoot?.querySelector('.permalink-highlight')).toBeNull();
   });
+
+  it.each([
+    ['while the load is running', true],
+    ['after the load finishes', false],
+  ])(
+    'a newer jump that finds no target, %s, keeps a landed jump in view',
+    async (_name, failDuringLoad) => {
+      lastReadMessageId = '';
+      const missing = {
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({}),
+      } as unknown as Response;
+      const releaseHistory = hold('history');
+      const releaseGone = hold('around:gone');
+      const { el, unread, bottom } = create();
+      await el.updateComplete;
+
+      await el.scrollToMessageById('first');
+      await el.updateComplete;
+      expect(scrolledTo.at(-1)).toBe('msg-first');
+      const gone = el.scrollToMessageById('gone');
+      await flush();
+      if (failDuringLoad) {
+        releaseGone(missing);
+        await gone;
+        await flush();
+        releaseHistory(page(LATEST));
+      } else {
+        releaseHistory(page(LATEST));
+        await flush();
+        releaseGone(missing);
+        await gone;
+      }
+      await flush();
+      await el.updateComplete;
+
+      expect(rendered(el, 'first')).toBe(true);
+      expect(rendered(el, 'latest-3')).toBe(false);
+      expect(scrolledTo.at(-1)).toBe('msg-first');
+      expect(unread).not.toHaveBeenCalled();
+      expect(bottom).not.toHaveBeenCalled();
+    }
+  );
 
   it('a jump from before leaving and coming back leaves the reopened view alone', async () => {
     hold('history');
