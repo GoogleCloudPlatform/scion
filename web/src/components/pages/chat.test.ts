@@ -1836,7 +1836,10 @@ describe('chat page — startup after the page is removed', () => {
     let unhandled: unknown[];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      // Load the real modules first, so these tests time the same whether
+      // or not an earlier test already did: only the mocked import differs.
+      await loadLazyModules();
       unhandled = [];
       process.on('unhandledRejection', onUnhandled);
       // A deploy purged the old chunk: the members import rejects.
@@ -1881,19 +1884,66 @@ describe('chat page — startup after the page is removed', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const el = createUnrenderedPage();
       window.history.replaceState({}, '', '/chat');
-      document.body.appendChild(el);
-      el.remove();
+      try {
+        document.body.appendChild(el);
+        el.remove();
 
-      await flush();
+        await flush();
 
-      expect(unhandled).toEqual([]);
-      expect(errorSpy).toHaveBeenCalledWith(
-        'Chat page failed to load its components:',
-        expect.anything()
-      );
-      expect(el.v2SpaceRailLoadFailed).toBe(false);
-      expect(el.v2SpaceRailLoaded).toBe(false);
-      errorSpy.mockRestore();
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          expect.anything()
+        );
+        expect(el.v2SpaceRailLoadFailed).toBe(false);
+        expect(el.v2SpaceRailLoaded).toBe(false);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('a connected page renders a reload message in the rail', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Renders the rail's template, not the whole page: happy-dom breaks
+      // on the members element once its module is defined (see above).
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+        await flush();
+
+        const rail = renderToFragment(el.renderV2Rail());
+        const alert = rail.querySelector('[role="alert"]');
+        expect(alert).not.toBeNull();
+        expect(alert?.textContent).toContain('Reload the page to try again.');
+        expect(rail.querySelector('sl-spinner')).toBeNull();
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('clears the failure once a later startup loads its imports', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+        await vi.waitFor(() => expect(el.v2SpaceRailLoadFailed).toBe(true));
+
+        // The page is removed and added again, and this time the chunk loads.
+        el.remove();
+        vi.doUnmock('../shared/chat/chat-members.js');
+        await loadLazyModules();
+        document.body.appendChild(el);
+        await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
+
+        expect(unhandled).toEqual([]);
+        expect(el.v2SpaceRailLoadFailed).toBe(false);
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
     });
   });
 });
