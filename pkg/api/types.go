@@ -586,6 +586,7 @@ type AgentInfo struct {
 	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550)
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
+	TemplateHash  string `json:"templateHash,omitempty"`  // Content hash of a template loaded from a content-addressed cache dir; when set, Template is a display name only and is never looked up by name
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
 	// HarnessConfigRevision records the harness-config bundle revision (e.g.
 	// the Hub artifact's ContentHash) that this agent was provisioned from.
@@ -961,6 +962,22 @@ func ContextWithHarnessConfigPath(ctx context.Context, path string) context.Cont
 // from the context, or "" if none was set.
 func HarnessConfigPathFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(harnessConfigPathContextKey{}).(string)
+	return v
+}
+
+type templateNameContextKey struct{}
+
+// ContextWithTemplateName records the human-friendly template slug for the
+// agent being provisioned. It is used for naming only (agent-info.json and
+// labels) and never to locate or load a template.
+func ContextWithTemplateName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, templateNameContextKey{}, name)
+}
+
+// TemplateNameFromContext returns the template slug recorded by
+// ContextWithTemplateName, or "" if none was set.
+func TemplateNameFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(templateNameContextKey{}).(string)
 	return v
 }
 
