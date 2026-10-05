@@ -37,7 +37,7 @@
       }
     }
   },
-  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth", "acknowledgeHAUnlanded"],
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth"],
   "properties": {
     "global": {
       "type": "object",
@@ -48,10 +48,6 @@
     },
     "fullnameOverride": {
       "type": "string"
-    },
-    "acknowledgeHAUnlanded": {
-      "type": "boolean",
-      "description": "Acknowledge that these values describe an HA deployment this release cannot start. database.driver=postgres, or storage.provider=gcs with auth.mode=proxy, or hub.extraEnv setting K_SERVICE, each satisfy the hub's isHADeployment test (cmd/server_foreground.go:927); the hosted HA preflight then runs and several of its thirteen gates have no source in this chart (which ones is derived, not asserted here: see deploy/helm/scion-hub/hack/ha-gates.txt), so the hub aborts at cmd/server_foreground.go:151-153 before serving. Temporary key: it is removed when the Cloud SQL and ingress/IAP values have both landed."
     },
     "replicaCount": {
       "type": "integer",
@@ -562,7 +558,7 @@
         "mode": {
           "type": "string",
           "enum": ["proxy", "oauth"],
-          "description": "Selects which configuration subtree is rendered and nothing else. Every key the HA preflight requires renders identically in both modes."
+          "description": "Selects which authentication subtree is rendered: server.auth.proxy (from auth.proxy) under proxy, server.oauth (from auth.oauth) under oauth. The hub's hosted-HA preflight checks the IAP and transport keys only under proxy; the keys it checks in both modes render identically."
         },
         "existingSecret": {
           "type": "string",
@@ -593,6 +589,48 @@
                   "$ref": "#/$defs/oauthProvider"
                 }
               }
+            }
+          }
+        },
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Proxy authentication, rendered into settings.yaml as server.auth.proxy when auth.mode is proxy. Setting iap.audience under auth.mode oauth is refused by the template as inert.",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": ["iap"],
+              "description": "The proxy auth providers this chart models: iap only. The hub's jwt provider (server.auth.proxy.jwt) is not modelled and cannot be reached through config.extra, because the chart writes server.auth.proxy.provider and config.extra may not overwrite a key the chart writes; supply the whole settings file through config.existingSecret to use it. The header provider is rejected at startup by the web server this chart always enables."
+            },
+            "iap": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "audience": {
+                  "type": "string",
+                  "description": "REQUIRED when auth.mode is proxy (provider iap), on every shape: initHubServer and initWebServer in cmd/server_foreground.go refuse to start without it. The IAP resource path, in one of the two shapes the hub accepts (isSupportedIAPAudience, cmd/server_foreground.go): /projects/<number>/global/backendServices/<id> for GKE behind a GCLB, or /projects/<number>/locations/<region>/services/<name> for Cloud Run. The shape is checked only where the hub checks it - on a hosted HA shape, by validateHostedHAPreflight - and no more strictly: every segment non-empty, surrounding whitespace and trailing slashes tolerated (the chart renders the value trimmed as the preflight trims it). Outside HA the hub requires only that it is non-empty, and so does this chart. Placeholder IDs of all zeros are accepted, as the hub accepts them with a warning. Not an OAuth client ID - that goes in auth.transport.oidcAudience."
+                }
+              }
+            }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Transport authentication for dispatched agents traversing the platform guard, rendered into settings.yaml as server.auth.transport (not server.transport) when mode is non-empty.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["", "none", "iap", "cloudrun_invoker"],
+              "description": "Empty leaves server.auth.transport out. iap is REQUIRED on a hosted HA shape under auth.mode proxy - the hub's preflight refuses anything else. iap and cloudrun_invoker require platformAuthSa; iap also requires oidcAudience."
+            },
+            "oidcAudience": {
+              "type": "string",
+              "description": "Rendered as server.auth.transport.oidc_audience. For iap: the IAP OAuth client ID, deliberately a different value from auth.proxy.iap.audience. Under cloudrun_invoker the hub falls back to the public hub URL when empty."
+            },
+            "platformAuthSa": {
+              "type": "string",
+              "description": "Rendered as server.auth.transport.platform_auth_sa: the email of the service account the hub uses to mint transport tokens."
             }
           }
         },
@@ -659,6 +697,96 @@
                 "description": "Required because database.driver is postgres."
               },
               "provider": {"const": "gcs"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "auth.mode proxy with provider iap needs auth.proxy.iap.audience on every shape, HA or not: initHubServer and initWebServer (cmd/server_foreground.go) refuse to start without it, and this chart always enables the web server. LIKE THE OAUTH RULE, DELIBERATELY WEAKER THAN THE TEMPLATE'S: an audience supplied through config.extra at server.auth.proxy.iap.audience is equally valid, so this checks the chart-value route only when config.extra is absent, and the template's check on the merged document covers every route. Not applied under config.existingSecret.",
+      "if": {
+        "properties": {
+          "auth": {
+            "properties": {
+              "mode": { "const": "proxy" }
+            },
+            "required": ["mode"]
+          },
+          "config": {
+            "properties": {
+              "existingSecret": { "const": "" },
+              "extra": { "maxProperties": 0 }
+            },
+            "required": ["existingSecret"]
+          }
+        },
+        "required": ["auth", "config"]
+      },
+      "then": {
+        "properties": {
+          "auth": {
+            "required": ["proxy"],
+            "properties": {
+              "proxy": {
+                "required": ["iap"],
+                "properties": {
+                  "iap": {
+                    "required": ["audience"],
+                    "properties": {
+                      "audience": {
+                        "minLength": 1,
+                        "description": "auth.mode proxy requires auth.proxy.iap.audience. Without it the hub refuses to start (initHubServer and initWebServer in cmd/server_foreground.go)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "On a hosted HA shape under auth.mode proxy the hub's preflight (validateHostedHAPreflight, cmd/server_foreground.go) also checks the SHAPE of the IAP audience (isSupportedIAPAudience). This mirrors it for the two HA routes the schema can see - database.driver postgres, and storage.provider gcs with auth.mode proxy; the K_SERVICE route and audiences supplied through config.extra are checked by the template on the merged document. Every segment non-empty; surrounding whitespace and trailing slashes tolerated, as the preflight trims them. The empty string passes here and is refused by the rule above.",
+      "if": {
+        "properties": {
+          "auth": {
+            "properties": { "mode": { "const": "proxy" } },
+            "required": ["mode"]
+          },
+          "config": {
+            "properties": { "existingSecret": { "const": "" } },
+            "required": ["existingSecret"]
+          }
+        },
+        "required": ["auth", "config"],
+        "anyOf": [
+          {
+            "properties": { "database": { "properties": { "driver": { "const": "postgres" } }, "required": ["driver"] } },
+            "required": ["database"]
+          },
+          {
+            "properties": { "storage": { "properties": { "provider": { "const": "gcs" } }, "required": ["provider"] } },
+            "required": ["storage"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "auth": {
+            "properties": {
+              "proxy": {
+                "properties": {
+                  "iap": {
+                    "properties": {
+                      "audience": {
+                        "pattern": "^(|[\\t-\\r \\x{85}\\p{Z}]*/projects/[^/]+/(locations/[^/]+/services|global/backendServices)/[^/]*[^/\\t-\\r \\x{85}\\p{Z}][^/]*/*[\\t-\\r \\x{85}\\p{Z}]*)$",
+                        "description": "On a hosted HA shape the IAP audience must be /projects/<number>/global/backendServices/<id> or /projects/<number>/locations/<region>/services/<name>; the hub's preflight refuses any other shape. The schema sees the value as written, so this is the template's pattern (scion-hub.iapAudiencePattern, matched on the normalised value) widened by exactly what the normalisation removes: leading and trailing whitespace in Go's strings.TrimSpace sense ([\\t-\\r \\x{85}\\p{Z}], which is Unicode White_Space and wider than RE2's \\s) and trailing slashes. The last segment must therefore hold a character that is neither / nor whitespace. TestHelmChartIAPAudiencePattern (cmd/helm_chart_iap_audience_test.go) checks this pattern, on raw values, against the hub."
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
         }
