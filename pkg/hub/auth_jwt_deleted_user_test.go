@@ -109,6 +109,14 @@ func TestJWTAuth_TokenStopsWorkingAfterUserDelete(t *testing.T) {
 	rec = f.get(t, agentPath)
 	require.Equal(t, http.StatusOK, rec.Code, "own agent before delete: %s", rec.Body.String())
 
+	// A user who owns agents cannot be deleted (ptone/scion#2769), so
+	// soft-delete the agent first. Its row stays, so the agent path below
+	// still shows the token is refused before any handler runs.
+	now := time.Now()
+	_, err := f.store.UpdateAgentDeletion(context.Background(), f.agentID, store.DeletionPredicate{},
+		store.DeletionFields{DeletedAt: &now})
+	require.NoError(t, err)
+
 	// Delete the user through the admin API.
 	del := doRequest(t, f.srv, http.MethodDelete, "/api/v1/users/"+f.user.ID, nil)
 	require.Equal(t, http.StatusNoContent, del.Code, "delete user: %s", del.Body.String())
