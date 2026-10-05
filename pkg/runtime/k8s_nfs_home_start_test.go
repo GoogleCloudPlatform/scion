@@ -1313,6 +1313,26 @@ func TestK8sDeleteResource_NFSHomePodGraceful(t *testing.T) {
 		t.Fatal(err)
 	}
 	deletes := keepPodsOnDelete(cs)
+
+	// A handle with a stale UID (the name now belongs to another pod)
+	// leaves the pod alone: any delete issued must carry the stale UID as
+	// its precondition, which the API server rejects, and never grace 0.
+	stale := podHandle(p)
+	stale.UID = "uid-stale"
+	if err := rt.DeleteResource(context.Background(), stale); err != nil {
+		t.Fatalf("stale DeleteResource: %v", err)
+	}
+	for i, d := range *deletes {
+		wantUIDPrecondition(t, d, "uid-stale")
+		if d.GracePeriodSeconds != nil && *d.GracePeriodSeconds == 0 {
+			t.Errorf("stale delete %d used grace 0: %+v", i, d)
+		}
+	}
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{}); err != nil {
+		t.Fatalf("pod removed by a stale handle: %v", err)
+	}
+	*deletes = nil
+
 	if err := rt.DeleteResource(context.Background(), podHandle(p)); err != nil {
 		t.Fatalf("DeleteResource: %v", err)
 	}

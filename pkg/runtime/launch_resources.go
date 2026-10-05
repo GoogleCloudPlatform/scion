@@ -110,6 +110,14 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 			return nil
 		}
 		if getErr == nil {
+			if pod.UID != uid {
+				// The name now belongs to another pod, which this launch
+				// must not delete. The precondition below covers a
+				// recreate after this read.
+				runtimeLog.Info("Launch cleanup skipped a resource recreated by another launch",
+					"kind", h.Kind, "namespace", h.Namespace, "name", h.Name, "uid", h.UID)
+				return nil
+			}
 			opts = podDeleteOptions(pod)
 			opts.Preconditions = &metav1.Preconditions{UID: &uid}
 		}
