@@ -23,7 +23,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle } from './__fixtures__/agent-store-harness.js';
-import { AgentStore, agentQueryKey } from './agent-store.js';
+import { AGENT_PROBE_INTERVAL_MS, AgentStore, agentQueryKey } from './agent-store.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import { apiFetch } from './api.js';
 import { StateManager, stateManager } from './state.js';
@@ -275,6 +275,71 @@ describe('AgentStore coalescing', () => {
     await Promise.all([first, joined]);
     expect(h.server.walks()).toBe(1);
     expect(progress.map((s) => s.agents.length)).toEqual([2, 4, 5]);
+  });
+
+  it('a caller joining a walk hears progress in order, never an older snapshot after a newer one', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+    const feed = h.feeds[0];
+
+    const progress: AgentListSnapshot[] = [];
+    void h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    // In the same turn as the join, a feed change publishes a newer
+    // snapshot of the walk's rows (dispatched directly: a real flush waits
+    // for the next frame).
+    feed.seedAgents([agent('a0', { activity: 'working' })]);
+    feed.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: { upserted: ['a0'], deleted: [], unknown: new Map(), generation: 0 },
+        },
+      })
+    );
+    await settle();
+
+    expect(progress.length).toBeGreaterThan(0);
+    const versions = progress.map((s) => s.version);
+    expect(versions).toEqual([...versions].sort((a, b) => a - b));
+    expect(new Set(versions).size).toBe(versions.length);
+    expect(progress[progress.length - 1]?.agents.find((a) => a.id === 'a0')?.activity).toBe(
+      'working'
+    );
+  });
+
+  it('a caller joining a background walk hears no progress: the list stays ready', async () => {
+    const h = createHarness(many(3), { pageSize: 2, probeFullWalkMs: 0 });
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    const walksBefore = h.server.walks();
+
+    // The next probe tick walks in the background; its pages are held.
+    const release = h.server.pause();
+    await vi.advanceTimersByTimeAsync(AGENT_PROBE_INTERVAL_MS);
+    expect(h.server.walks()).toBe(walksBefore + 1);
+    expect(h.store.peek(HUB)?.status).toBe('ready');
+    // With the feed down, ensure joins the walk instead of answering from memory.
+    h.stream().drop();
+    await settle();
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    release();
+    await settle();
+    // Whatever follows, a progress call never carries a ready snapshot.
+    expect(progress.filter((p) => p.status !== 'loading')).toEqual([]);
+    void joined.catch(() => {});
+    h.store.destroy();
   });
 
   it('a caller that joins a walk and leaves at once hears none of its rows', async () => {
