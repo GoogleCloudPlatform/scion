@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -234,16 +235,63 @@ func TestLoadModifySaveVersionedSettings(t *testing.T) {
 	}
 }
 
-// ZeroOmitempty: removed when the parent block exists (absent and zero load
-// the same there, and an already-absent key is a no-op), written when it
-// does not, which creates the block.
-func TestPrepareSettingsPathEdits_ZeroOmitempty(t *testing.T) {
+// A delete with Keep empties the block except the kept subtrees.
+func TestPrepareSettingsPathEdits_DeleteKeeping(t *testing.T) {
 	dir, path := writePathEditFixture(t, pathEditFixture)
 	unlock := LockSettingsFile()
-	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{
-		{Path: []string{"server", "broker", "enabled"}, Value: false, ZeroOmitempty: true},      // parent exists: delete
-		{Path: []string{"server", "hub", "cors", "enabled"}, Value: false, ZeroOmitempty: true}, // parent absent: write
-		{Path: []string{"server", "log_format"}, Value: "", ZeroOmitempty: true},                // already absent: no-op
+	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{{
+		Path: []string{"server"}, Delete: true,
+		Keep: [][]string{{"broker", "broker_id"}, {"broker", "broker_token"}},
+	}})
+	if err == nil {
+		err = staged.Commit()
+	}
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	data, _ := os.ReadFile(path)
+	if err := yamlv3.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	srv := m["server"].(map[string]interface{})
+	broker := srv["broker"].(map[string]interface{})
+	if broker["broker_id"] != "b-1" || broker["broker_token"] != "tok" || len(broker) != 2 || len(srv) != 1 {
+		t.Errorf("server after keep-delete = %v", srv)
+	}
+	if m["unknown_top"] != "kept" {
+		t.Errorf("siblings of the deleted block must survive: %v", m)
+	}
+}
+
+// PrepareEffectiveSettingsPathEdits drops edits that change nothing
+// effective and keeps the ones that do.
+func TestPrepareEffectiveSettingsPathEdits(t *testing.T) {
+	dir, path := writePathEditFixture(t, pathEditFixture)
+	before, _ := os.ReadFile(path)
+	unlock := LockSettingsFile()
+	staged, err := PrepareEffectiveSettingsPathEdits(dir, []SettingsPathEdit{
+		{Path: []string{"server", "log_format"}, Value: ""},                             // absent == "": no effect
+		{Path: []string{"server", "database", "driver"}, Value: ""},                     // creates an empty block: no effect
+		{Path: []string{"server", "hub", "port"}, Value: 9999},                          // effect
+		{Path: []string{"server", "hub", "cors", "allowed_origins"}, Value: []string{}}, // nil -> [] has effect
+	})
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"server.hub.cors.allowed_origins", "server.hub.port"}
+	got := append([]string{}, staged.Changed...)
+	sort.Strings(got)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("Changed = %v, want %v", got, want)
+	}
+
+	unlock = LockSettingsFile()
+	staged, err = PrepareEffectiveSettingsPathEdits(dir, []SettingsPathEdit{
+		{Path: []string{"server", "log_format"}, Value: ""},
+		{Path: []string{"active_profile"}, Delete: true}, // absent already
 	})
 	if err == nil {
 		err = staged.Commit()
@@ -252,20 +300,10 @@ func TestPrepareSettingsPathEdits_ZeroOmitempty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"server.broker.enabled", "server.hub.cors.enabled"}; fmt.Sprint(staged.Changed) != fmt.Sprint(want) {
-		t.Errorf("Changed = %v, want %v", staged.Changed, want)
+	if len(staged.Changed) != 0 {
+		t.Errorf("no-effect edits reported %v", staged.Changed)
 	}
-	var m map[string]interface{}
-	data, _ := os.ReadFile(path)
-	if err := yamlv3.Unmarshal(data, &m); err != nil {
-		t.Fatal(err)
-	}
-	srv := m["server"].(map[string]interface{})
-	if _, ok := srv["broker"].(map[string]interface{})["enabled"]; ok {
-		t.Errorf("server.broker.enabled should be removed:\n%s", data)
-	}
-	cors, _ := srv["hub"].(map[string]interface{})["cors"].(map[string]interface{})
-	if v, ok := cors["enabled"]; !ok || v != false {
-		t.Errorf("server.hub.cors.enabled should be written as false:\n%s", data)
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Error("no-effect edits rewrote the file")
 	}
 }
