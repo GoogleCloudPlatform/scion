@@ -1394,18 +1394,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if embeddedBroker != nil {
+			// Same target rule as a POST /brokers re-registration: the
+			// caller's user must be the matched broker's creator or a
+			// super-admin.
 			matched := embeddedBroker
-			callerUser := GetUserIdentityFromContext(ctx)
-			brokerIdent := GetBrokerIdentityFromContext(ctx)
-			allowed, err := s.authorizedForBrokerRotate(ctx, callerUser, brokerIdent, matched.ID,
-				func() (*store.RuntimeBroker, error) { return matched, nil })
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if !allowed {
+			if !s.brokerRemintTargetAuthorized(ctx, GetUserIdentityFromContext(ctx), matched) {
 				logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: matched.ID}, ActionUpdate,
-					"caller is not the broker's creator, the broker itself, or a super-admin")
+					"caller is not the broker's creator or a super-admin")
 				if embeddedBrokerMatchedByID {
 					// The caller named an explicit broker ID they do not
 					// own: hard deny, before any project mutation.

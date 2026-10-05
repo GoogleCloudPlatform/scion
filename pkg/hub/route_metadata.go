@@ -953,8 +953,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// check. POST /api/v1/brokers is user-credentialed and enforces
 	// broker.create itself, in-handler, via authorizeBrokerCreate
 	// (handlers_brokers.go) — see createBrokerRegistration and its
-	// ptone/scion#2138 gate. It is not RoutePolicy because the same path
-	// also carries the additional target owner/super-admin re-registration
+	// ptone/scion#2138 gate. UATs are admitted through
+	// authorizeBrokerCreate's bearer gate; broker on-behalf-of requests are
+	// not admitted. It is not RoutePolicy because the same path also
+	// carries the additional target owner/super-admin re-registration
 	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {

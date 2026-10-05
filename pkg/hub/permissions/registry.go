@@ -208,8 +208,10 @@ var Registry = []Permission{
 	// broker.create is a hub-level permission: registration is gated by an
 	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
 	// mere authentication. Its UAT selector "broker:create" is mintable only
-	// on a hub-boundary token (PermissionAllowedBoundaries). Broker creation
-	// does not admit bearer credentials (authorizeBrokerCreate).
+	// on a hub-boundary token (PermissionAllowedBoundaries). Registration is
+	// admitted for interactive sessions, dev credentials and hub-boundary
+	// UATs carrying broker:create, through the bearer gate
+	// (authorizeBrokerCreate).
 	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "broker:create", Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
