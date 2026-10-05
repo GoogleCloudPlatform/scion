@@ -11,7 +11,7 @@ While Scion manages the orchestration and execution of containers, the tools run
 Each agent has a dedicated "Home" directory that is mounted into the container. Harness-specific settings are typically found in a hidden subdirectory:
 - **Gemini**: `/home/gemini/.gemini/settings.json`
 - **Claude**: `/home/claude/.claude.json` (or similar)
-- **Opencode**: `~/.config/opencode/opencode.json` (the `.opencode.json` name is not read by opencode 1.x)
+- **Opencode**: `/home/scion/.config/opencode/opencode.json` (opencode 1.x does not read the old `.opencode.json` name)
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:

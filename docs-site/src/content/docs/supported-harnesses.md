@@ -89,7 +89,9 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Auth File** (`auth-file`): Uses `~/.local/share/opencode/auth.json` if available. Scion copies this file from your host when the agent is created.
 
 ### Configuration
-- **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default.
+- **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default, and the Vertex default never replaces a `model` already in the file. A file that is not plain JSON (for example one with comments) is left unchanged, with a warning.
+- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and keeps the configured model (ptone/scion#3065).
+- **`opencode.jsonc`**: opencode loads `opencode.jsonc` after `opencode.json`, so its keys (including `model`) override the file the provisioner writes.
 - **Environment**: Respects standard OpenCode environment variables.
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
