@@ -601,3 +601,66 @@ func TestChatV2Wake_PanicDuringDispatch_ReplayReportsInterrupted(t *testing.T) {
 	assert.Empty(t, f.disp.getMessageCalls(), "the replay must not dispatch")
 	assert.Equal(t, 1, f.countThreadMessages(t))
 }
+
+// panickingReplyStore panics when a reply link is stored, i.e. after the
+// message row is persisted but before any primary dispatch.
+type panickingReplyStore struct {
+	WebChatStore
+}
+
+func (panickingReplyStore) SetMessageReplyTo(context.Context, string, string) error {
+	panic("reply link blew up")
+}
+
+// A panic after persistence on a primary the gates already settled keeps
+// the gate's state: the interrupted mark only replaces the optimistic
+// "dispatched". The deferred case is the one that needs the guard (the
+// store already refuses to overwrite a failed row).
+func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
+	cases := []struct {
+		name       string
+		phase      string
+		reincState string
+		wantState  string
+		wantReason string
+	}{
+		{name: "deferred (reincarnating)", phase: string(state.PhaseRunning),
+			reincState: store.ReincarnationStatePending, wantState: store.MessageDispatchDeferred},
+		{name: "failed (unreachable)", phase: string(state.PhaseSuspended),
+			wantState: store.MessageDispatchFailed, wantReason: "Agent unreachable (suspended)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := chatWakeSetup(t, tc.phase)
+			if tc.reincState != "" {
+				f.agent.ReincarnationState = tc.reincState
+				require.NoError(t, f.s.UpdateAgent(t.Context(), f.agent))
+			}
+			f.srv.mu.RLock()
+			wcs := f.srv.webChatStore
+			f.srv.mu.RUnlock()
+			f.srv.SetWebChatStore(panickingReplyStore{WebChatStore: wcs})
+
+			func() {
+				defer func() { _ = recover() }()
+				// An unknown reply_to_id keeps the default agent as primary
+				// but still stores the reply link, which panics.
+				_ = doRequest(t, f.srv, http.MethodPost, f.path(),
+					map[string]any{"content": "hello", "reply_to_id": "no-such-message"})
+			}()
+
+			res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, res.Items, 1, "the row was stored before the panic")
+			m := res.Items[0]
+			assert.Equal(t, tc.wantState, m.DispatchState, "the gate's state must survive the panic")
+			if tc.wantReason != "" {
+				require.NotNil(t, m.DispatchFailureReason)
+				assert.Equal(t, tc.wantReason, *m.DispatchFailureReason)
+			} else if m.DispatchFailureReason != nil {
+				assert.Empty(t, *m.DispatchFailureReason)
+			}
+			assert.Empty(t, f.disp.getMessageCalls())
+		})
+	}
+}
