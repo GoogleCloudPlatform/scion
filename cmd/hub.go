@@ -2575,7 +2575,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Offer to sync project templates to Hub
-	offerTemplateSyncOnLinkFn(resolvedPath, endpoint, effectiveHubProjectID)
+	offerTemplateSyncOnLinkFn(resolvedPath, endpoint, effectiveHubProjectID, isGlobal)
 
 	// Display available brokers for this project
 	listBrokersForProject(ctx, client, effectiveHubProjectID)
@@ -2585,8 +2585,9 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 // templateSyncHubContext builds the hub context that template sync uses
 // after hub link. It targets the just-linked hub projectID, whatever the
-// environment or flags say.
-func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContext, error) {
+// environment or flags say. isGlobal comes from the caller's own
+// ResolveProjectPath call, so the path is not resolved a second time.
+func templateSyncHubContext(projectPath, endpoint, projectID string, isGlobal bool) (*HubContext, error) {
 	settings, err := loadSettingsForTarget(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load settings for template sync: %w", err)
@@ -2594,10 +2595,6 @@ func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContex
 	client, err := getHubClient(settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hub client for template sync: %w", err)
-	}
-	_, isGlobal, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project path for template sync: %w", err)
 	}
 	return &HubContext{
 		Client:      client,
@@ -2615,7 +2612,7 @@ var offerTemplateSyncOnLinkFn = offerTemplateSyncOnLink
 
 // offerTemplateSyncOnLink detects local project templates and prompts
 // the user to sync them to the Hub during project linking.
-func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
+func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal bool) {
 	// List project-scoped templates
 	_, projectTemplates, err := config.ListTemplatesGrouped()
 	if err != nil || len(projectTemplates) == 0 {
@@ -2640,7 +2637,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 		return
 	}
 
-	hubCtx, err := templateSyncHubContext(projectPath, endpoint, projectID)
+	hubCtx, err := templateSyncHubContext(projectPath, endpoint, projectID, isGlobal)
 	if err != nil {
 		fmt.Printf("Warning: %v\n", err)
 		return

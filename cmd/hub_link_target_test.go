@@ -62,12 +62,14 @@ func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 				mu           sync.Mutex
 				brokerQuery  []string
 				syncTargetID []string
+				syncIsGlobal []bool
 				providerPath []string
 			)
 			origOffer := offerTemplateSyncOnLinkFn
 			t.Cleanup(func() { offerTemplateSyncOnLinkFn = origOffer })
-			offerTemplateSyncOnLinkFn = func(_, _, projectID string) {
+			offerTemplateSyncOnLinkFn = func(_, _, projectID string, isGlobal bool) {
 				syncTargetID = append(syncTargetID, projectID)
+				syncIsGlobal = append(syncIsGlobal, isGlobal)
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +122,7 @@ func TestRunHubLink_FollowUpsUseHubProjectID(t *testing.T) {
 			require.NoError(t, runHubLink(hubLinkCmd, nil))
 
 			assert.Equal(t, []string{tt.wantHubID}, syncTargetID, "template sync target")
+			assert.Equal(t, []bool{true}, syncIsGlobal, "template sync gets hub link's isGlobal")
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, []string{tt.wantHubID}, brokerQuery, "broker list project filter")

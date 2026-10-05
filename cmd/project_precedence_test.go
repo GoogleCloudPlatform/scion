@@ -308,7 +308,7 @@ func TestTemplateSyncHubContext(t *testing.T) {
 	globalDir, err := config.GetResolvedProjectDir("global")
 	require.NoError(t, err)
 
-	hubCtx, err := templateSyncHubContext(globalDir, "http://hub.invalid", linkedID)
+	hubCtx, err := templateSyncHubContext(globalDir, "http://hub.invalid", linkedID, true)
 	require.NoError(t, err)
 	require.NotNil(t, hubCtx.Client)
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
@@ -335,9 +335,32 @@ func TestTemplateSyncHubContext_NonGlobalProject(t *testing.T) {
 	resolvedDir, err := filepath.EvalSymlinks(projectDir)
 	require.NoError(t, err)
 
-	hubCtx, err := templateSyncHubContext(resolvedDir, "http://hub.invalid", linkedID)
+	hubCtx, err := templateSyncHubContext(resolvedDir, "http://hub.invalid", linkedID, false)
 	require.NoError(t, err)
 	assert.False(t, hubCtx.IsGlobal, "a regular project path must not be reported as global")
+	assert.Equal(t, linkedID, hubCtx.ProjectID)
+}
+
+// TestTemplateSyncHubContext_SymlinkedGlobalDir pins IsGlobal to the
+// caller's value when ~/.scion is a symlink. hub link resolves the path
+// once and gets isGlobal=true; template sync must keep that value rather
+// than re-resolving the path, which follows the symlink and reports false.
+func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
+	const linkedID = "linked-project-id"
+	setupFlagPrecedenceHome(t, "http://hub.invalid", "global-local-id", "")
+	home := os.Getenv("HOME")
+	realDir := filepath.Join(t.TempDir(), "real-scion")
+	require.NoError(t, os.Rename(filepath.Join(home, ".scion"), realDir))
+	require.NoError(t, os.Symlink(realDir, filepath.Join(home, ".scion")))
+
+	resolvedPath, isGlobal, err := config.ResolveProjectPath("global")
+	require.NoError(t, err)
+	require.True(t, isGlobal, "hub link resolves the global dir as global")
+
+	hubCtx, err := templateSyncHubContext(resolvedPath, "http://hub.invalid", linkedID, isGlobal)
+	require.NoError(t, err)
+	assert.True(t, hubCtx.IsGlobal, "template sync keeps the caller's isGlobal")
+	assert.Equal(t, resolvedPath, hubCtx.ProjectPath)
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
 }
 
