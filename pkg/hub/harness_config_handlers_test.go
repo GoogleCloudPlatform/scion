@@ -510,15 +510,19 @@ func TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths(t *testing.T) {
 		"./config.yaml",
 		"scripts//provision.py",
 		"scripts/../config.yaml",
-		"a/../b",
+		"..",
+		"../x",
 		"scripts/",
 		"/config.yaml",
 		`scripts\provision.py`,
 		".",
 	} {
 		t.Run(bad, func(t *testing.T) {
+			// Every rejected path names an existing object or directory, so
+			// only the path check (not the storage existence check) can
+			// reject it.
 			srv, s, hc, root := localStorageHarnessConfig(t, []string{"config.yaml"},
-				[]string{"config.yaml", "b", "scripts/provision.py", `scripts\provision.py`})
+				[]string{"config.yaml", "../x", "scripts/provision.py", `scripts\provision.py`})
 			writeOutsideFile(t, root)
 
 			if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml", bad); code != http.StatusBadRequest {
