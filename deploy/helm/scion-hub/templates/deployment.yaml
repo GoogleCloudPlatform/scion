@@ -50,7 +50,6 @@ carries operator-supplied text into the pod spec, add a call beside these.
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.affinity | default dict) "source" "hub.affinity") }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 {{- include "scion-hub.assertExtraEnv" . }}
-{{- include "scion-hub.assertHAUnlanded" . }}
 {{- /*
 Also called from secret-session.yaml, which is where the secret is rendered.
 Repeated here for the reason directly below: this file always renders, and the
