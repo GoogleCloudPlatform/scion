@@ -828,7 +828,7 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
-	// Platform admins and group resource owners bypass the role-hierarchy check.
+	// Platform admins and group resource owners are exempt from the role-hierarchy check.
 	//
 	// The hierarchy is defined over user membership in the group, so it cannot be
 	// evaluated for an agent or broker caller — which is why an earlier form of
