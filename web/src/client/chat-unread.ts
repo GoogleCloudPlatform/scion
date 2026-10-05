@@ -213,7 +213,8 @@ export class ChatUnreadCounter {
 
 /** When an event was delivered, on the shared loads' clock. */
 function eventTime(e: Event): number {
-  return Number.isFinite(e.timeStamp) ? e.timeStamp : chatLoadClock();
+  // A synthetic event stamped 0 would share any request: fall back to now.
+  return e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
 }
 
 /** The page-wide unread counter. */

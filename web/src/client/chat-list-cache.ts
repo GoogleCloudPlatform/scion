@@ -100,6 +100,11 @@ export class SharedJsonLoad<T> {
     return this.start();
   }
 
+  /** When the current (latest) request was sent, if there is one. */
+  startedAt(): number | undefined {
+    return this.entry?.startedAt;
+  }
+
   /** Forget the cached result; the next load of any kind fetches. */
   invalidate(): void {
     this.entry = null;

@@ -77,6 +77,10 @@ interface Server {
   holdThreads: boolean;
   /** Thread lists carry `lastActivityAt` (for activity order from threads). */
   threadActivity: boolean;
+  /** Thread lists report #general unread. */
+  threadUnread: boolean;
+  /** Status for thread-list responses per space (default 200). */
+  threadStatus: Record<string, number>;
 }
 
 let server: Server;
@@ -105,10 +109,14 @@ function serve(): void {
     const m = path.match(/^\/api\/v1\/chat\/spaces\/([^/]+)\/threads$/);
     if (m) {
       const projectId = decodeURIComponent(m[1]);
-      const respond = (): Response =>
-        new Response(JSON.stringify({ threads: threadsFor(projectId, server.threadActivity) }), {
-          status: 200,
-        });
+      const respond = (): Response => {
+        const status = server.threadStatus[projectId] ?? 200;
+        if (status !== 200) return new Response('{}', { status });
+        const threads = threadsFor(projectId, server.threadActivity).map((t) =>
+          server.threadUnread ? { ...t, hasUnread: true } : t
+        );
+        return new Response(JSON.stringify({ threads }), { status: 200 });
+      };
       if (!server.holdThreads) return Promise.resolve(respond());
       return new Promise<Response>((resolve, reject) => {
         const signal = init?.signal ?? undefined;
@@ -157,6 +165,8 @@ beforeEach(() => {
     held: [],
     holdThreads: false,
     threadActivity: false,
+    threadUnread: false,
+    threadStatus: {},
   };
   chatSpacesLoad.invalidate();
   serve();
@@ -253,19 +263,35 @@ describe('space rail — progressive thread loading', () => {
     expect(spacesRequests()).toBe(2);
   });
 
-  it('a newer load of a space aborts the one in flight', async () => {
+  it('a reload lets an in-flight thread load land, then refetches it once (busy hub)', async () => {
+    // Reproduces a slow hub under a message stream: the page reloads the
+    // rail every burst, faster than the thread list answers.
     server.holdThreads = true;
     const el = await mount();
     el.expandSpace('p0');
     await el.updateComplete;
     expect(server.held).toHaveLength(1);
 
-    await el.reload();
-    await el.updateComplete;
+    for (let round = 0; round < 3; round++) {
+      await el.reload();
+      await el.updateComplete;
+      // Nothing aborted, nothing restarted while the request is in flight.
+      expect(server.held.every((h) => !h.signal?.aborted)).toBe(true);
+    }
+    expect(threadRequests()).toEqual(['p0']);
 
-    expect(server.held).toHaveLength(2);
-    expect(server.held[0].signal?.aborted).toBe(true);
-    expect(server.held[1].signal?.aborted).toBe(false);
+    server.held.shift()!.release();
+    await flush();
+    await el.updateComplete;
+    expect(el.threadsBySpace.has('p0')).toBe(true);
+    expect(el.shadowRoot.querySelectorAll('.threads-loading')).toHaveLength(0);
+    // The landed list predates the reloads: exactly one trailing fetch.
+    expect(threadRequests()).toEqual(['p0', 'p0']);
+
+    server.held.shift()!.release();
+    await flush();
+    expect(threadRequests()).toEqual(['p0', 'p0']);
+    expect(el.loadingThreads.size).toBe(0);
   });
 
   it('detaching the rail aborts its thread loads', async () => {
@@ -499,5 +525,215 @@ describe('space rail — reload sharing', () => {
     // A plain reload needs a request newer than itself.
     await el.reload();
     expect(spacesRequests()).toBe(2);
+  });
+});
+
+describe('space rail — read state while the selected list is loading', () => {
+  it('opening a thread whose list is in flight applies the read when it lands, without a reload', async () => {
+    // Reproduces a cold deep link: the thread view advances its watermark
+    // (read POST, then read-state-updated) before the space's list arrives.
+    server.spaces = [space(0), { ...space(1), unreadCount: 1 }];
+    server.threadUnread = true;
+    server.holdThreads = true;
+    const el = await mount({ selectedKey: 'p1-general', selectedProjectId: 'p1' });
+    await flush();
+    expect(threadRequests()).toEqual(['p1']);
+
+    el.markThreadRead('p1-general');
+    await flush();
+    expect(spacesRequests()).toBe(1);
+    expect(threadRequests()).toEqual(['p1']);
+    expect(server.held[0].signal?.aborted).toBe(false);
+
+    server.held[0].release();
+    await flush();
+    await el.updateComplete;
+
+    // The list was requested before the read: its dot is cleared on landing,
+    // and the badge with it.
+    expect(el.threadsBySpace.get('p1')[0].hasUnread).toBe(false);
+    expect(el.spaces.find((s: ChatSpace) => s.projectId === 'p1').unreadCount).toBe(0);
+    expect(spacesRequests()).toBe(1);
+    expect(threadRequests()).toEqual(['p1']);
+  });
+
+  it('falls back to a rollup refresh once nothing is loading and the thread turned up nowhere', async () => {
+    server.holdThreads = true;
+    server.threadStatus = { p1: 500 };
+    const el = await mount({ selectedKey: 'p1-general', selectedProjectId: 'p1' });
+    await flush();
+    el.markThreadRead('p1-general');
+    apiFetchMock.mockClear();
+
+    // The failed list is retried once automatically; both answers fail.
+    server.held.shift()!.release();
+    await flush();
+    server.held.shift()!.release();
+    await flush();
+
+    expect(spacesRequests()).toBe(1);
+  });
+});
+
+describe('space rail — failed thread loads', () => {
+  it('retries a failed load once automatically, then waits for the user', async () => {
+    server.threadStatus = { p0: 500 };
+    const el = await mount();
+    el.expandSpace('p0');
+    await flush();
+    expect(threadRequests()).toEqual(['p0', 'p0']);
+
+    // Collapse and expand again: an explicit request, so it tries again.
+    server.threadStatus = {};
+    el.handleSpaceHeaderClick(el.spaces[0]);
+    await el.updateComplete;
+    el.expandSpace('p0');
+    await flush();
+    await el.updateComplete;
+    expect(threadRequests()).toEqual(['p0', 'p0', 'p0']);
+    expect(el.threadsBySpace.get('p0')).toHaveLength(1);
+  });
+
+  it('an explicit request (a space deep link) loads again after failures, without an expand', async () => {
+    server.threadStatus = { p1: 500 };
+    const el = await mount();
+    expect(await el.threadsFor('p1')).toEqual([]);
+    expect(await el.threadsFor('p1')).toEqual([]);
+    expect(threadRequests()).toEqual(['p1', 'p1']);
+
+    server.threadStatus = {};
+    const threads = await el.threadsFor('p1');
+
+    expect(threads.map((t: ChatSpaceThread) => t.id)).toEqual(['p1-general']);
+    expect(el.collapsedSpaces.has('p1')).toBe(true);
+  });
+
+  it('a header click on a space whose load failed loads it again and opens #general', async () => {
+    server.threadStatus = { p1: 500 };
+    const el = await mount();
+    el.expandSpace('p1');
+    await flush();
+    el.handleSpaceHeaderClick(el.spaces[1]); // collapse
+    await el.updateComplete;
+    server.threadStatus = {};
+    const selected = new Promise<string>((resolve) => {
+      el.addEventListener(
+        'thread-select',
+        (e: Event) => resolve((e as CustomEvent).detail.conversationKey),
+        { once: true }
+      );
+    });
+
+    el.handleCollapsedSpaceClick(el.spaces[1]);
+
+    expect(await selected).toBe('p1-general');
+  });
+});
+
+describe('space rail — lazy paths', () => {
+  it('creating a thread in a never-loaded space loads its list instead of publishing one thread', async () => {
+    const el = await mount();
+    const base = apiFetchMock.getMockImplementation()!;
+    apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.endsWith('/threads') && init?.method === 'POST') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'p2-new', name: 'new' }), { status: 200 })
+        );
+      }
+      return base(path, init);
+    });
+    el.creatingThread = 'p2';
+    el.newThreadName = 'new';
+
+    await el.submitCreateThread('p2');
+    await flush();
+
+    expect(threadRequests().filter((p) => p === 'p2').length).toBeGreaterThanOrEqual(1);
+    // The space's real list, not a list holding only the new thread.
+    expect(el.threadsBySpace.get('p2').map((t: ChatSpaceThread) => t.id)).toEqual(['p2-general']);
+  });
+
+  it('ensureThreads waits for a load that superseded the one it joined', async () => {
+    server.holdThreads = true;
+    const el = await mount();
+    let settled = false;
+    const ensured = el.ensureThreads('p0').then(() => (settled = true));
+    await flush();
+    // An explicit newer load (as thread creation starts) supersedes it.
+    void el.loadThreads('p0');
+    server.held[0].release(); // aborted already; its answer is ignored
+    await flush();
+    expect(settled).toBe(false);
+
+    server.held[1].release();
+    await ensured;
+    expect(el.threadsBySpace.has('p0')).toBe(true);
+  });
+
+  it('opening a space from its header gives up if it was collapsed while loading', async () => {
+    server.holdThreads = true;
+    const el = await mount();
+    const selects: string[] = [];
+    el.addEventListener('thread-select', (e: Event) =>
+      selects.push((e as CustomEvent).detail.conversationKey)
+    );
+
+    el.handleCollapsedSpaceClick(el.spaces[2]);
+    await el.updateComplete;
+    el.handleSpaceHeaderClick(el.spaces[2]); // collapse again
+    await el.updateComplete;
+    server.held[0].release();
+    await flush();
+
+    expect(selects).toEqual([]);
+  });
+
+  it('a newly selected space starts loading in the same render, while still collapsed', async () => {
+    const el = await mount();
+    // hostUpdated runs after render and before updated(), where the routed
+    // space is expanded: the load must already be under way by then.
+    const seen: boolean[] = [];
+    el.addController({
+      hostUpdated: () => seen.push(el.collapsedSpaces.has('p3') && el.loadingThreads.has('p3')),
+    });
+
+    el.selectedKey = 'p3-general';
+    el.selectedProjectId = 'p3';
+    await el.updateComplete;
+
+    expect(seen[0]).toBe(true);
+    await flush();
+    expect(threadRequests()).toEqual(['p3']);
+  });
+
+  it('the trailing reload answers the newest of the calls it absorbed', async () => {
+    const el = await mount();
+    let releaseSpaces: () => void = () => {};
+    const base = apiFetchMock.getMockImplementation()!;
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/chat/spaces' && spacesRequests() === 1) {
+        await new Promise<void>((r) => (releaseSpaces = r));
+      }
+      return base(path, init);
+    });
+    apiFetchMock.mockClear();
+
+    const running = el.reload(); // pass 1, held
+    await flush();
+    const t1 = performance.now();
+    await new Promise((r) => setTimeout(r, 2));
+    void el.reload({ startedAfter: t1 });
+    // Another owner fetches between the two absorbed events...
+    void chatSpacesLoad.load();
+    await new Promise((r) => setTimeout(r, 2));
+    const t2 = performance.now();
+    void el.reload({ startedAfter: t2 });
+    releaseSpaces();
+    await running;
+    await flush();
+
+    // ...which answers the first but not the second: the trailing pass
+    // must fetch again rather than reuse it.
+    expect(spacesRequests()).toBe(3);
   });
 });

@@ -309,6 +309,9 @@ const MOBILE_BREAKPOINT_PX = 768;
  */
 const BACKGROUND_THREAD_LOADS = 2;
 
+/** Automatic retries of a failed thread load, per space and reload. */
+const THREAD_LOAD_AUTO_RETRIES = 1;
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
@@ -1038,6 +1041,18 @@ export class ScionChatSpaceRail extends LitElement {
       this._collapseLoadedFor = this.currentUserId;
       this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     }
+    // Expanding a space is asking for its threads: one whose last load
+    // failed (and is out of automatic retries) tries again.
+    const wasCollapsed = _changedProperties.get('collapsedSpaces') as Set<string> | undefined;
+    if (wasCollapsed) {
+      for (const id of wasCollapsed) {
+        if (this.collapsedSpaces.has(id) || this.threadsBySpace.has(id)) continue;
+        if (this._threadLoadFailures.has(id)) {
+          this._threadLoadFailures.delete(id);
+          this._threadLoadEpoch.delete(id);
+        }
+      }
+    }
     // Start whatever thread loads the state now calls for: a space expanded
     // or selected since the last render, or the next background load. Run
     // here, before render, so the loading state lands in the same render.
@@ -1178,6 +1193,7 @@ export class ScionChatSpaceRail extends LitElement {
     this._threadAborts.clear();
     this._threadLoads.clear();
     this._threadLoadEpoch.clear();
+    this._pendingReadState.clear();
     if (this.loadingThreads.size > 0) this.loadingThreads = new Set();
   }
 
@@ -1320,10 +1336,14 @@ export class ScionChatSpaceRail extends LitElement {
    * after `startedAfter` (see {@link reload}).
    */
   private async loadSpaces(initial: boolean, startedAfter: number): Promise<boolean> {
-    const data = await chatSpacesLoad.load(
+    const loading = chatSpacesLoad.load(
       initial ? { maxAgeMs: CHAT_STARTUP_REUSE_MS } : { startedAfter }
     );
+    // When the request this answer comes from was sent (it may be shared).
+    const requestedAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
+    const data = await loading;
     if (!data) return false;
+    this._spacesStartedAt = requestedAt;
     this.spaces = (data.spaces ?? []) as ChatSpace[];
     const newSpaceIds = new Set(this.spaces.map((s) => s.projectId));
     if (!this._initialLoadDone) {
@@ -1348,7 +1368,10 @@ export class ScionChatSpaceRail extends LitElement {
     // when next expanded (see syncThreadLoads). Not on the first load — a
     // list fetched before it (a space deep link asking `threadsFor` early)
     // is as fresh as this response and is kept.
-    if (!initial) this._threadsEpoch++;
+    if (!initial) {
+      this._threadsEpoch++;
+      this._threadLoadFailures.clear();
+    }
     // Expand the space holding the selected thread — the deep-link case on
     // the first load, and on every reload too (as before lazy loading), so a
     // reload keeps the open thread's space open.
@@ -1358,6 +1381,8 @@ export class ScionChatSpaceRail extends LitElement {
     return true;
   }
 
+  /** When the request behind the current spaces list was sent (`chatLoadClock`). */
+  private _spacesStartedAt = -Infinity;
   /** Set once the first spaces/prefs pass has finished; thread loads wait for it. */
   private _listsReady = false;
   /** Bumped by every spaces load: a thread list fetched in an older epoch is stale. */
@@ -1424,8 +1449,12 @@ export class ScionChatSpaceRail extends LitElement {
    */
   private syncThreadLoads(): void {
     if (!this._listsReady || !this.isConnected) return;
+    // A space with a load in flight is left alone even if a reload made it
+    // stale: aborting it would let a busy hub (a reload every message
+    // burst, slower list responses) restart it forever, so it never lands.
+    // It lands, re-renders, and this runs again to fetch it once more.
     const needsLoad = (id: string): boolean =>
-      (this._threadLoadEpoch.get(id) ?? -1) < this._threadsEpoch;
+      !this.loadingThreads.has(id) && (this._threadLoadEpoch.get(id) ?? -1) < this._threadsEpoch;
     // Only spaces the last spaces load returned: a thread list is fetched
     // for a space the server listed, never for one that has since gone.
     const known = this._knownSpaceIds;
@@ -1445,14 +1474,17 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * Load one space's thread list, superseding (aborting) any earlier load
-   * of the same space. Resolves when this load settles.
+   * Load one space's thread list. Supersedes (aborts) an earlier load of
+   * the same space — only explicit callers do that (creating a thread in an
+   * unloaded space); {@link syncThreadLoads} never starts a load for a space
+   * that has one in flight. Resolves when this load settles.
    */
   private loadThreads(projectId: string): Promise<void> {
     this._threadAborts.get(projectId)?.abort();
     const controller = new AbortController();
     this._threadAborts.set(projectId, controller);
     this._threadLoadEpoch.set(projectId, this._threadsEpoch);
+    const startedAt = chatLoadClock();
     if (!this.loadingThreads.has(projectId)) {
       this.loadingThreads = new Set(this.loadingThreads).add(projectId);
     }
@@ -1462,24 +1494,39 @@ export class ScionChatSpaceRail extends LitElement {
       const next = new Set(this.loadingThreads);
       next.delete(projectId);
       this.loadingThreads = next;
+      if (next.size === 0) this.settlePendingReadState();
+    };
+    const fail = (): void => {
+      // Retry automatically once per epoch (the next render's sync picks it
+      // up); after that, only an explicit expand or header click, or the
+      // next reload, tries again — a hub that keeps failing is not polled.
+      const failures = (this._threadLoadFailures.get(projectId) ?? 0) + 1;
+      this._threadLoadFailures.set(projectId, failures);
+      if (failures <= THREAD_LOAD_AUTO_RETRIES) this._threadLoadEpoch.delete(projectId);
     };
     const load = (async (): Promise<void> => {
       try {
         const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`, {
           signal: controller.signal,
         });
-        if (res.ok) {
-          const data = (await res.json()) as { threads?: ChatSpaceThread[] };
-          if (controller.signal.aborted) return;
-          const newMap = new Map(this.threadsBySpace);
-          newMap.set(projectId, data.threads || []);
-          this.threadsBySpace = newMap;
-          // A thread deep link without a routed space resolves here.
-          if (this.selectedKey && !this.selectedProjectId) this.expandSpaceForSelectedKey();
+        if (!res.ok) {
+          if (!controller.signal.aborted) fail();
+          return;
         }
+        const data = (await res.json()) as { threads?: ChatSpaceThread[] };
+        if (controller.signal.aborted) return;
+        this._threadLoadFailures.delete(projectId);
+        const threads = data.threads || [];
+        const newMap = new Map(this.threadsBySpace);
+        newMap.set(projectId, threads);
+        this.threadsBySpace = newMap;
+        this.applyPendingReadState(projectId, threads, startedAt);
+        // A thread deep link without a routed space resolves here.
+        if (this.selectedKey && !this.selectedProjectId) this.expandSpaceForSelectedKey();
       } catch {
-        // Silently fail (including an abort by a newer load). A failed load
-        // is retried by the next reload, not in a loop.
+        // A network failure, or an abort (by detach or an explicit newer
+        // load), which is not a failure of this space.
+        if (!controller.signal.aborted) fail();
       } finally {
         done();
       }
@@ -1488,14 +1535,20 @@ export class ScionChatSpaceRail extends LitElement {
     return load;
   }
 
+  /** Consecutive failed thread loads per space, reset by a success or a reload. */
+  private _threadLoadFailures = new Map<string, number>();
+
   /**
-   * Make sure a space's threads are loaded (or being loaded) in the
-   * current epoch, and wait for that load. Used where an action needs the
-   * list — opening #general from a collapsed space.
+   * Make sure a space's threads are loaded, and wait for that. Used where
+   * an action needs the list — opening #general from a collapsed space, a
+   * space deep link. A load already in flight is joined rather than
+   * restarted; with none and no list (never loaded, or the last attempt
+   * failed), this is an explicit request and loads regardless of retries.
    */
   private async ensureThreads(projectId: string): Promise<void> {
-    if ((this._threadLoadEpoch.get(projectId) ?? -1) < this._threadsEpoch) {
-      void this.loadThreads(projectId);
+    if (!this.loadingThreads.has(projectId)) {
+      const stale = (this._threadLoadEpoch.get(projectId) ?? -1) < this._threadsEpoch;
+      if (stale || !this.threadsBySpace.has(projectId)) void this.loadThreads(projectId);
     }
     // A load can be superseded while awaited; wait for whichever is current.
     let pending = this._threadLoads.get(projectId);
@@ -1505,6 +1558,65 @@ export class ScionChatSpaceRail extends LitElement {
       if (next === pending) break;
       pending = next;
     }
+  }
+
+  /**
+   * Read-state changes (thread id → change and when it happened) for
+   * threads no loaded list held while some list was still loading — the
+   * usual case being the thread just opened, whose space list is still on
+   * its way when the thread view advances its read watermark.
+   */
+  private _pendingReadState = new Map<string, { kind: 'read' | 'unread'; at: number }>();
+
+  /**
+   * Apply pending read-state changes for threads in a list that just
+   * landed. A list requested before the change still shows the old state,
+   * so the change is applied to it the normal way (row and badge). A list
+   * requested after it already shows the new state; then only the space
+   * badge can be behind, if the spaces list predates the change too.
+   */
+  private applyPendingReadState(
+    projectId: string,
+    threads: ChatSpaceThread[],
+    listStartedAt: number
+  ): void {
+    if (this._pendingReadState.size === 0) return;
+    let rollupStale = false;
+    for (const thread of threads) {
+      const pending = this._pendingReadState.get(thread.id);
+      if (!pending) continue;
+      this._pendingReadState.delete(thread.id);
+      const listIsOlder = listStartedAt < pending.at;
+      const rollupIsOlder = this._spacesStartedAt < pending.at;
+      if (listIsOlder && rollupIsOlder) {
+        // Both predate the change: apply it the normal way, row and badge.
+        if (pending.kind === 'read') this.markThreadRead(thread.id);
+        else this.markThreadUnread(thread.id);
+      } else if (listIsOlder) {
+        // The badge already reflects it; only the row is behind.
+        this.updateThread(
+          projectId,
+          thread.id,
+          pending.kind === 'read'
+            ? { hasUnread: false, hasUnreadMention: false }
+            : { hasUnread: true }
+        );
+      } else if (rollupIsOlder) {
+        rollupStale = true;
+      }
+    }
+    if (rollupStale) void this.reload();
+  }
+
+  /**
+   * Once nothing is loading, any pending change whose thread turned up in
+   * no list (its space failed to load, say) falls back to refreshing the
+   * rollup from the server.
+   */
+  private settlePendingReadState(): void {
+    if (this._pendingReadState.size === 0) return;
+    this._pendingReadState.clear();
+    if (this.spaces.some((s) => !this.threadsBySpace.has(s.projectId))) void this.reload();
   }
 
   /** Loads prefs; returns whether the load succeeded (used to gate pruning). */
@@ -2478,21 +2590,29 @@ export class ScionChatSpaceRail extends LitElement {
       if (!target.muted) this.adjustSpaceUnread(projectId, -1);
       return;
     }
-    this.refreshRollupForUnloadedThread(threadId);
+    this.refreshRollupForUnloadedThread(threadId, 'read');
   }
 
   /**
    * A read-state change for a thread no loaded list holds. Its space's list
    * may simply not have loaded yet (lists load lazily), so the space badge
-   * cannot be adjusted locally; refresh it from the server instead. Reloads
-   * coalesce, so a burst of these costs one pass. With every list loaded,
-   * the thread is in no space the rail shows and there is nothing to fix.
+   * cannot be adjusted locally. While lists are loading, the change waits
+   * for the one holding the thread (see `applyPendingReadState`); with none
+   * loading, the rollup is refreshed from the server (reloads coalesce).
+   * With every list loaded, the thread is in no space the rail shows and
+   * there is nothing to fix.
    */
-  private refreshRollupForUnloadedThread(threadId: string): void {
+  private refreshRollupForUnloadedThread(threadId: string, kind: 'read' | 'unread'): void {
     for (const threads of this.threadsBySpace.values()) {
       if (threads.some((t) => t.id === threadId)) return;
     }
     if (this.spaces.every((s) => this.threadsBySpace.has(s.projectId))) return;
+    if (this.loadingThreads.size > 0) {
+      // The list holding it is probably on its way (the thread just opened);
+      // apply the change when it lands instead of reloading the whole rail.
+      this._pendingReadState.set(threadId, { kind, at: chatLoadClock() });
+      return;
+    }
     void this.reload();
   }
 
@@ -2548,7 +2668,7 @@ export class ScionChatSpaceRail extends LitElement {
       if (!target.muted) this.adjustSpaceUnread(projectId, 1);
       return;
     }
-    this.refreshRollupForUnloadedThread(threadId);
+    this.refreshRollupForUnloadedThread(threadId, 'unread');
   }
 
   /**

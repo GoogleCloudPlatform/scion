@@ -1545,7 +1545,9 @@ export class ScionPageChat extends LitElement {
         // already in flight.
         void this.loadHubMembers({ refresh: true });
         // Presence rides on SSE between these polls; resync it here, at the
-        // poll's pace, rather than on every rail reload.
+        // poll's pace, rather than on every rail reload. It races the walk
+        // above: a user who first appears in that walk gets presence at the
+        // next poll or presence event, which is acceptable for a resync.
         void this.refreshHubMemberPresence(this._presenceProjectIds[0] ?? '');
       }
     }, FALLBACK_POLL_INTERVAL_MS);
@@ -2263,7 +2265,8 @@ export class ScionPageChat extends LitElement {
     // needs a spaces list requested after the newest message of the burst,
     // so it shares the tab-title counter's refresh for the same messages
     // (which runs sooner) rather than asking the server a second time.
-    const eventAt = Number.isFinite(e.timeStamp) ? e.timeStamp : chatLoadClock();
+    // A synthetic event stamped 0 would share any request: fall back to now.
+    const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
     this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
     this._refreshTimer = setTimeout(() => {
@@ -2953,11 +2956,6 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Fetch presence data from a space's members endpoint and merge it into the
-   * hub-level human members list.  Called from handleRailLoaded when the user
-   * is in the global /chat view so that presence indicators render on first load.
-   */
-  /**
    * Fetch hub presence once per hub view: when both the hub member list
    * (which presence merges into) and the space IDs (which name the members
    * endpoint to ask) are known, whichever arrives second triggers it.
@@ -2970,6 +2968,13 @@ export class ScionPageChat extends LitElement {
     void this.refreshHubMemberPresence(projectId);
   }
 
+  /**
+   * Fetch presence data from a space's members endpoint and merge it into the
+   * hub-level human members list, so presence indicators render in the
+   * global /chat view (the hub walk's `/api/v1/users` carries none). Called
+   * by {@link maybeRefreshHubPresence} (once per hub view) and by the
+   * fallback poll (a slow resync of what SSE keeps current in between).
+   */
   private async refreshHubMemberPresence(projectId: string): Promise<void> {
     if (!projectId) return;
     // Claimed up front so a second trigger during the request does not ask

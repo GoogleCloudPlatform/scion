@@ -205,6 +205,7 @@ describe('ChatUnreadCounter', () => {
     apiFetch.mockClear();
 
     try {
+      vi.advanceTimersByTime(1);
       const event = new CustomEvent('chat-message-received', { detail: {} });
       vi.advanceTimersByTime(1);
       // The page reloads its DM dots the moment the message arrives.
@@ -217,6 +218,33 @@ describe('ChatUnreadCounter', () => {
       expect(dmCalls).toHaveLength(1);
       expect(spaceCalls).toHaveLength(1);
       expect(getUnreadBadge()).toBe(2);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('a burst refresh only shares a fetch made after the newest event', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    try {
+      vi.advanceTimersByTime(1);
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      vi.advanceTimersByTime(1);
+      // The page fetches DMs for the first message only...
+      void chatDMsLoad.load();
+      vi.advanceTimersByTime(1);
+      // ...and a second message arrives after that fetch was sent.
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      apiFetch.mockClear();
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      // That fetch may predate the second message: the refresh asks again.
+      const dmCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/dms'));
+      expect(dmCalls).toHaveLength(1);
     } finally {
       counter.stop();
     }

@@ -918,9 +918,14 @@ describe('hub presence fetch', () => {
   it('the fallback poll resyncs it', async () => {
     vi.useFakeTimers();
     const page = mountPage();
+    page.parseV2Route = vi.fn();
     await vi.advanceTimersByTimeAsync(0);
-    page._presenceProjectIds = ['p1'];
+    // Presence already fetched for this hub view: the poll's own walk does
+    // not fetch it again, so only the poll's resync can.
+    railLoaded(page);
+    await vi.advanceTimersByTimeAsync(0);
     const before = membersRequests();
+    expect(before).toBe(1);
 
     await vi.advanceTimersByTimeAsync(60_000);
 
