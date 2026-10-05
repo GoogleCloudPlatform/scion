@@ -133,14 +133,20 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
-		// A report racing an in-flight `scion reincarnate` migration that
-		// carried nothing beyond the fields Guard 0b owns is now empty: skip
-		// the store write entirely and tell the caller it was not applied,
-		// so the dropped report is distinguishable from an accepted one.
-		// 200 (not an error) keeps `sciontool status` succeeding; it ignores
-		// the body today.
-		if reincarnationInFlight(agent) && statusUpdateIsEmpty(status) {
-			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonReincarnationInFlight})
+		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
+		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
+		// `scion reincarnate` migration) has blanked the report and nothing
+		// is left to persist, skip the store write and tell the caller the
+		// report was not applied, so a dropped report is distinguishable from
+		// an accepted one. 200 (not an error) keeps `sciontool status`
+		// succeeding; it ignores the body today.
+		//
+		// Partial apply: if the report also carries fields those guards do
+		// not own (heartbeat, toolName, taskSummary, limits, metadata, ...),
+		// those are still written and the response is {"applied":true} even
+		// though the guarded fields were dropped.
+		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
 			return
 		}
 		// Reconcile the max_agents_per_broker reservation against the phase
@@ -169,9 +175,30 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
 }
 
-// statusUpdateReasonReincarnationInFlight is the statusUpdateResult.Reason
-// for a status report dropped because a reincarnation owns the agent.
-const statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+// statusUpdateResult.Reason values for a status report dropped because a
+// guard owns the agent's status.
+const (
+	// statusUpdateReasonDeleteInProgress: a delete holds the agent, or the
+	// row is soft-deleted (Guard 0c).
+	statusUpdateReasonDeleteInProgress = "delete_in_progress"
+	// statusUpdateReasonReincarnationInFlight: a reincarnation owns the
+	// agent (Guard 0b).
+	statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+)
+
+// statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
+// that blanks every field it owns on agent's status reports, or "" when
+// neither does. Checked in guardAgentPhaseTransition's order: Guard 0c
+// before Guard 0b.
+func statusGuardNoopReason(agent *store.Agent) string {
+	switch {
+	case deletionActive(agent) || !agent.DeletedAt.IsZero():
+		return statusUpdateReasonDeleteInProgress
+	case reincarnationInFlight(agent):
+		return statusUpdateReasonReincarnationInFlight
+	}
+	return ""
+}
 
 // statusUpdateResult is the response body of POST /agents/{id}/status.
 // Applied is false when the hub accepted the request but persisted nothing

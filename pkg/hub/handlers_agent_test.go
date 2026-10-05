@@ -5282,6 +5282,86 @@ func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *te
 	}
 }
 
+// TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied: a status
+// POST that Guard 0c (a delete in progress, or a soft-deleted row) blanks
+// completely is not written, and the response says
+// {"applied":false,"reason":"delete_in_progress"} — the same guarded-no-op
+// signal as a reincarnation (ptone/scion#2267).
+func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark func(t *testing.T, s store.Store, agent *store.Agent)
+	}{
+		{"live delete", func(t *testing.T, s store.Store, agent *store.Agent) {
+			seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
+		}},
+		{"soft deleted", func(t *testing.T, s store.Store, agent *store.Agent) {
+			agent.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-del-msg"), Name: "Del Msg Project", Slug: "del-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-del-msg"), Slug: "del-msg-slug", Name: "Del Msg Agent",
+				ProjectID: project.ID, Phase: string(state.PhaseRunning), Message: "old",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			tc.mark(t, s, agent)
+			before, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","exitCode":1}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "delete_in_progress", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "old", after.Message)
+			assert.Nil(t, after.ExitCode)
+			assert.True(t, before.LastSeen.Equal(after.LastSeen) && before.Updated.Equal(after.Updated),
+				"a dropped report must skip the store write (LastSeen/Updated unchanged)")
+		})
+	}
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_PartialApply pins the
+// documented partial-apply behaviour: a report that mixes guarded fields
+// with fields the guards do not own has the guarded fields dropped, the
+// rest written, and is reported as applied.
+func TestAgentStatusUpdate_ReincarnationInFlight_PartialApply(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-reinc-partial"), Name: "Reinc Partial Project", Slug: "reinc-partial-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-reinc-partial"), Slug: "reinc-partial-slug", Name: "Reinc Partial Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseStarting), Message: "Reincarnating",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","taskSummary":"summary"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Reincarnating", after.Message, "the guarded message must be dropped")
+	assert.Equal(t, "summary", after.TaskSummary, "the unguarded field must be written")
+}
+
 // TestAgentStatusUpdate_MessageOnlyPostApplied is the counterpart to the
 // test above: with no reincarnation in flight a message-only POST is
 // written and reported as applied.
