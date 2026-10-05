@@ -155,10 +155,12 @@ func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	assert.Equal(t, "managed", origin)
 	assert.Equal(t, "new-hub", row.HubName)
 
+	// One running server, applied after every step, as each replica does
+	// on refresh.
+	running := &Server{}
+	ApplySnapshot(running, ops.Snapshot())
 	assert.Equal(t, "new-hub", ops.Snapshot().HubName)
-	applied := &Server{}
-	ApplySnapshot(applied, ops.Snapshot())
-	assert.Equal(t, "new-hub", applied.HubName())
+	assert.Equal(t, "new-hub", running.HubName())
 
 	resp := getServerConfigDB(t, srv, ops)
 	assert.Equal(t, "new-hub", resp.Server.Hub.HubName)
@@ -181,6 +183,39 @@ func TestServerConfigDB_HubName_ChangePersistsAndApplies(t *testing.T) {
 	row, _ = endpointsRow(t, fakeStore)
 	assert.Empty(t, row.HubName)
 	assert.Equal(t, "boot-hub", getServerConfigDB(t, srv, ops).Server.Hub.HubName)
+	// The running hub switches back too (round-2 finding 1): Snapshot
+	// resolves the bootstrap name, so ApplySnapshot does not keep the stale
+	// managed name. The GCP secret backend label follows the same
+	// snap.HubName in ApplySnapshot.
+	assert.Equal(t, "boot-hub", ops.Snapshot().HubName)
+	ApplySnapshot(running, ops.Snapshot())
+	assert.Equal(t, "boot-hub", running.HubName())
+}
+
+// Round-2 finding 5: endpoints PUTs are built on the current row, so a
+// hub_name-only PUT keeps the managed public_url and image_registry, and an
+// image_registry-only PUT keeps public_url and hub_name.
+func TestServerConfigDB_Endpoints_PutChangesOnlyItsFields(t *testing.T) {
+	srv, fakeStore, ops := newHubNameDBServer(t, "boot-hub")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://admin.example.com","image_registry":"reg.example.com"}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, _ := endpointsRow(t, fakeStore)
+	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://admin.example.com", HubName: "new-hub", ImageRegistry: "reg.example.com"}, row)
+
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"image_registry":"other.example.com"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row, _ = endpointsRow(t, fakeStore)
+	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://admin.example.com", HubName: "new-hub", ImageRegistry: "other.example.com"}, row)
+
+	// No-op echo of everything: row unchanged.
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"image_registry":"other.example.com","server":{"hub":{"public_url":"https://admin.example.com","hub_name":"new-hub"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	after, _ := endpointsRow(t, fakeStore)
+	assert.Equal(t, row, after)
 }
 
 // A changed hub_name is validated against the schema pattern.

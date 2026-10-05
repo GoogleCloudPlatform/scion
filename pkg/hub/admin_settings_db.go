@@ -429,18 +429,11 @@ func bootstrapAppliesWhenAbsent(section, key string) bool {
 	return section == "endpoints" && key == "hub_name"
 }
 
-// effectiveHubName returns the hub_name in effect: the operational snapshot
-// value when set, otherwise the bootstrap value (ApplySnapshot keeps the
-// bootstrap value when the snapshot HubName is empty). GET server-config
-// returns this value.
+// effectiveHubName returns the hub_name in effect: the snapshot value, which
+// is the DB value or, when the endpoints row has none, the bootstrap value.
+// GET server-config returns this value.
 func effectiveHubName(ops *OperationalSettings) string {
-	if name := ops.Snapshot().HubName; name != "" {
-		return name
-	}
-	if ops.bootstrapKoanf != nil {
-		return ops.bootstrapKoanf.String("server.hub.hub_name")
-	}
-	return ""
+	return ops.Snapshot().HubName
 }
 
 // dropEchoedHubName removes server.hub.hub_name from keys when the request
@@ -472,34 +465,96 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 	return append(keys[:idx:idx], keys[idx+1:]...), false
 }
 
-// carryForwardEndpointsHubName copies hub_name from the current endpoints
-// row into doc when the row is managed (an admin-written value, already
-// validated). A seeded row's hub_name is the bootstrap value, which stays in
-// effect without being written into the managed row.
-func carryForwardEndpointsHubName(ctx context.Context, ops *OperationalSettings, doc json.RawMessage) (json.RawMessage, error) {
-	row, err := ops.store.GetHubSetting(ctx, "endpoints")
-	if errors.Is(err, store.ErrNotFound) {
-		return doc, nil
+// overlayEndpointsRequest applies the endpoints fields present in the
+// request onto d, presence-aware (N6):
+//   - public_url: non-empty sets it; an explicit "" clears it.
+//   - image_registry: set when present (an explicit "" clears it).
+//   - hub_name: set when the request changes it (hubNameChanged); a change
+//     to "" clears it, so the bootstrap name applies again. An echo of the
+//     effective value was already dropped by dropEchoedHubName. With
+//     hubNameChanged false, a non-empty request value is still applied (the
+//     replace-semantics form in buildSingleSectionDoc).
+//
+// Omitted fields keep whatever d already holds.
+func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigUpdateRequest, fp *fieldPresence, hubNameChanged bool) {
+	hubFP := fp.nestedPresence("server").nestedPresence("hub")
+	if req.Server != nil && req.Server.Hub != nil {
+		if req.Server.Hub.PublicURL != "" {
+			d.PublicURL = req.Server.Hub.PublicURL
+		} else if hubFP.has("public_url") {
+			d.PublicURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.HubName != "" || hubNameChanged {
+			d.HubName = req.Server.Hub.HubName
+		}
 	}
+	if req.ImageRegistry != nil {
+		d.ImageRegistry = *req.ImageRegistry
+	}
+}
+
+// buildEndpointsDocOnCurrent builds the endpoints section doc for a PUT on
+// top of the current row, so fields the request omits keep their value
+// (the same carry-forward as buildAccessDocOnCurrent, with the same env
+// guard for a non-managed base).
+//
+// hub_name is carried forward only from a managed row: a seeded row holds
+// the bootstrap hub_name, which applies without being written (Snapshot
+// falls back to it), and may not match the schema pattern. With no row,
+// the base is the effective public_url and image_registry.
+//
+// It returns the revision the base was read at (0 when no row exists) for
+// use as the CAS expected revision.
+func buildEndpointsDocOnCurrent(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest, rawBody []byte, hubNameChanged bool) (json.RawMessage, int64, error) {
+	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
-		return nil, fmt.Errorf("reading current endpoints row: %w", err)
+		fp = nil // omitted-semantics; the typed decode already succeeded
 	}
-	if row.Origin != "managed" || len(row.Value) == 0 {
-		return doc, nil
+
+	base := &opsettings.EndpointsSettings{}
+	var baseRev int64
+	row, err := ops.store.GetHubSetting(ctx, "endpoints")
+	switch {
+	case err == nil:
+		if len(row.Value) > 0 {
+			if err := json.Unmarshal(row.Value, base); err != nil {
+				return nil, 0, fmt.Errorf("decoding current endpoints row: %w", err)
+			}
+		}
+		baseRev = row.Revision
+		if row.Origin != "managed" {
+			base.HubName = ""
+			dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
+		}
+	case errors.Is(err, store.ErrNotFound):
+		snap := ops.Snapshot()
+		base.PublicURL = snap.PublicURL
+		base.ImageRegistry = snap.ImageRegistry
+		dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
+	default:
+		return nil, 0, fmt.Errorf("reading current endpoints row: %w", err)
 	}
-	var current opsettings.EndpointsSettings
-	if err := json.Unmarshal(row.Value, &current); err != nil {
-		return nil, fmt.Errorf("decoding current endpoints row: %w", err)
+
+	overlayEndpointsRequest(base, req, fp, hubNameChanged)
+	doc, err := json.Marshal(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshalling endpoints doc: %w", err)
 	}
-	if current.HubName == "" {
-		return doc, nil
+	return doc, baseRev, nil
+}
+
+// dropEnvOverriddenEndpointsFields clears endpoints fields overridden by a
+// node-local env var, so an env-derived value in a non-managed base is not
+// carried into the shared row (see buildAccessDocOnCurrent).
+func dropEnvOverriddenEndpointsFields(base *opsettings.EndpointsSettings, envKeys []string) {
+	for _, k := range envKeys {
+		switch k {
+		case "server.hub.public_url":
+			base.PublicURL = ""
+		case "image_registry":
+			base.ImageRegistry = ""
+		}
 	}
-	var d opsettings.EndpointsSettings
-	if err := json.Unmarshal(doc, &d); err != nil {
-		return nil, fmt.Errorf("decoding endpoints doc: %w", err)
-	}
-	d.HubName = current.HubName
-	return json.Marshal(&d)
 }
 
 // detectKeySource determines which bootstrap layer provides a given section key.
@@ -682,16 +737,18 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		accessBaseRev = rev
 	}
 
-	// Endpoints is replaced whole; keep a managed hub_name the request did
-	// not change.
-	if doc, ok := sectionDocs["endpoints"]; ok && !hubNameChanged {
-		doc, err := carryForwardEndpointsHubName(r.Context(), ops, doc)
+	// Endpoints section: like access, carry omitted fields forward from the
+	// current row so a PUT changes only the fields it carries.
+	endpointsBaseRev := int64(-1)
+	if _, ok := sectionDocs["endpoints"]; ok {
+		doc, rev, err := buildEndpointsDocOnCurrent(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody, hubNameChanged)
 		if err != nil {
-			slog.Error("PUT server-config: failed to carry forward hub_name", "error", err)
+			slog.Error("PUT server-config: failed to build endpoints document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 			return
 		}
 		sectionDocs["endpoints"] = doc
+		endpointsBaseRev = rev
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -837,6 +894,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = rev
 		} else if secName == "access" && accessBaseRev >= 0 {
 			expectedRev = accessBaseRev
+		} else if secName == "endpoints" && endpointsBaseRev >= 0 {
+			expectedRev = endpointsBaseRev
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
@@ -1497,10 +1556,10 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
-	// N6/N7: Derive nested presence maps for the server and hub sub-objects.
-	// (The access section's auth presence is handled in overlayAccessRequest.)
+	// N6/N7: Derive the nested presence map for the server sub-object.
+	// (Access and endpoints presence is handled in overlayAccessRequest and
+	// overlayEndpointsRequest.)
 	serverFP := fp.nestedPresence("server")
-	hubFP := serverFP.nestedPresence("hub")
 
 	switch secName {
 	case "access":
@@ -1577,24 +1636,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		doc = d
 
 	case "endpoints":
+		// handlePutServerConfigDB rebuilds this doc on the current row
+		// (buildEndpointsDocOnCurrent); this is the replace-semantics form.
 		d := &opsettings.EndpointsSettings{}
-		if req.Server != nil && req.Server.Hub != nil {
-			// N6: presence-aware — explicit empty "" clears public_url.
-			if req.Server.Hub.PublicURL != "" {
-				d.PublicURL = req.Server.Hub.PublicURL
-			} else if hubFP.has("public_url") {
-				d.PublicURL = "" // explicitly cleared
-			}
-			// hub_name reaches here only when it changes (an echo of the
-			// effective value is dropped by dropEchoedHubName). An explicit
-			// "" clears it: omitted from the doc, so the bootstrap value
-			// applies again. An unchanged managed value is carried forward
-			// by carryForwardEndpointsHubName.
-			d.HubName = req.Server.Hub.HubName
-		}
-		if req.ImageRegistry != nil {
-			d.ImageRegistry = *req.ImageRegistry
-		}
+		overlayEndpointsRequest(d, req, fp, false)
 		doc = d
 
 	case "github_app":

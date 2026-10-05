@@ -379,6 +379,15 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 
 	snap := buildSnapshotFromKoanf(merged)
 
+	// hub_name is the one endpoints key that keeps its bootstrap value when
+	// a DB row omits it: a managed endpoints row carries hub_name only after
+	// an admin sets it, and clearing it returns to the bootstrap name. So
+	// resolve it here rather than leaving "" (which ApplySnapshot would skip,
+	// keeping a stale managed name in use).
+	if snap.HubName == "" && o.bootstrapKoanf != nil {
+		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
+	}
+
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
 	// merged koanf. The koanf round-trip loses empty-map semantics ({} → no
