@@ -2171,6 +2171,10 @@ describe('"Jump to agent" palette: the agent store\'s hub entry', () => {
   });
 
   afterEach(() => {
+    // Reset here, not at the end of a test, so a test that fails partway
+    // cannot leave its override to the tests after it.
+    paletteLoad.override = null;
+    paletteLoad.retainOverride = null;
     root.dispose();
     root.element.remove();
     vi.unstubAllGlobals();
