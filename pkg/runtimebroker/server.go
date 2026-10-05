@@ -169,6 +169,12 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// WorkspaceStorageBackend is the configured server.workspace_storage
+	// backend name ("" means "local"). It is reported to the hub, with
+	// NFSConfig's first share, as the broker's workspace storage descriptor
+	// (see BuildWorkspaceStorageDescriptor).
+	WorkspaceStorageBackend string
+
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
