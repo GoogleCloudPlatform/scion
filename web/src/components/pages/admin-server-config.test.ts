@@ -1225,6 +1225,30 @@ describe('scion-page-admin-server-config', () => {
       }
     );
 
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
     it.each([
       ['assign', 'sa-123'],
       ['block', ''],
