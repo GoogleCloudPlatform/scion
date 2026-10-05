@@ -38,6 +38,17 @@ import (
 // runtimebroker.Server, whose agent manager removes real agent files by
 // name. A late delete for a ghost run must leave the files of the agent
 // recreated under the same name intact.
+//
+// Limit: only the delete leg is real end to end. The create leg is a
+// stand-in (filesBrokerClient.CreateAgent and provision below) that writes
+// the agent files and the runId record itself, as the broker's create
+// handler does through pkg/agent Start/ProvisionAgent. Driving the real
+// create handler would need a full template, harness-config and
+// provisioning setup on the broker; that chain is covered separately by
+// pkg/agent TestProvisionAgent_RecordsRunID,
+// TestStart_RecordsRunIDBeforeContainer and
+// TestStart_FailureAfterPreCleanRecordsNewRun, and by the broker's
+// TestRunID_ThreadedIntoStartOptions (runId reaches StartOptions).
 
 // fileDeletingRunManager is runLabelManager whose DeleteTarget also removes
 // the agent's files by name, as pkg/agent's manager does.

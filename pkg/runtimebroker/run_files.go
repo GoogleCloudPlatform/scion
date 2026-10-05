@@ -25,15 +25,29 @@ import (
 // run owns them.
 //
 // It returns "" -- the caller proceeds as before -- when runID is empty (a
-// caller that names no run), when projectPath is empty, and when no run is
-// recorded (an agent provisioned before run IDs were recorded, or one
-// provisioned but never started).
+// caller that names no run) and when no run is recorded (an agent
+// provisioned before run IDs were recorded, or one provisioned but never
+// started). An empty projectPath resolves the way DeleteAgentFiles resolves
+// it.
 func agentFilesRunOwner(agentName, projectPath, runID string) string {
-	if runID == "" || projectPath == "" {
+	if runID == "" {
 		return ""
 	}
 	if owner := agent.GetSavedRunID(agentName, projectPath); owner != "" && owner != runID {
 		return owner
 	}
 	return ""
+}
+
+// otherRunInFlight reports whether a start of a run other than runID is in
+// flight on this broker under any of keys (see
+// launchRegistry.OtherRunInFlight): that start owns the agent's name, and
+// may be creating its files and per-agent objects right now.
+func (s *Server) otherRunInFlight(runID string, keys ...launchKey) bool {
+	for _, k := range keys {
+		if s.launchRegistry.OtherRunInFlight(k, runID) {
+			return true
+		}
+	}
+	return false
 }

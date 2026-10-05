@@ -173,6 +173,41 @@ func TestDeleteAgent_InFlightStartOfOtherRun_KeepsFiles(t *testing.T) {
 	}
 }
 
+// No container and no files yet, but a start of another run is in flight:
+// the not-found delete leaves per-agent runtime objects alone, since that
+// start may be creating them under this name (review N2). Without one in
+// flight, or for the same run, the leftover cleanup runs as before.
+func TestDeleteAgent_NotFoundWithOtherRunInFlight_SkipsLeftoverCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name, inflightRun string
+		wantCleanup       bool
+	}{
+		{"other run in flight", "run-new", false},
+		{"same run in flight", "run-old", true},
+		{"nothing in flight", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &cleanupRecordingManager{}
+			srv, _ := newCleanupTestServer(t, mgr)
+			if tc.inflightRun != "" {
+				lr := newLaunchRecord("sync-1", "dev", "create", "", time.Time{}, func() {})
+				lr.RunID = tc.inflightRun
+				srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, lr)
+			}
+
+			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&deleteFiles=true")
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if tc.wantCleanup {
+				assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+			} else {
+				assertCleanupCalls(t, mgr.cleanupCalls())
+			}
+		})
+	}
+}
+
 func TestLaunchRegistry_OtherRunInFlight(t *testing.T) {
 	key := launchKey{ProjectID: "p1", Slug: "a"}
 	for _, tc := range []struct {
@@ -377,6 +412,17 @@ func TestDeleteAgent_StaleRunAfterRecreate_RealFiles(t *testing.T) {
 			if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 				t.Errorf("the current run's delete left the agent dir (stat err %v)", err)
 			}
+			// Pre-existing behaviour, unchanged here and pinned so a change
+			// is visible: for an in-repo worktree-mode agent the delete
+			// removes the worktree directory but keeps the branch (even
+			// with removeBranch), and the worktree stays registered until
+			// `git worktree prune`.
+			if !branchExists(t, repo, "dev") {
+				t.Error("the current run's delete removed the branch (behaviour changed)")
+			}
+			if !worktreeRegistered(t, repo, worktree) {
+				t.Error("the current run's delete unregistered the worktree (behaviour changed)")
+			}
 		})
 	}
 }
@@ -459,5 +505,24 @@ func TestCleanupAbortedLaunch_KeepsFilesOfOtherRun(t *testing.T) {
 				t.Errorf("launch run-a's cleanup left its own files (stat err %v)", err)
 			}
 		})
+	}
+}
+
+// An empty project path resolves the way DeleteAgentFiles resolves it (the
+// broker's working project), so the run check is not skipped for it.
+func TestAgentFilesRunOwner_EmptyProjectPathResolvesLikeDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	scionDir := filepath.Join(root, ".scion")
+	recordRun(t, scionDir, "dev", "run-new")
+	t.Chdir(root)
+	if got := agentFilesRunOwner("dev", "", "run-old"); got != "run-new" {
+		t.Errorf("owner = %q, want run-new from the working project", got)
+	}
+	if got := agentFilesRunOwner("dev", "", "run-new"); got != "" {
+		t.Errorf("owner for the recorded run = %q, want none", got)
+	}
+	if got := agentFilesRunOwner("dev", "", ""); got != "" {
+		t.Errorf("owner without a run = %q, want none", got)
 	}
 }
