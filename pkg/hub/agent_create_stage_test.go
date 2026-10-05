@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -145,6 +146,54 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 			var sum compensationSummary
 			require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
 			assert.Equal(t, tc.wantStage, sum.Stage)
+		})
+	}
+}
+
+// A delete that claims the row while the create is being dispatched gets the
+// delete_in_progress answer, carrying the created agent's ID, at both
+// dispatch sites, and the create is rolled back with that site's stage.
+func TestCreateDispatchDeleteInProgressAnswer(t *testing.T) {
+	cases := []struct {
+		name      string
+		gatherEnv bool
+		wantStage string
+	}{
+		{name: "dispatch with env gather", gatherEnv: true, wantStage: createStageDispatchEnvGather},
+		{name: "dispatch", gatherEnv: false, wantStage: createStageDispatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &failingCreateDispatcher{createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)}
+			srv, s, project := setupCreateAgentServer(t, disp)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:      "claim-" + tidSlugSafe(tc.name),
+				ProjectID: project.ID,
+				Task:      "do something",
+				GatherEnv: tc.gatherEnv,
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			require.NotNil(t, disp.capturedAgent, "the create reached dispatch")
+			agentID := disp.capturedAgent.ID
+			require.NotEmpty(t, agentID)
+
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
+			assert.Equal(t, agentID, body.Error.Details["agentId"], "details.agentId")
+
+			ctx := context.Background()
+			failed, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+			require.NoError(t, err)
+			require.Len(t, failed, 1, "the rolled-back create is recorded once")
+			assert.Equal(t, agentID, failed[0].TargetID)
+			var sum compensationSummary
+			require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+			assert.Equal(t, tc.wantStage, sum.Stage)
+
+			_, err = s.GetAgent(ctx, agentID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "the agent row is rolled back")
 		})
 	}
 }
