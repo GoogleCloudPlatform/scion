@@ -119,6 +119,25 @@ test('typing straight after Ctrl+K becomes the query while the palette module is
   await expectTypingRightAfterOpenFilters(page);
 });
 
+test('a word delete typed while the palette module loads edits the query, not the composer draft', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await gotoWithComposer(page);
+  const textarea = composerTextarea(page);
+  await textarea.click();
+  await textarea.fill('my long draft');
+
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('cox');
+  await page.keyboard.press('Control+Backspace');
+  await page.keyboard.type('coder');
+
+  await expect(paletteInput(page)).toHaveValue('coder');
+  await expect(paletteOptions(page)).toHaveText([/Coder One/]);
+  await expect(textarea).toHaveValue('my long draft');
+});
+
 test('typing straight after a reopen becomes the new query', async ({ page }) => {
   await gotoWithComposer(page);
   await page.keyboard.press('Control+k');

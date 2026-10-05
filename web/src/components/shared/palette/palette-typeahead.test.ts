@@ -155,14 +155,97 @@ describe('PaletteTypeahead', () => {
     expect(typeahead.pending).toBe('@€');
   });
 
-  it('lets a non-printable key through even with AltGr held, Backspace and Enter included', () => {
+  it('lets a non-printable key through even with AltGr held, Enter and arrows included', () => {
     typeahead.start();
     press('a');
-    for (const key of ['Backspace', 'Enter', 'ArrowLeft']) {
+    for (const key of ['Enter', 'ArrowLeft', 'Home']) {
       const e = press(key, { ctrlKey: true, altKey: true }, true);
       expect(e.defaultPrevented).toBe(false);
     }
     expect(onTargetKeydown).toHaveBeenCalledTimes(3);
+    expect(typeahead.pending).toBe('a');
+  });
+
+  it.each([
+    ['Ctrl', { ctrlKey: true }, false, 'my '],
+    ['Ctrl+Shift (a word delete by choice)', { ctrlKey: true, shiftKey: true }, false, 'my '],
+    ['Shift', { shiftKey: true }, false, 'my lon'],
+    ['Alt', { altKey: true }, false, 'my long'],
+    ['Meta', { metaKey: true }, false, 'my long'],
+    ['Ctrl+Alt', { ctrlKey: true, altKey: true }, false, 'my long'],
+    ['AltGr', { ctrlKey: true, altKey: true }, true, 'my long'],
+  ])(
+    'swallows %s+Backspace outside macOS and applies the chosen edit to the captured text',
+    (_name, init, altGraph, rest) => {
+      typeahead.start();
+      for (const key of 'my long') press(key);
+      expectCaptured(press('Backspace', init, altGraph));
+      expect(typeahead.pending).toBe(rest);
+    }
+  );
+
+  it.each([
+    ['Option', { altKey: true }, 'my '],
+    ['Cmd', { metaKey: true }, ''],
+    ['Ctrl', { ctrlKey: true }, 'my lon'],
+    ['Shift', { shiftKey: true }, 'my lon'],
+  ])(
+    'swallows %s+Backspace on macOS and applies the chosen edit to the captured text',
+    (_name, init, rest) => {
+      typeahead = new PaletteTypeahead({ mac: true });
+      typeahead.start();
+      for (const key of 'my long') press(key);
+      expectCaptured(press('Backspace', init));
+      expect(typeahead.pending).toBe(rest);
+    }
+  );
+
+  it.each([
+    ['my long ', 'my '],
+    ['my long', 'my '],
+    ['a  b  ', 'a  '],
+    ['foo-bar', 'foo-'],
+    ['co@', 'co'],
+    ['user@host.x', 'user@host.'],
+    ['é😀 ab', 'é😀 '],
+    ['foo_bar', ''],
+    ['coder2', ''],
+    ['abc12', ''],
+    ['a!!', 'a'],
+    ['--', ''],
+    ['', ''],
+  ])('a word delete of %j leaves %j', (typed, rest) => {
+    for (const mac of [false, true]) {
+      const t = new PaletteTypeahead({ mac });
+      t.start();
+      try {
+        for (const key of Array.from(typed)) press(key);
+        expectCaptured(press('Backspace', mac ? { altKey: true } : { ctrlKey: true }));
+        expect(t.pending).toBe(rest);
+      } finally {
+        t.stop();
+        onTargetKeydown.mockClear();
+        onDocumentKeydown.mockClear();
+      }
+    }
+  });
+
+  it('a Backspace that is part of an IME composition passes through and leaves the captured text', () => {
+    typeahead.start();
+    press('a');
+    expectPassedThrough(press('Backspace', { isComposing: true }));
+    expect(typeahead.pending).toBe('a');
+  });
+
+  it.each([
+    ['plain', {}],
+    ['Ctrl', { ctrlKey: true }],
+    ['Alt', { altKey: true }],
+    ['Meta', { metaKey: true }],
+  ])('swallows %s Delete without changing the captured text', (_name, init) => {
+    typeahead.start();
+    press('a');
+    expectCaptured(press('Delete', init));
     expect(typeahead.pending).toBe('a');
   });
 
@@ -184,12 +267,12 @@ describe('PaletteTypeahead', () => {
       expect(typeahead.pending).toBe('@∫');
     });
 
-    it('lets Option with Ctrl or Meta, and a non-printable key with Option, through', () => {
+    it('lets Option with Ctrl or Meta, and a navigation key with Option, through', () => {
       typeahead.start();
       press('k', { altKey: true, ctrlKey: true });
       press('k', { altKey: true, metaKey: true });
       press('ArrowLeft', { altKey: true });
-      press('Backspace', { altKey: true });
+      press('Home', { altKey: true });
       expect(onTargetKeydown).toHaveBeenCalledTimes(4);
       expect(typeahead.pending).toBe('');
     });

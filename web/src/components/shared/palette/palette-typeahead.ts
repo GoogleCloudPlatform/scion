@@ -46,7 +46,6 @@ export const PALETTE_TYPEAHEAD_MAX_MS = 5000;
 const SWALLOWED_KEYS = new Set([
   'Enter',
   'Tab',
-  'Delete',
   'ArrowUp',
   'ArrowDown',
   'ArrowLeft',
@@ -123,27 +122,69 @@ export class PaletteTypeahead {
   /**
    * Window capture phase, so it runs before every document and element
    * listener, and before window capture listeners added after it. Escape,
-   * modifier chords (the palette's own shortcut, copy, reload…), lone
-   * modifiers, function keys and IME input pass through. A character typed
-   * with AltGr (reported as Ctrl+Alt on Windows) is text, and so is one
-   * typed with Option on macOS (see {@link PaletteTypeaheadOptions.mac}). Any
-   * key with Meta is a chord. Dead keys pass through, so an accented letter
+   * modifier chords other than Backspace and Delete (the palette's own
+   * shortcut, copy, reload…), lone modifiers, function keys and IME input,
+   * Backspace included, pass through. A character typed with AltGr
+   * (reported as Ctrl+Alt on Windows) is text, and so is one typed with
+   * Option on macOS (see {@link PaletteTypeaheadOptions.mac}). Any other key
+   * with Meta is a chord. Dead keys pass through, so an accented letter
    * composed from one reaches the old focus.
+   *
+   * Backspace and Delete are swallowed with any modifier: in the gap they
+   * correct what was just typed, and must not delete text in the old focus.
+   * Backspace edits the captured text close to how the same chord edits a
+   * text field on the platform (see {@link deleteBackward}); Delete has no
+   * text after the caret to remove.
    */
   private readonly handleKeydown = (e: KeyboardEvent): void => {
-    if (e.isComposing || e.metaKey) return;
+    if (e.isComposing) return;
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      if (e.key === 'Backspace') this.text = deleteBackward(this.text, e, this.mac);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (e.metaKey) return;
     const printable = Array.from(e.key).length === 1;
     const altGraph = printable && e.getModifierState('AltGraph');
     const optionText = printable && this.mac && e.altKey && !e.ctrlKey;
     if (!altGraph && !optionText && (e.ctrlKey || e.altKey)) return;
     if (printable) {
       this.text += e.key;
-    } else if (e.key === 'Backspace') {
-      this.text = Array.from(this.text).slice(0, -1).join('');
     } else if (!SWALLOWED_KEYS.has(e.key)) {
       return;
     }
     e.preventDefault();
     e.stopImmediatePropagation();
   };
+}
+
+/**
+ * The last word of `text` and the spaces after it, close to a browser's
+ * word delete: a run of letters, digits and underscores, or a run of other
+ * non-space characters. Like a browser, it stops at punctuation runs, so
+ * `foo-bar` loses `bar`, `co@` loses `@` and `a!!` loses `!!`. Unlike
+ * Chromium, letters or digits joined by `'`, `.` or `,` count as separate
+ * words, so `v1.2` loses only `2`.
+ */
+const LAST_WORD = /(?:[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s]+)?\s*$/u;
+
+/**
+ * The captured text after a Backspace, close to the platform's text field
+ * conventions. On macOS, Cmd deletes all of it (to the line start), Option
+ * deletes the last word, and Ctrl, like a plain or Shift Backspace, deletes
+ * one character. Elsewhere Ctrl deletes the last word, with or without
+ * Shift (Chromium on Linux deletes to the line start for Ctrl+Shift; the
+ * capture lasts only until the input has focus, so one word delete rule is
+ * kept), and Alt or Meta (with or without Ctrl) leave it unchanged.
+ */
+function deleteBackward(text: string, e: KeyboardEvent, mac: boolean): string {
+  if (mac) {
+    if (e.metaKey) return '';
+    if (e.altKey) return text.replace(LAST_WORD, '');
+  } else {
+    if (e.altKey || e.metaKey) return text;
+    if (e.ctrlKey) return text.replace(LAST_WORD, '');
+  }
+  return Array.from(text).slice(0, -1).join('');
 }
