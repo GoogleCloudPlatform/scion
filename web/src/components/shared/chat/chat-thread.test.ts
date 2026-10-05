@@ -870,8 +870,15 @@ describe('scion-chat-thread wake on send', () => {
     expect(internals.sendError).toBe('error');
   });
 
-  /** Wake send whose first attempt drops, then gets `answer` on retry. */
-  async function dropThenAnswer(answer: Response): Promise<{
+  /**
+   * Wake send whose first attempt ends without an outcome (`first`: a
+   * dropped connection by default, or a response such as send_in_progress
+   * or a gateway drop), then gets `answer` on retry.
+   */
+  async function dropThenAnswer(
+    answer: Response,
+    first: 'drop' | Response = 'drop'
+  ): Promise<{
     internals: Internals;
     onError: ReturnType<typeof vi.fn>;
     onSuccess: ReturnType<typeof vi.fn>;
@@ -880,7 +887,11 @@ describe('scion-chat-thread wake on send', () => {
     const internals = el as unknown as Internals;
     showConfirmMock.mockResolvedValueOnce(true);
     apiFetch.mockResolvedValueOnce(wakeOfferResponse());
-    apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    if (first === 'drop') {
+      apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    } else {
+      apiFetch.mockResolvedValueOnce(first);
+    }
     apiFetch.mockResolvedValueOnce(answer);
     const onError = vi.fn();
     const onSuccess = vi.fn();
@@ -896,6 +907,32 @@ describe('scion-chat-thread wake on send', () => {
     } as unknown as Response);
     expect(sendBodies()).toHaveLength(3);
     expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(internals.sendError).toContain('Could not confirm whether the message was delivered');
+  });
+
+  function maintenance(): Response {
+    return {
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ error: 'system_maintenance', message: 'Down for maintenance' }),
+    } as unknown as Response;
+  }
+
+  it('reports an unknown outcome for maintenance after send_in_progress', async () => {
+    const { internals, onError } = await dropThenAnswer(maintenance(), inProgressResponse());
+    expect(sendBodies()).toHaveLength(3);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(internals.sendError).toContain('Could not confirm whether the message was delivered');
+  });
+
+  it('reports an unknown outcome for maintenance after a gateway drop', async () => {
+    const { internals, onError } = await dropThenAnswer(maintenance(), {
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new SyntaxError('not json')),
+    } as unknown as Response);
+    expect(sendBodies()).toHaveLength(3);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(internals.sendError).toContain('Could not confirm whether the message was delivered');
   });
