@@ -118,6 +118,29 @@ func (a *Agent) DeletionActive(now time.Time) bool {
 	return a.DeletionLeaseAt != nil && a.DeletionLeaseAt.After(now)
 }
 
+// DeletionHoldsRow reports whether a delete holds the row against a start:
+// the row is finalizing (teardown has run, even if the lease expired: only a
+// retry or force moves it on), or deleting under a live lease. A deleting row
+// whose lease has passed or was never set does not hold it. This is the
+// in-flight part of the start gate (the hub's deleteBlocksStart) and the
+// rule SetAgentRunID refuses under (entadapter's runIDWritable is its SQL
+// form, plus deleted_at IS NULL), so both read one definition
+// (ptone/scion#2550 P1).
+func DeletionHoldsRow(state string, leaseAt *time.Time, now time.Time) bool {
+	switch state {
+	case DeletionStateFinalizing:
+		return true
+	case DeletionStateDeleting:
+		return leaseAt != nil && leaseAt.After(now)
+	}
+	return false
+}
+
+// DeletionHoldsRow is DeletionHoldsRow over the agent's deletion fields.
+func (a *Agent) DeletionHoldsRow(now time.Time) bool {
+	return a != nil && DeletionHoldsRow(a.DeletionState, a.DeletionLeaseAt, now)
+}
+
 // DeletionEffectiveCode returns the code a failed or lease-expired delete
 // reads as: the stored code if one is set, otherwise "abandoned" for a
 // lease-expired deleting/finalizing row (a dead engine). Empty for a row

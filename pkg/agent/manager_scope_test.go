@@ -73,7 +73,7 @@ func TestDelete_AmbiguousSlugFailsClosed(t *testing.T) {
 			}, nil
 		},
 		StopFunc:   func(ctx context.Context, id string) error { stopped = append(stopped, id); return nil },
-		DeleteFunc: func(ctx context.Context, id string) error { deleted = append(deleted, id); return nil },
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
 	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err == nil {
@@ -113,10 +113,10 @@ func TestDeleteTarget_UsesResolvedContainerWithoutRelisting(t *testing.T) {
 			return []api.AgentInfo{{Name: "dev", ContainerID: "cid-other-project"}}, nil
 		},
 		StopFunc:   func(ctx context.Context, id string) error { stopped = append(stopped, id); return nil },
-		DeleteFunc: func(ctx context.Context, id string) error { deleted = append(deleted, id); return nil },
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.DeleteTarget(context.Background(), "dev", "cid-b", false, "", false); err != nil {
+	if _, err := mgr.DeleteTarget(context.Background(), "dev", runtime.RunRef{ID: "cid-b"}, false, "", false); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
 	if listed {
@@ -131,10 +131,10 @@ func TestDeleteTarget_FileOnlyAgentSkipsRuntime(t *testing.T) {
 	called := false
 	mock := &runtime.MockRuntime{
 		StopFunc:   func(ctx context.Context, id string) error { called = true; return nil },
-		DeleteFunc: func(ctx context.Context, id string) error { called = true; return nil },
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { called = true; return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.DeleteTarget(context.Background(), "dev", "", false, "", false); err != nil {
+	if _, err := mgr.DeleteTarget(context.Background(), "dev", runtime.RunRef{}, false, "", false); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
 	if called {
@@ -171,7 +171,7 @@ func TestStopProjectContainers_RemovesMatchingContainers(t *testing.T) {
 			return out, nil
 		},
 		StopFunc:   func(ctx context.Context, id string) error { return nil },
-		DeleteFunc: func(ctx context.Context, id string) error { deleted = append(deleted, id); return nil },
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
 

@@ -1440,7 +1440,7 @@ func TestSubstrateDelete_FallsBackToDeleteActorUIDWhenGetActorFails(t *testing.T
 		}, nil
 	}
 
-	if err := rt.Delete(context.Background(), id); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: id}); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 

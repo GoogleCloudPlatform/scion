@@ -169,5 +169,5 @@ func (r *AppleContainerRuntime) DeleteResource(ctx context.Context, h api.Resour
 	if h.UID == "" {
 		return errNoUID(h)
 	}
-	return r.Delete(ctx, h.UID)
+	return r.Delete(ctx, RunRef{ID: h.UID})
 }
