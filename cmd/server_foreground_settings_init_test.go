@@ -226,6 +226,43 @@ func TestInitOperationalSettings_HubDefaultGCPIdentitySurvivesRestart(t *testing
 	}
 }
 
+// TestInitOperationalSettings_SeedEnvReachesHubOnSQLite guards closed issue
+// ptone/scion#1284: on a SQLite hub, SCION_SEED_* values must reach the live
+// hub through initOperationalSettings (seed -> syncHubSettings -> Refresh ->
+// ApplySnapshot). The postgres-only gate that once skipped this is gone; this
+// keeps it from coming back.
+func TestInitOperationalSettings_SeedEnvReachesHubOnSQLite(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed-admin@example.com,seed-admin2@example.com")
+	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
+
+	cfg := &config.GlobalConfig{}
+	cfg.Database.Driver = "sqlite3"
+	st := newTestStore(t)
+	srv, err := hub.New(hub.ServerConfig{}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+		t.Fatalf("initOperationalSettings: %v", err)
+	}
+
+	got := srv.AdminEmails()
+	want := []string{"seed-admin@example.com", "seed-admin2@example.com"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("AdminEmails() = %v, want %v", got, want)
+	}
+	if role := srv.DefaultUserRole(); role != "viewer" {
+		t.Errorf("DefaultUserRole() = %q, want viewer", role)
+	}
+}
+
 // TestColocatedBrokerRegisters pins the single condition shared by the early
 // ExpectEmbeddedBroker call and co-located registration in startRuntimeBroker.
 func TestColocatedBrokerRegisters(t *testing.T) {
