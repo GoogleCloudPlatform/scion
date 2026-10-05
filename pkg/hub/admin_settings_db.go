@@ -453,8 +453,8 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
 // bootstrap value when a managed DB row omits it. That is the case for
-// endpoints hub_name: ApplySnapshot skips an empty HubName, and a managed
-// endpoints row carries hub_name only after an admin changes it.
+// endpoints hub_name: a managed endpoints row carries hub_name only after
+// an admin changes it, and Snapshot falls back to the bootstrap value.
 func bootstrapAppliesWhenAbsent(section, key string) bool {
 	return section == "endpoints" && key == "hub_name"
 }

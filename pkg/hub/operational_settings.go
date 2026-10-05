@@ -390,8 +390,8 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	// a DB row omits it: a managed endpoints row carries hub_name only after
 	// an admin sets it, and clearing it returns to the bootstrap name. The
 	// snapshot holds the configured value only; "" means unset, and
-	// ApplySnapshot then uses this replica's own startup default
-	// (config.ResolveHubNameOrDefault). A replica's hostname must not appear
+	// ApplySnapshot then uses the name this replica resolved at startup
+	// (startupHubNameOrDefault). A replica's hostname must not appear
 	// here: GET returns this value and clients echo it back to any replica.
 	if snap.HubName == "" && o.bootstrapKoanf != nil {
 		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")

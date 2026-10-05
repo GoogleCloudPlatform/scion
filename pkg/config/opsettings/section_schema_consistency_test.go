@@ -330,3 +330,28 @@ func TestFederationSection_IntervalDescriptionCarried(t *testing.T) {
 		}
 	}
 }
+
+// withStringOnlyIntervals must not write into the shared root anyOf branch.
+func TestWithStringOnlyIntervals_LeavesRootUntouched(t *testing.T) {
+	raw, err := config.GetSettingsSchemaJSON("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	fed := schemaObject(getSchemaProperty(root, "server", "federation"))
+	_ = withStringOnlyIntervals(fed)
+	c := &schemaComparer{root: root}
+	node, _ := c.lookup("server.federation.refresh_interval")
+	branches, _ := node["anyOf"].([]interface{})
+	if len(branches) != 2 {
+		t.Fatalf("root refresh_interval anyOf changed: %v", node)
+	}
+	for _, b := range branches {
+		if bm, _ := b.(map[string]interface{}); bm["description"] != nil {
+			t.Errorf("root anyOf branch gained a description: %v", bm)
+		}
+	}
+}

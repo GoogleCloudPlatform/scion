@@ -1055,10 +1055,11 @@ type RemoteAgentInfo struct {
 // Server is the Hub API HTTP server.
 type Server struct {
 	config ServerConfig
-	// startupHubName is the hub name resolved at startup (ServerConfig.HubName
-	// from LoadGlobalConfig(serverConfigPath), so it honours --config, else
-	// the hostname). ApplySnapshot returns to it when the configured
-	// hub_name is unset. See startupHubNameOrDefault.
+	// startupHubName is the name resolved at startup (ServerConfig.HubName,
+	// from LoadGlobalConfig(serverConfigPath), else the hostname).
+	// ApplySnapshot returns to it when the configured hub_name is unset.
+	// See startupHubNameOrDefault. In file mode a name removed from
+	// settings.yaml therefore stays in use until restart (ptone/scion#3070).
 	startupHubName     string
 	store              store.Store
 	httpServer         *http.Server

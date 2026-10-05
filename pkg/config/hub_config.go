@@ -337,8 +337,8 @@ func (c *HubServerConfig) ResolveHubName() string {
 
 // ResolveHubNameOrDefault returns name when it is set, otherwise the
 // default hub name: os.Hostname(), or "unknown" if that fails. Startup
-// (ResolveHubName) and the operational settings snapshot both use it, so a
-// cleared hub_name resolves to the same name a restart would use.
+// (ResolveHubName) uses it, and the hub returns to that startup-resolved
+// name when a configured hub_name is cleared.
 func ResolveHubNameOrDefault(name string) string {
 	if name != "" {
 		return name

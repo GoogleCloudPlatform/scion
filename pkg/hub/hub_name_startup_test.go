@@ -21,13 +21,14 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // newStartupNamedServer builds a Server through New with hubName as the
-// startup-resolved ServerConfig.HubName, as server start does from
-// LoadGlobalConfig(serverConfigPath) (which honours --config).
+// startup-resolved ServerConfig.HubName, the name resolved at startup
+// (LoadGlobalConfig(serverConfigPath)).
 func newStartupNamedServer(t *testing.T, hubName string) *Server {
 	t.Helper()
 	s, err := newTestStore(":memory:")
@@ -100,4 +101,18 @@ func TestReloadSettings_FileHubName(t *testing.T) {
 	srv := newStartupNamedServer(t, "boot-hub")
 	srv.reloadSettings()
 	assert.Equal(t, "yaml-hub", srv.HubName())
+}
+
+// Round-5 finding 1: the GCP secret backend label follows the name
+// ApplySnapshot resolves: the configured hub_name, else the startup name.
+func TestApplySnapshot_GCPSecretLabelFollowsHubName(t *testing.T) {
+	srv := newStartupNamedServer(t, "cfg-hub")
+	backend := secret.NewGCPBackendWithClient(nil, newCopyForwardMockSMClient(), "proj", "hub-id")
+	srv.secretBackend = backend
+
+	ApplySnapshot(srv, Layer1Snapshot{HubName: "db-hub"})
+	assert.Equal(t, "db-hub", backend.HubName())
+
+	ApplySnapshot(srv, Layer1Snapshot{})
+	assert.Equal(t, "cfg-hub", backend.HubName(), "a clear returns the label to the startup name")
 }
