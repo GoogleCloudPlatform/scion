@@ -1369,6 +1369,30 @@ type chatSendOptions struct {
 	OfferWake bool
 }
 
+const (
+	// chatWakeResumeBudget bounds a chat v2 wake (resume dispatch plus the
+	// up-to-30s readiness wait in wakeAgentForDM).
+	chatWakeResumeBudget = 90 * time.Second
+	// chatWakeDeliveryBudget is the primary dispatch bound in
+	// sendAgentRouted (dispatchWithBrokerRetry's 30s timeout).
+	chatWakeDeliveryBudget = 30 * time.Second
+	// chatWakeWriteSlack covers persistence and the response write.
+	chatWakeWriteSlack = 30 * time.Second
+	// chatWakeWriteBudget is the write deadline a wake request gets: it
+	// ends only after the resume and delivery budgets have both run out.
+	chatWakeWriteBudget = chatWakeResumeBudget + chatWakeDeliveryBudget + chatWakeWriteSlack
+)
+
+// extendWriteDeadlineForWake moves the connection's write deadline past
+// the server-wide WriteTimeout to chatWakeWriteBudget from now. A
+// ResponseWriter without deadline support is logged and ignored.
+func extendWriteDeadlineForWake(w http.ResponseWriter) {
+	deadline := time.Now().Add(chatWakeWriteBudget)
+	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil {
+		slog.Debug("chat wake: SetWriteDeadline not applied", "error", err)
+	}
+}
+
 // suspendedPrimaryWakeable reports whether a chat v2 send may wake agent:
 // it is suspended, not deleted, not mid-reincarnation, runs on a runtime
 // with suspend/resume and has a broker, and the caller holds the lifecycle
@@ -1565,10 +1589,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		return ""
 	}
 
-	// Wake (suspended primary): after authorization and validation, so a
-	// denied or invalid send cannot resume an agent, and before
-	// persistence, so a refused or failed wake leaves no row behind and
-	// the client keeps the draft.
+	// Wake admission (suspended primary): after authorization and
+	// validation, so a denied or invalid send can neither be offered a
+	// wake nor resume an agent. The wake itself runs later, right before
+	// persistence (see wakePrimary below).
+	wakePrimary := false
 	if !primaryReincarnating && state.Phase(primaryAgent.Phase) == state.PhaseSuspended &&
 		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake) {
 		switch {
@@ -1581,14 +1606,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				})
 			return ""
 		case opts.Wake:
-			// wakeAgentForDM reports managed runtimes, a missing broker,
-			// the start gate and readiness failures as typed errors.
-			if _, wakeErr := s.wakeAgentForDM(ctx, primaryAgent); wakeErr != nil {
-				WriteAgentDMError(w, wakeErr)
-				return ""
-			}
-			// wakeAgentForDM moved the agent to running in place.
-			primaryUnreachable, primaryUnreachableReason = isAgentUnreachable(primaryAgent)
+			wakePrimary = true
 		case s.suspendedPrimaryWakeable(ctx, user, primaryAgent):
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 				fmt.Sprintf("Agent %q is suspended", primaryAgent.Slug), map[string]interface{}{
@@ -1680,6 +1698,33 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			}
 		}
 		chatV2ConvResult = convResult
+	}
+	// Wake: after conversation resolution, so a resolution failure cannot
+	// leave the agent awake with no message, and before persistence, so a
+	// failed wake leaves no row behind and the client keeps the draft.
+	if wakePrimary {
+		// A wake request outlives the server-wide WriteTimeout: give it
+		// one bounded budget covering the resume, readiness and delivery,
+		// so the client always receives the outcome instead of a dropped
+		// connection after the message was in fact delivered.
+		extendWriteDeadlineForWake(w)
+		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
+		// wakeAgentForDM reports managed runtimes, a missing broker, the
+		// start gate and readiness failures as typed errors.
+		_, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
+		cancelWake()
+		if wakeErr != nil {
+			WriteAgentDMError(w, wakeErr)
+			return ""
+		}
+		// wakeAgentForDM moved the agent to running in place: the row is
+		// no longer born failed.
+		primaryUnreachable, _ = isAgentUnreachable(primaryAgent)
+		if !primaryUnreachable {
+			storeMsg.DispatchState = store.MessageDispatchDispatched
+			storeMsg.DispatchFailureReason = nil
+			dispatchFailureCode = ""
+		}
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)

@@ -20,10 +20,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -241,4 +243,108 @@ func TestChatV2Wake_Wake_Running_NoResume(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Len(t, f.disp.getMessageCalls(), 1)
+}
+
+// offer_wake from a caller without message permission is refused by the
+// message authorization (403 message_denied) before any wake offer.
+func TestChatV2Wake_OfferWake_NoMessagePermission_Denied(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	ctx := t.Context()
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
+	u := &store.User{
+		ID: tid("chat-wake-nomsg"), Email: "chat-wake-nomsg@example.com",
+		DisplayName: "No Message", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, f.s.CreateUser(ctx, u))
+	msgAuthzAddProjectMember(t, f.s, u.ID, f.proj.ID, f.proj.Slug, store.GroupMemberRoleMember)
+
+	rec := doRequestAsUser(t, f.srv, u, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "offer_wake": true})
+	require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+	resp := decodeWakeResp(t, rec)
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, ErrCodeMessageDenied, errObj["code"])
+	assert.NotContains(t, rec.Body.String(), "canWake")
+	assert.Empty(t, f.disp.getStartCalls())
+	assert.Equal(t, 0, f.countThreadMessages(t))
+}
+
+// deadlineRecorder is a ResponseRecorder that supports SetWriteDeadline,
+// as a real connection does, and records every deadline set.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deadlines = append(r.deadlines, t)
+	return nil
+}
+
+// ctxDeadlineDispatcher records the deadline of the resume dispatch ctx.
+type ctxDeadlineDispatcher struct {
+	*wakeTrackingDispatcher
+	mu            sync.Mutex
+	startDeadline time.Time
+	startHasDL    bool
+}
+
+func (d *ctxDeadlineDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, prompt string, cont bool) error {
+	d.mu.Lock()
+	d.startDeadline, d.startHasDL = ctx.Deadline()
+	d.mu.Unlock()
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
+}
+
+// A wake request gets a write deadline past the server-wide WriteTimeout
+// that outlasts the bounded resume and delivery, and the resume itself is
+// bounded, so the client always receives the outcome.
+func TestChatV2Wake_Wake_ExtendsWriteDeadlineAndBoundsResume(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	disp := &ctxDeadlineDispatcher{wakeTrackingDispatcher: f.disp}
+	f.srv.SetDispatcher(disp)
+	f.markReadySoon()
+
+	body, err := json.Marshal(map[string]any{"content": "hello", "wake": true})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, f.path(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	start := time.Now()
+	f.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	// The extended deadline reached the connection through every
+	// middleware wrapper, and ends after resume plus delivery.
+	rec.mu.Lock()
+	deadlines := append([]time.Time(nil), rec.deadlines...)
+	rec.mu.Unlock()
+	require.Len(t, deadlines, 1, "the wake path must set the write deadline once")
+	assert.False(t, deadlines[0].Before(start.Add(chatWakeWriteBudget)))
+	assert.Greater(t, chatWakeWriteBudget, chatWakeResumeBudget+chatWakeDeliveryBudget)
+	assert.Greater(t, chatWakeWriteBudget, 60*time.Second, "must outlast the default WriteTimeout")
+
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	require.True(t, disp.startHasDL, "the resume dispatch must be bounded")
+	assert.False(t, disp.startDeadline.After(time.Now().Add(chatWakeResumeBudget)))
+}
+
+// A plain send never touches the write deadline.
+func TestChatV2Wake_PlainSend_LeavesWriteDeadline(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	body, err := json.Marshal(map[string]any{"content": "hello", "offer_wake": true})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, f.path(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	f.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+	assert.Empty(t, rec.deadlines)
 }
