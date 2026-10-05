@@ -14,7 +14,7 @@
 
 /**
  * Chromium, real xterm: the terminal workspace's "Jump to agent" palette —
- * the header button opens it with the chat palette's type scale, its
+ * the rail footer button opens it with the chat palette's type scale, its
  * options spanning the full width of the results; in a multi-pane grid a
  * pick adds a pane, or replaces the focused pane when the grid is full; in
  * a single-pane view (the single preset, or any preset on
@@ -146,7 +146,7 @@ function fixture(id: string, name: string): AgentFixture {
 }
 
 function paletteButton(page: Page): Locator {
-  return page.locator('#terminal-workspace scion-header .palette-button');
+  return page.locator('#terminal-workspace .terminal-jump-btn');
 }
 
 function paletteDialog(page: Page): Locator {
@@ -215,7 +215,7 @@ async function pick(page: Page, name: string): Promise<void> {
   await expect(paletteDialog(page)).toBeHidden();
 }
 
-test('the header button opens the palette, labeled "Jump to agent"', async ({ page }) => {
+test('the Jump to agent button opens the palette, labeled "Jump to agent"', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -230,7 +230,7 @@ test('the header button opens the palette, labeled "Jump to agent"', async ({ pa
   );
 });
 
-test('a dismiss refocuses the header button that opened the palette', async ({ page }) => {
+test('a dismiss refocuses the Jump to agent button that opened the palette', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -245,7 +245,7 @@ test('a dismiss refocuses the header button that opened the palette', async ({ p
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -539,7 +539,7 @@ test('a reopen during the close animation shows a focused palette, and keeps the
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -589,7 +589,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
