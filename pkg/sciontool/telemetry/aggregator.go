@@ -65,6 +65,12 @@ type Aggregator struct {
 	tokensCached    int64
 	tokensReasoning int64
 	toolCalls       map[string]*ToolCallStats
+
+	// open is true between the start of a session (explicit or implicit)
+	// and its Finalize. implicit marks a session opened by ObserveSession
+	// because its session-start event was not seen.
+	open     bool
+	implicit bool
 }
 
 // NewAggregator creates a new Aggregator pre-populated with agent and project
@@ -84,10 +90,48 @@ func NewAggregator() *Aggregator {
 
 // StartSession initialises the aggregator for a new session. It resets all
 // counters so the same aggregator can be reused across sessions.
+//
+// If a session was already opened implicitly by ObserveSession (the
+// session-start event arrived late) and the IDs do not conflict, that
+// session is adopted as-is so the events recorded so far are kept and not
+// counted twice.
 func (a *Aggregator) StartSession(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.open && a.implicit && (a.sessionID == "" || sessionID == "" || a.sessionID == sessionID) {
+		if a.sessionID == "" {
+			a.sessionID = sessionID
+		}
+		a.implicit = false
+		return
+	}
+
+	a.resetLocked(sessionID)
+}
+
+// ObserveSession records the session ID carried by any hook event other
+// than session-start. If no session is open (the session-start event was
+// missed) it opens one implicitly, starting now. If the open session has no
+// ID yet, the observed ID is adopted. An ID that differs from the open
+// session's ID is ignored.
+func (a *Aggregator) ObserveSession(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.open {
+		a.resetLocked(sessionID)
+		a.implicit = true
+		return
+	}
+	if a.sessionID == "" {
+		a.sessionID = sessionID
+	}
+}
+
+func (a *Aggregator) resetLocked(sessionID string) {
+	a.open = true
+	a.implicit = false
 	a.sessionID = sessionID
 	a.startedAt = time.Now()
 	a.turnCount = 0
@@ -162,6 +206,14 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 		a.tokensReasoning = reasoningTokens
 	}
 
+	endedAt := time.Now()
+	startedAt := a.startedAt
+	if startedAt.IsZero() {
+		startedAt = endedAt
+	}
+	a.open = false
+	a.implicit = false
+
 	toolCalls := make(map[string]ToolCallStats, len(a.toolCalls))
 	for name, stats := range a.toolCalls {
 		toolCalls[name] = *stats
@@ -171,8 +223,8 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 		SessionID:       a.sessionID,
 		AgentID:         a.agentID,
 		ProjectID:       a.projectID,
-		StartedAt:       a.startedAt,
-		EndedAt:         time.Now(),
+		StartedAt:       startedAt,
+		EndedAt:         endedAt,
 		Status:          status,
 		Model:           a.model,
 		TurnCount:       a.turnCount,

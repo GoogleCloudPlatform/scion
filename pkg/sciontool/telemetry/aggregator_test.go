@@ -301,3 +301,144 @@ func TestAggregator_Concurrent(t *testing.T) {
 		t.Errorf("expected %d reasoning tokens, got %d", expectedReasoning, summary.TokensReasoning)
 	}
 }
+
+func newTestAggregator() *Aggregator {
+	return &Aggregator{
+		agentID:   "agent-1",
+		projectID: "project-1",
+		toolCalls: make(map[string]*ToolCallStats),
+	}
+}
+
+// A missed session-start must not lose the session: the ID carried by later
+// events (including session-end) is adopted and the start time is set.
+func TestAggregator_MissedSessionStart(t *testing.T) {
+	a := newTestAggregator()
+
+	a.ObserveSession("session-late")
+	a.RecordToolEnd("read_file", "")
+	a.ObserveSession("session-late")
+	a.RecordModelEnd(100, 20, 0, 0)
+	a.ObserveSession("session-late")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "session-late" {
+		t.Errorf("SessionID = %q, want session-late", summary.SessionID)
+	}
+	if summary.StartedAt.IsZero() {
+		t.Error("StartedAt is zero, want the time of the first observed event")
+	}
+	if summary.EndedAt.Before(summary.StartedAt) {
+		t.Errorf("EndedAt %v before StartedAt %v", summary.EndedAt, summary.StartedAt)
+	}
+	if summary.APICallCount != 1 || summary.TokensInput != 100 {
+		t.Errorf("api calls=%d input=%d, want 1/100", summary.APICallCount, summary.TokensInput)
+	}
+	if summary.ToolCalls["read_file"].Calls != 1 {
+		t.Errorf("read_file calls = %d, want 1", summary.ToolCalls["read_file"].Calls)
+	}
+}
+
+// Only the session-end event carries the ID: it must still be used.
+func TestAggregator_SessionIDOnlyOnSessionEnd(t *testing.T) {
+	a := newTestAggregator()
+
+	a.ObserveSession("")
+	a.RecordModelEnd(10, 5, 0, 0)
+	a.ObserveSession("session-end-only")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "session-end-only" {
+		t.Errorf("SessionID = %q, want session-end-only", summary.SessionID)
+	}
+	if summary.TokensInput != 10 {
+		t.Errorf("TokensInput = %d, want 10", summary.TokensInput)
+	}
+}
+
+// A late session-start for the lazily opened session keeps the counters
+// gathered so far and does not count them twice.
+func TestAggregator_LateSessionStartAfterLazyOpen(t *testing.T) {
+	a := newTestAggregator()
+
+	a.ObserveSession("s1")
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.RecordTurn()
+	started := a.startedAt
+
+	a.StartSession("s1")
+	a.ObserveSession("s1")
+	a.RecordModelEnd(50, 5, 0, 0)
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "s1" {
+		t.Errorf("SessionID = %q, want s1", summary.SessionID)
+	}
+	if summary.APICallCount != 2 || summary.TokensInput != 150 || summary.TokensOutput != 15 {
+		t.Errorf("api=%d in=%d out=%d, want 2/150/15", summary.APICallCount, summary.TokensInput, summary.TokensOutput)
+	}
+	if summary.TurnCount != 1 {
+		t.Errorf("TurnCount = %d, want 1", summary.TurnCount)
+	}
+	if !summary.StartedAt.Equal(started) {
+		t.Errorf("StartedAt = %v, want lazy start %v", summary.StartedAt, started)
+	}
+}
+
+// A session-start with a different ID begins a new session as before.
+func TestAggregator_SessionStartWithNewIDResets(t *testing.T) {
+	a := newTestAggregator()
+
+	a.ObserveSession("old")
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.StartSession("new")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "new" {
+		t.Errorf("SessionID = %q, want new", summary.SessionID)
+	}
+	if summary.APICallCount != 0 || summary.TokensInput != 0 {
+		t.Errorf("api=%d in=%d, want counters reset", summary.APICallCount, summary.TokensInput)
+	}
+}
+
+// After a session ends, events from a following session whose start was
+// missed open a fresh session instead of carrying old counters over.
+func TestAggregator_LazyOpenAfterFinalizeResets(t *testing.T) {
+	a := newTestAggregator()
+
+	a.StartSession("first")
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.Finalize(0, 0, 0, 0, "")
+
+	a.ObserveSession("second")
+	a.RecordModelEnd(7, 1, 0, 0)
+	a.ObserveSession("second")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "second" {
+		t.Errorf("SessionID = %q, want second", summary.SessionID)
+	}
+	if summary.APICallCount != 1 || summary.TokensInput != 7 {
+		t.Errorf("api=%d in=%d, want 1/7", summary.APICallCount, summary.TokensInput)
+	}
+}
+
+// Observing events inside a normally started session changes nothing.
+func TestAggregator_ObserveWithinStartedSession(t *testing.T) {
+	a := newTestAggregator()
+
+	a.StartSession("s1")
+	started := a.startedAt
+	a.ObserveSession("s1")
+	a.RecordModelEnd(1, 1, 0, 0)
+	a.ObserveSession("other")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "s1" || !summary.StartedAt.Equal(started) {
+		t.Errorf("got id=%q started=%v, want s1/%v", summary.SessionID, summary.StartedAt, started)
+	}
+	if summary.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1", summary.APICallCount)
+	}
+}
