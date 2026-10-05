@@ -742,13 +742,18 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 		return
 	}
 
+	update, ok := aggregatorUpdates[event.Name]
+	if !ok {
+		return
+	}
+
 	var summary telemetry.SessionSummary
 	var ended bool
 	apply := func() bool {
-		summary, ended = h.applyAggregatorEvent(event)
+		summary, ended = update(h.aggregator, event)
 		return ended
 	}
-	if h.SessionState != nil && isAggregatorEvent(event.Name) {
+	if h.SessionState != nil {
 		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
 			log.Error("Session metrics state: %v", err)
 			if ended && errors.Is(err, ErrSessionStateUnavailable) {
@@ -767,59 +772,60 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	}
 }
 
-// isAggregatorEvent reports whether applyAggregatorEvent changes the
-// aggregator for an event with this name.
-func isAggregatorEvent(name string) bool {
-	switch name {
-	case hooks.EventSessionStart, hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
-		return true
-	default:
-		return false
+// aggregatorUpdate applies one event to the aggregator. For session-end it
+// returns the finalized summary and true.
+type aggregatorUpdate func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool)
+
+// observed wraps an update for an event that feeds the summary. Such events
+// also carry the session ID; observing it first means a missed session-start
+// does not leave the summary without an ID or start time (the session-end
+// event itself usually has the ID). Session-start, lifecycle and other
+// events are not observed, so they cannot open a session ahead of the real
+// session-start.
+func observed(update aggregatorUpdate) aggregatorUpdate {
+	return func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.ObserveSession(event.Data.SessionID)
+		return update(a, event)
 	}
 }
 
-// applyAggregatorEvent applies one event to the aggregator. On session-end
-// it returns the finalized summary and true.
-func (h *TelemetryHandler) applyAggregatorEvent(event *hooks.Event) (telemetry.SessionSummary, bool) {
-	// Events that feed the summary also carry the session ID. Observing it
-	// means a missed session-start does not leave the summary without an
-	// ID or start time (the session-end event itself usually has the ID).
-	// Lifecycle and other events are not observed, so they cannot open a
-	// session ahead of the real session-start.
-	switch event.Name {
-	case hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
-		h.aggregator.ObserveSession(event.Data.SessionID)
-	}
+// noSummary is the result of an update that does not end the session.
+func noSummary() (telemetry.SessionSummary, bool) { return telemetry.SessionSummary{}, false }
 
-	switch event.Name {
-	case hooks.EventSessionStart:
-		h.aggregator.StartSession(event.Data.SessionID)
-
-	case hooks.EventToolEnd:
-		h.aggregator.RecordToolEnd(event.Data.ToolName, event.Data.Error)
-
-	case hooks.EventModelEnd:
-		h.aggregator.RecordModelEnd(
+// aggregatorUpdates is the single list of events that change the
+// aggregator, and how each does. updateAggregator persists state only for
+// events in it.
+var aggregatorUpdates = map[string]aggregatorUpdate{
+	hooks.EventSessionStart: func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.StartSession(event.Data.SessionID)
+		return noSummary()
+	},
+	hooks.EventToolEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordToolEnd(event.Data.ToolName, event.Data.Error)
+		return noSummary()
+	}),
+	hooks.EventModelEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordModelEnd(
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
 			event.Data.ReasoningTokens,
 		)
-
-	case hooks.EventAgentEnd:
-		h.aggregator.RecordTurn()
-
-	case hooks.EventSessionEnd:
-		summary := h.aggregator.Finalize(
+		return noSummary()
+	}),
+	hooks.EventAgentEnd: observed(func(a *telemetry.Aggregator, _ *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordTurn()
+		return noSummary()
+	}),
+	hooks.EventSessionEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		return a.Finalize(
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
 			event.Data.ReasoningTokens,
 			event.Data.Error,
-		)
-		return summary, true
-	}
-	return telemetry.SessionSummary{}, false
+		), true
+	}),
 }
 
 func isMetricRelevantEvent(name string) bool {
