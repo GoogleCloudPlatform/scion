@@ -87,6 +87,13 @@ func TestBuildPod_NoNFSSharedDirs_NoSupplementalGroups(t *testing.T) {
 	pod, err = rt.buildPod("default", sharedDirGroupsRunConfig())
 	require.NoError(t, err)
 	assert.Nil(t, pod.Spec.SecurityContext.SupplementalGroups)
+
+	// nfs realization with groups but no shared dirs mounted.
+	cfg = sharedDirGroupsRunConfig(4242)
+	cfg.SharedDirs = nil
+	pod, err = rt.buildPod("default", cfg)
+	require.NoError(t, err)
+	assert.Nil(t, pod.Spec.SecurityContext.SupplementalGroups)
 }
 
 func TestSharedDirSupplementalGroups(t *testing.T) {
@@ -97,8 +104,9 @@ func TestSharedDirSupplementalGroups(t *testing.T) {
 	assert.Nil(t, sharedDirSupplementalGroups(cfg, 1000))
 }
 
-// The sciontool env var is for the local-container privilege drop only:
-// it must never reach the Kubernetes pod env from the broker.
+// The broker never adds the sciontool env var to the pod env. It would have
+// no effect there anyway: pods run non-root, so sciontool does no privilege
+// drop and the process keeps the pod's supplementalGroups.
 func TestBuildPod_SharedDirLeafGroups_NoSupplementalGIDsEnv(t *testing.T) {
 	pod, err := newNFSTestK8sRuntime().buildPod("default", sharedDirGroupsRunConfig(4242))
 	require.NoError(t, err)
@@ -158,16 +166,22 @@ func TestDockerRun_SharedDirLeafGroups_GroupAdd(t *testing.T) {
 
 func TestDockerRun_NoNFSSharedDirs_NoGroupAdd(t *testing.T) {
 	rt := &DockerRuntime{Command: writeEchoCommand(t)}
-	cfg := sharedDirGroupsRunConfig(4242)
-	cfg.SharedDirStorage = nil
-	cfg.Env = []string{SupplementalGIDsEnvVar + "=27"}
+	noStorage := sharedDirGroupsRunConfig(4242)
+	noStorage.SharedDirStorage = nil
+	noStorage.Env = []string{SupplementalGIDsEnvVar + "=27"}
+	noDirs := sharedDirGroupsRunConfig(4242) // groups set, but no shared dirs mounted
+	noDirs.SharedDirs = nil
 
-	out, err := rt.Run(context.Background(), cfg)
-	require.NoError(t, err)
-	args := argsBeforeImage(t, out, cfg.Image)
-	assert.NotContains(t, args, "--group-add")
-	n, _ := countEnv(args, SupplementalGIDsEnvVar)
-	assert.Zero(t, n, "a user value is dropped even when the broker sets none")
+	for name, cfg := range map[string]RunConfig{"no nfs storage": noStorage, "no shared dirs": noDirs} {
+		t.Run(name, func(t *testing.T) {
+			out, err := rt.Run(context.Background(), cfg)
+			require.NoError(t, err)
+			args := argsBeforeImage(t, out, cfg.Image)
+			assert.NotContains(t, args, "--group-add")
+			n, _ := countEnv(args, SupplementalGIDsEnvVar)
+			assert.Zero(t, n, "a user value is dropped even when the broker sets none")
+		})
+	}
 }
 
 func TestPodmanRun_SharedDirLeafGroups(t *testing.T) {
@@ -204,4 +218,21 @@ func TestDockerRun_SharedDirLeafGroups_SecretValueReplaced(t *testing.T) {
 	n, v := countEnv(argsBeforeImage(t, out, cfg.Image), SupplementalGIDsEnvVar)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, "4242", v)
+}
+
+// Apple's container CLI has no --group-add: warn and start unchanged.
+func TestAppleRun_SharedDirLeafGroups_Skipped(t *testing.T) {
+	logs := &bytes.Buffer{}
+	prev := runtimeLog
+	runtimeLog = slog.New(slog.NewTextHandler(logs, nil))
+	t.Cleanup(func() { runtimeLog = prev })
+
+	out, err := (&AppleContainerRuntime{Command: writeEchoCommand(t)}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
+	require.NoError(t, err)
+	args := argsBeforeImage(t, out, "test-image")
+	assert.NotContains(t, args, "--group-add")
+	n, _ := countEnv(args, SupplementalGIDsEnvVar)
+	assert.Zero(t, n)
+	assert.Contains(t, logs.String(), "shared dir groups are not supported")
+	assert.Contains(t, logs.String(), "runtime=container")
 }

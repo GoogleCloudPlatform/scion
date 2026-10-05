@@ -380,8 +380,8 @@ Different kinds of agents can write to the same NFS shared directory (leaf): Doc
 - **The export must support POSIX ACLs.** The leaf's default ACL makes new files group-writable whatever the writer's umask. Without ACL support, files follow each writer's umask (usually `022`) and other writers cannot modify them. Scion logs a warning once when it cannot set the ACL. ACL-capable storage is required for shared directories with mixed writers.
 - **Every writer must be in the leaf's group.** At each agent start, the broker reads the group of every NFS shared directory the agent mounts, from the leaf itself, and adds it to the agent:
   - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated.
-  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user; older images drop them and keep the previous behaviour.
-  - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group.
+  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and `/exec` commands); older images drop them and keep the previous behaviour.
+  - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group. Docker with `userns-remap` or a rootless `dockerd` also gets no effect from the group, because the leaf gid is not mapped into the container's user namespace; the broker does not detect this case.
 
   For safety, the broker skips a group (with a warning) when it is below `1000`, when it is an overflow id (`65534` or `4294967294`, which NFSv4 id mapping reports for unmapped groups), or when `nfs.gid` is set and does not match. If the group cannot be read, the agent starts without it. Agents without an NFS shared directory are unchanged. On an `all_squash` export the server maps every client to one identity, so the added group has no effect there.
 
