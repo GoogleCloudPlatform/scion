@@ -357,7 +357,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, savedProfile)
+	}, savedProfile, slog.LevelWarn)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err

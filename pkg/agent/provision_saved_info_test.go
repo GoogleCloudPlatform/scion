@@ -34,6 +34,7 @@ func TestSavedAgentInfoGetters(t *testing.T) {
 	}
 	data, err := json.Marshal(api.AgentInfo{
 		Profile:       "balanced",
+		Runtime:       "docker",
 		HarnessConfig: "claude",
 		Phase:         "stopped",
 	})
@@ -50,6 +51,7 @@ func TestSavedAgentInfoGetters(t *testing.T) {
 		want string
 	}{
 		{name: "profile", get: GetSavedProfile, want: "balanced"},
+		{name: "runtime", get: GetSavedRuntime, want: "docker"},
 		{name: "harness config", get: GetSavedHarnessConfig, want: "claude"},
 		{name: "phase", get: GetSavedPhase, want: "stopped"},
 	}
@@ -68,6 +70,7 @@ func TestSavedAgentInfoGettersReturnEmptyForUnreadableMetadata(t *testing.T) {
 
 	getters := []func(string, string) string{
 		GetSavedProfile,
+		GetSavedRuntime,
 		GetSavedHarnessConfig,
 		GetSavedPhase,
 	}

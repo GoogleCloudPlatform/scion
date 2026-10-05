@@ -131,8 +131,8 @@ func assertSavedProfileUnresolved(t *testing.T, tc unresolvedCase, w *httptest.R
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
-	if got := w.Header().Get("Retry-After"); got != "30" {
-		t.Errorf("Retry-After = %q, want 30", got)
+	if got := w.Header().Get("Retry-After"); got != recordedRuntimeRetryAfterSeconds {
+		t.Errorf("Retry-After = %q, want %q", got, recordedRuntimeRetryAfterSeconds)
 	}
 	body := w.Body.String()
 	var resp ErrorResponse
@@ -352,6 +352,9 @@ func TestStartAgent_UnresolvableSavedProfileRecordedRuntime(t *testing.T) {
 					t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
 				}
 				out := logs.String()
+				if n := strings.Count(out, fallbackLogMsg); n != 1 {
+					t.Errorf("fallback logged %d times at Warn, want 1:\n%s", n, out)
+				}
 				if !strings.Contains(out, "agent last ran on the broker default runtime") ||
 					!strings.Contains(out, "runtime=docker") || !strings.Contains(out, "profile=vanished") {
 					t.Errorf("default-runtime fallback not logged:\n%s", out)
@@ -368,6 +371,7 @@ func TestStartAgent_UnresolvableSavedProfileRecordedRuntime(t *testing.T) {
 // uses the same resolution, so a recorded default runtime restarts there.
 func TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime(t *testing.T) {
 	f := newLifecycleFixture(t)
+	logs := captureLifecycleLog(f.srv)
 	const name = "restart-recorded-default"
 	writeSavedAgentInfo(t, f.projectPath, name, "vanished", "docker")
 	f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
@@ -376,11 +380,76 @@ func TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime(t *testing.
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
+	if n := strings.Count(logs.String(), fallbackLogMsg); n != 1 {
+		t.Errorf("fallback logged %d times at Warn, want 1:\n%s", n, logs.String())
+	}
 	if f.defaultMgr.StartCalls() != 1 {
 		t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
 	}
 	if runs, _ := f.k8sRun(); runs != 0 {
 		t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+	}
+}
+
+// fallbackLogMsg is the recorded-runtime fallback's log message.
+const fallbackLogMsg = "agent last ran on the broker default runtime, using it"
+
+// TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes: agent-info.json
+// records only the runtime type. On a broker whose default runtime's
+// identity is more than its type (Kubernetes context/namespace) or that
+// has per-profile instances, a matching recorded type does not show the
+// agent ran on that instance, so an unresolvable saved profile still gets
+// the 503 instead of starting on the default.
+func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
+	cases := []struct {
+		name     string
+		rt       runtime.Runtime
+		recorded string
+	}{
+		{
+			name:     "kubernetes default",
+			rt:       &runtime.KubernetesRuntime{DefaultNamespace: "ns-a"},
+			recorded: "kubernetes",
+		},
+		{
+			name: "per-profile-instance default",
+			rt: &perProfileRuntime{
+				MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "docker" }},
+				perProfile:  true,
+			},
+			recorded: "docker",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearSCIONEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			projectPath := newDockerProject(t)
+			const name = "instance-runtime-agent"
+			writeSavedAgentInfo(t, projectPath, name, "vanished", c.recorded)
+
+			cfg := DefaultServerConfig()
+			cfg.BrokerID = "test-broker-id"
+			cfg.BrokerName = "test-host"
+			cfg.StateDir = t.TempDir()
+			cfg.ContainerHubEndpoint = lifecycleBridge
+			mgr := &filteringMockManager{}
+			srv := New(cfg, mgr, c.rt)
+			logs := captureLifecycleLog(srv)
+
+			w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/start", map[string]any{
+				"projectPath": projectPath,
+				"hubEndpoint": lifecycleHubEndpoint,
+			})
+			tc := unresolvedCase{wantMsg: `profile \"vanished\" not found`, wantLog: "not found"}
+			assertSavedProfileUnresolved(t, tc, w, logs, projectPath)
+			if mgr.StartCalls() != 0 {
+				t.Errorf("default runtime Start calls = %d, want 0", mgr.StartCalls())
+			}
+			if strings.Contains(logs.String(), fallbackLogMsg) {
+				t.Errorf("fallback taken:\n%s", logs.String())
+			}
+		})
 	}
 }
 

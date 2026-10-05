@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -2244,8 +2245,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	// A saved profile names the runtime this existing agent was created
 	// on; if settings cannot resolve it, fail rather than start the agent
-	// on the default runtime (ptone/scion#2709).
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "")
+	// on the default runtime (ptone/scion#2709). buildStartContext already
+	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		writeSavedProfileUnresolved(w, err)
@@ -2702,7 +2704,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// already stopped. See the identical re-check and comment in startAgent.
 	// As in startAgent, an unresolvable saved profile fails before the
 	// stop below instead of falling back to the default runtime.
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "")
+	// The profile is read by id but the recorded-runtime fallback reads
+	// agent-info.json by opts.Name (the container's name). If they differ
+	// the fallback cannot fire and the 503 is returned, which fails safe.
+	// buildStartContext already logged any fallback at Warn; Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
 	if err != nil {
 		writeSavedProfileUnresolved(w, err)
 		return
@@ -4619,7 +4625,7 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
-	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, false)
+	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, false, slog.LevelWarn)
 	return mgr, runtimeType
 }
 
@@ -4645,14 +4651,15 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // the settings do not define returns errSavedProfileUnresolved instead of
 // the broker's default manager, unless the agent's recorded runtime
 // (AgentInfo.Runtime) is the default runtime, in which case the default is
-// used (savedProfileUnresolved). Without strict the error is always nil
+// used (savedProfileUnresolved) and logged at fallbackLevel. Without strict
+// the error is always nil
 // and those cases fall back to the default, as for a fresh start.
 //
 // The returned error is sent to the client, so it names only the agent,
 // the profile and a fixed cause; it does not include file paths or
 // settings content. The full detail is logged here at Warn, once per
 // failure.
-func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool) (agent.Manager, string, error) {
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool, fallbackLevel slog.Level) (agent.Manager, string, error) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			// A ForceRuntime naming the default runtime returns s.manager
@@ -4675,7 +4682,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
 	vs, _, err := s.loadRuntimeSettings(projectDir)
 	if err != nil && strict {
-		return s.savedProfileUnresolved(opts, projectDir, err,
+		return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
 			fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
 				errSavedProfileUnresolved, opts.Name, opts.Profile))
 	}
@@ -4689,7 +4696,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 		// project with no settings file reaches ResolveRuntime below and
 		// fails there with "profile not found" instead.
 		if strict {
-			return s.savedProfileUnresolved(opts, projectDir, errors.New("no project settings found"),
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, errors.New("no project settings found"),
 				fmt.Errorf("%w: agent %q profile %q: no project settings found",
 					errSavedProfileUnresolved, opts.Name, opts.Profile))
 		}
@@ -4712,7 +4719,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 		if strict {
 			// ResolveRuntime's errors name only the profile and runtime
 			// ("profile %q not found", "runtime %q not found for profile %q").
-			return s.savedProfileUnresolved(opts, projectDir, err,
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
 				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
 		}
 		// Profile or its runtime not found in settings; use default
@@ -4813,11 +4820,19 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 // savedProfileUnresolved handles a strict resolution failure. If the
 // agent's agent-info.json records that it last ran on the broker's default
 // runtime, that runtime is still the right one, so it returns the default
-// manager and logs the fallback. Otherwise it logs cause and returns
-// clientErr, which handlers write as the 503.
-func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, cause, clientErr error) (agent.Manager, string, error) {
-	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" && recorded == s.runtime.Name() {
-		s.agentLifecycleLog.Warn("saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
+// manager and logs the fallback at level. Otherwise it logs cause and
+// returns clientErr, which handlers write as the 503.
+//
+// agent-info.json records only the runtime type, so the fallback applies
+// only where a type match is an identity match: not for Kubernetes (the
+// identity includes context and namespace, see auxiliaryRuntimeIdentity)
+// and not for runtimes with per-profile instances. Those get the 503.
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
+	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
+		recorded == s.runtime.Name() &&
+		!scionrt.HasPerProfileInstances(s.runtime) &&
+		auxiliaryRuntimeIdentity(s.runtime) == s.runtime.Name() {
+		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
 			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
 		return s.manager, s.runtime.Name(), nil
 	}
@@ -4836,7 +4851,7 @@ func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir str
 // retryable 503 (runtime_unavailable, Retry-After: 30): the agent's runtime
 // is not available on this broker until its profile resolves again.
 func writeSavedProfileUnresolved(w http.ResponseWriter, err error) {
-	w.Header().Set("Retry-After", "30")
+	w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
 	RuntimeUnavailable(w, err.Error()+"; the agent's runtime is not available on this broker, retry once its profile is configured")
 }
 
