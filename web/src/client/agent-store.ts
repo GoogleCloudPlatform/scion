@@ -234,6 +234,8 @@ interface Entry {
   probeTimer: ReturnType<typeof setTimeout> | null;
   /** Aborts the probe in flight. */
   probe: AbortController | null;
+  /** When the scheduled probe is due (epoch ms); kept while the page is hidden. */
+  probeDueAt?: number | undefined;
   /** The newest position in the probe's order seen by the last walk or probe. */
   highWater?: ProbeMark | undefined;
   /** The server refused the sorted view for this list: no probe before this time (epoch ms). */
@@ -990,29 +992,38 @@ export class AgentStore {
   /**
    * Keep the entry's probe timer running exactly while it may probe: the
    * entry is current, retained, loaded and probeable, and the page is
-   * visible. Otherwise stop it. After the server refuses the list's sorted
-   * view, the next probe waits {@link AGENT_PROBE_REFUSED_RETRY_MS}.
+   * visible. Otherwise stop it. A probe the page hid before it was due
+   * keeps its due time, so switching tabs does not put it off; one that
+   * fell due while hidden is scheduled afresh. After the server refuses the
+   * list's sorted view, the next probe waits
+   * {@link AGENT_PROBE_REFUSED_RETRY_MS}.
    */
   private syncProbe(entry: Entry): void {
-    const eligible =
+    const probed =
       this.entries.get(entry.key) === entry &&
       entry.retainers.size > 0 &&
       entry.fetchedAt !== undefined &&
-      isProbeable(entry.query) &&
-      this.isVisible();
-    if (!eligible) {
+      isProbeable(entry.query);
+    if (!probed || !this.isVisible()) {
       this.stopProbe(entry);
       return;
     }
     if (entry.probeTimer || entry.probe) return;
-    const jitter = (this.random() * 2 - 1) * AGENT_PROBE_JITTER_MS;
-    const refused = (entry.probeRetryAt ?? 0) - this.now();
+    const now = this.now();
+    if (entry.probeDueAt === undefined || entry.probeDueAt <= now) {
+      const jitter = (this.random() * 2 - 1) * AGENT_PROBE_JITTER_MS;
+      entry.probeDueAt = now + AGENT_PROBE_INTERVAL_MS + jitter;
+    }
+    const refused = (entry.probeRetryAt ?? 0) - now;
     entry.probeTimer = setTimeout(
       () => {
         entry.probeTimer = null;
+        // A timer may fire a little before a fractional due time; the next
+        // probe is scheduled afresh either way.
+        entry.probeDueAt = undefined;
         this.runProbeTick(entry);
       },
-      Math.max(AGENT_PROBE_INTERVAL_MS + jitter, refused)
+      Math.max(entry.probeDueAt - now, refused)
     );
   }
 

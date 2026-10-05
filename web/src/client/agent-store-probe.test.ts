@@ -171,6 +171,16 @@ describe('AgentStore delta probe', () => {
     expect(h.server.probes()).toBe(1);
   });
 
+  it('keeps a probe due across a brief hide, so frequent tab switches do not put it off', async () => {
+    const h = await loaded([row('a1', 1)], HUB, { probeFullWalkMs: Infinity });
+    for (let i = 0; i < 9; i++) {
+      await tick(20_000);
+      h.visibility.set('hidden');
+      h.visibility.set('visible');
+    }
+    expect(h.server.probes()).toBe(6);
+  });
+
   it('abandons a probe in flight when the page is hidden', async () => {
     const h = await loaded([row('a1', 1)]);
     const release = h.server.pause();
