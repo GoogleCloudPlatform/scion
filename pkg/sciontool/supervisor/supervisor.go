@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -166,6 +167,9 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.SysProcAttr.Credential = &syscall.Credential{
 			Uid: uint32(s.config.UID),
 			Gid: uint32(s.config.GID),
+			// Keep the runtime-granted nfs shared-dir groups
+			// (ptone/scion#3155); nil keeps today's empty set.
+			Groups: suppgroups.FromEnv(),
 		}
 		log.Debug("Child will run as UID=%d, GID=%d", s.config.UID, s.config.GID)
 	} else if s.config.RequirePrivilegeDrop {
