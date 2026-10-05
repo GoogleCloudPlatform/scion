@@ -99,7 +99,7 @@ export interface TrackedRequest {
 }
 
 /**
- * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo` and
+ * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`, `replaceRoute` and
  * `stateManager` from `client/main.js` — the app's real bootstrap module,
  * which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
  * fetch, the full page router, admin-status probe...) the instant anything
@@ -131,6 +131,10 @@ export async function stubMainClientModule(page: Page): Promise<void> {
           const url = new URL(path, location.origin);
           history.pushState({}, '', url.pathname + url.search + url.hash);
           window.dispatchEvent(new PopStateEvent('popstate'));
+        }
+        export function replaceRoute(path) {
+          history.replaceState(history.state, '', path + location.search + location.hash);
+          return Promise.resolve();
         }
       `,
     })
