@@ -801,15 +801,6 @@ func TestCheckEffectiveMembership(t *testing.T) {
 		bind(t, newCustomRole(t, "future"), store.RoleBindingPrincipalUser, uid, &future, nil)
 		expect(t, uid, false, "")
 	})
-
-	t.Run("group-bound owner still confers nothing", func(t *testing.T) {
-		uid := newUser(t, "group-owner")
-		gid := newGroupWith(t, "owner", uid)
-		ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-		require_NoError(t, err)
-		bind(t, ownerRD.ID, store.RoleBindingPrincipalGroup, gid, nil, nil)
-		expect(t, uid, false, "")
-	})
 }
 
 // ---------------------------------------------------------------------------

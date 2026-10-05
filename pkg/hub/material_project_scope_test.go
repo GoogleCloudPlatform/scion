@@ -237,7 +237,7 @@ func customOnlyDelegateAgent(t *testing.T, f *materialFixture, name string, perm
 
 	userID := tid("custom-only-" + name)
 	require.NoError(t, f.Store.CreateUser(ctx, &store.User{
-		ID: userID, Email: "custom-only-" + name + "@test.com", DisplayName: name, Role: "member", Status: store.UserStatusActive,
+		ID: userID, Email: "custom-only-root-" + name + "@test.com", DisplayName: name, Role: "member", Status: store.UserStatusActive,
 	}))
 	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
 		Name:        "custom-only-" + name,
