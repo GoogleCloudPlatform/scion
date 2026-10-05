@@ -1279,3 +1279,30 @@ describe('scion-chat-message zone label (AC4, review R2-3)', () => {
     expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
   });
 });
+
+describe('scion-chat-message wide tables', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('wraps each table in a named, keyboard-reachable sideways scroller, once', async () => {
+    const el = await mount(
+      '<table><tr><td>a</td></tr></table><table><caption> Agents </caption><tr><td>b</td></tr></table>'
+    );
+    const wrappers = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('.md-content .md-table-scroll') ?? []
+    );
+    expect(wrappers).toHaveLength(2);
+    for (const w of wrappers) {
+      expect(w.firstElementChild?.tagName).toBe('TABLE');
+      expect(w.tabIndex).toBe(0);
+      expect(w.getAttribute('role')).toBe('region');
+    }
+    expect(wrappers.map((w) => w.getAttribute('aria-label'))).toEqual(['Table', 'Agents']);
+
+    // A re-render of the same content does not wrap twice.
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.md-table-scroll .md-table-scroll')).toHaveLength(0);
+  });
+});
