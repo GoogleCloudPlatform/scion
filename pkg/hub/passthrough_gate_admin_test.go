@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
@@ -52,7 +51,7 @@ type ptEmbeddedFixture struct {
 func newPTEmbeddedFixture(t *testing.T, name string, projectOwner *store.User, brokerCreatedBy string) ptEmbeddedFixture {
 	t.Helper()
 	srv, s := testServer(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	require.NoError(t, s.CreateUser(ctx, projectOwner))
 	ensureHubMembership(ctx, s, projectOwner.ID)
