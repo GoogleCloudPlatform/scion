@@ -142,8 +142,6 @@ func TestHubClient_Reads_SendLinkedUser(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/projects/proj-1/agents":
 			json.NewEncoder(w).Encode(hubAgentsResponse{})
-		case "/api/v1/projects/proj-1":
-			json.NewEncoder(w).Encode(hubProject{ID: "proj-1", Slug: "p"})
 		default:
 			json.NewEncoder(w).Encode(hubProjectsResponse{})
 		}
@@ -157,14 +155,13 @@ func TestHubClient_Reads_SendLinkedUser(t *testing.T) {
 
 	_, err := client.ListAgents(ctx, "proj-1", "user:alice@example.com")
 	require.NoError(t, err)
-	_, err = client.GetProjectStatus(ctx, "proj-1", "user:alice@example.com")
-	require.NoError(t, err)
 	_, err = client.ListUserProjects(ctx, "user:alice@example.com", "")
 	require.NoError(t, err)
 
-	require.Len(t, headers, 3)
+	require.Len(t, headers, 2)
 	for _, h := range headers {
 		assert.Equal(t, "user:alice@example.com", h.Get("X-Scion-On-Behalf-Of"))
+		assert.Equal(t, "x-scion-on-behalf-of", h.Get("X-Scion-Signed-Headers"))
 		assert.NotEmpty(t, h.Get("X-Scion-Signature"))
 	}
 }

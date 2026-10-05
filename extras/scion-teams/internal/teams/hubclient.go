@@ -101,45 +101,6 @@ func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messa
 	return nil
 }
 
-// callbackPayload is the JSON body POSTed to the hub's callback endpoint.
-type callbackPayload struct {
-	Data map[string]interface{} `json:"data"`
-}
-
-// DeliverCallback sends callback data to the hub's callback endpoint.
-func (c *HubClient) DeliverCallback(ctx context.Context, data map[string]interface{}) error {
-	payload := callbackPayload{Data: data}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal callback payload: %w", err)
-	}
-
-	url := c.hubURL + "/api/v1/broker/callback"
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create callback request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	if err := c.signRequest(req); err != nil {
-		return fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("callback delivery failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return readHubError("hub callback", resp)
-	}
-
-	return nil
-}
-
 // --- Hub API query types ---
 
 // AgentInfo holds information about a single agent returned by the hub API.
@@ -219,42 +180,6 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string
 	return agents, nil
 }
 
-// ListProjects returns every project visible to the broker. It is not scoped
-// to a user, so user-facing pickers must use ListUserProjects instead.
-// GET /api/v1/broker/projects
-func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/broker/projects"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, readHubError("list projects", resp)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
 // ListUserProjects returns the projects the linked user identified by
 // onBehalfOf ("user:<email>") is a member of. A non-empty slug narrows the
 // result to that project slug.
@@ -294,39 +219,6 @@ func (c *HubClient) ListUserProjects(ctx context.Context, onBehalfOf, slug strin
 		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
 	}
 	return projects, nil
-}
-
-// GetProjectStatus returns the details of a single project, read as the
-// linked user identified by onBehalfOf ("user:<email>").
-// GET /api/v1/projects/{projectID}
-func (c *HubClient) GetProjectStatus(ctx context.Context, projectID, onBehalfOf string) (*ProjectOption, error) {
-	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, url.PathEscape(projectID))
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create get project request: %w", err)
-	}
-	setOnBehalfOf(req, onBehalfOf)
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("get project request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, readHubError("get project", resp)
-	}
-
-	var p hubProject
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
-		return nil, fmt.Errorf("decode get project response: %w", err)
-	}
-
-	return &ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}, nil
 }
 
 // --- Hub API identity linking methods ---
