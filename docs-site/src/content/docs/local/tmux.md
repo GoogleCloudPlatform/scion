@@ -26,6 +26,8 @@ When you are attached to an agent, you interact with `tmux` using a **prefix key
 | **Switch Panes** | `Prefix` then `Arrow Keys` |
 | **Toggle Mouse Mode** | `Prefix` then `m` (Enables scrolling and pane selection via mouse; **on by default**) |
 
+`Prefix` then `d` is the only detach key. Docker and podman's own `Ctrl-p Ctrl-q` detach sequence is turned off for attach sessions. Podman disables it, and docker gets a sequence nobody types by accident. That way `Ctrl-p`, a common history key in agent CLIs, reaches the agent straight away.
+
 ## Web Terminal Interactivity
 
 The Scion Web Dashboard provides a built-in terminal interface for agents that fully supports Tmux. This Web Terminal includes:

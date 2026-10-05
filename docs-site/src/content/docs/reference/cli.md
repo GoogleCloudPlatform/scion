@@ -193,7 +193,13 @@ If the agent is stopped, the attach ends immediately rather than waiting and ret
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
-    - `Ctrl+P, Ctrl+Q`: Detach from the session without stopping the agent.
+    - `Ctrl-b`, then `d`: Detach from the session without stopping the agent (the tmux detach key; see [Interactive Sessions with Tmux](/scion/local/tmux/)). The container runtime's own `Ctrl-p Ctrl-q` detach sequence is not active in attach sessions, so `Ctrl-p` reaches the agent.
+- **Requires a terminal:** `scion attach`, `scion start --attach` and `scion resume --attach` need an interactive terminal on stdin. Without one (for example from a script or a coding harness) they fail at once with `attach requires an interactive terminal` and a non-zero exit, before starting anything. Use `scion look` to view a session and `scion message` to send input instead.
+- **Not running:** if the Hub reports the agent as not running, `scion attach` names the command that fixes it: `scion resume <agent> --attach` for a stopped or suspended agent, `scion start <agent> --attach` otherwise.
+- **No reconnect:** in Hub mode `scion attach` does not reconnect. When the session ends for any reason other than a detach, the command exits non-zero with a message that says what happened and what to run next, based on the [PTY close code](/scion/reference/api/#pty-close-codes). For example, a dropped runtime broker (`4503`) suggests running `scion attach` again, and an ended session (`4410`) suggests `scion resume`. `scion start --attach` and `scion resume --attach` use the same attach flow and print the same messages.
+- **Hub URL with a path prefix:** a Hub served under a path (for example `https://example.com/scion`) works for attach as it does for other commands.
+
+See [Attaching to a remote agent](/scion/hosted/user/hosted-user/#attaching-to-a-remote-agent) for Hub-mode details such as who can attach.
 
 ### `scion message` (or `msg`)
 
