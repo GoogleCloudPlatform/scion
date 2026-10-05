@@ -166,6 +166,11 @@ func RuntimeBrokerID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRuntimeBrokerID, v))
 }
 
+// WorkspacePlacement applies equality check predicate on the "workspace_placement" field. It's identical to WorkspacePlacementEQ.
+func WorkspacePlacement(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
 // WebPtyEnabled applies equality check predicate on the "web_pty_enabled" field. It's identical to WebPtyEnabledEQ.
 func WebPtyEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWebPtyEnabled, v))
@@ -354,6 +359,11 @@ func RunIntent(v string) predicate.Agent {
 // RunIntentAt applies equality check predicate on the "run_intent_at" field. It's identical to RunIntentAtEQ.
 func RunIntentAt(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRunIntentAt, v))
+}
+
+// RunIntentMarkedAt applies equality check predicate on the "run_intent_marked_at" field. It's identical to RunIntentMarkedAtEQ.
+func RunIntentMarkedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentMarkedAt, v))
 }
 
 // StartClaimID applies equality check predicate on the "start_claim_id" field. It's identical to StartClaimIDEQ.
@@ -1764,6 +1774,81 @@ func RuntimeBrokerIDEqualFold(v string) predicate.Agent {
 // RuntimeBrokerIDContainsFold applies the ContainsFold predicate on the "runtime_broker_id" field.
 func RuntimeBrokerIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldRuntimeBrokerID, v))
+}
+
+// WorkspacePlacementEQ applies the EQ predicate on the "workspace_placement" field.
+func WorkspacePlacementEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementNEQ applies the NEQ predicate on the "workspace_placement" field.
+func WorkspacePlacementNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIn applies the In predicate on the "workspace_placement" field.
+func WorkspacePlacementIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementNotIn applies the NotIn predicate on the "workspace_placement" field.
+func WorkspacePlacementNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementGT applies the GT predicate on the "workspace_placement" field.
+func WorkspacePlacementGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementGTE applies the GTE predicate on the "workspace_placement" field.
+func WorkspacePlacementGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLT applies the LT predicate on the "workspace_placement" field.
+func WorkspacePlacementLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLTE applies the LTE predicate on the "workspace_placement" field.
+func WorkspacePlacementLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContains applies the Contains predicate on the "workspace_placement" field.
+func WorkspacePlacementContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasPrefix applies the HasPrefix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasSuffix applies the HasSuffix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIsNil applies the IsNil predicate on the "workspace_placement" field.
+func WorkspacePlacementIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementNotNil applies the NotNil predicate on the "workspace_placement" field.
+func WorkspacePlacementNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementEqualFold applies the EqualFold predicate on the "workspace_placement" field.
+func WorkspacePlacementEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContainsFold applies the ContainsFold predicate on the "workspace_placement" field.
+func WorkspacePlacementContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldWorkspacePlacement, v))
 }
 
 // WebPtyEnabledEQ applies the EQ predicate on the "web_pty_enabled" field.
@@ -4019,6 +4104,56 @@ func RunIntentAtIsNil() predicate.Agent {
 // RunIntentAtNotNil applies the NotNil predicate on the "run_intent_at" field.
 func RunIntentAtNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldRunIntentAt))
+}
+
+// RunIntentMarkedAtEQ applies the EQ predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtNEQ applies the NEQ predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtIn applies the In predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunIntentMarkedAt, vs...))
+}
+
+// RunIntentMarkedAtNotIn applies the NotIn predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunIntentMarkedAt, vs...))
+}
+
+// RunIntentMarkedAtGT applies the GT predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtGTE applies the GTE predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtLT applies the LT predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtLTE applies the LTE predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtIsNil applies the IsNil predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunIntentMarkedAt))
+}
+
+// RunIntentMarkedAtNotNil applies the NotNil predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunIntentMarkedAt))
 }
 
 // StartClaimIDEQ applies the EQ predicate on the "start_claim_id" field.

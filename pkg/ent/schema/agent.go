@@ -114,6 +114,15 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
@@ -359,6 +368,14 @@ func (Agent) Fields() []ent.Field {
 		// run_intent_at is the store-clock time of the last run_intent
 		// write. It strictly increases per row, so it orders intent writes.
 		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
+		// run_intent_marked_at is set to run_intent_at by every intent write
+		// of code that maintains start claims, and by no other code. When the
+		// two differ, the intent was last written by earlier code (or the
+		// boot backfill), which could leave intent stopped on an agent that is
+		// meant to run; the hub's backstop does not stop such an agent.
+		field.Time("run_intent_marked_at").
 			Optional().
 			Nillable(),
 

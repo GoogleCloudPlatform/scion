@@ -209,6 +209,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetStartClaimLaunchID("").
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
+			SetRunIntentMarkedAt(intentAt).
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}

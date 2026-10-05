@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,13 +92,19 @@ func TestStartClaimWiring_RestartHoldsClaimAcrossStopLeg(t *testing.T) {
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "released after the start leg")
 }
 
+// A restart that cannot claim is refused before it stops anything, and the
+// capacity hold it took first is undone: no reservation is left and the
+// stopped agent's phase is restored.
 func TestStartClaimWiring_RestartRacingAClaimIsRefusedBeforeStopping(t *testing.T) {
 	f, d, a := newClaimFixture(t)
+	setBrokerAgentCeiling(t, f.s, 5)
 	_, err := f.s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
 	require.NoError(t, err)
 	code, body := lifecycle(t, f, a.ID, "restart")
 	require.Equal(t, http.StatusConflict, code, body)
 	assert.Equal(t, int32(0), d.stops.Load(), "the agent is not stopped when its restart cannot claim")
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the restart's reservation is released")
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "the starting phase is restored")
 }
 
 // A stop whose dispatch succeeded releases the claim it superseded, of
@@ -369,4 +376,329 @@ func TestStartClaimWiring_StatusWrittenUnderClaimAndLifecycleOpHeld(t *testing.T
 	assert.True(t, claimHeld, "the started status is written before the claim is released")
 	assert.True(t, opActive, "the lifecycle op is held during the dispatch")
 	assert.Equal(t, "running", getAgent(t, f.s, a.ID).Phase)
+}
+
+// An agent whose stopped intent was written by earlier code (here the boot
+// backfill, which never sets the marker) is logged, not stopped, by the
+// backstop; one written by claim-aware code is stopped.
+func TestStartClaimWiring_BackstopLeavesLegacyStoppedIntent(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	ctx := context.Background()
+	legacy := f.addAgent("legacy", "error", "") // backfill: not running -> stopped
+	_, err := f.s.BackfillRunIntent(ctx)
+	require.NoError(t, err)
+	got := getAgent(t, f.s, legacy.ID)
+	require.Equal(t, store.RunIntentStopped, got.RunIntent)
+	require.False(t, got.RunIntentWrittenWithClaims())
+
+	f.heartbeat(completeInventory(), legacy.Slug)
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(0), d.stops.Load(), "a running agent with an older stopped intent is not stopped")
+
+	_, err = f.s.SetRunIntent(ctx, legacy.ID, store.RunIntentStopped) // a claim-aware stop
+	require.NoError(t, err)
+	f.srv.intentStops.Delete(legacy.ID)
+	f.heartbeat(completeInventory(), legacy.Slug)
+	require.Eventually(t, func() bool { return d.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+}
+
+// failRunningStatusStore fails the started-status write.
+type failRunningStatusStore struct {
+	store.Store
+	agentID string
+}
+
+func (s failRunningStatusStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if id == s.agentID && u.ClearExit {
+		return errors.New("database is locked")
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// A restart whose start leg succeeded but whose status write failed is not
+// a failed restart: the reservation is kept and no stopped state is
+// recorded.
+func TestStartClaimWiring_RestartStatusWriteFailureIsNotAFailedStart(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("restarting-live", "running", "working")
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	code, _ := lifecycle(t, f, a.ID, "restart")
+	assert.NotEqual(t, http.StatusBadGateway, code, "not answered as a failed dispatch")
+	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "the running agent keeps its reservation")
+	assert.NotEqual(t, "stopped", getAgent(t, f.s, a.ID).Phase, "no stopped state is recorded for a started container")
+}
+
+// A start whose claim is lost before it dispatches is abandoned and undoes
+// its capacity hold: the reservation it made is released and the starting
+// phase restored, on a detached context (a database refuses work on a done
+// one), whether the claim is lost while the reservation is being made or
+// after the starting write, at the fence.
+func TestStartClaimWiring_FenceFailureRollsBackCapacity(t *testing.T) {
+	cases := []struct {
+		name  string
+		store func(s store.Store) ctxHonouringReleaseStore
+	}{
+		{"lost during the reservation", func(s store.Store) ctxHonouringReleaseStore {
+			return ctxHonouringReleaseStore{Store: s, reserveDelay: 400 * time.Millisecond}
+		}},
+		{"lost after the starting write", func(s store.Store) ctxHonouringReleaseStore {
+			return ctxHonouringReleaseStore{Store: s, startingDelay: 400 * time.Millisecond}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, d, a := newClaimFixture(t)
+			ctx := context.Background()
+			setBrokerAgentCeiling(t, f.s, 5)
+			def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+			require.NoError(t, err)
+			// The fence passes while the delayed store call runs: the claim
+			// is lost (its run context cancelled) before the dispatch.
+			f.srv.startClaimTestHook = func(r *startClaimRun) {
+				r.fenceAt = time.Now().Add(150 * time.Millisecond)
+				r.renewEvery = time.Hour
+			}
+			d.start = func(ctx context.Context, cur *store.Agent) error {
+				t.Fatal("dispatched past the fence")
+				return nil
+			}
+			f.srv.store = tc.store(f.s)
+			f.srv.quotaService.store = f.srv.store
+			err = f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser})
+			require.ErrorIs(t, err, errStartClaimLost)
+			has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+			require.NoError(t, err)
+			assert.False(t, has, "the reservation made for the abandoned start is released")
+			assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "the starting phase is restored")
+		})
+	}
+}
+
+// A failed start keeps a reservation the agent already held.
+func TestStartClaimWiring_FailedStartKeepsPreheldCapacity(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+	require.NoError(t, err)
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		return fmt.Errorf("x: %w", errStartRequestNotSent)
+	}
+	require.Error(t, f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser}))
+	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "a reservation the agent held before the start is kept")
+}
+
+// A start refused by a stop-kind claim says a stop is in progress.
+func TestStartClaimWiring_StopHolderMessage(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	at, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	_, err = f.s.ClaimAgentStop(ctx, a.ID, "drain-hub", at, time.Minute)
+	require.NoError(t, err)
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusConflict, code)
+	e, _ := body["error"].(map[string]interface{})
+	assert.Contains(t, e["message"], "A stop is in progress")
+}
+
+// wakeStatusSpyStore records whether the wake's running write happened
+// while the claim was held.
+type wakeStatusSpyStore struct {
+	store.Store
+	t         *testing.T
+	agentID   string
+	claimHeld *bool
+}
+
+func (s wakeStatusSpyStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if id == s.agentID && u.Phase == "running" {
+		cur, err := s.GetAgent(ctx, id)
+		require.NoError(s.t, err)
+		*s.claimHeld = cur.StartClaimID != ""
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// The wake writes running after readiness while its claim is held.
+func TestStartClaimWiring_WakeRunningWrittenUnderClaim(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	a := f.addAgent("waker", "suspended", "")
+	var claimHeld bool
+	f.srv.store = wakeStatusSpyStore{Store: f.s, t: t, agentID: a.ID, claimHeld: &claimHeld}
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		go func() { // the agent reports activity: ready
+			time.Sleep(50 * time.Millisecond)
+			_ = f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Activity: "thinking"})
+		}()
+		return nil
+	}
+	res, dmErr := f.srv.wakeAgentForDM(context.Background(), getAgent(t, f.s, a.ID))
+	require.Nil(t, dmErr)
+	require.Equal(t, WakeResumed, res.Outcome)
+	assert.True(t, claimHeld, "running is written before the wake's claim is released")
+}
+
+// ctxHonouringReleaseStore refuses a reservation release on a done context,
+// as a real database does, and delays returning from a reservation or a
+// starting write.
+type ctxHonouringReleaseStore struct {
+	store.Store
+	reserveDelay  time.Duration // after a reservation is made
+	startingDelay time.Duration // after a write of phase starting
+}
+
+func (s ctxHonouringReleaseStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
+	err := s.Store.UpdateAgentStatus(ctx, id, upd)
+	if upd.Phase == string(state.PhaseStarting) {
+		time.Sleep(s.startingDelay)
+	}
+	return err
+}
+
+func (s ctxHonouringReleaseStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return s.Store.(store.AdvisoryLocker).TryAdvisoryLock(ctx, key)
+}
+
+func (s ctxHonouringReleaseStore) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	return s.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, classID, objID)
+}
+
+func (s ctxHonouringReleaseStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
+	out, err := s.Store.CreateUsageReservation(ctx, r)
+	time.Sleep(s.reserveDelay)
+	return out, err
+}
+
+func (s ctxHonouringReleaseStore) ReleaseReservation(ctx context.Context, limitID, resourceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.ReleaseReservation(ctx, limitID, resourceID)
+}
+
+// A live start claim defers a heartbeat's uncounted phase on any replica,
+// except a stop's or a wake's claim; an unconfirmed claim does not.
+func TestStartClaimWiring_HeartbeatGuardingClaim(t *testing.T) {
+	cases := []struct {
+		kind  store.StartClaimKind
+		state store.StartClaimState
+		want  bool
+	}{
+		{store.StartClaimUser, store.StartClaimLive, true},
+		{store.StartClaimRestart, store.StartClaimLive, true},
+		{store.StartClaimCreate, store.StartClaimLive, true},
+		{store.StartClaimRecovery, store.StartClaimLive, true},
+		{store.StartClaimReincarnate, store.StartClaimLive, true},
+		{store.StartClaimStop, store.StartClaimLive, false},
+		{store.StartClaimWake, store.StartClaimLive, false},
+		{store.StartClaimUser, store.StartClaimUnconfirmed, false},
+	}
+	srv, _ := testServer(t)
+	for _, tc := range cases {
+		a := &store.Agent{ID: "agent-claim-guard", StartClaimID: "c", StartClaimKind: tc.kind, StartClaimState: tc.state}
+		assert.Equal(t, tc.want, srv.heartbeatPhaseGuarded(a, "stopped"), "kind=%s state=%s", tc.kind, tc.state)
+		assert.False(t, srv.heartbeatPhaseGuarded(a, "running"), "a counted phase is never guarded")
+	}
+	assert.False(t, srv.heartbeatPhaseGuarded(&store.Agent{ID: "agent-no-claim"}, "stopped"))
+}
+
+// A restart run by another replica holds its claim across the stop leg: a
+// heartbeat this replica handles, reporting the old container stopped, does
+// not move the row off running or release its reservation. Once the claim
+// is released, the same report applies.
+func TestStartClaimWiring_HeartbeatDeferredUnderAnotherReplicasClaim(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+	require.NoError(t, err)
+	claim, err := f.s.ClaimAgentStart(ctx, a.ID, "other-replica", store.StartClaimRestart, "docker", time.Minute)
+	require.NoError(t, err)
+
+	stopped := brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: string(state.PhaseStopped), ContainerStatus: "Exited (0)", RuntimeTarget: "docker"},
+		}}},
+	}
+	f.send(stopped)
+	assert.Equal(t, string(state.PhaseRunning), getAgent(t, f.s, a.ID).Phase, "the stopped report is deferred under the claim")
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the reservation is kept under the claim")
+
+	_, err = f.s.ReleaseAgentStart(ctx, a.ID, claim.ID, "other-replica")
+	require.NoError(t, err)
+	f.send(stopped)
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase, "without the claim the report applies")
+}
+
+// The wake ends its lifecycle op once its post-dispatch starting write has
+// landed, so a heartbeat-reported exit during the readiness wait applies; its
+// claim is still held.
+func TestStartClaimWiring_WakeEndsLifecycleOpBeforeReadinessWait(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	a := f.addAgent("waker", "suspended", "")
+	var opDuringWait, claimDuringWait atomic.Bool
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		go func() {
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if got, err := f.s.GetAgent(context.Background(), a.ID); err == nil && got.Phase == string(state.PhaseStarting) && got.ContainerStatus != "" {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond) // past the starting write, inside the wait
+			opDuringWait.Store(f.srv.lifecycleOps.active(a.ID))
+			claimDuringWait.Store(getAgent(t, f.s, a.ID).StartClaimID != "")
+			_ = f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Activity: "thinking"})
+		}()
+		cur.ContainerStatus = "running"
+		return nil
+	}
+	res, dmErr := f.srv.wakeAgentForDM(context.Background(), getAgent(t, f.s, a.ID))
+	require.Nil(t, dmErr)
+	require.Equal(t, WakeResumed, res.Outcome)
+	assert.False(t, opDuringWait.Load(), "the lifecycle op ended before the readiness wait")
+	assert.True(t, claimDuringWait.Load(), "the wake's claim is held through the readiness wait")
+}
+
+// deleteHoldsClaimStore refuses every start claim: a delete holds the row.
+type deleteHoldsClaimStore struct{ store.Store }
+
+func (deleteHoldsClaimStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
+	return store.StartClaim{}, store.ErrDeleteInProgress
+}
+
+// A create-and-start whose claim a delete refuses answers delete_in_progress
+// and is rolled back as a refused run-intent write, as before claims.
+func TestStartClaimWiring_CreateClaimRefusedByDeleteRollsBack(t *testing.T) {
+	disp := &createAgentDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.store = deleteHoldsClaimStore{srv.store}
+	req := CreateAgentRequest{Name: "claim-refused-by-delete", ProjectID: project.ID, Task: "do something"}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
+	failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	require.Len(t, failed, 1, "the refused create is rolled back once")
+	var sum compensationSummary
+	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+	assert.Equal(t, createStageRunIntent, sum.Stage)
 }

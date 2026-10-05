@@ -139,6 +139,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		RunID:               a.RunID,
+		WorkspacePlacement:  a.WorkspacePlacement,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
@@ -162,6 +163,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIntentAt
 		sa.RunIntentAt = &t
 	}
+	sa.RunIntentMarkedAt = copyTimePtr(a.RunIntentMarkedAt)
 	if a.StartClaimID != nil {
 		sa.StartClaimID = *a.StartClaimID
 	}
@@ -1366,6 +1368,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 
+	if su.IfPhase != "" && current.Phase != su.IfPhase {
+		return store.ErrPhaseMismatch
+	}
+
 	now := time.Now()
 
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
@@ -1382,6 +1388,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.Message = ""
 		su.ClearExit = false
 		su.ClearMessageIf = ""
+		su.ClearTerminalRemnants = false
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1427,7 +1434,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// being terminal so routine running→running heartbeats (which carry their own
 	// sticky-stalled rules in the broker handler) are left untouched. An explicit
 	// message in the same update (su.Message != "") wins and is set below.
-	if su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error") {
+	// ClearTerminalRemnants applies the same clear whatever the current phase
+	// (a lifecycle start's final write; see store.AgentStatusUpdate).
+	if su.ClearTerminalRemnants || (su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error")) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
@@ -1502,6 +1511,25 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 	return tx.Commit()
+}
+
+// SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
+func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetWorkspacePlacement(placement).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // UpdateAgentExposedPorts applies a partial exposed-port update without using

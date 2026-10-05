@@ -30,7 +30,7 @@ import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
-import { chatUnread } from './chat-unread.js';
+import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
@@ -928,15 +928,20 @@ async function init(): Promise<void> {
   // every page, because an unread mention is worth seeing from the dashboard.
   // After the flags settle — with chat disabled the endpoints it reads are
   // not even registered.
-  if (currentUser && isFeatureEnabled('web.native_chat')) {
-    chatUnread.start();
-  }
+  // On a chat first page the first refresh goes out now and the page shares
+  // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
+  const initialPath = stripBasePath(window.location.pathname);
+  startChatUnreadIfEligible(
+    chatUnread,
+    !!currentUser,
+    isFeatureEnabled('web.native_chat'),
+    CHAT_ROUTES.has(resolveRoute(initialPath).tag)
+  );
 
   // Setup client-side router for navigation
   setupRouter();
   // Include query string on initial render so terminal layout state
   // from a shared/bookmarked URL can be restored on page load (#1715).
-  const initialPath = stripBasePath(window.location.pathname);
   const initialSearch = window.location.search;
   await renderRoute(initialSearch ? `${initialPath}${initialSearch}` : initialPath);
 

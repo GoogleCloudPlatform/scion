@@ -666,9 +666,15 @@ type Welcome struct {
 	MaxFrame        uint32                 `protobuf:"varint,5,opt,name=max_frame,json=maxFrame,proto3" json:"max_frame,omitempty"`
 	LifetimeHintS   uint32                 `protobuf:"varint,6,opt,name=lifetime_hint_s,json=lifetimeHintS,proto3" json:"lifetime_hint_s,omitempty"`
 	// Every grant verification key still within not_after.
-	GrantKeys     []*GrantKey `protobuf:"bytes,7,rep,name=grant_keys,json=grantKeys,proto3" json:"grant_keys,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	GrantKeys []*GrantKey `protobuf:"bytes,7,rep,name=grant_keys,json=grantKeys,proto3" json:"grant_keys,omitempty"`
+	// The endpoint_incarnation the hub ADMITTED the session with: the agent's
+	// launch id, "gen-<N>" under the interim fallback (the Hello presented
+	// none), or the broker's incarnation; empty for users. Grants are minted
+	// against this value, so a target MUST verify grants against it, never
+	// against the value it presented or local configuration.
+	EndpointIncarnation string `protobuf:"bytes,8,opt,name=endpoint_incarnation,json=endpointIncarnation,proto3" json:"endpoint_incarnation,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Welcome) Reset() {
@@ -748,6 +754,13 @@ func (x *Welcome) GetGrantKeys() []*GrantKey {
 		return x.GrantKeys
 	}
 	return nil
+}
+
+func (x *Welcome) GetEndpointIncarnation() string {
+	if x != nil {
+		return x.EndpointIncarnation
+	}
+	return ""
 }
 
 type GrantKey struct {
@@ -1655,7 +1668,7 @@ const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\x10transport_limits\x18\x05 \x01(\v2!.scion.conduit.v1.TransportLimitsR\x0ftransportLimits\"T\n" +
 	"\x0fTransportLimits\x12\x1b\n" +
 	"\tmax_frame\x18\x01 \x01(\rR\bmaxFrame\x12$\n" +
-	"\x0eidle_timeout_s\x18\x02 \x01(\rR\fidleTimeoutS\"\xa9\x02\n" +
+	"\x0eidle_timeout_s\x18\x02 \x01(\rR\fidleTimeoutS\"\xdc\x02\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12*\n" +
@@ -1665,7 +1678,8 @@ const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\tmax_frame\x18\x05 \x01(\rR\bmaxFrame\x12&\n" +
 	"\x0flifetime_hint_s\x18\x06 \x01(\rR\rlifetimeHintS\x129\n" +
 	"\n" +
-	"grant_keys\x18\a \x03(\v2\x1a.scion.conduit.v1.GrantKeyR\tgrantKeys\"a\n" +
+	"grant_keys\x18\a \x03(\v2\x1a.scion.conduit.v1.GrantKeyR\tgrantKeys\x121\n" +
+	"\x14endpoint_incarnation\x18\b \x01(\tR\x13endpointIncarnation\"a\n" +
 	"\bGrantKey\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x1d\n" +
 	"\n" +

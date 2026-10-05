@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,6 +189,38 @@ func TestRecoveryObservations_RecordedFromHeartbeat(t *testing.T) {
 	now, err := f.s.StoreClock(ctx)
 	require.NoError(t, err)
 	assert.True(t, observationFresh(got[lost.ID], targetInventoryTimes(inv), now), "a stored observation reads back as fresh")
+}
+
+// While a lifecycle operation holds the agent, the heartbeat does not apply
+// a stopped phase to the row, but the start-claim observation still records
+// what the broker reported, with the exit reason kept on the row.
+func TestRecoveryObservations_PhaseGuardedHeartbeatStillObserved(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("guarded", "starting", "")
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	endOp := f.srv.lifecycleOps.begin(a.ID)
+	defer endOp()
+
+	code := 137
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: "guarded", Phase: "stopped", ContainerStatus: "Exited (137)", ExitCode: &code,
+				ExitReason: string(state.ExitReasonCrashed), RuntimeTarget: "docker"},
+		}}},
+	})
+
+	row, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "starting", row.Phase, "the guarded heartbeat leaves the phase")
+	assert.Equal(t, string(state.ExitReasonCrashed), row.ExitReason, "the exit reason is still recorded")
+	got, err := f.s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	require.Contains(t, got, a.ID)
+	assert.Equal(t, store.ObservedPresentTerminal, got[a.ID].State, "the observation records the reported phase")
 }
 
 func TestRecoveryObservations_UnconfirmedClaimWithoutTargetUsesClaimTarget(t *testing.T) {

@@ -71,6 +71,14 @@ type Agent struct {
 	TaskSummary     string        `json:"taskSummary,omitempty"`
 	Message         string        `json:"message,omitempty"`
 
+	// WorkspacePlacement is where the agent's last start placed its
+	// workspace, as its broker reported it: api.WorkspacePlacementExport
+	// (the broker's shared NFS export) or api.WorkspacePlacementLocal. ""
+	// means unknown. CreateAgent and UpdateAgent never write it; the only
+	// writer is SetAgentWorkspacePlacement, so a whole-row write holding an
+	// older copy cannot clobber a newer report.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
@@ -154,6 +162,9 @@ type Agent struct {
 	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
 
 	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
 	// held. Internal bookkeeping, untagged like the launch columns.
@@ -179,6 +190,14 @@ type Agent struct {
 	// populate it themselves, so a snapshot always reflects the fields
 	// present at the moment it was computed, not at load time.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+
+	// ProvisionedOnly is a computed, read-only view (ptone/scion#2929):
+	// true when the agent was provisioned but never asked to run (see
+	// ComputeAgentProvisionedOnly). Like Launch, only the hub populates it,
+	// at response time. No omitempty (as on the SSE status event): this
+	// struct is the REST agent shape, and an explicit false lets the web's
+	// partial seed merge clear a previously merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 
 	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
 	// The persisted deletion_* columns: a leased, sticky delete marker.
@@ -653,6 +672,21 @@ const (
 // with that slug, and the store agents group marker backfill writes it on
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// IsProjectMembersGroup reports whether g is a system project members group:
+// it belongs to a project and carries either members-group marker key with
+// the value "true".
+//
+// Project members groups are system-managed. They cannot be the principal of
+// a role binding or be nested as a child of another group; the store
+// refuses both with ErrProjectMembersGroupPrincipal.
+func IsProjectMembersGroup(g *Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[LegacyAnnotationProjectMembersGroup] == "true"
+}
 
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
@@ -2281,6 +2315,15 @@ type MessageFilter struct {
 	After          time.Time // Lower bound for created_at (exclusive)
 }
 
+// LatestMessageOptions narrows the per-key latest-message lookups
+// (LatestMessagesByThreadIDs, LatestMessagesByConversationIDs). Each field
+// has the meaning of the MessageFilter field of the same name; empty fields
+// do not filter.
+type LatestMessageOptions struct {
+	Channel     string // Only messages on this channel
+	ExcludeType string // Ignore messages of this type
+}
+
 // =============================================================================
 // Conversations (Multi-Party Messaging)
 // =============================================================================
@@ -3176,6 +3219,20 @@ const (
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
 )
+
+// ValidEdgeDeactivationCause reports whether c is a cause that may be
+// recorded on a delegation edge.
+func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationDelegatorDeleted,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationReincarnateReplaced:
+		return true
+	}
+	return false
+}
 
 // Deactivation is the deactivation record of an edge or assignment.
 type Deactivation struct {

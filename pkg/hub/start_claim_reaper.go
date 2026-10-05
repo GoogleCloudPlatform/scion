@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"time"
@@ -91,10 +92,14 @@ func (s *Server) reaperBrokerView(ctx context.Context, brokerID string) *reaperB
 	}
 	b, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("Start claim reaper: reading the broker failed; its claims are kept this round", "broker_id", brokerID, "error", err)
+		}
 		return nil
 	}
 	rows, err := s.store.ListBrokerTargetInventory(ctx, brokerID)
 	if err != nil {
+		slog.Warn("Start claim reaper: reading the broker's inventory failed; its claims are kept this round", "broker_id", brokerID, "error", err)
 		return nil
 	}
 	return &reaperBrokerView{
@@ -110,6 +115,9 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 	}
 	if a.StartClaimKind == store.StartClaimCreate && a.StartClaimLaunchID != "" && a.StartClaimLaunchID == a.LaunchID {
 		if changed, err := s.store.SettleEndedLaunchClaim(ctx, a.ID, a.StartClaimID); err != nil || changed {
+			if err != nil {
+				slog.Warn("Start claim reaper: settling the claim of an ended launch failed", "agent_id", a.ID, "claim_id", a.StartClaimID, "error", err)
+			}
 			return
 		}
 	}

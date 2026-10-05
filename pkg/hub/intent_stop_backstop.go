@@ -34,7 +34,10 @@ const intentStopInterval = observationFreshness
 // online a moment ago. Agents with a lifecycle operation or a queued
 // dispatch in progress, being deleted, or mid-reincarnation are skipped.
 // The stop runs under a short stop-kind claim pinned to the intent the
-// heartbeat saw, so a start accepted meanwhile is never stopped.
+// heartbeat saw, so a start accepted meanwhile is never stopped. Only an
+// intent written by code that maintains start claims is acted on (see
+// store.Agent.RunIntentWrittenWithClaims); an older stopped intent is
+// logged.
 func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerID string, prev *store.RuntimeBroker, hb *brokerHeartbeatRequest, report *heartbeatReport) {
 	if !inventoryAllowsReconcile(prev, hb, s.missingAgents.now(), s.missingAgentGrace()) {
 		return
@@ -70,6 +73,14 @@ func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerI
 			continue
 		}
 		s.intentStops.Store(a.ID, time.Now())
+		if a.RunIntent == store.RunIntentStopped && a.RunIntentAt != nil && !a.RunIntentWrittenWithClaims() {
+			// Intent last written by earlier code (or the boot backfill),
+			// which could leave intent stopped on an agent meant to run
+			// (a reincarnated stopped agent, a rolled-back delete, a
+			// replica of the previous version): logged, never stopped.
+			s.agentLifecycleLog.Info("Agent runs with a stopped run intent from earlier code; not stopped", "agent_id", a.ID)
+			continue
+		}
 		go s.stopForStoppedIntent(context.WithoutCancel(ctx), a)
 	}
 }

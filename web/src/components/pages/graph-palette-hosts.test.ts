@@ -38,6 +38,7 @@ import type { Agent, PageData } from '../../shared/types.js';
 import type { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentListWindow } from '../../client/agent-list-window.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -108,6 +109,8 @@ beforeEach(() => {
   });
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.spyOn(stateManager, 'setScope').mockImplementation(() => {});
+  // With setScope stubbed no stream opens; a whole-set load waits for one.
+  vi.spyOn(stateManager, 'sseConnected').mockResolvedValue(undefined);
   getAgents = vi.spyOn(stateManager, 'getAgents').mockReturnValue([]);
   vi.spyOn(stateManager, 'seedAgents').mockImplementation(() => {});
   vi.stubGlobal(
@@ -158,9 +161,18 @@ async function mount(tag: string, setup: (el: GraphPage) => void = () => {}): Pr
   return el;
 }
 
-/** Sets a page's private state, then waits for it to render. */
+/**
+ * Sets a page's private state, then waits for it to render. A page with an
+ * agent window filters through the window's view state, so a phase filter
+ * also goes there, as the page's own phase handler does.
+ */
 async function setState(el: GraphPage, state: Record<string, unknown>): Promise<void> {
   Object.assign(el, state);
+  const win = (el as GraphPage & { agentWindow?: AgentListWindow }).agentWindow;
+  if (win && 'phaseFilter' in state) {
+    win.setViewState({ phaseFilter: state.phaseFilter as string });
+  }
+  el.requestUpdate();
   await el.updateComplete;
 }
 
@@ -387,5 +399,26 @@ describe('project page', () => {
     await setState(el, { error: null });
     expect(await openCandidateIds(el)).toEqual(['a1', 'a2', 'a3']);
     await expectPickFocusesTree(el, 'a3');
+  });
+});
+
+describe('tree view hosts with a complete set', () => {
+  it('/agents and the project page leave the ancestor-not-loaded marker off', async () => {
+    store.set('scion-view-agents', 'graph');
+    const agentsPage = await mount('scion-page-agents');
+    await setState(agentsPage, { agents: AGENTS });
+    const agentsTree = agentsPage.renderRoot.querySelector('scion-agent-tree-view');
+    expect(agentsTree).not.toBeNull();
+    expect(agentsTree?.markMissingAncestors).toBe(false);
+    agentsPage.remove();
+
+    store.set('scion-view-project-agents', 'graph');
+    const projectPage = await mount('scion-page-project-detail', (el) => {
+      (el as GraphPage & { projectId: string }).projectId = PROJECT_ID;
+    });
+    await setState(projectPage, { agents: AGENTS.filter((a) => a.projectId === PROJECT_ID) });
+    const projectTree = projectPage.renderRoot.querySelector('scion-agent-tree-view');
+    expect(projectTree).not.toBeNull();
+    expect(projectTree?.markMissingAncestors).toBe(false);
   });
 });

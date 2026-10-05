@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,19 +116,37 @@ func TestProvisionedStart_RunningContainerHealsCreatedRow(t *testing.T) {
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
 }
 
-// failingDeleteStore fails every agent row delete.
-type failingDeleteStore struct{ store.Store }
+// failingDeleteStore fails every agent row delete, and every transaction
+// (so a create's compensation fails too).
+type failingDeleteStore struct {
+	store.Store
+	deletes *atomic.Int32
+}
 
-func (failingDeleteStore) DeleteAgent(context.Context, string) error {
+func (s failingDeleteStore) DeleteAgent(context.Context, string) error {
+	s.deletes.Add(1)
 	return errors.New("database is locked")
 }
 
-// A failed create whose row cannot be removed is left visibly failed.
+func (failingDeleteStore) WithTx(context.Context, func(tx store.Store) error) error {
+	return errors.New("database is locked")
+}
+
+// A failed create whose compensation fails and whose row then still cannot
+// be removed (the delete is retried) is left visibly failed.
 func TestProvisionedStart_FailedCreateRowThatCannotBeRemoved(t *testing.T) {
 	f, _, _ := newClaimFixture(t)
 	a := f.addAgent("orphan", "created", "")
-	f.srv.store = failingDeleteStore{Store: f.s}
-	f.srv.cleanupFailedCreate(context.Background(), a, f.brokerID, cleanupSkipRevoke, nil)
+	var deletes atomic.Int32
+	f.srv.store = failingDeleteStore{Store: f.s, deletes: &deletes}
+	corrID := f.srv.cleanupFailedCreate(context.Background(), createRollback{
+		Agent:           a,
+		RuntimeBrokerID: f.brokerID,
+		Stage:           createStageDispatch,
+		Cause:           errors.New("dispatch failed"),
+	})
+	assert.NotEmpty(t, corrID, "a failed compensation is reported")
+	assert.Equal(t, int32(createCleanupDeleteAttempts), deletes.Load(), "the row delete is retried")
 	got := getAgent(t, f.s, a.ID)
 	assert.Equal(t, "error", got.Phase)
 	assert.Equal(t, createRowRemoveFailedMessage, got.Message)

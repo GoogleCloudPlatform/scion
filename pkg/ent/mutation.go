@@ -4548,6 +4548,7 @@ type AgentMutation struct {
 	detached                   *bool
 	runtime                    *string
 	runtime_broker_id          *string
+	workspace_placement        *string
 	web_pty_enabled            *bool
 	exposed_ports              *[]store.ExposedPort
 	appendexposed_ports        []store.ExposedPort
@@ -4594,6 +4595,7 @@ type AgentMutation struct {
 	deletion_request           *string
 	run_intent                 *string
 	run_intent_at              *time.Time
+	run_intent_marked_at       *time.Time
 	start_claim_id             *string
 	start_claim_kind           *string
 	start_claim_state          *string
@@ -5938,6 +5940,55 @@ func (m *AgentMutation) RuntimeBrokerIDCleared() bool {
 func (m *AgentMutation) ResetRuntimeBrokerID() {
 	m.runtime_broker_id = nil
 	delete(m.clearedFields, agent.FieldRuntimeBrokerID)
+}
+
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (m *AgentMutation) SetWorkspacePlacement(s string) {
+	m.workspace_placement = &s
+}
+
+// WorkspacePlacement returns the value of the "workspace_placement" field in the mutation.
+func (m *AgentMutation) WorkspacePlacement() (r string, exists bool) {
+	v := m.workspace_placement
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkspacePlacement returns the old "workspace_placement" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldWorkspacePlacement(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkspacePlacement is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkspacePlacement requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkspacePlacement: %w", err)
+	}
+	return oldValue.WorkspacePlacement, nil
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (m *AgentMutation) ClearWorkspacePlacement() {
+	m.workspace_placement = nil
+	m.clearedFields[agent.FieldWorkspacePlacement] = struct{}{}
+}
+
+// WorkspacePlacementCleared returns if the "workspace_placement" field was cleared in this mutation.
+func (m *AgentMutation) WorkspacePlacementCleared() bool {
+	_, ok := m.clearedFields[agent.FieldWorkspacePlacement]
+	return ok
+}
+
+// ResetWorkspacePlacement resets all changes to the "workspace_placement" field.
+func (m *AgentMutation) ResetWorkspacePlacement() {
+	m.workspace_placement = nil
+	delete(m.clearedFields, agent.FieldWorkspacePlacement)
 }
 
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
@@ -7908,6 +7959,55 @@ func (m *AgentMutation) ResetRunIntentAt() {
 	delete(m.clearedFields, agent.FieldRunIntentAt)
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (m *AgentMutation) SetRunIntentMarkedAt(t time.Time) {
+	m.run_intent_marked_at = &t
+}
+
+// RunIntentMarkedAt returns the value of the "run_intent_marked_at" field in the mutation.
+func (m *AgentMutation) RunIntentMarkedAt() (r time.Time, exists bool) {
+	v := m.run_intent_marked_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntentMarkedAt returns the old "run_intent_marked_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntentMarkedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntentMarkedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntentMarkedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntentMarkedAt: %w", err)
+	}
+	return oldValue.RunIntentMarkedAt, nil
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (m *AgentMutation) ClearRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	m.clearedFields[agent.FieldRunIntentMarkedAt] = struct{}{}
+}
+
+// RunIntentMarkedAtCleared returns if the "run_intent_marked_at" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentMarkedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntentMarkedAt]
+	return ok
+}
+
+// ResetRunIntentMarkedAt resets all changes to the "run_intent_marked_at" field.
+func (m *AgentMutation) ResetRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	delete(m.clearedFields, agent.FieldRunIntentMarkedAt)
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (m *AgentMutation) SetStartClaimID(s string) {
 	m.start_claim_id = &s
@@ -8567,7 +8667,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 76)
+	fields := make([]string, 0, 78)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8645,6 +8745,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.runtime_broker_id != nil {
 		fields = append(fields, agent.FieldRuntimeBrokerID)
+	}
+	if m.workspace_placement != nil {
+		fields = append(fields, agent.FieldWorkspacePlacement)
 	}
 	if m.web_pty_enabled != nil {
 		fields = append(fields, agent.FieldWebPtyEnabled)
@@ -8766,6 +8869,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.run_intent_at != nil {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.run_intent_marked_at != nil {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.start_claim_id != nil {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -8856,6 +8962,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Runtime()
 	case agent.FieldRuntimeBrokerID:
 		return m.RuntimeBrokerID()
+	case agent.FieldWorkspacePlacement:
+		return m.WorkspacePlacement()
 	case agent.FieldWebPtyEnabled:
 		return m.WebPtyEnabled()
 	case agent.FieldExposedPorts:
@@ -8936,6 +9044,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RunIntent()
 	case agent.FieldRunIntentAt:
 		return m.RunIntentAt()
+	case agent.FieldRunIntentMarkedAt:
+		return m.RunIntentMarkedAt()
 	case agent.FieldStartClaimID:
 		return m.StartClaimID()
 	case agent.FieldStartClaimKind:
@@ -9017,6 +9127,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRuntime(ctx)
 	case agent.FieldRuntimeBrokerID:
 		return m.OldRuntimeBrokerID(ctx)
+	case agent.FieldWorkspacePlacement:
+		return m.OldWorkspacePlacement(ctx)
 	case agent.FieldWebPtyEnabled:
 		return m.OldWebPtyEnabled(ctx)
 	case agent.FieldExposedPorts:
@@ -9097,6 +9209,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRunIntent(ctx)
 	case agent.FieldRunIntentAt:
 		return m.OldRunIntentAt(ctx)
+	case agent.FieldRunIntentMarkedAt:
+		return m.OldRunIntentMarkedAt(ctx)
 	case agent.FieldStartClaimID:
 		return m.OldStartClaimID(ctx)
 	case agent.FieldStartClaimKind:
@@ -9307,6 +9421,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRuntimeBrokerID(v)
+		return nil
+	case agent.FieldWorkspacePlacement:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkspacePlacement(v)
 		return nil
 	case agent.FieldWebPtyEnabled:
 		v, ok := value.(bool)
@@ -9588,6 +9709,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRunIntentAt(v)
 		return nil
+	case agent.FieldRunIntentMarkedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntentMarkedAt(v)
+		return nil
 	case agent.FieldStartClaimID:
 		v, ok := value.(string)
 		if !ok {
@@ -9826,6 +9954,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRuntimeBrokerID) {
 		fields = append(fields, agent.FieldRuntimeBrokerID)
 	}
+	if m.FieldCleared(agent.FieldWorkspacePlacement) {
+		fields = append(fields, agent.FieldWorkspacePlacement)
+	}
 	if m.FieldCleared(agent.FieldExposedPorts) {
 		fields = append(fields, agent.FieldExposedPorts)
 	}
@@ -9922,6 +10053,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunIntentAt) {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.FieldCleared(agent.FieldRunIntentMarkedAt) {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.FieldCleared(agent.FieldStartClaimID) {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -10016,6 +10150,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRuntimeBrokerID:
 		m.ClearRuntimeBrokerID()
+		return nil
+	case agent.FieldWorkspacePlacement:
+		m.ClearWorkspacePlacement()
 		return nil
 	case agent.FieldExposedPorts:
 		m.ClearExposedPorts()
@@ -10112,6 +10249,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ClearRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ClearRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ClearStartClaimID()
@@ -10228,6 +10368,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRuntimeBrokerID:
 		m.ResetRuntimeBrokerID()
+		return nil
+	case agent.FieldWorkspacePlacement:
+		m.ResetWorkspacePlacement()
 		return nil
 	case agent.FieldWebPtyEnabled:
 		m.ResetWebPtyEnabled()
@@ -10348,6 +10491,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ResetRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ResetRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ResetStartClaimID()

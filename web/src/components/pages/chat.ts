@@ -50,8 +50,11 @@ import type { AgentListSnapshot } from '../../client/agent-store.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
+import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
+import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
@@ -416,6 +419,29 @@ export class ScionPageChat extends LitElement {
   /** The {@link _hubMembersGeneration} that owns the current in-flight walk; meaningless while `_hubMembersInFlight` is false. */
   private _hubMembersInFlightGeneration = 0;
   private _hubMembersReloadQueued = false;
+  /**
+   * The {@link _hubMembersGeneration} whose walk last published both lists,
+   * or null. A "join" call for that same generation has nothing to wait for
+   * and nothing new to fetch: the walk it would join already finished, and
+   * SSE has kept the list current since. Without this, the route re-parse
+   * that follows `rail-loaded` (seconds after mount, under a loaded hub)
+   * found no walk in flight and walked the whole hub again. A generation
+   * bump retires it by mismatch; `loadV2Members` clears it because it
+   * replaces the lists with one project's members. `{ refresh: true }`
+   * ignores it.
+   */
+  private _hubMembersLoadedGeneration: number | null = null;
+  /** The in-flight project members request, aborted once another view claims the sidebar. */
+  private _projectMembersAbort: AbortController | null = null;
+  /** Newest chat message (event time) the pending debounced rail reload must reflect. */
+  private _railReloadAfter = -Infinity;
+  /**
+   * The {@link _hubMembersGeneration} hub presence was last fetched for (or
+   * is being fetched for). Presence then stays current over SSE, so a rail
+   * reload — one per chat message — must not fetch a space's members again
+   * just to re-merge it; the fallback poll resyncs it slowly instead.
+   */
+  private _hubPresenceGeneration: number | null = null;
   /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
@@ -1328,6 +1354,8 @@ export class ScionPageChat extends LitElement {
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
     ++this._hubMembersGeneration;
+    this._projectMembersAbort?.abort();
+    this._projectMembersAbort = null;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
     this._mobileLayoutQuery = null;
     document.removeEventListener('keydown', this._onKeydown);
@@ -1465,8 +1493,9 @@ export class ScionPageChat extends LitElement {
       void this.loadHubMembers();
     }
 
-    // Load unread DM peer IDs for the blue unread dot on member avatars
-    void this.loadUnreadDMPeers();
+    // Load unread DM peer IDs for the blue unread dot on member avatars.
+    // The tab-title counter asked for the same list moments ago; share it.
+    void this.loadUnreadDMPeers({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
 
     // Subscribe to SSE events
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
@@ -1516,6 +1545,11 @@ export class ScionPageChat extends LitElement {
         // route/view re-parses elsewhere, which just want whatever walk is
         // already in flight.
         void this.loadHubMembers({ refresh: true });
+        // Presence rides on SSE between these polls; resync it here, at the
+        // poll's pace, rather than on every rail reload. It races the walk
+        // above: a user who first appears in that walk gets presence at the
+        // next poll or presence event, which is acceptable for a resync.
+        void this.refreshHubMemberPresence(this._presenceProjectIds[0] ?? '');
       }
     }, FALLBACK_POLL_INTERVAL_MS);
   }
@@ -1564,10 +1598,9 @@ export class ScionPageChat extends LitElement {
       // When in the global /chat view (no conversation selected), the hub
       // members were loaded from /api/v1/users which doesn't include presence
       // state. Now that we have space IDs, fetch presence data from the first
-      // space's members endpoint and merge it into the existing list.
-      if (!this.v2Conversation) {
-        void this.refreshHubMemberPresence(detail.spaceIds[0]);
-      }
+      // space's members endpoint and merge it into the existing list — once
+      // per hub view, not on every rail reload.
+      this.maybeRefreshHubPresence();
     }
   }
 
@@ -1946,8 +1979,9 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // Find #general thread (or fall back to first thread) for this space
-    const threads = await this.loadSpaceThreads(projectId);
+    // Find #general thread (or fall back to first thread) for this space.
+    // Through the rail, so its list and this lookup share one request.
+    const threads = await rail.threadsFor(projectId);
     // Same as after the slug lookup: a thread opened during the await wins.
     if (!this.routeNamesSpace(slug)) return;
     const target = threads.find((t: { isGeneral: boolean }) => t.isGeneral) || threads[0];
@@ -1969,31 +2003,6 @@ export class ScionPageChat extends LitElement {
       // Update URL to include the thread
       navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(target.id)}`);
     }
-  }
-
-  /**
-   * Fetch threads for a space from the API.
-   */
-  private async loadSpaceThreads(
-    projectId: string
-  ): Promise<Array<{ id: string; name: string; isGeneral: boolean; defaultAgent?: string }>> {
-    try {
-      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`);
-      if (res.ok) {
-        const data = (await res.json()) as {
-          threads?: Array<{
-            id: string;
-            name: string;
-            isGeneral: boolean;
-            defaultAgent?: string;
-          }>;
-        };
-        return data.threads || [];
-      }
-    } catch {
-      // Non-critical
-    }
-    return [];
   }
 
   /**
@@ -2253,14 +2262,22 @@ export class ScionPageChat extends LitElement {
     // A new message may create an unread DM or clear one — refresh the dots.
     void this.loadUnreadDMPeers();
 
-    // Debounce: reload the rail + backfill conversation
+    // Debounce: reload the rail + backfill conversation. The reload only
+    // needs a spaces list requested after the newest message of the burst,
+    // so it shares the tab-title counter's refresh for the same messages
+    // (which runs sooner) rather than asking the server a second time.
+    // A synthetic event stamped 0 would share any request: fall back to now.
+    const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
+    this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
     this._refreshTimer = setTimeout(() => {
       this._refreshTimer = null;
+      const startedAfter = this._railReloadAfter;
+      this._railReloadAfter = -Infinity;
       const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
         | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
         | null;
-      if (rail) void rail.reload();
+      if (rail) void rail.reload({ startedAfter });
     }, 2000);
   }
 
@@ -2492,9 +2509,11 @@ export class ScionPageChat extends LitElement {
    */
   private async resolveDMPeerInfo(key: string): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (!res.ok) return;
-      const data = (await res.json()) as {
+      // Peer metadata does not change under a DM, so a list loaded moments
+      // ago (at startup, by the unread counter) answers this as well.
+      const body = await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      if (!body) return;
+      const data = body as {
         dms?: Array<{
           conversationKey: string;
           peerName?: string;
@@ -2543,21 +2562,27 @@ export class ScionPageChat extends LitElement {
     // earlier lookup's own push changes it without the user doing anything.
     const startSeq = this._userNavSeq;
     const superseded = (): boolean =>
-      opts.fromRoute
+      opts?.fromRoute
         ? !this.routeNamesDMPeer(peerId) ||
           (!!this.v2Conversation?.isDM && this.v2Conversation.peerId === peerId)
         : this._userNavSeq !== startSeq;
     // A DM the user opened gets its own URL, as openDM gives it when the key
     // is known; otherwise the next re-parse of the old route would close it.
     const pushIfOpenedByUser = (dmKey: string): void => {
-      if (!opts.fromRoute) this.pushDMPath(dmKey);
+      if (!opts?.fromRoute) this.pushDMPath(dmKey);
     };
 
     // 1. Try to find an existing DM via the DM list API (no user ID needed).
     try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (res.ok) {
-        const data = (await res.json()) as {
+      // A route-driven lookup (startup, deep link, the re-parse after
+      // rail-loaded) shares the list loaded moments ago; a DM missing from
+      // it falls through to the steps below, which build the key without
+      // the list. A DM the user opens fetches afresh: it may be brand new.
+      const body = await chatDMsLoad.load(
+        opts?.fromRoute ? { maxAgeMs: CHAT_STARTUP_REUSE_MS } : {}
+      );
+      if (body) {
+        const data = body as {
           dms?: Array<{
             conversationKey: string;
             peerName?: string;
@@ -2683,10 +2708,15 @@ export class ScionPageChat extends LitElement {
     // project or presence response still in flight from the view the user
     // just left is discarded even when this call only joins a walk.
     ++this._membersViewSeq;
+    this._projectMembersAbort?.abort();
+    this._projectMembersAbort = null;
     const inFlightForThisGeneration =
       this._hubMembersInFlight && this._hubMembersInFlightGeneration === this._hubMembersGeneration;
     if (inFlightForThisGeneration) {
       if (options?.refresh) this._hubMembersReloadQueued = true;
+      return;
+    }
+    if (!options?.refresh && this._hubMembersLoadedGeneration === this._hubMembersGeneration) {
       return;
     }
     if (this._hubMembersScheduled) return;
@@ -2915,6 +2945,11 @@ export class ScionPageChat extends LitElement {
           kind: 'agent' as const,
         })),
       ];
+      if (usersResult.status === 'fulfilled' && agentsResult.status === 'fulfilled') {
+        this._hubMembersLoadedGeneration = generation;
+        // The rail may have loaded first; presence waited for this list.
+        this.maybeRefreshHubPresence();
+      }
     } catch {
       // Non-critical — sidebar keeps whatever it already had.
     }
@@ -2922,12 +2957,32 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Fetch hub presence once per hub view: when both the hub member list
+   * (which presence merges into) and the space IDs (which name the members
+   * endpoint to ask) are known, whichever arrives second triggers it.
+   */
+  private maybeRefreshHubPresence(): void {
+    const projectId = this._presenceProjectIds[0];
+    if (this.v2Conversation || !projectId) return;
+    if (this._hubMembersLoadedGeneration !== this._hubMembersGeneration) return;
+    if (this._hubPresenceGeneration === this._hubMembersGeneration) return;
+    void this.refreshHubMemberPresence(projectId);
+  }
+
+  /**
    * Fetch presence data from a space's members endpoint and merge it into the
-   * hub-level human members list.  Called from handleRailLoaded when the user
-   * is in the global /chat view so that presence indicators render on first load.
+   * hub-level human members list, so presence indicators render in the
+   * global /chat view (the hub walk's `/api/v1/users` carries none). Called
+   * by {@link maybeRefreshHubPresence} (once per hub view) and by the
+   * fallback poll (a slow resync of what SSE keeps current in between).
    */
   private async refreshHubMemberPresence(projectId: string): Promise<void> {
     if (!projectId) return;
+    // Claimed up front so a second trigger during the request does not ask
+    // again; released below if the merge does not happen.
+    const generation = this._hubMembersGeneration;
+    this._hubPresenceGeneration = generation;
+    let merged = false;
     // Captured, not bumped: this only merges presence fields into whatever
     // loadHubMembers/loadV2Members last populated, it doesn't replace that
     // view's arrays. If the view has since moved on, bail instead of
@@ -2943,6 +2998,7 @@ export class ScionPageChat extends LitElement {
       // a newer load could otherwise land in the window between the body
       // resolving and this check.
       if (seq !== this._membersViewSeq) return;
+      merged = true;
       if (!data.humans?.length) return;
 
       // Build a lookup of userId → presenceState. Members present in the
@@ -2965,6 +3021,11 @@ export class ScionPageChat extends LitElement {
       }
     } catch {
       // Non-critical — presence will still update via SSE events
+    } finally {
+      // Not applied (failed, or the view moved on): let the next trigger retry.
+      if (!merged && this._hubPresenceGeneration === generation) {
+        this._hubPresenceGeneration = null;
+      }
     }
   }
 
@@ -2972,12 +3033,12 @@ export class ScionPageChat extends LitElement {
    * Fetch DM conversations and extract peer IDs with unread messages
    * for the blue unread dot on member avatars.
    */
-  private async loadUnreadDMPeers(): Promise<void> {
+  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<void> {
     const requestId = ++this._unreadDMRequestId;
     try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (!res.ok) return;
-      const data = (await res.json()) as {
+      const body = await chatDMsLoad.load(options);
+      if (!body) return;
+      const data = body as {
         dms?: Array<{
           conversationKey: string;
           peerId: string;
@@ -3024,8 +3085,17 @@ export class ScionPageChat extends LitElement {
   private async loadV2Members(projectId: string): Promise<void> {
     if (!projectId) return;
     const seq = ++this._membersViewSeq;
+    // This replaces the hub lists, so the next hub view must walk again.
+    this._hubMembersLoadedGeneration = null;
+    // The previous view's member load can no longer publish (see the seq
+    // check below); stop it instead of letting the hub finish the work.
+    this._projectMembersAbort?.abort();
+    const controller = new AbortController();
+    this._projectMembersAbort = controller;
     try {
-      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`, {
+        signal: controller.signal,
+      });
       if (res.ok) {
         const data = (await res.json()) as {
           humans?: Array<{
@@ -3129,7 +3199,9 @@ export class ScionPageChat extends LitElement {
         ];
       }
     } catch {
-      // Non-critical
+      // Non-critical (an abort lands here too: a newer view took over)
+    } finally {
+      if (this._projectMembersAbort === controller) this._projectMembersAbort = null;
     }
   }
 
@@ -3393,7 +3465,7 @@ export class ScionPageChat extends LitElement {
    */
   private dismissKeyboard(): void {
     const el = deepActiveElement();
-    if (el instanceof HTMLElement || el instanceof SVGElement) el.blur();
+    if (el instanceof HTMLElement || el instanceof SVGElement) blurElement(el);
   }
 
   /** Swiping right reveals the panel to the left of the current one. */
@@ -4625,7 +4697,7 @@ export class ScionPageChat extends LitElement {
     if (!(dialog instanceof HTMLElement)) return;
     await (dialog as unknown as { updateComplete: Promise<boolean> }).updateComplete;
     const closeButton = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="close-button"]');
-    closeButton?.focus();
+    focusElement(closeButton);
   }
 
   private _capturePaletteInvokerFocus(): void {
@@ -4691,7 +4763,7 @@ export class ScionPageChat extends LitElement {
       this._focusPaletteFallback();
       return;
     }
-    el.focus();
+    focusElement(el);
     if (selection && (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement)) {
       try {
         el.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
@@ -4716,7 +4788,7 @@ export class ScionPageChat extends LitElement {
     const checkVisibility = (fallback as unknown as { checkVisibility?: () => boolean })
       .checkVisibility;
     if (typeof checkVisibility === 'function' && !checkVisibility.call(fallback)) return;
-    fallback.focus();
+    focusElement(fallback);
   }
 
   /**
@@ -4744,7 +4816,7 @@ export class ScionPageChat extends LitElement {
   private async _focusComposerAfterPaletteSelection(): Promise<void> {
     const slTextarea = await this._pollForNewComposerTextarea();
     if (slTextarea) {
-      slTextarea.focus();
+      focusElement(slTextarea);
       return;
     }
     // The composer never became available (e.g. read-only) — fall back to a
@@ -4848,6 +4920,9 @@ export class ScionPageChat extends LitElement {
             ? html`
                 <scion-chat-space-rail
                   selectedKey=${this.v2Conversation?.conversationKey || ''}
+                  selectedProjectId=${this.v2Conversation && !this.v2Conversation.isDM
+                    ? this.v2Conversation.projectId
+                    : ''}
                   currentUserId=${this.pageData?.user?.id || ''}
                   @thread-select=${this.handleThreadSelect}
                   @reset-view=${this.handleResetView}

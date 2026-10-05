@@ -92,6 +92,10 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
 	// The backstop stops an agent whose intent is already stopped.
 	"Server.stopForStoppedIntent": {kind: intentUnchanged},
+	// Removes a run that landed after its agent was deleted or a delete
+	// claimed it: the row is gone, or the delete engine records the stopped
+	// intent itself (ptone/scion#3055).
+	"HTTPAgentDispatcher.compensateLandedRun": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a
