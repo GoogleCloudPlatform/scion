@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -142,7 +143,8 @@ to list secrets at different scopes.
 Examples:
   scion hub secret list                    # List all user secrets
   scion hub secret list --project          # List project secrets
-  scion hub secret list --json             # Output as JSON`,
+  scion hub secret list --json             # Output as JSON (metadata only)
+  scion hub secret list --format json      # Same, via the global flag`,
 	Args: cobra.NoArgs,
 	RunE: runSecretList,
 }
@@ -441,6 +443,45 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// secretListItem is the JSON shape of one row of "scion hub secret list".
+// It carries the same metadata the table shows and never a secret value.
+type secretListItem struct {
+	Key          string    `json:"key"`
+	Type         string    `json:"type"`
+	AllowProgeny bool      `json:"allowProgeny"`
+	Version      int       `json:"version"`
+	Updated      time.Time `json:"updated"`
+}
+
+// secretListOutput is the JSON shape of "scion hub secret list".
+type secretListOutput struct {
+	Scope   string           `json:"scope"`
+	Secrets []secretListItem `json:"secrets"`
+}
+
+func newSecretListOutput(scope string, secrets []hubclient.Secret) secretListOutput {
+	out := secretListOutput{Scope: scope, Secrets: make([]secretListItem, 0, len(secrets))}
+	for _, s := range secrets {
+		out.Secrets = append(out.Secrets, secretListItem{
+			Key:          s.Key,
+			Type:         secretTypeLabel(s.SecretType),
+			AllowProgeny: s.AllowProgeny,
+			Version:      s.Version,
+			Updated:      s.Updated,
+		})
+	}
+	return out
+}
+
+// secretTypeLabel returns the displayed secret type, defaulting to
+// "environment" when the Hub leaves it empty.
+func secretTypeLabel(t string) string {
+	if t == "" {
+		return "environment"
+	}
+	return t
+}
+
 func runSecretList(cmd *cobra.Command, _ []string) error {
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
@@ -458,10 +499,8 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
 
-	if secretOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+	if secretOutputJSON || isJSONOutput() {
+		return outputJSON(newSecretListOutput(scope, resp.Secrets))
 	}
 
 	if len(resp.Secrets) == 0 {
@@ -473,10 +512,7 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED")
 	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-----------------------")
 	for _, s := range resp.Secrets {
-		typeLabel := s.SecretType
-		if typeLabel == "" {
-			typeLabel = "environment"
-		}
+		typeLabel := secretTypeLabel(s.SecretType)
 		progenyLabel := "-"
 		if s.AllowProgeny {
 			progenyLabel = "\u2713"
