@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -96,8 +95,7 @@ func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messa
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("hub returned status %d: %s", resp.StatusCode, string(respBody))
+		return readHubError("hub", resp)
 	}
 
 	return nil
@@ -136,8 +134,7 @@ func (c *HubClient) DeliverCallback(ctx context.Context, data map[string]interfa
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("hub callback returned status %d: %s", resp.StatusCode, string(respBody))
+		return readHubError("hub callback", resp)
 	}
 
 	return nil
@@ -207,8 +204,7 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list agents returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse
@@ -243,8 +239,7 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list projects returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("list projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -281,8 +276,7 @@ func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID, onBehalfOf
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list user projects returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -319,8 +313,7 @@ func (c *HubClient) GetProjectStatus(ctx context.Context, projectID, onBehalfOf 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("get project returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("get project", resp)
 	}
 
 	var p hubProject
@@ -370,8 +363,7 @@ func (c *HubClient) RegisterTeamsLink(ctx context.Context, teamsUserID string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", fmt.Errorf("hub link returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", readHubError("hub link", resp)
 	}
 
 	return code, nil
@@ -399,8 +391,7 @@ func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", "", "", fmt.Errorf("link status returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", "", readHubError("link status", resp)
 	}
 
 	var result struct {

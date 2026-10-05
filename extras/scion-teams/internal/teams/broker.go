@@ -834,7 +834,7 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		)
 		// The webhook has already acknowledged this activity, so report the
 		// failure in the conversation.
-		b.replyText(ctx, activity, inboundDeliveryFailureText(agentSlug))
+		b.replyText(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, inboundDeliveryFailureText(agentSlug)))
 		return fmt.Errorf("deliver to hub: %w", err)
 	}
 

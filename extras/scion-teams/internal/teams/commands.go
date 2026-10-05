@@ -367,7 +367,7 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents from hub", "error", err, "project_id", link.ProjectID)
-		return h.sendReply(ctx, activity, "Failed to retrieve agents. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agents. Please try again."))
 	}
 
 	// Cache agent slugs in store.
@@ -450,7 +450,7 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for status", "error", err)
-		return h.sendReply(ctx, activity, "Failed to retrieve project status. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve project status. Please try again."))
 	}
 
 	card := NewAdaptiveCard()
@@ -506,7 +506,7 @@ func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for agent status", "error", err)
-		return h.sendReply(ctx, activity, "Failed to retrieve agent status. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agent status. Please try again."))
 	}
 
 	for _, agent := range agents {
@@ -803,7 +803,7 @@ func (h *CommandHandler) handleDefault(ctx context.Context, activity *Activity, 
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for validation", "error", err)
-		return h.sendReply(ctx, activity, "Failed to validate agent. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to validate agent. Please try again."))
 	}
 
 	var found bool

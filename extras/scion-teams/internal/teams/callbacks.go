@@ -152,7 +152,9 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 	// Deliver the response to the hub.
 	if err := h.deliverAskUserResponse(ctx, activity, pending, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		return h.respondWithUpdatedCard(activity, "Failed to deliver your response. Please try again."), nil
+		mapping := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity), h.log)
+		return h.respondWithUpdatedCard(activity,
+			hubErrorText(err, mapping, h.projectSlugFor(ctx, pending.ConversationID), "Failed to deliver your response. Please try again.")), nil
 	}
 
 	// Mark as responded.
@@ -380,4 +382,18 @@ func (h *CallbackHandler) respondWithUpdatedCard(activity *Activity, text string
 		Status: 200,
 		Body:   updatedAttachment,
 	}
+}
+
+// projectSlugFor returns the slug of the project linked to conversationID,
+// or "" when it is not known.
+func (h *CallbackHandler) projectSlugFor(ctx context.Context, conversationID string) string {
+	store := h.getStore()
+	if store == nil {
+		return ""
+	}
+	link, err := store.GetChannelLink(ctx, stripThreadSuffix(conversationID))
+	if err != nil || link == nil {
+		return ""
+	}
+	return link.ProjectSlug
 }
