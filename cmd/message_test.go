@@ -3486,9 +3486,12 @@ func captureCombinedOutput(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
 	oldOut, oldErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = w, w
-	done := make(chan string)
+	// Buffered, so the reader can always hand off its result and exit,
+	// even if fn panics or calls t.FailNow and <-done is never reached.
+	done := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
 		_, _ = io.Copy(&buf, r)
@@ -3714,4 +3717,112 @@ func TestSendMessageViaConversation_AgentRefMentionPrintsBeforeConfirmation(t *t
 	require.NoError(t, err)
 	require.Contains(t, out, "Note: @nobody is not an agent in this project; no agent was notified.")
 	assert.Equal(t, "Message delivered to agent 'my-agent'.", lastLine(out))
+}
+
+// TestSendMessage_DeferredMentionPrintsBeforeConfirmation covers the
+// "deferred" branches (recipient mid-reincarnate) on the agent,
+// conv: agent-ref and outbound conv: paths: the mention note prints
+// first and the "is reincarnating; message saved" confirmation is the
+// last line.
+func TestSendMessage_DeferredMentionPrintsBeforeConfirmation(t *testing.T) {
+	const projectID = "project-msg-3303-deferred"
+	const convRaw = "conv:22222222-2222-2222-2222-222222222222"
+	mentionResults := []messages.MentionResult{
+		{Slug: "nobody", Status: "not_found", Error: "no matching agent in this project"},
+	}
+
+	newServer := func(t *testing.T) *HubContext {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/agents"):
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"agents": []hubclient.Agent{{Name: "my-agent", Status: "running"}},
+				})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"message_id":      "msg-deferred",
+					"status":          "deferred",
+					"recipient":       convRaw,
+					"recipient_id":    "uid-test",
+					"mention_results": mentionResults,
+				})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/my-agent/message"):
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"message_id":      "msg-deferred",
+					"status":          "deferred",
+					"agent":           "my-agent",
+					"deferred":        "agent is reincarnating",
+					"mention_results": mentionResults,
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(server.Close)
+		client, err := hubclient.New(server.URL)
+		require.NoError(t, err)
+		return &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	}
+
+	tests := []struct {
+		name    string
+		send    func(hubCtx *HubContext) error
+		confirm string
+	}{
+		{
+			name: "agent",
+			send: func(hubCtx *HubContext) error {
+				return sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false, false)
+			},
+			confirm: "agent my-agent is reincarnating; message saved to history" +
+				" and will be seen on catch-up (message msg-deferred).",
+		},
+		{
+			name: "conv agent-ref",
+			send: func(hubCtx *HubContext) error {
+				ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "my-agent", Raw: "@my-agent"}
+				return sendMessageViaConversation(hubCtx, ref, "hey @nobody", false, false, nil)
+			},
+			confirm: "agent my-agent is reincarnating; message saved to history" +
+				" and will be seen on catch-up (message msg-deferred).",
+		},
+		{
+			name: "outbound conv",
+			send: func(hubCtx *HubContext) error {
+				ref := &messaging.Reference{Kind: messaging.RefConversation, Value: strings.TrimPrefix(convRaw, "conv:"), Raw: convRaw}
+				return sendMessageViaConversation(hubCtx, ref, "hey @nobody", false, false, nil)
+			},
+			confirm: "agent " + convRaw + " is reincarnating; message saved to history" +
+				" and will be seen on catch-up (message msg-deferred).",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+			origCC := msgCC
+			msgCC = nil
+			defer func() { msgCC = origCC }()
+
+			hubCtx := newServer(t)
+			var sendErr error
+			out := captureCombinedOutput(t, func() {
+				sendErr = tc.send(hubCtx)
+			})
+			require.NoError(t, sendErr)
+
+			note := "Note: @nobody is not an agent in this project; no agent was notified."
+			require.Contains(t, out, note)
+			require.Contains(t, out, tc.confirm)
+			assert.Less(t, strings.Index(out, note), strings.Index(out, tc.confirm),
+				"mention note must print before the deferred confirmation")
+			assert.Equal(t, tc.confirm, lastLine(out),
+				"the deferred confirmation must be the last line")
+		})
+	}
 }
