@@ -1317,7 +1317,8 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Get project agents (with cache refresh) — only needed for legacy path.
-	agents := b.getProjectAgents(ctx, link.ProjectID, linkedPrincipal(ctx, store, m.Author.ID))
+	// Without a linked sender, getProjectAgents uses the cache only.
+	agents := b.getProjectAgents(ctx, link.ProjectID, linkedPrincipal(ctx, store, b.log, m.Author.ID))
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1993,6 +1994,8 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 // will replace this Discord-side resolution entirely.
 //
 // onBehalfOf is the message author's principal, sent with the hub refresh.
+// When it is empty, the cached list is returned (even if stale) and the hub
+// is not called.
 func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) []string {
 	b.mu.RLock()
 	store := b.store
@@ -2012,7 +2015,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehal
 		return cached.AgentSlugs
 	}
 
-	if hubClient == nil {
+	if hubClient == nil || onBehalfOf == "" {
 		if cached != nil {
 			return cached.AgentSlugs
 		}

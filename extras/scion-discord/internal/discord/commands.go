@@ -549,7 +549,16 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 		return
 	}
 
-	onBehalfOf := linkedPrincipal(ctx, h.store, interactionUserID(i))
+	// Without a linked account, return empty choices.
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(string) {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+			Data: &discordgo.InteractionResponseData{},
+		})
+	})
+	if !ok {
+		return
+	}
 
 	var choices []*discordgo.ApplicationCommandOptionChoice
 	switch focused.Name {
@@ -714,19 +723,14 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to check user mapping", "error", err, "discord_user_id", discordUserID)
-		h.followup(s, i, "Something went wrong. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
 	// If running in a thread/forum topic, resolve the parent channel.
 	var link *ChannelLink
+	var err error
 	parentID, ok := threadParentID(s, i.ChannelID)
 	if !ok {
 		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
@@ -763,24 +767,16 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 		}
 	}
 
-	// Get the projects the linked user is a member of.
-	var projects []ProjectOption
-	if onBehalfOf := principalForMapping(mapping); onBehalfOf != "" {
-		projects, err = h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
-		if err != nil {
-			h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
-		}
+	// Offer only the projects the linked user is a member of.
+	projects, err := h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
+	if err != nil {
+		h.log.Warn("Failed to list user projects", "error", err, "discord_user_id", discordUserID)
+		h.followup(s, i, "Failed to fetch your projects. Please try `/scion setup` again.")
+		return
 	}
 
 	if len(projects) == 0 {
-		projects, err = h.hubClient.ListProjectsFresh(ctx)
-		if err != nil {
-			h.log.Warn("Failed to list projects from hub", "error", err)
-		}
-	}
-
-	if len(projects) == 0 {
-		h.followup(s, i, "No projects found. Create a project in the hub first.")
+		h.followup(s, i, "You are not a member of any project. Ask a project owner to add you, then run `/scion setup` again.")
 		return
 	}
 
@@ -862,7 +858,12 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -975,7 +976,12 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.followup(s, i, "Failed to fetch agent status. Please try again.")
 		return
@@ -1062,19 +1068,13 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil || mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	sender, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
-	sender := "user:" + mapping.ScionEmail
-	if mapping.ScionEmail == "" {
-		sender = "discord:" + mapping.DiscordUsername
-	}
-
 	// Verify the agent exists.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principalForMapping(mapping))
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, sender)
 	if err != nil {
 		h.followup(s, i, "Failed to verify agent. Please try again.")
 		return
@@ -1170,7 +1170,12 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	agents, err := h.getAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
+		return
+	}
+
+	agents, err := h.getAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -1399,7 +1404,12 @@ func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, linkedPrincipal(ctx, h.store, interactionUserID(i)))
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to fetch agents. Please try again later.")
@@ -1472,18 +1482,8 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to check user mapping for thread command", "error", err, "discord_user_id", discordUserID)
-		h.followup(s, i, "Something went wrong. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "You need to link your Discord account first. Run `/scion register`.")
-		return
-	}
-	if mapping.ScionEmail == "" {
-		h.followup(s, i, "Your registered account does not have an associated email address. Please re-register.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -1496,7 +1496,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	}
 
 	// Step 0.5: Check for slug conflicts.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principalForMapping(mapping))
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents for slug conflict check", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to verify agent name availability. Please try again.")
@@ -1512,7 +1512,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// Step 0.6: Validate template (if provided).
 	templateName := getSubcommandOption(i, "template")
 	if templateName != "" {
-		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID, principalForMapping(mapping))
+		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID, onBehalfOf)
 		if err != nil {
 			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
 			h.followup(s, i, "Failed to verify template. Please try again.")
@@ -1582,7 +1582,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		agentResp, agentErr = h.hubClient.CreateAgent(createCtx, link.ProjectID, CreateAgentRequest{
 			Name:     slug,
 			Template: templateName,
-		}, "user:"+mapping.ScionEmail)
+		}, onBehalfOf)
 	}()
 
 	// Goroutine B: Create the Discord thread + post the status message.
@@ -1733,7 +1733,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Channel:   "discord",
 			ThreadID:  thread.ID,
-			Sender:    "user:" + mapping.ScionEmail,
+			Sender:    onBehalfOf,
 			SenderID:  discordUserID,
 			Recipient: "agent:" + agentResp.Slug,
 			Msg: fmt.Sprintf(
@@ -1860,23 +1860,79 @@ func principalForMapping(mapping *DiscordUserMapping) string {
 	return "user:" + mapping.ScionEmail
 }
 
-// linkedPrincipal looks up the Discord user's link and returns the namespaced
-// principal sent as X-Scion-On-Behalf-Of on hub calls made for that user. It
-// returns "" when the user is unknown, unlinked, or the lookup fails.
-func linkedPrincipal(ctx context.Context, store Store, discordUserID string) string {
+// errNoLinkedUser is returned by agent lookups made without a linked user.
+var errNoLinkedUser = errors.New("no linked user")
+
+// msgLinkAccountFirst is the reply sent when a command needs the invoking
+// user's linked Scion account and there is none.
+const msgLinkAccountFirst = "Please link your Discord account first with `/scion register`."
+
+// msgAccountLookupFailed is the reply sent when the link lookup itself fails.
+const msgAccountLookupFailed = "Something went wrong looking up your account. Please try again."
+
+// lookupPrincipal returns the namespaced principal for a Discord user, or ""
+// when the user is unknown, unlinked, or linked without an email.
+func lookupPrincipal(ctx context.Context, store Store, discordUserID string) (string, error) {
 	if store == nil || discordUserID == "" {
-		return ""
+		return "", nil
 	}
 	mapping, err := store.GetUserMapping(ctx, discordUserID)
 	if err != nil {
+		return "", err
+	}
+	return principalForMapping(mapping), nil
+}
+
+// linkedPrincipal looks up the Discord user's link and returns the namespaced
+// principal sent as X-Scion-On-Behalf-Of on hub calls made for that user. It
+// returns "" when the user is unknown, unlinked, or the lookup fails; a
+// failed lookup is logged.
+func linkedPrincipal(ctx context.Context, store Store, log *slog.Logger, discordUserID string) string {
+	principal, err := lookupPrincipal(ctx, store, discordUserID)
+	if err != nil {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
 		return ""
 	}
-	return principalForMapping(mapping)
+	return principal
+}
+
+// requirePrincipal returns the invoking user's principal. When the user has
+// no linked account with an email, it calls reply with a prompt to run
+// /scion register and returns false; when the lookup fails, it replies with
+// a retry message and returns false. Callers return without reading agents
+// or calling the hub when ok is false.
+func requirePrincipal(ctx context.Context, store Store, log *slog.Logger, discordUserID string, reply func(string)) (principal string, ok bool) {
+	principal, err := lookupPrincipal(ctx, store, discordUserID)
+	if err != nil {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
+		reply(msgAccountLookupFailed)
+		return "", false
+	}
+	if principal == "" {
+		reply(msgLinkAccountFirst)
+		return "", false
+	}
+	return principal, true
+}
+
+// requirePrincipal is the CommandHandler form of requirePrincipal that replies
+// with a follow-up message.
+func (h *CommandHandler) requirePrincipal(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) (string, bool) {
+	return requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) { h.followup(s, i, msg) })
 }
 
 // getAgents returns agent slugs for a project, using the store cache with
 // a fallback to the hub API. onBehalfOf is the invoking user's principal.
 func (h *CommandHandler) getAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
+	if onBehalfOf == "" {
+		return nil, errNoLinkedUser
+	}
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)

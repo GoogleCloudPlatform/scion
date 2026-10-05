@@ -202,19 +202,12 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 	defer cancel()
 
 	// Check user registration.
-	discordUserID := interactionUserID(i)
-	if discordUserID == "" {
+	if interactionUserID(i) == "" {
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -230,7 +223,7 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 		return
 	}
 
-	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID, principalForMapping(mapping))
+	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list secrets", "error", err, "project_id", link.ProjectID)
 		h.followup(s, i, "Failed to list secrets. Please try again later.")
@@ -270,19 +263,12 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 	defer cancel()
 
 	// Check user registration.
-	discordUserID := interactionUserID(i)
-	if discordUserID == "" {
+	if interactionUserID(i) == "" {
 		h.followup(s, i, "Could not identify your user.")
 		return
 	}
-	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil {
-		h.log.Error("Failed to look up user mapping", "error", err)
-		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
-		return
-	}
-	if mapping == nil {
-		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+	onBehalfOf, ok := h.requirePrincipal(ctx, s, i)
+	if !ok {
 		return
 	}
 
@@ -304,7 +290,7 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 
-	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID, principalForMapping(mapping))
+	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to get secret", "error", err, "key", key, "project_id", link.ProjectID)
 		h.followup(s, i, fmt.Sprintf("Failed to get secret **%s**: %s", key, err))

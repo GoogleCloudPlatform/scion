@@ -31,6 +31,10 @@ const (
 type linkedUserHub struct {
 	mu    sync.Mutex
 	calls []recordedHubCall
+
+	// projects selects the GET /projects answer: "" returns one project,
+	// "empty" returns none, and "error" returns a 500.
+	projects string
 }
 
 func (h *linkedUserHub) snapshot() []recordedHubCall {
@@ -60,6 +64,7 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		OnBehalfOf:    onBehalfOf,
 		SignedHeaders: r.Header.Get("X-Scion-Signed-Headers"),
 	})
+	projectsMode := h.projects
 	h.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -77,6 +82,10 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "empty":
+		_ = json.NewEncoder(w).Encode(hubProjectsResponse{})
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "error":
+		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
 		_ = json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: luProject, Slug: "proj-one"}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+luProject+"/agents":
@@ -355,7 +364,7 @@ func TestHandleSetup_ListsLinkedUserProjects(t *testing.T) {
 		assert.Empty(t, c.RawQuery, "project list is scoped by the linked user, not an ownerId filter")
 	}
 	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"),
-		"the broker-wide project list is only a fallback when the user list is empty")
+		"setup offers only the user's projects")
 	assert.Contains(t, e.discord.allBodies(), "setup:proj:"+luProject)
 }
 
@@ -385,4 +394,319 @@ func TestHandleThread_ReachesAgentCreation(t *testing.T) {
 	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/templates")
 	assertLinkedUserCalls(t, e.hub, http.MethodPost, agentsPath)
 	assert.Contains(t, e.discord.allBodies(), "Thread created with agent **fix-the-build**")
+}
+
+// setProjects selects the GET /projects answer (see linkedUserHub.projects).
+func (h *linkedUserHub) setProjects(mode string) {
+	h.mu.Lock()
+	h.projects = mode
+	h.mu.Unlock()
+}
+
+// countingStore wraps a Store, counts agent-cache reads, and can fail user
+// link lookups.
+type countingStore struct {
+	Store
+	mu               sync.Mutex
+	agentCacheReads  int
+	userMappingError error
+}
+
+func (c *countingStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
+	c.mu.Lock()
+	c.agentCacheReads++
+	c.mu.Unlock()
+	return c.Store.GetProjectAgents(ctx, projectID)
+}
+
+func (c *countingStore) GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error) {
+	c.mu.Lock()
+	err := c.userMappingError
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return c.Store.GetUserMapping(ctx, discordUserID)
+}
+
+func (c *countingStore) reads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.agentCacheReads
+}
+
+const luOtherUser = "du-bob"
+
+// asUser returns i with the invoking user replaced by discordUserID.
+func asUser(i *discordgo.InteractionCreate, discordUserID string) *discordgo.InteractionCreate {
+	i.Member.User = &discordgo.User{ID: discordUserID, Username: "bob"}
+	return i
+}
+
+// useCountingStore swaps the env's handlers onto a countingStore and seeds a
+// fresh agent cache for luProject.
+func (e *linkedUserEnv) useCountingStore(t *testing.T) *countingStore {
+	t.Helper()
+	cs := &countingStore{Store: e.store}
+	e.store = cs
+	e.commands.store = cs
+	e.callback.store = cs
+	require.NoError(t, e.store.SetProjectAgents(context.Background(), &ProjectAgents{
+		ProjectID:   luProject,
+		AgentSlugs:  []string{"worker"},
+		RefreshedAt: time.Now(),
+	}))
+	return cs
+}
+
+func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
+	handlers := []struct {
+		name string
+		run  func(e *linkedUserEnv, user string)
+	}{
+		{"agents", func(e *linkedUserEnv, u string) { e.commands.HandleAgents(e.session, asUser(luCommand("agents"), u)) }},
+		{"status", func(e *linkedUserEnv, u string) {
+			e.commands.HandleStatus(e.session, asUser(luCommand("status", luStringOpt("agent", "worker")), u))
+		}},
+		{"message", func(e *linkedUserEnv, u string) {
+			e.commands.HandleMessage(e.session, asUser(luCommand("message", luStringOpt("agent", "worker"), luStringOpt("text", "hi")), u))
+		}},
+		{"terminal", func(e *linkedUserEnv, u string) {
+			e.commands.HandleTerminal(e.session, asUser(luCommand("terminal", luStringOpt("agent", "worker")), u))
+		}},
+		{"default", func(e *linkedUserEnv, u string) { e.commands.HandleDefault(e.session, asUser(luCommand("default"), u)) }},
+		{"default with agent", func(e *linkedUserEnv, u string) {
+			e.commands.HandleDefault(e.session, asUser(luCommand("default", luStringOpt("agent", "worker")), u))
+		}},
+		{"thread", func(e *linkedUserEnv, u string) {
+			e.commands.HandleThread(e.session, asUser(luCommand("thread", luStringOpt("title", "Fix the build")), u))
+		}},
+		{"secret list", func(e *linkedUserEnv, u string) {
+			e.commands.HandleSecretList(e.session, asUser(luSecretCommand("list"), u))
+		}},
+		{"secret get", func(e *linkedUserEnv, u string) {
+			e.commands.HandleSecretGet(e.session, asUser(luSecretCommand("get", luStringOpt("key", "API_KEY")), u))
+		}},
+		{"setup", func(e *linkedUserEnv, u string) {
+			require.NoError(t, e.store.DeleteChannelLink(context.Background(), luChannel))
+			e.commands.HandleSetup(e.session, asUser(luCommand("setup"), u))
+		}},
+		{"setup project select", func(e *linkedUserEnv, u string) {
+			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+				CustomID: "setup:proj:" + luProject,
+			}), u)
+			e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
+		}},
+	}
+
+	users := []struct {
+		name    string
+		mapping *DiscordUserMapping
+	}{
+		{name: "no link"},
+		{name: "link without email", mapping: &DiscordUserMapping{
+			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
+		}},
+	}
+
+	for _, h := range handlers {
+		for _, u := range users {
+			t.Run(h.name+"/"+u.name, func(t *testing.T) {
+				e := newLinkedUserEnv(t)
+				e.linkChannel(t)
+				cs := e.useCountingStore(t)
+				if u.mapping != nil {
+					require.NoError(t, e.store.CreateUserMapping(context.Background(), u.mapping))
+				}
+
+				h.run(e, luOtherUser)
+
+				assert.Empty(t, e.hub.snapshot(), "no hub call without a linked account")
+				assert.Zero(t, cs.reads(), "no agent cache read without a linked account")
+				assert.Contains(t, e.discord.allBodies(), "Please link your Discord account first with `/scion register`.")
+			})
+		}
+	}
+}
+
+func TestHandleAutocomplete_UnlinkedUserGetsNoChoices(t *testing.T) {
+	for _, focused := range []string{"agent", "template"} {
+		t.Run(focused, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			cs := e.useCountingStore(t)
+
+			e.commands.HandleAutocomplete(e.session, asUser(luAutocomplete("status", focused), luOtherUser))
+
+			assert.Empty(t, e.hub.snapshot())
+			assert.Zero(t, cs.reads())
+			bodies := e.discord.allBodies()
+			assert.Contains(t, bodies, `"type":8`, "an autocomplete result is sent")
+			assert.NotContains(t, bodies, "worker")
+			assert.NotContains(t, bodies, "default")
+		})
+	}
+}
+
+func TestHandlers_LinkLookupFailureAsksToRetry(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+	cs := e.useCountingStore(t)
+	cs.userMappingError = assert.AnError
+
+	e.commands.HandleAgents(e.session, luCommand("agents"))
+
+	assert.Empty(t, e.hub.snapshot())
+	assert.Zero(t, cs.reads())
+	assert.Contains(t, e.discord.allBodies(), "Something went wrong looking up your account. Please try again.")
+}
+
+func TestHandleSetup_NoProjectsTellsUserTheyAreNotAMember(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.hub.setProjects("empty")
+
+	e.commands.HandleSetup(e.session, luCommand("setup"))
+
+	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
+	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
+	bodies := e.discord.allBodies()
+	assert.Contains(t, bodies, "You are not a member of any project.")
+	assert.NotContains(t, bodies, "setup:proj:")
+}
+
+func TestHandleSetup_ProjectListErrorAsksToRetry(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.hub.setProjects("error")
+
+	e.commands.HandleSetup(e.session, luCommand("setup"))
+
+	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
+	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
+	bodies := e.discord.allBodies()
+	assert.Contains(t, bodies, "Failed to fetch your projects. Please try `/scion setup` again.")
+	assert.NotContains(t, bodies, "setup:proj:")
+}
+
+func TestHandleSetupProject_SlugFromUserProjects(t *testing.T) {
+	tests := []struct {
+		name     string
+		projects string
+		wantSlug string
+	}{
+		{name: "found in user projects", wantSlug: "proj-one"},
+		{name: "falls back to project ID", projects: "empty", wantSlug: luProject},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.hub.setProjects(tt.projects)
+
+			i := luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+				CustomID: "setup:proj:" + luProject,
+			})
+			e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
+
+			assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
+			assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
+			link, err := e.store.GetChannelLink(context.Background(), luChannel)
+			require.NoError(t, err)
+			require.NotNil(t, link)
+			assert.Equal(t, tt.wantSlug, link.ProjectSlug)
+		})
+	}
+}
+
+// newLinkedUserBroker returns a broker on the env's store, session and fake
+// hub, using the legacy inbound path and an empty agent cache.
+func newLinkedUserBroker(t *testing.T, e *linkedUserEnv, hubURL string) *DiscordBroker {
+	t.Helper()
+	return &DiscordBroker{
+		log:           discardLogger(),
+		session:       e.session,
+		store:         e.store,
+		hubClient:     NewHTTPHubClient(hubURL, "", "", nil),
+		hubURL:        hubURL,
+		pluginName:    "discord",
+		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		sentIDs:       make(map[string]time.Time),
+		subs:          make(map[string]bool),
+		threadParents: make(map[string]string),
+		config:        &Config{},
+		botUser:       &discordgo.User{ID: "BOT123", Username: "TestBot"},
+		agentCacheTTL: 30 * time.Second,
+	}
+}
+
+func luChannelMessage(authorID, content string) *discordgo.MessageCreate {
+	return &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID:        "msg-1",
+		ChannelID: luChannel,
+		GuildID:   testGuildID,
+		Content:   content,
+		Author:    &discordgo.User{ID: authorID, Username: "someone"},
+		Timestamp: time.Now(),
+		Type:      discordgo.MessageTypeDefault,
+	}}
+}
+
+func newLinkedUserHubServer(t *testing.T, e *linkedUserEnv) string {
+	t.Helper()
+	srv := httptest.NewServer(e.hub)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestHandleIncomingMessage_RefreshesAgentsAsSender(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+
+	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "@worker hello"))
+
+	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects/"+luProject+"/agents")
+}
+
+func TestHandleIncomingMessage_UnlinkedSenderUsesAgentCacheOnly(t *testing.T) {
+	tests := []struct {
+		name  string
+		cache *ProjectAgents
+	}{
+		{name: "empty cache"},
+		{name: "stale cache", cache: &ProjectAgents{
+			ProjectID: luProject, AgentSlugs: []string{"worker"}, RefreshedAt: time.Now().Add(-time.Hour),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			if tt.cache != nil {
+				require.NoError(t, e.store.SetProjectAgents(context.Background(), tt.cache))
+			}
+			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+
+			b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "@worker hello"))
+
+			assert.Empty(t, e.hub.snapshot(), "no hub call for an unlinked sender")
+			if tt.cache != nil {
+				// The cached agent resolves, so the sender is asked to register.
+				assert.Contains(t, e.discord.allBodies(), "/scion register")
+			}
+		})
+	}
+}
+
+func TestLinkedPrincipal_LogsFailedLookup(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	store := &countingStore{Store: newTestStore(t), userMappingError: assert.AnError}
+	assert.Empty(t, linkedPrincipal(context.Background(), store, log, "du-carol"))
+	assert.Contains(t, buf.String(), "level=WARN")
+	assert.Contains(t, buf.String(), "discord_user_id=du-carol")
+
+	buf.Reset()
+	store.userMappingError = nil
+	assert.Empty(t, linkedPrincipal(context.Background(), store, log, "du-carol"))
+	assert.Empty(t, buf.String(), "an unlinked user is not logged")
 }
