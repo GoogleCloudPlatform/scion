@@ -193,10 +193,17 @@ test-launch-store-postgres:
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
-# tests self-skip without it, so the target fails if the variable is unset
-# or if any selected test skips or reports no PASS line. CI runs this in
+# tests self-skip without it, so the target fails if the variable is unset,
+# if any selected test skips, or if any test listed in
+# WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
 # the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
 # webchat_* tables, so point the DSN at a scratch database.
+WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
+	TestC4Fix_Postgres_FreshDB \
+	TestC4Fix_Postgres_PreExistingDB \
+	TestC4Fix_Postgres_Idempotent \
+	TestC4Fix_Postgres_PreExistingDB_Idempotent
+
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -204,7 +211,7 @@ test-webchat-postgres:
 		exit 1; \
 	fi
 	@go test -count=1 -timeout 10m -v \
-		-run '^TestListTopicsByProjects_Postgres$$' \
+		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-webchat-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-webchat-postgres.log; \
@@ -213,10 +220,12 @@ test-webchat-postgres:
 		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi; \
-	if ! grep -qE '^--- PASS: TestListTopicsByProjects_Postgres ' /tmp/test-webchat-postgres.log; then \
-		echo "ERROR: TestListTopicsByProjects_Postgres did not run." >&2; \
-		exit 1; \
-	fi
+	for t in $(WEBCHAT_POSTGRES_TESTS); do \
+		if ! grep -qE "^--- PASS: $$t " /tmp/test-webchat-postgres.log; then \
+			echo "ERROR: $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done
 
 ## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
 # It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
