@@ -90,7 +90,7 @@ OpenCode supports two authentication methods (auto-detected in this order):
 
 ### Configuration
 - **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default, and the Vertex default never replaces a `model` already in the file. A file that is not plain JSON (for example one with comments) is left unchanged, with a warning.
-- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and keeps the configured model (ptone/scion#3065).
+- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and leaves `model` unchanged (ptone/scion#3065).
 - **`opencode.jsonc`**: opencode loads `opencode.jsonc` after `opencode.json`, so its keys (including `model`) override the file the provisioner writes.
 - **Environment**: Respects standard OpenCode environment variables.
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.

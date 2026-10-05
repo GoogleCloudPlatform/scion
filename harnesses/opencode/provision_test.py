@@ -284,6 +284,40 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertIn("opencode.json", stderr.getvalue())
         self.assertIn("not a plain JSON object and is left unchanged", stderr.getvalue())
 
+    def test_non_object_json_config_is_left_untouched(self) -> None:
+        # RV3-N2: valid JSON that is not an object is left as it is.
+        content = "[1]"
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            path = _seed_config(tmp, content)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), content)
+        self.assertIn("not a plain JSON object and is left unchanged", stderr.getvalue())
+
+    def test_config_path_that_is_a_directory_is_left_untouched(self) -> None:
+        # F1: a config path that is not a regular file is unusable; it is
+        # left in place with a warning instead of failing provision.
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            path = os.path.join(tmp, CONFIG_REL)
+            os.makedirs(path)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(
+                    tmp,
+                    env_vars=["ANTHROPIC_API_KEY"],
+                    mcp_servers={"remote-tool": {"transport": "sse", "url": "https://example.com/mcp"}},
+                )
+            self.assertTrue(os.path.isdir(path))
+            self.assertEqual(os.listdir(path), [])
+        self.assertIn("is left unchanged", stderr.getvalue())
+        self.assertNotIn("model=", stderr.getvalue())
+
     def test_vertex_default_keeps_user_model(self) -> None:
         # R3: the Vertex default must not overwrite a model the user set.
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,6 +364,21 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertNotIn("model", config)
         self.assertNotIn("small_model", config)
 
+    def test_explicit_vertex_model_kept_after_switch_to_api_key(self) -> None:
+        # RV3-N1: an explicit SCION_MODEL equal to the Vertex default is
+        # still written on a non-vertex auth method.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp)
+            with unittest.mock.patch.dict(os.environ, {"SCION_MODEL": "google-vertex/gemini-2.5-pro"}):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "google-vertex/gemini-2.5-pro")
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.dict(os.environ, {"SCION_MODEL": "google-vertex/gemini-2.5-pro"}):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "google-vertex/gemini-2.5-pro")
+
     def test_user_values_kept_after_switch_to_api_key(self) -> None:
         # O2: values that differ from the Vertex defaults are user values.
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,7 +413,17 @@ class ConfigSchemaTest(unittest.TestCase):
             with contextlib.redirect_stderr(stderr):
                 _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
         self.assertEqual(stderr.getvalue().count("not read by opencode 1.x"), 1)
-        self.assertIn("settings belong in opencode.json", stderr.getvalue())
+        self.assertIn("move any settings you added to opencode.json", stderr.getvalue())
+        # RV3-N2: an unparsable (JSONC) legacy file is kept with the notice.
+        jsonc = '{\n  // keep\n  "theme": "x",\n}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _seed_config(tmp, jsonc, legacy_rel)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), jsonc)
+        self.assertEqual(stderr.getvalue().count("not read by opencode 1.x"), 1)
         with tempfile.TemporaryDirectory() as tmp:
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):

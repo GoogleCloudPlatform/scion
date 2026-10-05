@@ -220,7 +220,7 @@ def _load_config() -> dict[str, Any] | None:
     still be valid for opencode. None means: leave the file as it is.
     """
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
-    if not os.path.isfile(config_path):
+    if not os.path.exists(config_path):
         return {}
     try:
         existing = sh.load_json(config_path)
@@ -309,7 +309,10 @@ def _remove_legacy_seed(ctx: sh.ProvisionContext) -> None:
             return
     except (OSError, ValueError):
         pass
-    ctx.info(f"{path} is not read by opencode 1.x; settings belong in opencode.json")
+    ctx.info(
+        f"{path} is not read by opencode 1.x; "
+        "move any settings you added to opencode.json"
+    )
 
 
 # ---------------------------------------------------------------------------
