@@ -18,6 +18,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -897,6 +898,31 @@ SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
 			result = append(result, id.String())
 		}
 	}
+	return result, nil
+}
+
+// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+// given group as a direct child group, in one query on the child-group edge.
+// Unlike GetParentGroups it does not walk ancestors and does not exclude the
+// group itself, so a self-edge is reported.
+func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := s.client.Group.Query().
+		Where(group.HasChildGroupsWith(group.IDEQ(uid))).
+		IDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	sort.Strings(result)
 	return result, nil
 }
 

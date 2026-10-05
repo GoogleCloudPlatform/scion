@@ -1631,6 +1631,12 @@ type GroupStore interface {
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
+	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+	// given group as a direct child group (one level only, no ancestors). A
+	// group with a self-edge is included in its own result. The result is
+	// sorted and empty, not ErrNotFound, when there are none.
+	GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error)
+
 	// CountGroupMembersByRole counts how many members of a group have the given role.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
 
