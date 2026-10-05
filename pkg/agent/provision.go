@@ -432,6 +432,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateName != "" {
+		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
+	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
 		// Copy rather than mutate opts.InlineConfig in place: it is a
@@ -780,12 +783,12 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		// Load scion-agent config from this template and merge it
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			return nil, fmt.Errorf("failed to load config from template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("failed to load config from template %s: %w", templateRef(tpl), err)
 		}
 
 		// Validate: reject legacy templates that still have a 'harness' field
 		if err := config.ValidateAgnosticTemplate(tplCfg); err != nil {
-			return nil, fmt.Errorf("template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
@@ -1382,7 +1385,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		templateHome := filepath.Join(tpl.Path, "home")
 		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
 			if err := util.CopyDir(templateHome, agentHome); err != nil {
-				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", tpl.Name, err)
+				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
 			}
 			templateHomeCopied = true
 		}
@@ -1470,7 +1473,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
 				}
 				if err := util.CopyDir(tplSkills, skillsDest); err != nil {
-					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", tpl.Name, err)
+					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", templateRef(tpl), err)
 				}
 			}
 		}
@@ -2550,7 +2553,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", tpl.Name, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
 		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
@@ -2694,4 +2697,13 @@ func normalizeHydratedTemplateInfo(info *api.AgentInfo, slug string) bool {
 		info.Template = slug
 	}
 	return true
+}
+
+// templateRef names tpl in messages: its name, or its path when it has no
+// name (a template in a content-hash cache directory).
+func templateRef(tpl *config.Template) string {
+	if tpl.Name != "" {
+		return tpl.Name
+	}
+	return tpl.Path
 }

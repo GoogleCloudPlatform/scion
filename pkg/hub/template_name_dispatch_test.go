@@ -52,20 +52,6 @@ func TestApplyStartExtras_TemplateName(t *testing.T) {
 	}
 }
 
-// TestDispatch_TemplateNameOnStartAndRestart checks that start and restart
-// carry the agent's template as StartExtras.TemplateName.
-func TestDispatch_TemplateNameOnStartAndRestart(t *testing.T) {
-	ctx := context.Background()
-	d, client, ag := autoExposeDispatchFixture(t)
-	ag.Template = "web-dev"
-
-	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
-	assert.Equal(t, "web-dev", client.lastStartExtras.TemplateName)
-
-	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
-	assert.Equal(t, "web-dev", client.lastRestartExtras.TemplateName)
-}
-
 // TestStartRestartWire_TemplateName checks the start and restart request
 // bodies on both transports: the slug is sent as templateName, a content
 // hash is not sent, and the template load key is never sent.

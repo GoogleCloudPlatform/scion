@@ -316,8 +316,14 @@ func TestStartHashTemplateLabelAndEnv(t *testing.T) {
 
 			writeHC := func(dir, user string) {
 				_ = os.MkdirAll(filepath.Join(dir, "home"), 0o755)
+				extra := ""
+				if user == "localuser" {
+					// Identifies this harness-config when the harness is
+					// resolved from it (NoAuth drop-to-shell message).
+					extra = "no_auth:\n  behavior: drop-to-shell\n  message: from-local-template\n"
+				}
 				_ = os.WriteFile(filepath.Join(dir, "config.yaml"),
-					[]byte("harness: claude\nuser: "+user+"\nimage: scion-claude:latest\n"), 0o644)
+					[]byte("harness: claude\nuser: "+user+"\nimage: scion-claude:latest\n"+extra), 0o644)
 			}
 			globalScionDir := filepath.Join(tmpDir, ".scion")
 			writeHC(filepath.Join(globalScionDir, "harness-configs", "claude-web"), "globaluser")
@@ -401,6 +407,20 @@ profiles:
 			}
 			check("restart", "globaluser")
 
+			// A start that names the template by a non-absolute name (as a
+			// local start of an existing agent can) does not resolve the
+			// same-named local template for the harness-config either.
+			captured = runtime.RunConfig{}
+			if _, err := mgr.Start(context.Background(), api.StartOptions{
+				Name: "hash-agent", Template: "web-dev", TemplateName: tt.slug,
+				ProjectPath: projectScionDir, NoAuth: true,
+			}); err != nil {
+				t.Fatalf("named-template Start: %v", err)
+			}
+			if captured.UnixUsername == "localuser" || captured.NoAuthMessage == "from-local-template" {
+				t.Errorf("named-template start used the local %q template's harness-config (user %q, no-auth message %q)", "web-dev", captured.UnixUsername, captured.NoAuthMessage)
+			}
+
 			// A start of an agent with no agent directory, carrying only the
 			// slug, does not load the same-named local template either.
 			captured = runtime.RunConfig{}
@@ -414,5 +434,63 @@ profiles:
 				t.Errorf("fresh start: UnixUsername = %q, want %q (the local %q template must not be loaded by slug)", captured.UnixUsername, "globaluser", "web-dev")
 			}
 		})
+	}
+}
+
+// TestProvisionAndReprovision_HashTemplateRecordsSlug checks that Provision
+// (provision-only create) and Reprovision record the dispatch's template
+// slug, not an empty name, for a template in a content-hash cache directory.
+func TestProvisionAndReprovision_HashTemplateRecordsSlug(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	hashDir := filepath.Join(t.TempDir(), testContentHash)
+	_ = os.MkdirAll(hashDir, 0o755)
+	_ = os.WriteFile(filepath.Join(hashDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0o644)
+
+	const agentName = "hash-provision-agent"
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	readInfo := func() api.AgentInfo {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(scionDir, agentName), "agent-info.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	if _, err := mgr.Provision(context.Background(), api.StartOptions{
+		Name: agentName, Template: hashDir, TemplateName: "web-dev",
+		ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if info := readInfo(); info.Template != "web-dev" || info.TemplateHash != testContentHash {
+		t.Errorf("after Provision: template = %q, templateHash = %q; want %q, %q", info.Template, info.TemplateHash, "web-dev", testContentHash)
+	}
+
+	// Reprovision requires a real clone in the workspace.
+	_ = os.MkdirAll(filepath.Join(scionDir, "agents", agentName, "workspace", ".git"), 0o755)
+	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: hashDir, TemplateName: "web-dev-v2",
+		ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+	if info := readInfo(); info.Template != "web-dev-v2" || info.TemplateHash != testContentHash {
+		t.Errorf("after Reprovision: template = %q, templateHash = %q; want %q, %q", info.Template, info.TemplateHash, "web-dev-v2", testContentHash)
+	}
+}
+
+func TestTemplateRef(t *testing.T) {
+	if got := templateRef(&config.Template{Name: "web-dev", Path: "/t/web-dev"}); got != "web-dev" {
+		t.Errorf("templateRef(named) = %q, want web-dev", got)
+	}
+	hashDir := filepath.Join("/cache", testContentHash)
+	if got := templateRef(&config.Template{Path: hashDir}); got != hashDir {
+		t.Errorf("templateRef(unnamed) = %q, want %q", got, hashDir)
 	}
 }
