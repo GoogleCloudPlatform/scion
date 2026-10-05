@@ -1743,6 +1743,8 @@ export class ScionChatThread extends LitElement {
         `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
       );
 
+      // Early out only: the catch below and the check after the body is
+      // read would also drop a stale page, but there is no need to read it.
       if (currentId !== this.fetchId) return false;
 
       if (!res.ok) {
@@ -2484,6 +2486,8 @@ export class ScionChatThread extends LitElement {
           .sort(compareMessageOrder);
         // Restore reply-to state so the reply bar comes back for retry —
         // before reading the error, so a reply picked meanwhile stands.
+        // These guards cover the thread's own state only; the composer's
+        // onError restore after a switch is handled separately.
         if (sendFetchId === this.fetchId) this.composerReplyTo = savedReplyTo;
         const error = await extractApiError(res, 'Failed to send message');
         if (sendFetchId === this.fetchId) this.sendError = error;
@@ -2599,6 +2603,8 @@ export class ScionChatThread extends LitElement {
         .filter((m) => m.type !== 'mention')
         .sort(compareMessageOrder);
       const error = err instanceof Error ? err.message : 'Failed to send message';
+      // Thread state only; the composer's onError restore after a switch
+      // is handled separately.
       if (sendFetchId === this.fetchId) {
         // Restore reply-to state so the reply bar comes back for retry.
         this.composerReplyTo = savedReplyTo;
