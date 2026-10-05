@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -214,6 +215,9 @@ type BrokerJoinRequest struct {
 	Version      string                `json:"version"`
 	Capabilities []string              `json:"capabilities,omitempty"`
 	Profiles     []store.BrokerProfile `json:"profiles,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor. An
+	// older broker omits it and the stored descriptor is left unchanged.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // BrokerJoinResponse is the response for POST /api/v1/brokers/join.
@@ -249,6 +253,10 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.AsyncLaunch = true
 		case "emptyperagentworkspace", "empty_per_agent_workspace":
 			caps.EmptyPerAgentWorkspace = true
+		case "agentmove", "agent_move":
+			caps.AgentMove = true
+		case "startsinflight", "starts_in_flight":
+			caps.StartsInFlight = true
 		}
 	}
 	return caps
@@ -531,6 +539,12 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// distinguish an upgraded broker from an old one.
 	if len(req.Capabilities) > 0 {
 		broker.Capabilities = capabilitiesFromStrings(req.Capabilities)
+	}
+
+	// An omitted descriptor keeps the stored one, as on heartbeat (see the
+	// heartbeat handler for why a stale descriptor is safe).
+	if req.WorkspaceStorage != nil {
+		broker.WorkspaceStorage = req.WorkspaceStorage
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {

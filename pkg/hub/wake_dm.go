@@ -122,16 +122,45 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		// Hold a lifecycle op for the dispatch leg, as beginStartDispatch
+		// requires; it ends once the starting write below has landed, so the
+		// readiness wait still sees a heartbeat-reported exit.
+		endOp := s.beginLifecycleOp(agent.ID)
+		defer endOp()
+
 		// A suspended agent's reservation was released when it was suspended;
 		// re-reserve (with the cap check) before dispatch, same as create and
-		// the HTTP start/resume paths (ptone/scion#1963).
-		reserved, err := s.checkAndReserveBrokerQuota(ctx, agent)
+		// the HTTP start/resume paths (ptone/scion#1963), and mark the agent
+		// starting so the quota reconcile keeps the slot during the dispatch
+		// (ptone/scion#2014).
+		sd, err := s.beginStartDispatch(ctx, agent)
 		if err != nil {
 			if errors.Is(err, store.ErrQuotaExceeded) {
 				return nil, &AgentDMError{
 					Code:       ErrCodeQuotaExceeded,
 					Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
 					HTTPStatus: http.StatusTooManyRequests,
+				}
+			}
+			// A delete claimed the row after the start gate: answer as for
+			// a refused running intent (ptone/scion#2550).
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
+			if errors.Is(err, store.ErrPhaseMismatch) {
+				// The agent left suspended after it was read: nothing was
+				// dispatched.
+				return nil, &AgentDMError{
+					Code:       ErrCodeConflict,
+					Message:    "Failed to wake agent: its phase changed; retry",
+					HTTPStatus: http.StatusConflict,
+				}
+			}
+			if errors.Is(err, errStartingWrite) {
+				return nil, &AgentDMError{
+					Code:       ErrCodeRuntimeError,
+					Message:    "Failed to wake agent: " + err.Error(),
+					HTTPStatus: http.StatusInternalServerError,
 				}
 			}
 			return nil, &AgentDMError{
@@ -142,7 +171,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		}
 
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
+			sd.rollback(ctx)
+			// A delete claimed the row after the start gate passed: the
+			// running intent was refused (ptone/scion#2550).
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),
@@ -152,7 +186,10 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Resume the suspended agent. continue=true tells the harness to
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
+			sd.rollback(ctx)
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
@@ -173,8 +210,22 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
-		// Transition to 'starting' while waiting for readiness.
-		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
+		// The resume dispatch succeeded and the container is up: keep the
+		// reservation from here on, whatever the writes below do.
+		sd.settle()
+
+		// Re-assert 'starting' (beginStartDispatch already wrote it) and
+		// clear the previous generation's leftovers here, while the
+		// lifecycle op is still held: a heartbeat guarded during the
+		// dispatch may have stored the old container's exit message, exit
+		// fields and container status. Clearing them now, before the
+		// readiness wait, leaves alone anything the new container posts
+		// later (its first status, which is the readiness signal).
+		statusUpdate := store.AgentStatusUpdate{
+			Phase:                 string(state.PhaseStarting),
+			ClearTerminalRemnants: true,
+			ContainerStatus:       agent.ContainerStatus,
+		}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to starting",
 				"agent_id", agent.ID, "error", err)
@@ -185,6 +236,14 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseStarting)
+		// The dispatch leg is over. End the lifecycle op so the readiness
+		// wait sees a heartbeat-reported exit. Residual (as before
+		// ptone/scion#2014): a heartbeat gathered before the resume that
+		// reports the suspended container stopped, landing after this
+		// point, moves the row to stopped and releases the slot while the
+		// new container is up; the running write below does not
+		// re-reserve, so the count stays low until the hourly backfill.
+		endOp()
 		// Publish from a re-read: a delete that claimed the row meanwhile
 		// must not be painted over (design ptone/scion#2483 note F).
 		s.publishAgentStatusFresh(ctx, agent)
@@ -220,7 +279,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
-		// Agent is ready — transition to 'running'.
+		// Agent is ready — transition to 'running'. A plain phase write:
+		// the message, stalled marker and exit fields on the row now belong
+		// to the new generation.
 		statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to running",

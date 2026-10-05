@@ -189,7 +189,7 @@ func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, delet
 	return false, nil
 }
 
-func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 
@@ -198,10 +198,6 @@ func (m *heartbeatMockManager) List(ctx context.Context, filter map[string]strin
 }
 
 func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
-}
-
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	return nil
 }
 

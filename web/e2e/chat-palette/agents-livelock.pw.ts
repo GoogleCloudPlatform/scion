@@ -14,31 +14,29 @@
 
 /**
  * Chromium: the palette's Agents group against a real, deliberately slow,
- * multi-page `/api/v1/agents`, invalidated repeatedly while the fetch is
- * still in flight (what a busy hub's per-agent status SSE traffic produces
- * on a hub with a long agent list). The group must still resolve to its
- * real rows, in a small, bounded number of requests — not restart its fetch
- * once per invalidation and never finish.
+ * multi-page `/api/v1/agents`, with a busy hub's per-agent status traffic
+ * arriving on the agent feed while the walk is in flight and after it.
+ * The group must resolve to its real rows in one walk and then follow the
+ * feed's changes — never restart its fetch once per event.
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { setupApiMocks } from './mock-api.js';
+import { emitAgentEvent, setupApiMocks } from './mock-api.js';
 import { routeAgentPages } from './route-agent-pages.js';
 
 const PAGE_ONE_AGENT = { id: 'agent-page-one', name: 'Page One Agent', slug: 'page-one' };
 const PAGE_TWO_AGENT = { id: 'agent-page-two', name: 'Page Two Agent', slug: 'page-two' };
+const CREATED_AGENT = { id: 'agent-created', name: 'Created Agent', slug: 'created' };
 
 /**
  * Waits until `count()` has not changed for `quietMs`, up to `timeoutMs`
- * total — used to let the fixture's own unrelated pre-palette traffic to
- * this endpoint (see `routeAgentPages`'s caller) finish arriving before a
- * test takes its baseline, rather than guessing a fixed settle delay that
- * could still race a late request.
+ * total, so the page's own pre-palette requests to this endpoint have
+ * finished before a test takes its baseline.
  */
 async function waitForCountToSettle(
   count: () => number,
   quietMs = 300,
-  timeoutMs = 3_000
+  timeoutMs = 5_000
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let last = count();
@@ -64,59 +62,49 @@ function agentsLoading(page: Page) {
   return page.locator('scion-quick-palette [data-palette-group="agents"] .palette-loading');
 }
 
-/** Dispatch the same invalidation a real per-agent status SSE event produces. */
-async function simulateAgentsUpdatedEvent(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    (
-      document.querySelector('scion-page-chat') as unknown as { _handleAgentsUpdated(): void }
-    )._handleAgentsUpdated();
-  });
-}
-
-test('Agents invalidations during a slow multi-page fetch defer to it instead of restarting it', async ({
+test('agent status events during and after a slow multi-page walk are applied without another agent-list request', async ({
   page,
 }) => {
   await setupApiMocks(page);
-  // Registered before `goto`, so it is already in effect for every request
-  // this fixture's own page load makes — including the unrelated ones it
-  // makes to this same endpoint before the palette ever opens (see
-  // mock-api.ts) — rather than racing them.
-  const { fulfilledCount } = routeAgentPages(
+  // Registered before `goto`, so every request to the endpoint is counted.
+  const { fulfilledCount, callCount } = routeAgentPages(
     page,
     [{ agents: [PAGE_ONE_AGENT], nextCursor: 'page-2' }, { agents: [PAGE_TWO_AGENT] }],
-    { '': 100, 'page-2': 4000 }
+    { '': 100, 'page-2': 2000 }
   );
+  // The hub's single-agent read, which carries the capabilities and
+  // messageability its `created` event leaves out.
+  let createdFetches = 0;
+  await page.route(`**/api/v1/agents/${CREATED_AGENT.id}`, async (route) => {
+    createdFetches++;
+    await route.fulfill({
+      json: {
+        ...CREATED_AGENT,
+        projectId: 'p1',
+        phase: 'running',
+        _capabilities: { actions: ['attach', 'message'] },
+        _messageability: { canMessage: true },
+      },
+    });
+  });
   await page.goto('/e2e/chat-palette/fixture.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
+  // The page's own requests to this endpoint (not the palette's) settle
+  // first; every count below is relative to them.
+  await waitForCountToSettle(callCount);
+  await expect.poll(() => fulfilledCount() - callCount(), { timeout: 10_000 }).toBe(0);
+  const startedBefore = callCount();
+  const fulfilledBefore = fulfilledCount();
+  const started = (): number => callCount() - startedBefore;
+  const fulfilled = (): number => fulfilledCount() - fulfilledBefore;
 
-  // That pre-palette traffic settles on its own time, not a fixed delay —
-  // wait for it to actually *fulfill* (not just start) before taking the
-  // baseline below, so a late completion can never be mistaken for one of
-  // this test's own requests.
-  await waitForCountToSettle(fulfilledCount);
-  const fulfilledBeforeOpen = fulfilledCount();
-
-  // One full two-page cycle takes ~4.1s uninterrupted (100ms + 4000ms).
-  // Invalidations below are spaced 600ms apart — past the 500ms debounce
-  // window, so each one's own debounce tick actually fires on schedule
-  // rather than being coalesced away by the next invalidation arriving too
-  // soon to matter — and they all land (and finish arriving) well before the
-  // cycle completes, with the last one's own debounce tick (500ms later)
-  // still landing while the fetch is genuinely in flight, about 1s before
-  // the cycle's own natural completion — comfortable margin against
-  // scheduling jitter on a loaded CI box. No further invalidation arrives
-  // after that: the only thing that can still notice the fetch has since
-  // finished and start the deferred follow-up is
-  // `_refreshDirtyPaletteGroups` itself rescheduling its own recheck — a
-  // dropped reschedule there leaves the group dirty with no follow-up ever
-  // starting, so the fulfilled count below never climbs past 2 and the poll
-  // fails.
   await page.keyboard.press('Control+k');
   await expect(agentsLoading(page)).toBeVisible();
 
+  // Status traffic while the walk is still reading pages.
   for (let i = 0; i < 4; i++) {
-    await page.waitForTimeout(600);
-    await simulateAgentsUpdatedEvent(page);
+    await page.waitForTimeout(300);
+    await emitAgentEvent(page, 'p1', 'status', { agentId: PAGE_ONE_AGENT.id, activity: 'working' });
   }
 
   await expect(paletteOptions(page).filter({ hasText: PAGE_ONE_AGENT.name })).toBeVisible({
@@ -124,19 +112,44 @@ test('Agents invalidations during a slow multi-page fetch defer to it instead of
   });
   await expect(paletteOptions(page).filter({ hasText: PAGE_TWO_AGENT.name })).toBeVisible();
   await expect(agentsLoading(page)).toHaveCount(0);
+  expect(fulfilled()).toBe(2);
 
-  // Exactly two full two-page cycles — the original load, already settled
-  // above, plus the one coalesced follow-up the 4 invalidations collapse
-  // into — regardless of how many of them landed during either cycle.
-  // Polling on *fulfilled* requests (not merely started ones) until the
-  // follow-up's own page-2 request has actually completed, then holding
-  // past the debounce window, is what actually catches both failure
-  // directions: a dropped follow-up never reaches 4 fulfilled requests at
-  // all (it stays at 2, the poll times out), and a follow-up that keeps
-  // reloading (or restarts once per invalidation) keeps climbing past 4
-  // during the hold below.
-  await expect.poll(() => fulfilledCount() - fulfilledBeforeOpen, { timeout: 12_000 }).toBe(4);
+  // After the walk: one agent stops being messageable and another is
+  // created. The open group follows both, from the feed alone.
+  await emitAgentEvent(page, 'p1', 'status', {
+    agentId: PAGE_TWO_AGENT.id,
+    _messageability: { canMessage: false },
+  });
+  await emitAgentEvent(page, 'p1', 'created', {
+    agentId: CREATED_AGENT.id,
+    projectId: 'p1',
+    name: CREATED_AGENT.name,
+    slug: CREATED_AGENT.slug,
+    phase: 'running',
+  });
+  await expect(paletteOptions(page).filter({ hasText: PAGE_TWO_AGENT.name })).toHaveCount(0);
+  await expect(paletteOptions(page).filter({ hasText: CREATED_AGENT.name })).toBeVisible();
+
+  expect(createdFetches).toBe(1);
+
+  // No further agent-list request within 1.5 s: still the one walk.
   await page.waitForTimeout(1_500);
-  expect(fulfilledCount() - fulfilledBeforeOpen).toBe(4);
-  await expect(agentsLoading(page)).toHaveCount(0);
+  expect(started()).toBe(2);
+  expect(fulfilled()).toBe(2);
+  expect(createdFetches).toBe(1);
+
+  // Reopening answers from the store, without another walk.
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(
+    () =>
+      !(document.querySelector('scion-page-chat') as unknown as { v2PaletteOpen: boolean })
+        .v2PaletteOpen
+  );
+  // Let the close animation finish so the shortcut opens rather than queues.
+  await page.waitForTimeout(500);
+  await page.keyboard.press('Control+k');
+  await expect(paletteOptions(page).filter({ hasText: CREATED_AGENT.name })).toBeVisible();
+  await expect(paletteOptions(page).filter({ hasText: PAGE_ONE_AGENT.name })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(started()).toBe(2);
 });

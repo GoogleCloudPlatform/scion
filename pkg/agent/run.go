@@ -33,12 +33,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 )
 
 var ErrTmuxBinaryNotFound = errors.New("tmux binary not found")
@@ -135,6 +137,23 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// below is unaffected and keeps its existing settings.Hub.ProjectID
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
+	// The hub agent ID, snapshotted for the same reason: an NFS agent home
+	// is named after it (resolveHomeStorage), and it must come from the
+	// dispatch, never from settings or the agent name.
+	hubDispatchedAgentID := ""
+	if opts.Env != nil {
+		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
+	}
+
+	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
+	// mints one per create/start dispatch; local/CLI mode and older hubs
+	// send none, so mint it here instead. It is fixed this early so
+	// provisioning can record it as the run that owns the agent's files
+	// (ptone/scion#2675), before the container exists.
+	if opts.RunID == "" {
+		opts.RunID = uuid.NewString()
+	}
+	ctx = api.ContextWithRunID(ctx, opts.RunID)
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -167,10 +186,22 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
+	}
+
+	// Record this run as the owner of an already provisioned agent's files
+	// (provision-only, a restart, a resume) as soon as the previous run's
+	// container is gone (ptone/scion#2675). From here on the hub keeps this
+	// run even if the start fails, so the files must name it too, or a
+	// delete for this run would leave them behind. A fresh provision below
+	// records it as it writes agent-info.json; without agent-info.json this
+	// is a no-op.
+	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+			"agent", opts.Name, "run_id", opts.RunID, "error", err)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
@@ -1281,6 +1312,10 @@ authDone:
 	// successfully loaded global settings, so a start that fell back to the
 	// local layout after a load error never records that fallback.
 	sharedDirStorageResolved := false
+	// startGlobalSettings is the global settings snapshot the shared-dir
+	// backend was chosen from, when it was loaded; the home storage below
+	// is resolved from the same snapshot.
+	var startGlobalSettings *config.VersionedSettings
 	if len(effectiveSharedDirs) > 0 {
 		recorded, recErr := readSharedDirStorageRecord(agentDir)
 		if recErr != nil {
@@ -1332,6 +1367,7 @@ authDone:
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		} else if globalSettings != nil {
+			startGlobalSettings = globalSettings
 			// The backend can be overridden per profile or runtime entry.
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
@@ -1384,6 +1420,41 @@ authDone:
 			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
 		}
 	}
+	// Home storage: local, or (Kubernetes only) an NFS home on the export of
+	// the profile's shared_dir_storage. Chosen at the agent's first start
+	// and recorded, before any pod exists; later starts use the record.
+	homeStorageProfile := opts.Profile
+	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+		homeStorageProfile = finalScionCfg.Info.Profile
+	}
+	homePlan, err := resolveHomeStorage(homeStorageInput{
+		AgentDir:     agentDir,
+		AgentName:    opts.Name,
+		Slug:         slug,
+		RuntimeName:  m.Runtime.Name(),
+		Profile:      homeStorageProfile,
+		AgentID:      hubDispatchedAgentID,
+		ProjectID:    hubDispatchedProjectID,
+		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
+		LoadSettings: func() (*config.VersionedSettings, error) {
+			if startGlobalSettings != nil {
+				return checkHomeStorageLoaded(startGlobalSettings)
+			}
+			return loadHomeStorageSettings()
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	homeStorage, err := prepareHomeStorage(homePlan, hubDispatchedProjectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	homeStorageBackend := ""
+	if homeStorage != nil {
+		homeStorageBackend = runtime.HomeStorageNFS
+	}
+
 	if len(sharedDirVolumes) > 0 {
 		// Add SCION_VOLUMES env var for discoverability
 		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
@@ -1394,6 +1465,7 @@ authDone:
 	nfsGID := 0
 	nfsPVClaimName := ""
 	nfsSubPath := ""
+	nfsSubPathRoot := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1525,6 +1597,7 @@ authDone:
 			nfsPVClaimName = mount.PVClaimName
 			nfsSubPath = mount.SubPath
 			if settings.Server.WorkspaceStorage.NFS != nil {
+				nfsSubPathRoot = settings.Server.WorkspaceStorage.NFS.SubPathRoot
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
@@ -1582,6 +1655,9 @@ authDone:
 		}
 	}
 
+	// The run ID was fixed (minted if absent) at the top of Start.
+	runID := opts.RunID
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -1600,6 +1676,7 @@ authDone:
 		NFSGID:               nfsGID,
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
+		NFSSubPathRoot:       nfsSubPathRoot,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
@@ -1743,6 +1820,8 @@ authDone:
 		TrustedHubEndpoint: trustedHubEndpoint,
 		SharedDirs:         effectiveSharedDirs,
 		SharedDirStorage:   sharedDirStorage,
+		HomeStorageBackend: homeStorageBackend,
+		HomeStorage:        homeStorage,
 		BrokerMode:         opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
@@ -1771,6 +1850,7 @@ authDone:
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
+				api.LabelRunID:         runID,
 			}
 			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
@@ -1825,7 +1905,7 @@ authDone:
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
-					_ = m.Runtime.Delete(ctx, id)
+					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
 					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
 				}
 				a.Detached = detached
@@ -1845,6 +1925,7 @@ authDone:
 	warnings = append(warnings, "Container started but could not be verified as running")
 	return &api.AgentInfo{
 		ID:                    id,
+		RunID:                 runID,
 		Name:                  opts.Name,
 		Phase:                 status,
 		Detached:              detached,

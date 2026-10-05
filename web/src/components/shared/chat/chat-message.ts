@@ -948,11 +948,28 @@ export class ScionChatMessage extends LitElement {
       text-decoration: underline;
     }
 
+    /* A wide table scrolls sideways inside its own box rather than
+       squashing its columns or widening the message. The wrapper is added
+       after render (wrapTables) so the table keeps its table semantics. */
+    .md-table-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+
     .md-content table {
       border-collapse: collapse;
-      width: 100%;
-      margin: 0.5em 0;
+      min-width: 100%;
       font-size: var(--chat-fs-md);
+    }
+
+    .md-table-scroll:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 2px;
+    }
+
+    .md-table-scroll > table {
+      margin: 0;
     }
 
     .md-content th,
@@ -960,6 +977,15 @@ export class ScionChatMessage extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       padding: 0.375em 0.5em;
       text-align: left;
+    }
+
+    /* On a phone, columns keep a readable width and the wrapper scrolls
+       past that; on wider screens tables size to their content as before. */
+    @media (max-width: 768px) {
+      .md-content th,
+      .md-content td {
+        min-width: 6em;
+      }
     }
 
     .md-content th {
@@ -1573,6 +1599,7 @@ export class ScionChatMessage extends LitElement {
       void this.renderContent();
     }
     if (changed.has('renderedHtml')) {
+      this.wrapTables();
       this.injectCopyButtons();
       this.injectSyntaxHighlighting();
       this.injectDiffBlocks();
@@ -1640,6 +1667,24 @@ export class ScionChatMessage extends LitElement {
     const next = new Map(this.previews);
     next.set(id, state);
     this.previews = next;
+  }
+
+  /** Give each rendered markdown table its own sideways scroller. */
+  private wrapTables(): void {
+    this.shadowRoot?.querySelectorAll('.md-content table').forEach((table) => {
+      if (table.parentElement?.classList.contains('md-table-scroll')) return;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'md-table-scroll';
+      // A keyboard user must be able to reach and scroll a wide table, and
+      // the scrolling region needs a name. Always focusable: whether it
+      // overflows changes with the viewport (rotation, resizing).
+      wrapper.tabIndex = 0;
+      wrapper.setAttribute('role', 'region');
+      const caption = table.querySelector('caption')?.textContent?.trim();
+      wrapper.setAttribute('aria-label', caption || 'Table');
+      table.replaceWith(wrapper);
+      wrapper.appendChild(table);
+    });
   }
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */

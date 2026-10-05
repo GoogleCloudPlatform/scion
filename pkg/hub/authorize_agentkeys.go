@@ -23,13 +23,10 @@ import (
 
 // KeysAuthzDecision is the shared evaluation result authorizeAgentKeys
 // produces (.design/agent-keys-contract.md §3, ptone/scion#2191 / task 2.1,
-// ptone/scion#2195). Both ExecuteAgentKeys (task 2.2) and the temporary
-// message-raw bridge (task 2.3) consume this result directly rather than
-// reimplementing the policy: this file evaluates the policy once and returns
-// a decision; each caller turns that decision into its own response shape
-// (2.2's direct keys envelope vs. 2.3's bridge, which must reach the
-// identical decision a direct /keys call would for the same caller and
-// target — contract AK-24/AK-25 auth parity).
+// ptone/scion#2195). ExecuteAgentKeys consumes this result directly rather
+// than reimplementing the policy: this file evaluates the policy once and
+// returns a decision, and the caller turns it into the keys response
+// envelope.
 //
 // Allowed is true exactly when the caller may proceed to the next admission
 // step (rate limiting, runtime/phase checks); it says nothing about whether

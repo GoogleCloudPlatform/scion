@@ -17,8 +17,10 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -75,7 +77,11 @@ type HeartbeatService struct {
 	auxiliaryManagers func() []agent.Manager // optional: returns managers for non-default runtimes
 	version           string
 	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
-	log               *slog.Logger
+	// startsInFlight returns the agent starts running on this broker
+	// (Server.startsInFlightSnapshot). Optional: when nil, the heartbeat
+	// neither lists starts nor advertises the capability.
+	startsInFlight func() []launchKey
+	log            *slog.Logger
 
 	// defaultRuntime is the broker's own default runtime instance, set once
 	// by the caller that constructs this service (which already holds it)
@@ -84,11 +90,48 @@ type HeartbeatService struct {
 	// never constructed here.
 	defaultRuntime scionrt.Runtime
 
+	// listingDeadline bounds how long a heartbeat waits for the agent
+	// listing of its runtime targets (default plus auxiliary). A target not
+	// listed in time is reported incomplete, so liveness and the other
+	// targets' data keep flowing every interval.
+	listingDeadline time.Duration
+
+	// workspaceStorage, when set, returns the broker's current workspace
+	// storage descriptor, reported on every heartbeat so the hub sees share
+	// health changes. Nil omits the field.
+	workspaceStorage func() *api.BrokerWorkspaceStorage
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
-	stopCh      chan struct{}
-	doneCh      chan struct{}
+	// listings holds the listing in progress for each target key (guarded
+	// by mu). A heartbeat joins a listing that is still within its
+	// deadline instead of starting another, and starts no new listing for
+	// a target whose listing has run past its deadline, so a hung runtime
+	// cannot pile up goroutines.
+	listings map[string]*targetListing
+	// joinedListing, if set, is called with each target key for which a
+	// heartbeat joined a listing already in progress. Tests use it.
+	joinedListing func(key string)
+	stopCh        chan struct{}
+	doneCh        chan struct{}
 }
+
+// targetListing is one runtime target's agent listing, shared by every
+// heartbeat that waits for it. Its agents slice is shared by those
+// heartbeats, so readers must not modify it or append to it. The listing
+// runs under the context of the heartbeat that started it: if that context
+// is cancelled, every heartbeat waiting on the listing reports the target
+// incomplete.
+type targetListing struct {
+	done     chan struct{} // closed when agents and err are set
+	deadline time.Time
+	agents   []api.AgentInfo
+	err      error
+}
+
+// errListingPending marks a target whose listing did not finish before
+// the heartbeat's deadline.
+var errListingPending = errors.New("agent listing did not finish before the heartbeat deadline")
 
 // SwapManager replaces the agent manager used by the heartbeat service.
 // This is called when the broker's container runtime changes (e.g. via
@@ -118,13 +161,35 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 	}
 
 	return &HeartbeatService{
-		client:        client,
-		brokerID:      brokerID,
-		interval:      interval,
-		manager:       manager,
-		projectFilter: projectFilter,
-		log:           log,
+		client:          client,
+		brokerID:        brokerID,
+		interval:        interval,
+		listingDeadline: defaultListingDeadline(interval),
+		manager:         manager,
+		projectFilter:   projectFilter,
+		log:             log,
 	}
+}
+
+// listingDeadlineFloor is the listing deadline a heartbeat interval gets
+// when half the interval would be shorter, as long as it stays below three
+// quarters of the interval. It matches the Docker runtime's own bound on a
+// listing (dockerListGroupTimeout), so a short interval does not discard
+// Docker listings that would have succeeded.
+const listingDeadlineFloor = 10 * time.Second
+
+// defaultListingDeadline returns the listing deadline for a heartbeat
+// interval: half the interval, raised towards listingDeadlineFloor for
+// short intervals but never past three quarters of the interval, so the
+// heartbeat is still sent within its interval. At the default 30s interval
+// this is 15s; at the 5s minimum it is 3.75s, below the Docker listing
+// bound, and such a slow listing is then reported incomplete.
+func defaultListingDeadline(interval time.Duration) time.Duration {
+	deadline := interval / 2
+	if floor := min(listingDeadlineFloor, interval*3/4); deadline < floor {
+		deadline = floor
+	}
+	return deadline
 }
 
 // SetVersion sets the broker version reported in heartbeats.
@@ -179,6 +244,21 @@ func (s *HeartbeatService) IsRunning() bool {
 func (s *HeartbeatService) run(ctx context.Context) {
 	defer close(s.doneCh)
 
+	// Cancel in-flight work (the agent listing and the heartbeat request)
+	// as soon as Stop is called, so Stop never waits on a slow runtime.
+	s.mu.Lock()
+	stopCh := s.stopCh
+	s.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	// Send initial heartbeat immediately
 	if err := s.sendHeartbeat(ctx); err != nil {
 		s.log.Error("Initial heartbeat failed", "error", err)
@@ -195,7 +275,7 @@ func (s *HeartbeatService) run(ctx context.Context) {
 			if err := s.sendHeartbeat(ctx); err != nil {
 				s.log.Error("Failed to send heartbeat", "error", err)
 			}
-		case <-s.stopCh:
+		case <-stopCh:
 			s.log.Info("Heartbeat service stopping")
 			return
 		case <-ctx.Done():
@@ -234,12 +314,32 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
+			// Cross-broker agent move is not implemented by this broker.
+			AgentMove: false,
 		},
+	}
+	if s.workspaceStorage != nil {
+		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+
+	// Starts in flight are read BEFORE the agents are listed: a start that
+	// finishes between the two reads is then either still listed here or
+	// its container is in the agent list, so the hub never sees neither.
+	if s.startsInFlight != nil {
+		heartbeat.Capabilities.StartsInFlight = true
+		for _, k := range s.startsInFlight() {
+			if s.projectFilter != nil && !s.projectFilter(k.ProjectID) {
+				continue
+			}
+			heartbeat.StartsInFlight = append(heartbeat.StartsInFlight, hubclient.StartInFlight{ProjectID: k.ProjectID, Slug: k.Slug})
+		}
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the
 	// current manager under its own lock and handles nil, so no separate
-	// nil check is needed here.
+	// nil check is needed here. It returns within listingDeadline; a target
+	// not listed by then is reported incomplete, so the Hub keeps the
+	// broker online and draws no conclusion about that target's agents.
 	projectAgents, inventory := s.gatherProjectAgents(ctx)
 	if len(projectAgents) > 0 {
 		heartbeat.Projects = projectAgents
@@ -247,6 +347,108 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	heartbeat.Inventory = inventory
 
 	return heartbeat
+}
+
+// listTarget is one runtime target a heartbeat lists.
+type listTarget struct {
+	key         string // listing and log key; unique within one heartbeat
+	id          string // inventory target ID ("" when unidentified)
+	runtimeName string
+	mgr         agent.Manager
+}
+
+// listTargets lists every target concurrently and waits until all have
+// finished, deadline passes, or ctx is done. It returns, per target, the
+// agents and the listing error; a target not listed in time gets
+// errListingPending.
+//
+// A target whose listing (started by this or an earlier heartbeat) is still
+// within its own deadline is joined rather than listed again. A target
+// whose listing has run past its deadline and not returned is reported
+// pending without starting another. A listing that returns after its own
+// deadline counts as failed, so its result is never reported.
+func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget, deadline time.Time) ([][]api.AgentInfo, []error) {
+	now := time.Now()
+	listings := make([]*targetListing, len(targets))
+	var joined []string
+	s.mu.Lock()
+	onJoin := s.joinedListing
+	if s.listings == nil {
+		s.listings = make(map[string]*targetListing)
+	}
+	for i, t := range targets {
+		if l, ok := s.listings[t.key]; ok {
+			if now.Before(l.deadline) {
+				listings[i] = l
+				if onJoin != nil {
+					joined = append(joined, t.key)
+				}
+			}
+			continue
+		}
+		l := &targetListing{done: make(chan struct{}), deadline: deadline}
+		s.listings[t.key] = l
+		listings[i] = l
+		go s.runListing(ctx, t.key, t.mgr, l)
+	}
+	s.mu.Unlock()
+	for _, key := range joined {
+		onJoin(key)
+	}
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	expired := false
+	agents := make([][]api.AgentInfo, len(targets))
+	errs := make([]error, len(targets))
+	for i, l := range listings {
+		if l == nil {
+			errs[i] = errListingPending
+			continue
+		}
+		if !expired {
+			select {
+			case <-l.done:
+			case <-timer.C:
+				expired = true
+			case <-ctx.Done():
+				expired = true
+			}
+		}
+		select {
+		case <-l.done:
+			agents[i], errs[i] = l.agents, l.err
+		default:
+			errs[i] = errListingPending
+		}
+	}
+	return agents, errs
+}
+
+// runListing lists one target for l, bounded by l.deadline, then publishes
+// the result and removes l from the listings in progress.
+func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent.Manager, l *targetListing) {
+	listCtx, cancel := context.WithDeadline(ctx, l.deadline)
+	agents, err := mgr.List(listCtx, nil)
+	if err == nil {
+		// Returned only after its deadline passed (or ctx ended): too old
+		// to report. Check the clock too: listCtx's own timer may not have
+		// fired yet when List returns just after the deadline.
+		if err = listCtx.Err(); err == nil && !time.Now().Before(l.deadline) {
+			err = context.DeadlineExceeded
+		}
+		if err != nil {
+			agents = nil
+		}
+	}
+	cancel()
+	l.agents, l.err = agents, err
+	s.mu.Lock()
+	if s.listings[key] == l {
+		delete(s.listings, key)
+	}
+	s.mu.Unlock()
+	close(l.done)
 }
 
 // runtimeNamer is implemented by agent managers that can name the runtime
@@ -344,25 +546,57 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	// agentTargets maps heartbeatAgentKey to the target that reported it.
 	agentTargets := make(map[string]string)
 
-	// List all agents managed by this broker (default runtime).
-	// If the default manager fails (e.g. its runtime binary is missing),
-	// continue — auxiliary managers may still work.
-	defaultID, defaultRuntime := heartbeatTargetOf(mgr)
-	defaultKey := defaultID
-	if defaultKey == "" {
-		defaultKey = "default"
+	// Collect the targets: the default runtime first, then the auxiliary
+	// runtimes (e.g. Kubernetes). Unidentified managers get a positional
+	// key; a key seen twice in one heartbeat gets its position appended so
+	// the two listings stay separate.
+	var targets []listTarget
+	seenKeys := make(map[string]bool)
+	addListTarget := func(m agent.Manager, fallbackKey string) {
+		id, runtimeName := heartbeatTargetOf(m)
+		key := id
+		if key == "" {
+			key = fallbackKey
+		}
+		if seenKeys[key] {
+			key = fmt.Sprintf("%s#%d", key, len(targets))
+		}
+		seenKeys[key] = true
+		targets = append(targets, listTarget{key: key, id: id, runtimeName: runtimeName, mgr: m})
 	}
-	agents, err := mgr.List(ctx, nil)
-	s.noteListResult(defaultKey, err)
-	if err != nil {
-		agents = nil
-	}
-	addTarget(defaultID, defaultRuntime, err == nil)
-	for _, ag := range agents {
-		agentTargets[heartbeatAgentKey(ag)] = defaultID
+	addListTarget(mgr, "default")
+	if s.auxiliaryManagers != nil {
+		for i, auxMgr := range s.auxiliaryManagers() {
+			addListTarget(auxMgr, fmt.Sprintf("auxiliary-%d", i))
+		}
 	}
 
-	// Also include agents from auxiliary runtimes (e.g. Kubernetes).
+	s.mu.Lock()
+	listingDeadline := s.listingDeadline
+	s.mu.Unlock()
+	if listingDeadline <= 0 {
+		listingDeadline = defaultListingDeadline(s.interval)
+	}
+	listed, listErrs := s.listTargets(ctx, targets, time.Now().Add(listingDeadline))
+	for i, t := range targets {
+		s.noteListResult(t.key, listErrs[i])
+		addTarget(t.id, t.runtimeName, listErrs[i] == nil)
+	}
+
+	// The default runtime's agents. If its listing failed (e.g. its runtime
+	// binary is missing or it was too slow), continue — auxiliary runtimes
+	// may still work.
+	// Listing results may be shared with concurrent heartbeats and are
+	// read-only: copy before appending the auxiliary agents.
+	var agents []api.AgentInfo
+	if listErrs[0] == nil {
+		agents = slices.Clone(listed[0])
+	}
+	for _, ag := range agents {
+		agentTargets[heartbeatAgentKey(ag)] = targets[0].id
+	}
+
+	// Also include agents from auxiliary runtimes.
 	// Dedup by name+projectID (not name alone) to prevent collision across
 	// projects while still deduplicating the same agent found on multiple
 	// runtimes. Keying by name alone would drop an auxiliary-runtime agent
@@ -370,30 +604,20 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	// slug — that agent would then never be reported in heartbeats and its
 	// status on the Hub would go stale (e.g. stuck at "starting"). This
 	// mirrors the dedup key used by the agent-list handler.
-	if s.auxiliaryManagers != nil {
-		seen := make(map[string]bool)
-		for _, ag := range agents {
-			seen[heartbeatAgentKey(ag)] = true
+	seen := make(map[string]bool)
+	for _, ag := range agents {
+		seen[heartbeatAgentKey(ag)] = true
+	}
+	for i := 1; i < len(targets); i++ {
+		if listErrs[i] != nil {
+			continue
 		}
-		for i, auxMgr := range s.auxiliaryManagers() {
-			auxID, auxRuntime := heartbeatTargetOf(auxMgr)
-			key := auxID
-			if key == "" {
-				key = fmt.Sprintf("auxiliary-%d", i)
-			}
-			auxAgents, auxErr := auxMgr.List(ctx, nil)
-			s.noteListResult(key, auxErr)
-			addTarget(auxID, auxRuntime, auxErr == nil)
-			if auxErr != nil {
-				continue
-			}
-			for _, ag := range auxAgents {
-				k := heartbeatAgentKey(ag)
-				if !seen[k] {
-					seen[k] = true
-					agents = append(agents, ag)
-					agentTargets[k] = auxID
-				}
+		for _, ag := range listed[i] {
+			k := heartbeatAgentKey(ag)
+			if !seen[k] {
+				seen[k] = true
+				agents = append(agents, ag)
+				agentTargets[k] = targets[i].id
 			}
 		}
 	}

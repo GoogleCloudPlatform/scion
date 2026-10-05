@@ -583,6 +583,7 @@ type AgentInfo struct {
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
 	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
+	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
@@ -660,6 +661,10 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
+	// ProvisionedOnly: the Hub reports the agent provisioned but not
+	// started (ptone/scion#2929). No omitempty: an explicit false lets a
+	// client that merges responses clear a previously seen true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
@@ -853,6 +858,25 @@ func IsFreshProvisionFromContext(ctx context.Context) bool {
 	return v
 }
 
+type runIDContextKey struct{}
+
+// ContextWithRunID returns a new context carrying the run ID of the start
+// that is provisioning the agent (ptone/scion#2550), so provisioning can
+// record it in agent-info.json as the run that owns the agent's files
+// (ptone/scion#2675). An empty runID returns ctx unchanged.
+func ContextWithRunID(ctx context.Context, runID string) context.Context {
+	if runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, runIDContextKey{}, runID)
+}
+
+// RunIDFromContext returns the run ID set by ContextWithRunID, or "".
+func RunIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(runIDContextKey{}).(string)
+	return v
+}
+
 type sharedWorkspaceContextKey struct{}
 
 // ContextWithSharedWorkspace returns a new context with the shared workspace flag attached.
@@ -990,6 +1014,24 @@ type HubAgentDefaults struct {
 	MaxDuration     string        `json:"maxDuration,omitempty"`
 	Resources       *ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool         `json:"autoExposePorts,omitempty"`
+	// Experiments lists the hub experiments that change what a broker does
+	// for this dispatch and are enabled on the hub (for example
+	// experiments.K8sNFSHome). The hub sends only names that are on; an
+	// absent name is off.
+	Experiments []string `json:"experiments,omitempty"`
+}
+
+// ExperimentEnabled reports whether the hub sent name as enabled.
+func (d *HubAgentDefaults) ExperimentEnabled(name string) bool {
+	if d == nil {
+		return false
+	}
+	for _, e := range d.Experiments {
+		if e == name {
+			return true
+		}
+	}
+	return false
 }
 
 // IsEmpty reports whether no default carries a value. An empty set is not put
@@ -1000,7 +1042,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil
+		d.AutoExposePorts == nil && len(d.Experiments) == 0
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port
@@ -1108,6 +1150,13 @@ type StartOptions struct {
 	// start's cleanup: the runtime then skips its own start cleanup and
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
+
+	// RunID is the per-run identity minted by the hub for this create/start
+	// dispatch (ptone/scion#2550). It is applied to the runtime entry as the
+	// LabelRunID label. When empty (local/CLI mode, or an older hub) the
+	// agent manager mints a UUID itself, so every new entry carries one.
+	RunID string
+
 	// ResolvedKubernetesServiceAccountName is the Kubernetes ServiceAccount
 	// resolved by the broker from the operator-configured GSA mapping;
 	// applied over the template and persisted config at start, when
@@ -1130,6 +1179,37 @@ type ResourceHandle struct {
 	Name      string
 	UID       string
 }
+
+// LabelRunID is the runtime label carrying an entry's per-run identity
+// (StartOptions.RunID, AgentInfo.RunID). A delete carrying a run ID only
+// targets the entry with that label (ptone/scion#2550).
+const LabelRunID = "scion.run_id"
+
+// Error-detail keys a runtime broker sets on a start or restart failure
+// that happened inside Manager.Start (ptone/scion#2550). By then the broker
+// has acted: Start may already have removed the previous same-name entry
+// (and restart has stopped it) and may have created a new entry labelled
+// with the requested run. The hub must therefore not revert its run ID to
+// the previous one. An error without DetailStartAttempted is a rejection
+// from before Manager.Start, or from a broker that predates the marker.
+const (
+	// BrokerErrorDetailStartAttempted is true when the failure came from
+	// Manager.Start.
+	BrokerErrorDetailStartAttempted = "startAttempted"
+	// BrokerErrorDetailRunID carries the run ID the failed start used,
+	// when it had one.
+	BrokerErrorDetailRunID = "runId"
+	// BrokerErrorDetailCurrentRunID carries the run the runtime holds for
+	// the agent after the failed start, from one re-list of every runtime
+	// on the broker (scoped to the request's project) on the failure path:
+	// the scion.run_id of the agent's single container entry, or "" when it
+	// is unlabelled or entries of several runs exist (so a delete falls back
+	// to the by-name resolution). It is absent when no container entry is
+	// left on any runtime, or when the re-list failed; the hub then keeps
+	// the run it minted. When present, the hub records it in place of the
+	// run it minted, so its next delete targets what actually exists.
+	BrokerErrorDetailCurrentRunID = "currentRunId"
+)
 
 // ResourceHandle.Kind values.
 const (

@@ -21,6 +21,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -608,6 +609,57 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 	}
 }
 
+// TestSendKeys_CancelledWhileWaitingForLock covers ptone/scion#2877's
+// target-lock half: an explicit cancel (the broker's per-request ctx, which
+// a Hub "cancel" frame cancels) while SendKeys waits for the target's
+// injection lock must end the wait at once, report ErrKeysNotStarted, and
+// run no Exec — even though the deadline is still far away and the lock
+// later becomes free.
+func TestSendKeys_CancelledWhileWaitingForLock(t *testing.T) {
+	agent := runningAgent()
+
+	var execCalls atomic.Int32
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			execCalls.Add(1)
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	lock := mgr.injectionLock(agent.ContainerID)
+	if err := lock.Lock(context.Background()); err != nil {
+		t.Fatalf("failed to seed the lock: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c") }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendKeys did not return after its ctx was cancelled during the lock wait")
+	}
+	lock.Unlock()
+
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	if got := execCalls.Load(); got != 0 {
+		t.Fatalf("Exec called %d times, want 0 after a cancel during the lock wait", got)
+	}
+}
+
 // TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave covers "Concurrent
 // keys and buffered/interrupt messages cannot interleave manager injection
 // sequences": SendKeys and an interrupt Message call for the same target,
@@ -686,107 +738,6 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	}
 	if transitions != 1 {
 		t.Fatalf("SendKeys and an interrupt message interleaved their tmux Exec calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
-	}
-}
-
-// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave covers a gap where
-// MessageRaw (the legacy raw-keys primitive, pending Phase 4
-// removal) previously did not take injectionLock at all, so raw keys
-// delivered through it could interleave with a concurrent SendKeys call (or
-// a buffered/interrupt message) for the same target. Same
-// sequence-contiguity technique as
-// TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave.
-// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave deterministically
-// forces the race the injection lock exists to prevent (an earlier version
-// of this test passed 30/30 runs with the
-// lock removed from MessageRaw, because MessageRaw's single Exec call
-// happened to always run to completion before SendKeys's two calls in
-// practice, never actually landing between them).
-//
-// SendKeys's mocked Exec blocks on its first call — the "has-session"
-// readiness probe, which the lock must be held across — after signaling
-// that it has entered its critical section. Only once that signal arrives
-// is the MessageRaw goroutine started, and only after giving it a fixed
-// window to reach (and, with the lock present, block on) its own Exec
-// attempt is the probe released to let SendKeys continue to its second
-// (send-keys) call. With the lock, MessageRaw's Lock call cannot succeed
-// until SendKeys's Unlock — after both of its calls — so the sequence must
-// be keys, keys, raw. Without it, MessageRaw's unblocked Exec call lands
-// inside that window, producing keys, raw, keys instead. Confirmed to fail
-// with the lock removed from MessageRaw, and confirmed again here via a
-// temporary revert-and-retest before restoring the fix.
-func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
-	agent := runningAgent()
-
-	var mu sync.Mutex
-	var sequence []string
-	record := func(who string) {
-		mu.Lock()
-		sequence = append(sequence, who)
-		mu.Unlock()
-	}
-
-	probeEntered := make(chan struct{})
-	releaseProbe := make(chan struct{})
-
-	mock := &runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{agent}, nil
-		},
-		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
-			record(currentCaller(ctx))
-			if currentCaller(ctx) == "keys" && len(cmd) >= 2 && cmd[1] == "has-session" {
-				// SendKeys's readiness probe — its first of two Exec calls,
-				// made while (with the lock present) still holding the
-				// injection lock. Signal entry, then hold here until the
-				// test decides MessageRaw has had its chance to race in.
-				close(probeEntered)
-				<-releaseProbe
-			}
-			return "", nil
-		},
-	}
-	mgr := &AgentManager{Runtime: mock}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ctx := withCaller(context.Background(), "keys")
-		if err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
-			t.Errorf("SendKeys failed: %v", err)
-		}
-	}()
-
-	<-probeEntered
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ctx := withCaller(context.Background(), "raw")
-		if err := mgr.MessageRaw(ctx, "test-agent", "", "Escape"); err != nil {
-			t.Errorf("MessageRaw failed: %v", err)
-		}
-	}()
-
-	// Give MessageRaw time to reach its own Exec attempt — with the lock
-	// present it blocks there; without it, it completes within this window,
-	// landing between SendKeys's two calls.
-	time.Sleep(50 * time.Millisecond)
-	close(releaseProbe)
-
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sequence) != 4 {
-		t.Fatalf("expected exactly 4 recorded Exec calls (3 from SendKeys — version check, probe, send — and 1 from MessageRaw), got %v", sequence)
-	}
-	want := []string{"keys", "keys", "keys", "raw"}
-	for i := range want {
-		if sequence[i] != want[i] {
-			t.Fatalf("SendKeys and MessageRaw interleaved their tmux Exec calls for the same target: sequence = %v, want %v", sequence, want)
-		}
 	}
 }
 
@@ -1801,8 +1752,7 @@ func TestSendKeys_NoReplay_SingleExecWithStdin(t *testing.T) {
 // "serialization": SendKeys must also serialize against the buffered
 // *paste* delivery path (deliverImmediate with interrupt=false and a
 // non-empty message, which uses tmux load-buffer/paste-buffer rather than
-// send-keys) -- only the interrupt and MessageRaw paths had an interleave
-// test before this. Same sequence-contiguity technique as
+// send-keys) -- previously only the interrupt path had an interleave test. Same sequence-contiguity technique as
 // TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave: every tmux
 // invocation (via either Exec or ExecWithStdin, since the paste path's
 // load-buffer step uses ExecWithStdin) is tagged by caller, and a

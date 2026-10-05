@@ -779,6 +779,9 @@ export class ScionChatThread extends LitElement {
         overflow-y: auto;
         overflow-x: hidden;
         overscroll-behavior: contain;
+        /* Set by the chat page's mobile panels; see chat.ts. Code blocks
+         * and tables are scrollers of their own, so they still pan sideways. */
+        touch-action: var(--chat-touch-action, auto);
         padding: 0.5rem 0;
         display: flex;
         flex-direction: column;
@@ -1065,6 +1068,21 @@ export class ScionChatThread extends LitElement {
         border-radius: 0.375rem;
         margin: 0.25rem 1rem;
         white-space: pre-wrap;
+      }
+
+      /* Clear a landscape phone's notch and rounded corners (the page uses
+         viewport-fit=cover) on whichever sides this column meets the screen
+         edge. Each inset is a transparent border, so the row's background still
+         paints to the screen edge and only its content moves in. The chat page
+         sets --chat-inset-left and --chat-inset-right for the edges the
+         conversation touches; both are 0 everywhere else. */
+      .interagent-toggle-bar,
+      .state-msg,
+      .messages-scroll,
+      .typing-indicator,
+      .send-error {
+        border-left: var(--chat-inset-left, 0px) solid transparent;
+        border-right: var(--chat-inset-right, 0px) solid transparent;
       }
     `,
   ];

@@ -104,7 +104,8 @@ func (d *HTTPAgentDispatcher) SetAsyncLaunchSettingsProvider(fn func() AsyncLaun
 // ErrLaunchInvalidPhase is returned by a launching create dispatch when
 // BeginLaunch refused because the agent left the created/provisioning phases
 // (for example a stop landed first). Nothing was sent to the broker, and the
-// caller must not fall back to a synchronous send.
+// caller must not fall back to a synchronous send. When a delete holds the
+// row the error also wraps store.ErrDeleteInProgress (ptone/scion#2550).
 var ErrLaunchInvalidPhase = errors.New("agent is no longer in a phase that can be launched")
 
 // errLaunchEchoMismatch is returned when the broker answered launchPending
@@ -216,6 +217,15 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 	launchID, err := d.store.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, settings.Timeout)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidPhase) {
+			// A delete that claimed the row after beginRun moved it out of
+			// the launchable phases: say so (ptone/scion#2550). The error
+			// still wraps ErrLaunchInvalidPhase and store.ErrInvalidPhase,
+			// so callers leave the row to the delete as for any other
+			// phase change.
+			if fresh, gerr := d.store.GetAgent(ctx, agent.ID); gerr == nil &&
+				(!fresh.DeletedAt.IsZero() || fresh.DeletionHoldsRow(time.Now())) {
+				return nil, nil, nil, fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, err, store.ErrDeleteInProgress)
+			}
 			return nil, nil, nil, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, err)
 		}
 		return nil, nil, nil, fmt.Errorf("begin launch: %w", err)

@@ -31,10 +31,13 @@ import {
   ChatUnreadCounter,
   countUnreadDMs,
   countUnreadSpaces,
+  INITIAL_REFRESH_MAX_DELAY_MS,
+  startChatUnreadIfEligible,
   UNREAD_REFRESH_DEBOUNCE_MS,
   type UnreadDM,
   type UnreadSpace,
 } from './chat-unread.js';
+import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatSpacesLoad } from './chat-list-cache.js';
 import { setDocumentTitle, setUnreadBadge, getUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
@@ -51,6 +54,9 @@ function mockChatApi(spaces: UnreadSpace[], dms: UnreadDM[]): void {
 
 beforeEach(() => {
   apiFetch.mockReset();
+  // The shared loads are page-wide; one test's result must not satisfy the next.
+  chatSpacesLoad.invalidate();
+  chatDMsLoad.invalidate();
   setUnreadBadge(0);
   setDocumentTitle();
 });
@@ -160,6 +166,111 @@ describe('ChatUnreadCounter', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('shares the startup lists with the chat page and rail instead of fetching its own', async () => {
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    // The rail and the chat page ask first (or at the same moment).
+    const railSpaces = chatSpacesLoad.load({ maxAgeMs: 5_000 });
+    const pageDMs = chatDMsLoad.load({ maxAgeMs: 5_000 });
+    const counter = new ChatUnreadCounter();
+    counter.start({ immediate: true });
+    await Promise.all([railSpaces, pageDMs]);
+    await vi.waitFor(() => expect(getUnreadBadge()).toBe(3));
+
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    counter.stop();
+  });
+
+  it('a deferred first refresh reuses the startup lists the chat page and rail loaded', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    // The rail and the chat page ask first (or at the same moment).
+    const railSpaces = chatSpacesLoad.load({ maxAgeMs: 5_000 });
+    const pageDMs = chatDMsLoad.load({ maxAgeMs: 5_000 });
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await Promise.all([railSpaces, pageDMs]);
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(getUnreadBadge()).toBe(3);
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('an event-driven refresh fetches even right after startup', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+
+    // A message arrives: the startup result may predate it.
+    mockChatApi([{ unreadCount: 4 }], []);
+    counter.scheduleRefresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+    expect(apiFetch).toHaveBeenCalledTimes(4);
+    expect(getUnreadBadge()).toBe(4);
+    counter.stop();
+  });
+
+  it('a message refresh shares the DM fetch the chat page made for the same message', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    counter.start({ immediate: true });
+    await vi.advanceTimersByTimeAsync(0);
+    apiFetch.mockClear();
+
+    try {
+      vi.advanceTimersByTime(1);
+      const event = new CustomEvent('chat-message-received', { detail: {} });
+      vi.advanceTimersByTime(1);
+      // The page reloads its DM dots the moment the message arrives.
+      stateManager.dispatchEvent(event);
+      void chatDMsLoad.load();
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      const dmCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/dms'));
+      const spaceCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/spaces'));
+      expect(dmCalls).toHaveLength(1);
+      expect(spaceCalls).toHaveLength(1);
+      expect(getUnreadBadge()).toBe(2);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('a burst refresh only shares a fetch made after the newest event', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start({ immediate: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    try {
+      vi.advanceTimersByTime(1);
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      vi.advanceTimersByTime(1);
+      // The page fetches DMs for the first message only...
+      void chatDMsLoad.load();
+      vi.advanceTimersByTime(1);
+      // ...and a second message arrives after that fetch was sent.
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      apiFetch.mockClear();
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      // That fetch may predate the second message: the refresh asks again.
+      const dmCalls = apiFetch.mock.calls.filter((c) => String(c[0]).endsWith('/chat/dms'));
+      expect(dmCalls).toHaveLength(1);
+    } finally {
+      counter.stop();
+    }
+  });
+
   it('coalesces a burst of events into one refresh', async () => {
     vi.useFakeTimers();
     mockChatApi([{ unreadCount: 1 }], []);
@@ -179,8 +290,8 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    // start() refreshes once immediately.
-    await vi.advanceTimersByTimeAsync(0);
+    // start() refreshes once, by the deferral bound at the latest.
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -210,7 +321,7 @@ describe('ChatUnreadCounter', () => {
 
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -253,7 +364,7 @@ describe('ChatUnreadCounter', () => {
 
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -288,7 +399,7 @@ describe('ChatUnreadCounter', () => {
     });
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -309,7 +420,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -334,7 +445,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -359,7 +470,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     counter.stop();
     apiFetch.mockClear();
 
@@ -382,5 +493,497 @@ describe('ChatUnreadCounter', () => {
 
     expect(getUnreadBadge()).toBe(6);
     localStorage.clear();
+  });
+});
+
+/** Requests the counter sent, by endpoint. */
+function chatRequests(): { spaces: number; dms: number } {
+  const urls = apiFetch.mock.calls.map((c) => String(c[0]));
+  return {
+    spaces: urls.filter((u) => u.endsWith('/chat/spaces')).length,
+    dms: urls.filter((u) => u.endsWith('/chat/dms')).length,
+  };
+}
+
+/**
+ * A controllable requestIdleCallback. happy-dom has none, so without this the
+ * counter takes its timer fallback.
+ */
+function installIdleCallback(): {
+  runIdle: () => void;
+  timeouts: Array<number | undefined>;
+  cancelled: number[];
+  restore: () => void;
+} {
+  const pending = new Map<number, IdleRequestCallback>();
+  const timeouts: Array<number | undefined> = [];
+  const cancelled: number[] = [];
+  let next = 1;
+  const w = window as unknown as {
+    requestIdleCallback?: unknown;
+    cancelIdleCallback?: unknown;
+  };
+  w.requestIdleCallback = (cb: IdleRequestCallback, opts?: IdleRequestOptions): number => {
+    const id = next++;
+    pending.set(id, cb);
+    timeouts.push(opts?.timeout);
+    return id;
+  };
+  w.cancelIdleCallback = (id: number): void => {
+    cancelled.push(id);
+    pending.delete(id);
+  };
+  return {
+    runIdle: () => {
+      const cbs = [...pending.values()];
+      pending.clear();
+      for (const cb of cbs) cb({ didTimeout: false, timeRemaining: () => 50 });
+    },
+    timeouts,
+    cancelled,
+    restore: () => {
+      delete w.requestIdleCallback;
+      delete w.cancelIdleCallback;
+    },
+  };
+}
+
+describe('ChatUnreadCounter first refresh', () => {
+  it('sends nothing on start, then one pair at the first idle period', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiFetch).not.toHaveBeenCalled();
+      // Bounded: idle may never come on a busy page.
+      expect(idle.timeouts).toHaveLength(1);
+      expect(idle.timeouts[0]).toBeGreaterThan(0);
+      expect(idle.timeouts[0]).toBeLessThanOrEqual(3000);
+
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('falls back to a bounded timer where requestIdleCallback is missing', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(INITIAL_REFRESH_MAX_DELAY_MS).toBeLessThanOrEqual(3000);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('refreshes once for a chat notification that arrives before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      stateManager.dispatchEvent(
+        new CustomEvent('notification-created', {
+          detail: { state: {}, data: { status: MENTION_STATUS } },
+        })
+      );
+      // The notification's refresh supersedes the pending first refresh.
+      expect(idle.cancelled).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      // The idle period arriving afterwards must not repeat it.
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(1);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('refreshes once when idle comes while a chat event refresh is pending', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      // Idle arrives inside the debounce window.
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS / 2);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('skips the first refresh after an explicit refresh', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await counter.refresh();
+      expect(idle.cancelled).toHaveLength(1);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('sends nothing when stopped before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.stop();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(idle.cancelled).toHaveLength(1);
+    } finally {
+      idle.restore();
+    }
+  });
+
+  it('sends nothing when stopped before the fallback timer', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    counter.stop();
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('with no window (a non-browser environment)', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('takes the timer fallback and sends one pair at the bound', async () => {
+      vi.useFakeTimers();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      vi.stubGlobal('window', undefined);
+      try {
+        expect(typeof window).toBe('undefined');
+        expect(() => counter.start()).not.toThrow();
+        expect(vi.getTimerCount()).toBe(1);
+        await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+        expect(apiFetch).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      } finally {
+        counter.stop();
+      }
+    });
+
+    it('sends nothing and does not throw when stopped before the bound', async () => {
+      vi.useFakeTimers();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      vi.stubGlobal('window', undefined);
+      counter.start();
+      expect(() => counter.stop()).not.toThrow();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not throw cancelling an idle refresh once the window is gone', async () => {
+      vi.useFakeTimers();
+      const idle = installIdleCallback();
+      mockChatApi([{ unreadCount: 1 }], []);
+      const counter = new ChatUnreadCounter();
+      try {
+        counter.start();
+        expect(idle.timeouts).toHaveLength(1);
+        vi.stubGlobal('window', undefined);
+        expect(() => counter.stop()).not.toThrow();
+        await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+        expect(apiFetch).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        idle.restore();
+      }
+    });
+  });
+
+  it('reuses the lists the chat page loaded before idle instead of fetching them again', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 4 }], [{ hasUnread: true }, { hasUnread: true, muted: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      // The user opens chat before idle: the rail and the page load both
+      // lists and push their halves.
+      const spaces = await chatSpacesLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      const dms = await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      counter.setSpaceUnread((spaces?.spaces ?? []) as UnreadSpace[]);
+      counter.setDMUnread((dms?.dms ?? []) as UnreadDM[]);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(5);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('fetches only the list the chat page has not loaded yet', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      const spaces = await chatSpacesLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      counter.setSpaceUnread((spaces?.spaces ?? []) as UnreadSpace[]);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('reuses a page load made since start even when idle runs after the reuse window', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      // The chat page loads both lists one second after start.
+      await chatSpacesLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      // The idle callback runs late (a hidden tab or a busy main thread),
+      // after that load is older than the startup reuse window.
+      await vi.advanceTimersByTimeAsync(CHAT_STARTUP_REUSE_MS + 500);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('asks to run within the startup reuse window', () => {
+    // The forced run is requested while a load the page made at startup is
+    // still reusable on its own age; a later run reuses it anyway (above).
+    expect(INITIAL_REFRESH_MAX_DELAY_MS).toBeLessThanOrEqual(CHAT_STARTUP_REUSE_MS);
+  });
+});
+
+describe('startChatUnreadIfEligible', () => {
+  it('starts only for a signed-in user with chat enabled, at once on a chat route', () => {
+    const cases: Array<{
+      name: string;
+      signedIn: boolean;
+      chatEnabled: boolean;
+      onChatRoute: boolean;
+      starts: Array<{ immediate: boolean }>;
+    }> = [
+      { name: 'signed out', signedIn: false, chatEnabled: true, onChatRoute: true, starts: [] },
+      { name: 'chat disabled', signedIn: true, chatEnabled: false, onChatRoute: true, starts: [] },
+      {
+        name: 'signed out, chat disabled',
+        signedIn: false,
+        chatEnabled: false,
+        onChatRoute: false,
+        starts: [],
+      },
+      {
+        name: 'chat route',
+        signedIn: true,
+        chatEnabled: true,
+        onChatRoute: true,
+        starts: [{ immediate: true }],
+      },
+      {
+        name: 'non-chat route',
+        signedIn: true,
+        chatEnabled: true,
+        onChatRoute: false,
+        starts: [{ immediate: false }],
+      },
+    ];
+    for (const c of cases) {
+      const start = vi.fn();
+      const started = startChatUnreadIfEligible(
+        { start },
+        c.signedIn,
+        c.chatEnabled,
+        c.onChatRoute
+      );
+      expect(started, c.name).toBe(c.starts.length > 0);
+      expect(
+        start.mock.calls.map((args) => args[0]),
+        c.name
+      ).toEqual(c.starts);
+    }
+  });
+});
+
+describe('ChatUnreadCounter started on a chat route', () => {
+  it('sends the pair at once and the chat page and rail share it', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      startChatUnreadIfEligible(counter, true, true, true);
+      // Sent synchronously, with no idle callback or timer.
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(idle.timeouts).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // The page module has loaded: the rail and the page ask for the lists.
+      await vi.advanceTimersByTimeAsync(1000);
+      await chatSpacesLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('still fetches for a chat event right after the startup pair', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      startChatUnreadIfEligible(counter, true, true, true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      mockChatApi([{ unreadCount: 4 }], []);
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      expect(chatRequests()).toEqual({ spaces: 2, dms: 2 });
+      expect(getUnreadBadge()).toBe(4);
+    } finally {
+      counter.stop();
+    }
+  });
+});
+
+describe('ChatUnreadCounter started elsewhere', () => {
+  it('sends nothing at start and one pair at the first idle period', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      startChatUnreadIfEligible(counter, true, true, false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(idle.timeouts).toEqual([INITIAL_REFRESH_MAX_DELAY_MS]);
+
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(1);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+});
+
+describe('ChatUnreadCounter restart', () => {
+  it('schedules a new deferred first refresh after stop and start', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.stop();
+      expect(idle.cancelled).toHaveLength(1);
+
+      counter.start();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('sends the pair again when restarted at once', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start({ immediate: true });
+      await vi.advanceTimersByTimeAsync(0);
+      counter.stop();
+      // Past the reuse window, so the restart cannot share the first pair.
+      await vi.advanceTimersByTimeAsync(CHAT_STARTUP_REUSE_MS + 1);
+
+      counter.start({ immediate: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 2, dms: 2 });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      counter.stop();
+    }
   });
 });

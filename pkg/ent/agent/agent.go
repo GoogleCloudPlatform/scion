@@ -106,6 +106,8 @@ const (
 	FieldLaunchAsyncOptIn = "launch_async_opt_in"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldRunID holds the string denoting the run_id field in the database.
+	FieldRunID = "run_id"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -146,6 +148,26 @@ const (
 	FieldRunIntent = "run_intent"
 	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
 	FieldRunIntentAt = "run_intent_at"
+	// FieldStartClaimID holds the string denoting the start_claim_id field in the database.
+	FieldStartClaimID = "start_claim_id"
+	// FieldStartClaimKind holds the string denoting the start_claim_kind field in the database.
+	FieldStartClaimKind = "start_claim_kind"
+	// FieldStartClaimState holds the string denoting the start_claim_state field in the database.
+	FieldStartClaimState = "start_claim_state"
+	// FieldStartClaimOwner holds the string denoting the start_claim_owner field in the database.
+	FieldStartClaimOwner = "start_claim_owner"
+	// FieldStartClaimTarget holds the string denoting the start_claim_target field in the database.
+	FieldStartClaimTarget = "start_claim_target"
+	// FieldStartClaimAt holds the string denoting the start_claim_at field in the database.
+	FieldStartClaimAt = "start_claim_at"
+	// FieldStartClaimLeaseUntil holds the string denoting the start_claim_lease_until field in the database.
+	FieldStartClaimLeaseUntil = "start_claim_lease_until"
+	// FieldStartClaimUnconfirmedAt holds the string denoting the start_claim_unconfirmed_at field in the database.
+	FieldStartClaimUnconfirmedAt = "start_claim_unconfirmed_at"
+	// FieldStartClaimHoldUntil holds the string denoting the start_claim_hold_until field in the database.
+	FieldStartClaimHoldUntil = "start_claim_hold_until"
+	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
+	FieldStartClaimLaunchID = "start_claim_launch_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -225,6 +247,7 @@ var Columns = []string{
 	FieldReincarnationUpdatedAt,
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
+	FieldRunID,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -245,6 +268,16 @@ var Columns = []string{
 	FieldDeletionRequest,
 	FieldRunIntent,
 	FieldRunIntentAt,
+	FieldStartClaimID,
+	FieldStartClaimKind,
+	FieldStartClaimState,
+	FieldStartClaimOwner,
+	FieldStartClaimTarget,
+	FieldStartClaimAt,
+	FieldStartClaimLeaseUntil,
+	FieldStartClaimUnconfirmedAt,
+	FieldStartClaimHoldUntil,
+	FieldStartClaimLaunchID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -288,6 +321,8 @@ var (
 	DefaultLaunchAsyncOptIn bool
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultRunID holds the default value on creation for the "run_id" field.
+	DefaultRunID string
 	// DefaultLaunchState holds the default value on creation for the "launch_state" field.
 	DefaultLaunchState string
 	// DefaultLaunchEndReason holds the default value on creation for the "launch_end_reason" field.
@@ -314,6 +349,16 @@ var (
 	DefaultDeletionPrior string
 	// DefaultDeletionRequest holds the default value on creation for the "deletion_request" field.
 	DefaultDeletionRequest string
+	// DefaultStartClaimKind holds the default value on creation for the "start_claim_kind" field.
+	DefaultStartClaimKind string
+	// DefaultStartClaimState holds the default value on creation for the "start_claim_state" field.
+	DefaultStartClaimState string
+	// DefaultStartClaimOwner holds the default value on creation for the "start_claim_owner" field.
+	DefaultStartClaimOwner string
+	// DefaultStartClaimTarget holds the default value on creation for the "start_claim_target" field.
+	DefaultStartClaimTarget string
+	// DefaultStartClaimLaunchID holds the default value on creation for the "start_claim_launch_id" field.
+	DefaultStartClaimLaunchID string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -593,6 +638,11 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
 }
 
+// ByRunID orders the results by the run_id field.
+func ByRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunID, opts...).ToFunc()
+}
+
 // ByLaunchState orders the results by the launch_state field.
 func ByLaunchState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchState, opts...).ToFunc()
@@ -691,6 +741,56 @@ func ByRunIntent(opts ...sql.OrderTermOption) OrderOption {
 // ByRunIntentAt orders the results by the run_intent_at field.
 func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
+}
+
+// ByStartClaimID orders the results by the start_claim_id field.
+func ByStartClaimID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimID, opts...).ToFunc()
+}
+
+// ByStartClaimKind orders the results by the start_claim_kind field.
+func ByStartClaimKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimKind, opts...).ToFunc()
+}
+
+// ByStartClaimState orders the results by the start_claim_state field.
+func ByStartClaimState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimState, opts...).ToFunc()
+}
+
+// ByStartClaimOwner orders the results by the start_claim_owner field.
+func ByStartClaimOwner(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimOwner, opts...).ToFunc()
+}
+
+// ByStartClaimTarget orders the results by the start_claim_target field.
+func ByStartClaimTarget(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimTarget, opts...).ToFunc()
+}
+
+// ByStartClaimAt orders the results by the start_claim_at field.
+func ByStartClaimAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimAt, opts...).ToFunc()
+}
+
+// ByStartClaimLeaseUntil orders the results by the start_claim_lease_until field.
+func ByStartClaimLeaseUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimLeaseUntil, opts...).ToFunc()
+}
+
+// ByStartClaimUnconfirmedAt orders the results by the start_claim_unconfirmed_at field.
+func ByStartClaimUnconfirmedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimUnconfirmedAt, opts...).ToFunc()
+}
+
+// ByStartClaimHoldUntil orders the results by the start_claim_hold_until field.
+func ByStartClaimHoldUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimHoldUntil, opts...).ToFunc()
+}
+
+// ByStartClaimLaunchID orders the results by the start_claim_launch_id field.
+func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

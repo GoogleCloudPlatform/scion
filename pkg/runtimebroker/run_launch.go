@@ -466,6 +466,13 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 		// longer this launch's to delete (design §3.8.4).
 		return
 	}
+	if owner := agentFilesRunOwner(lc.opts.Name, lc.opts.ProjectPath, lc.opts.RunID); owner != "" {
+		// The files record a different run as their owner
+		// (ptone/scion#2675): they are not this launch's to delete.
+		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", lc.opts.RunID, "files_run_id", owner)
+		return
+	}
 	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
@@ -504,9 +511,15 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
 	}
+	var skillErr *agent.SkillResolutionError
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()
+	case errors.As(err, &skillErr):
+		// A required skill could not be resolved: the same code a
+		// synchronous create or start returns, with the error naming the
+		// skill and its cause.
+		return ErrCodeSkillResolution, err.Error()
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		return "template_not_found", err.Error()
 	default:

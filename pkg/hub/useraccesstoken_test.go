@@ -149,6 +149,15 @@ func (m *mockUserStore) GetUser(_ context.Context, id string) (*store.User, erro
 	}
 	return u, nil
 }
+func (m *mockUserStore) GetUsersByIDs(_ context.Context, ids []string) (map[string]*store.User, error) {
+	out := make(map[string]*store.User, len(ids))
+	for _, id := range ids {
+		if u, ok := m.users[id]; ok {
+			out[id] = u
+		}
+	}
+	return out, nil
+}
 func (m *mockUserStore) GetUserByEmail(context.Context, string) (*store.User, error) {
 	return nil, store.ErrNotFound
 }
@@ -235,8 +244,8 @@ func TestValidateToken(t *testing.T) {
 		if identity.ID() != tid("user-1") {
 			t.Errorf("expected user ID 'user-1', got %q", identity.ID())
 		}
-		if identity.ScopedProjectID() != tid("project-1") {
-			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
+		if identity.Boundary().ProjectID != tid("project-1") {
+			t.Errorf("expected project 'project-1', got %q", identity.Boundary().ProjectID)
 		}
 		if identity.CredentialID() != token.stored.ID {
 			t.Errorf("expected credential ID %q, got %q", token.stored.ID, identity.CredentialID())
@@ -384,8 +393,8 @@ func TestValidateToken_CarriesStoredBoundary(t *testing.T) {
 			if got := identity.Boundary(); got != c.wantBoundary {
 				t.Errorf("identity.Boundary() = %+v, want %+v", got, c.wantBoundary)
 			}
-			if got := identity.ScopedProjectID(); got != c.wantProjectID {
-				t.Errorf("identity.ScopedProjectID() = %q, want %q", got, c.wantProjectID)
+			if got := identity.Boundary().ProjectID; got != c.wantProjectID {
+				t.Errorf("identity.Boundary().ProjectID = %q, want %q", got, c.wantProjectID)
 			}
 
 			cc := credentialContextForIdentity(identity)
@@ -508,8 +517,8 @@ func TestScopedUserIdentity(t *testing.T) {
 	if scoped.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", scoped.Email())
 	}
-	if scoped.ScopedProjectID() != tid("project-1") {
-		t.Errorf("expected project 'project-1', got %q", scoped.ScopedProjectID())
+	if scoped.Boundary().ProjectID != tid("project-1") {
+		t.Errorf("expected project 'project-1', got %q", scoped.Boundary().ProjectID)
 	}
 	if !scoped.HasScope("agent:attach") {
 		t.Error("expected HasScope('agent:attach') to be true")

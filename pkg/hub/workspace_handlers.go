@@ -500,19 +500,26 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if errors.Is(err, ErrLaunchInvalidPhase) {
-			writeLaunchInvalidPhase(w)
+			writeLaunchInvalidPhase(w, err, agent.ID)
 			return
 		}
 		if err != nil {
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				ref.write(w)
+				return
+			}
 			if writeAgentTokenIssueError(w, err) {
 				return
 			}
 			if writeEmptyPerAgentCapabilityError(w, err) {
+				return
+			}
+			if relaySkillResolutionError(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())

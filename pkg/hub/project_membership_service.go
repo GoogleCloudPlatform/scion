@@ -805,6 +805,14 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
+	// Project members groups cannot be granted roles. Checked after the
+	// actor is authorized (so the refusal is only visible to callers who may
+	// manage this project) and before the transaction: the marker
+	// annotations cannot be changed through the API.
+	if isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
+	}
+
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the
 	// same transaction. The lock serializes concurrent membership mutations
 	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
@@ -987,6 +995,9 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if txErr == store.ErrAlreadyExists {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: "this member already has this role in this project", HTTPStatus: 409}
 		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
+		}
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
@@ -1049,6 +1060,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			Reason:     fmt.Sprintf("role %q cannot be assigned to %s principals", newRoleDef.Name, existing.PrincipalType),
 			HTTPStatus: 400,
 		}
+	}
+	// A role change re-creates the binding, so it is refused for a project
+	// members group principal. Deleting the existing binding stays allowed.
+	if isProjectMembersGroupPrincipal(ctx, svc.store, existing.PrincipalType, existing.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(existing.PrincipalID)
 	}
 
 	// Governance: check both old and new target roles.
@@ -1198,6 +1214,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
+		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -1468,9 +1487,10 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		// Step 3: Point project.OwnerID at the new owner, so the old owner no
 		// longer gets access through the resource-owner relationship rule
 		// (ptone/scion#2554). Use the narrow writer, not a Get plus full-row
-		// UpdateProject: a full-row write can clobber a concurrent PATCH. That
-		// interleaving is not expressible in a single-threaded test, so this
-		// call site is guarded by review.
+		// UpdateProject: a full-row write can clobber a concurrent PATCH. The
+		// PATCH/transfer interleaving (a transfer landing inside a PATCH's
+		// read-then-write window) is pinned by
+		// TestUpdateProject_ConcurrentTransferOwnershipSurvives.
 		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
 			return fmt.Errorf("update project owner: %w", upErr)
 		}
@@ -1803,6 +1823,16 @@ func lastOwnerDenial() *MembershipDecision {
 // countActiveDirectOwnersFromStore counts active direct-user project-owner
 // bindings in the provided store, which may be transactional.
 func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx context.Context, s store.Store, projectID string) (int, error) {
+	return countActiveDirectProjectOwners(ctx, s, projectID, svc.nowFunc(), "")
+}
+
+// countActiveDirectProjectOwners counts the active (not expired, not
+// scheduled) direct-user project-owner bindings on projectID in s, which may
+// be transactional. Bindings whose principal is excludeUserID are skipped, so
+// callers can ask "how many owners remain besides this user"; pass "" to count
+// every owner. This is the single definition of "owner" used by the last-owner
+// rule, shared by the members API and user deletion.
+func countActiveDirectProjectOwners(ctx context.Context, s store.Store, projectID string, now time.Time, excludeUserID string) (int, error) {
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
 		return 0, err
@@ -1811,10 +1841,12 @@ func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx contex
 	if err != nil {
 		return 0, err
 	}
-	now := svc.nowFunc()
 	count := 0
 	for _, b := range bindings {
 		if b.PrincipalType != store.RoleBindingPrincipalUser || b.RoleDefinitionID != ownerRoleDef.ID {
+			continue
+		}
+		if excludeUserID != "" && b.PrincipalID == excludeUserID {
 			continue
 		}
 		if !isBindingActive(b, now) {
