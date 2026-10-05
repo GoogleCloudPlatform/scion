@@ -260,7 +260,7 @@ func assertSessionLinkEvent(t *testing.T, e *BrokerAuthEvent, brokerID, projectI
 }
 
 func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
-	f := brokerAssocSetup(t, "audit-register-link")
+	f := brokerAssocSetup(t, "audit-link-on-register")
 	audit := installBrokerAuditCapture(f.srv)
 
 	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -278,7 +278,7 @@ func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
-	f := brokerAssocSetup(t, "audit-register-link-denied")
+	f := brokerAssocSetup(t, "audit-link-on-register-denied")
 	audit := installBrokerAuditCapture(f.srv)
 
 	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
