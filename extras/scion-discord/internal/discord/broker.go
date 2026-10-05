@@ -1370,7 +1370,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 	// A link without an email keeps the Discord username as the sender.
 	if senderMapping.ScionEmail != "" {
-		sender = "user:" + senderMapping.ScionEmail
+		sender = principalForMapping(senderMapping)
 	}
 
 	// Classify mentions by position before stripping.

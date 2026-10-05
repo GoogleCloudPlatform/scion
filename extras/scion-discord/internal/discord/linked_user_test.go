@@ -1206,12 +1206,16 @@ func TestSettingsButtons_ActOnTheChannelTheyArePressedIn(t *testing.T) {
 func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 	ctx := context.Background()
 	users := []struct {
-		name string
-		user string
-		want string
+		name    string
+		user    string
+		mapping *DiscordUserMapping
+		want    string
 	}{
 		{name: "linked", user: luDiscordUser, want: luPrincipal},
 		{name: "no link", user: luOtherUser, want: "discord:" + luOtherUser},
+		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
+			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
+		}, want: "discord:" + luOtherUser},
 	}
 
 	pending := &PendingAskUser{
@@ -1225,6 +1229,9 @@ func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 	for _, u := range users {
 		t.Run("button/"+u.name, func(t *testing.T) {
 			e := newLinkedUserEnv(t)
+			if u.mapping != nil {
+				require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
+			}
 			var got *messages.StructuredMessage
 			e.callback.deliverInbound = func(_ string, msg *messages.StructuredMessage) *hubError {
 				got = msg
@@ -1239,6 +1246,9 @@ func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 		})
 		t.Run("modal/"+u.name, func(t *testing.T) {
 			e := newLinkedUserEnv(t)
+			if u.mapping != nil {
+				require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
+			}
 			req := *pending
 			require.NoError(t, e.store.CreatePendingAskUser(ctx, &req))
 			var got *messages.StructuredMessage
