@@ -101,6 +101,12 @@ const (
 	// reads back to map this to the same fixed message the post-upgrade
 	// 4501 close code produces.
 	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
+
+	// Flat Runtime Broker wire codes, shared with the Hub
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ErrCodeRuntimeTargetMismatch     = api.ErrCodeRuntimeTargetMismatch
+	ErrCodeRuntimeProfileUnsupported = api.ErrCodeRuntimeProfileUnsupported
+	ErrCodeRuntimeTargetRequired     = api.ErrCodeRuntimeTargetRequired
 )
 
 // writeError writes a JSON error response.

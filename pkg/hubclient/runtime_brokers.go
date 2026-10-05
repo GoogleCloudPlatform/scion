@@ -322,6 +322,9 @@ type CreateBrokerRequest struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
+	// RuntimeTarget is the flat Runtime Broker registration descriptor
+	// (.design/flat-runtime-brokers-contract.md section 6); nil is legacy.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // CreateBrokerResponse is returned when creating a new broker.
@@ -330,6 +333,9 @@ type CreateBrokerResponse struct {
 	JoinToken    string `json:"joinToken"`
 	ExpiresAt    string `json:"expiresAt"`
 	Reregistered bool   `json:"reregistered,omitempty"`
+	// RuntimeTarget is the Hub's acknowledgement of the stored flat target
+	// binding; nil from a legacy row or a Hub that predates the contract.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // JoinBrokerRequest is the request to complete broker registration.
@@ -346,6 +352,8 @@ type JoinBrokerRequest struct {
 	// DefaultProfile is the broker's default (active) profile name. Nil
 	// (an older broker) keeps the stored value.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// RuntimeTarget is the flat Runtime Broker descriptor; nil is legacy.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.
@@ -353,6 +361,9 @@ type JoinBrokerResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded HMAC secret
 	HubEndpoint string `json:"hubEndpoint"`
 	BrokerID    string `json:"brokerId"`
+	// RuntimeTarget is the Hub's acknowledgement of the stored flat target
+	// binding; nil from a legacy row or a Hub that predates the contract.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // Create creates a new broker registration and returns a join token.

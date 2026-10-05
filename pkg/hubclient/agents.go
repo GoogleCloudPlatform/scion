@@ -282,6 +282,11 @@ type CreateAgentRequest struct {
 	// the client follows the launch with GET agent. A Hub that does not
 	// support or enable it ignores the field and answers synchronously.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+
+	// ExpectedRuntimeTargetID optionally guards a create against placement
+	// on a different runtime target than the caller showed
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.

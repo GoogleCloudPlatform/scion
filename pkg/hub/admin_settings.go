@@ -424,6 +424,14 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
+	// server.broker.instances: presence comes from the raw body (the typed
+	// decode cannot tell an absent key from []); an explicit value is
+	// validated before anything is written.
+	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
 
 	// server.hub.agent_endpoint has no live-reload path (like public_url, it
 	// only takes effect at the next restart), so a malformed value written
@@ -557,8 +565,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply updates by marshaling the request fields and merging
+	// Apply updates by marshaling the request fields and merging, keeping
+	// server.broker.instances unless the body set it explicitly.
+	storedInstances := storedBrokerInstances(raw)
 	applySettingsUpdates(raw, &req)
+	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 
 	// Validate the effective hub default GCP identity (the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's

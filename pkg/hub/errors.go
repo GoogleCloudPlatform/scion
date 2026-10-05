@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -99,6 +100,21 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Flat Runtime Broker codes (.design/flat-runtime-brokers-contract.md
+	// section 9). The first three are shared wire codes defined in pkg/api;
+	// the rest are Hub-only. None of them is an authorization result.
+	ErrCodeRuntimeTargetMismatch            = api.ErrCodeRuntimeTargetMismatch       // 409
+	ErrCodeRuntimeProfileUnsupported        = api.ErrCodeRuntimeProfileUnsupported   // 422
+	ErrCodeRuntimeTargetRequired            = api.ErrCodeRuntimeTargetRequired       // 412 (relayed)
+	ErrCodeRuntimeTargetChanged             = "runtime_target_changed"               // 409
+	ErrCodeRuntimeBrokerNotFlat             = "runtime_broker_not_flat"              // 409
+	ErrCodeRuntimeBrokerNameConflict        = "runtime_broker_name_conflict"         // 409
+	ErrCodeRuntimeTargetMoveUnsupported     = "runtime_target_move_unsupported"      // 409
+	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
+	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
+	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,
 	// reincarnate, restore, create-with-existing-agent and DM wake while a
@@ -624,4 +640,20 @@ func brokerRuntimeUnavailableMessage(runtime string) string {
 		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
 	}
 	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
+}
+
+// RuntimeTargetRefusal is a typed flat Runtime Broker refusal raised by the
+// Hub (.design/flat-runtime-brokers-contract.md sections 7 and 9): a
+// correctness or compatibility refusal, never an authorization result.
+// Handlers write it with its own Status, Code and Details; it is classified
+// as a confirmed not-acted-on start error.
+type RuntimeTargetRefusal struct {
+	Code    string
+	Status  int
+	Message string
+	Details map[string]interface{}
+}
+
+func (e *RuntimeTargetRefusal) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }

@@ -197,6 +197,11 @@ type CreateBrokerRegistrationRequest struct {
 	// host. Set by the operator so the Hub can gate passthrough on actAs.
 	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
 	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
+
+	// RuntimeTarget is the registration descriptor of a flat (single-target)
+	// Runtime Broker (.design/flat-runtime-brokers-contract.md section 6).
+	// Nil means a legacy registration.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // CreateBrokerRegistrationResponse is the response for POST /api/v1/brokers.
@@ -205,6 +210,9 @@ type CreateBrokerRegistrationResponse struct {
 	JoinToken    string    `json:"joinToken"` // scion_join_<base64>
 	ExpiresAt    time.Time `json:"expiresAt"`
 	Reregistered bool      `json:"reregistered,omitempty"`
+	// RuntimeTarget echoes the stored descriptor of a flat Runtime Broker
+	// row (the activation acknowledgement); nil for a legacy row.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -221,6 +229,9 @@ type BrokerJoinRequest struct {
 	// DefaultProfile is the broker's default (active) profile name. An
 	// older broker omits it and the stored value is left unchanged.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// RuntimeTarget is the flat Runtime Broker descriptor; it must equal the
+	// stored target. Nil means a legacy join.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerJoinResponse is the response for POST /api/v1/brokers/join.
@@ -228,6 +239,9 @@ type BrokerJoinResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded 256-bit key
 	HubEndpoint string `json:"hubEndpoint"`
 	BrokerID    string `json:"brokerId"`
+	// RuntimeTarget echoes the stored descriptor of a flat Runtime Broker
+	// row (the activation acknowledgement); nil for a legacy row.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // JoinTokenPrefix is the prefix for join tokens.
