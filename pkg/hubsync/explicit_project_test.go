@@ -151,10 +151,10 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case r.URL.Path == "/healthz":
+				switch r.URL.Path {
+				case "/healthz":
 					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-				case r.URL.Path == "/api/v1/projects":
+				case "/api/v1/projects":
 					var projects []hubclient.Project
 					switch q := r.URL.Query(); {
 					case q.Get("slug") == "global" && tc.hubHasGlobal:

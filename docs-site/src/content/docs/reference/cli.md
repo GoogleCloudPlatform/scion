@@ -18,6 +18,25 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+**Project resolution order.** The CLI picks the project in this order:
+
+1. The `-g` / `--project` or `--global` flag.
+2. Inside a Hub-connected agent container only: the agent's own project (`SCION_PROJECT_ID`).
+3. The project `.scion` directory found from the current directory.
+4. The global project (`~/.scion`).
+
+An explicit flag always wins over `SCION_PROJECT_ID` and `SCION_PROJECT`.
+
+In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
+`global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
+project, the command fails with an error that names `--project <slug|id>` as the alternative.
+
+:::note[Agents creating agents in other projects]
+Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub
+refuses an agent-created agent outside the calling agent's own project. This is intended: an
+agent can only start agents in its own project.
+:::
+
 The legacy hidden `--grove` flag has been removed from every command; passing it fails with
 `unknown flag: --grove`. Use `--project`.
 
