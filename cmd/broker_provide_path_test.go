@@ -174,24 +174,32 @@ func TestProviderRegisterPath(t *testing.T) {
 // runBrokerProvide end to end against a fake hub that captures the
 // registered path (review NB3), covering the wiring of providerRegisterPath:
 // --project from HOME, a remote --broker, and --broker naming this host's
-// own broker (which, being local, still registers the linked path).
+// own broker (which, being local, still registers the linked path). The
+// remote decision uses the resolved broker ID, so --broker given by name
+// behaves like --broker given by ID; with no local broker ID at all, any
+// --broker is remote.
 func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 	const (
 		target      = "11111111-aaaa-aaaa-aaaa-111111111111"
 		localBroker = "aaaaaaaa-0000-0000-0000-000000000001"
 		otherBroker = "bbbbbbbb-0000-0000-0000-000000000002"
 	)
+	brokerNames := map[string]string{localBroker: "local-host", otherBroker: "remote-host"}
 	for _, tc := range []struct {
 		name            string
 		inLinkedProject bool
 		project, broker string
+		noLocalBroker   bool // no broker credentials on this host
 		wantLinkedPath  bool
 	}{
-		{"--project from HOME", false, target, "", false},
-		{"--project from inside the named project", true, target, "", true},
-		{"remote --broker from inside a linked project", true, "", otherBroker, false},
-		{"remote --broker with --project", true, target, otherBroker, false},
-		{"--broker naming this host's own broker", true, "", localBroker, true},
+		{"--project from HOME", false, target, "", false, false},
+		{"--project from inside the named project", true, target, "", false, true},
+		{"remote --broker from inside a linked project", true, "", otherBroker, false, false},
+		{"remote --broker with --project", true, target, otherBroker, false, false},
+		{"--broker naming this host's own broker", true, "", localBroker, false, true},
+		{"--broker by name: this host's own broker", true, "", "local-host", false, true},
+		{"--broker by name: a remote broker", true, "", "remote-host", false, false},
+		{"--broker with no local broker ID on this host", true, "", localBroker, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -201,9 +209,24 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+target:
 					_, _ = w.Write([]byte(`{"id":"` + target + `","name":"proj","slug":"proj"}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers":
+					name := r.URL.Query().Get("name")
+					var found []string
+					for id, n := range brokerNames {
+						if n == name {
+							found = append(found, `{"id":"`+id+`","name":"`+n+`"}`)
+						}
+					}
+					_, _ = w.Write([]byte(`{"brokers":[` + strings.Join(found, ",") + `]}`))
 				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers/"):
 					id := strings.TrimPrefix(r.URL.Path, "/api/v1/runtime-brokers/")
-					_, _ = w.Write([]byte(`{"id":"` + id + `","name":"broker-` + id[:8] + `"}`))
+					n, ok := brokerNames[id]
+					if !ok {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"broker not found"}}`))
+						return
+					}
+					_, _ = w.Write([]byte(`{"id":"` + id + `","name":"` + n + `"}`))
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/register":
 					var req hubclient.RegisterProjectRequest
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -223,11 +246,15 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 
 			home := t.TempDir()
 			t.Setenv("HOME", home)
-			if err := brokercredentials.NewMultiStore("").Save(&brokercredentials.BrokerCredentials{
-				Name: "test-hub", BrokerID: localBroker, HubEndpoint: hub.URL, SecretKey: "dGVzdA==",
-				AuthMode: brokercredentials.AuthModeDevAuth,
-			}); err != nil {
-				t.Fatal(err)
+			hubConn := ""
+			if !tc.noLocalBroker {
+				hubConn = "test-hub"
+				if err := brokercredentials.NewMultiStore("").Save(&brokercredentials.BrokerCredentials{
+					Name: hubConn, BrokerID: localBroker, HubEndpoint: hub.URL, SecretKey: "dGVzdA==",
+					AuthMode: brokercredentials.AuthModeDevAuth,
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			linked := filepath.Join(home, "linked", ".scion")
 			if err := os.MkdirAll(linked, 0o755); err != nil {
@@ -243,13 +270,20 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 				t.Chdir(home)
 			}
 
-			saved := []any{brokerProjectID, brokerBrokerID, brokerHubFlag, autoConfirm, brokerMakeDefault, projectPath}
+			saved := []any{brokerProjectID, brokerBrokerID, brokerHubFlag, autoConfirm, brokerMakeDefault, projectPath, hubEndpoint}
 			t.Cleanup(func() {
 				brokerProjectID, brokerBrokerID, brokerHubFlag = saved[0].(string), saved[1].(string), saved[2].(string)
 				autoConfirm, brokerMakeDefault, projectPath = saved[3].(bool), saved[4].(bool), saved[5].(string)
+				hubEndpoint = saved[6].(string)
 			})
-			brokerProjectID, brokerBrokerID, brokerHubFlag = tc.project, tc.broker, "test-hub"
+			brokerProjectID, brokerBrokerID, brokerHubFlag = tc.project, tc.broker, hubConn
 			autoConfirm, brokerMakeDefault, projectPath = true, false, ""
+			hubEndpoint = ""
+			if tc.noLocalBroker {
+				// No hub connection credentials: reach the hub through the
+				// endpoint override instead.
+				hubEndpoint = hub.URL
+			}
 
 			if err := runBrokerProvide(brokerProvideCmd, nil); err != nil {
 				t.Fatalf("runBrokerProvide: %v", err)
