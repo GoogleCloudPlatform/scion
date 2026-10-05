@@ -249,6 +249,9 @@ var routeAuthzManifest = map[string]string{
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA
 
+	// ── Conduit (hub.conduit experiment) ───────────────────────────────
+	"/api/v1/conduit/grant-keys": "authenticated", // GET: public grant verification keys only; any signed-in identity; 404 when the experiment is off
+
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
 	"/api/v1/agent/gcp-identity-token": "agent-token", // Agent GCP identity token
