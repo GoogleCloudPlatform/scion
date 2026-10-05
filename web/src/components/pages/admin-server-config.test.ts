@@ -552,6 +552,56 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Workstation hubs (layer0_editable): Layer-0 editable on the DB tier ──
+
+  describe('DB mode on a workstation hub (layer0_editable)', () => {
+    it('Layer-0 fields are editable: no deployment-configuration badges', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(false);
+      const values = queryAll(element, '.read-only-value').map((el) => el.textContent?.trim());
+      expect(values).not.toContain('postgres');
+      expect(values).not.toContain('8080');
+    });
+
+    it('env-pinned fields stay read-only', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        layer0_editable: true,
+        env_overrides: ['server.hub.port'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+    });
+
+    it('the PUT payload carries Layer-0 keys for the server to split', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      let capturedPayload: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      const server = capturedPayload!.server as Record<string, unknown> | undefined;
+      expect(server?.log_level).toBe('info');
+      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('postgres');
+    });
+  });
+
   // ── Criterion 6: File mode ──
 
   describe('Criterion 6 — File mode', () => {

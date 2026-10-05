@@ -279,6 +279,9 @@ interface ServerConfigResponse {
 
   // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
+  // True on workstation hubs: Layer-0 and file-only settings are editable and
+  // the PUT writes them to settings.yaml. False on hosted hubs.
+  layer0_editable?: boolean;
   env_overrides?: string[];
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
@@ -698,6 +701,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Layer-aware rendering state ──
   private settingsTier: 'db' | 'file' = 'file';
+  private layer0Editable = false;
   private layer1Keys: Set<string> = new Set(STATIC_LAYER1_KEYS);
   private envKeys: Set<string> = new Set();
 
@@ -1734,6 +1738,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
     this.settingsTier = data.settings_tier || 'file';
+    this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.sectionMetadata = data.section_metadata || null;
@@ -1826,8 +1831,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     return Object.keys(this.harnessConfigErrors).length > 0;
   }
 
+  /**
+   * Hosted DB-backed hubs only accept Layer-1 keys, so everything else is
+   * read-only there. Workstation hubs (layer0_editable) also write Layer-0
+   * and file-only keys to settings.yaml, so only env-pinned keys are locked.
+   */
+  private get layer1Only(): boolean {
+    return this.settingsTier === 'db' && !this.layer0Editable;
+  }
+
   private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
-    if (this.settingsTier === 'db') {
+    if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
     return this.envKeys.has(koanfKey) ? 'env' : null;
@@ -2352,8 +2366,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.clearSaveErrors();
 
     try {
-      const payload =
-        this.settingsTier === 'db' ? this.buildLayer1Payload() : this.buildFilePayload();
+      // A workstation hub splits the full payload itself: Layer-1 keys go to
+      // the DB, the rest to settings.yaml.
+      const payload = this.layer1Only ? this.buildLayer1Payload() : this.buildFilePayload();
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
