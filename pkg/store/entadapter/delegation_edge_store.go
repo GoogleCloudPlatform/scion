@@ -272,6 +272,38 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgesForDelegator(ctx context.
 	)
 }
 
+// deactivatedEdgesOf selects the inactive edges of the delegate deactivated
+// with cause under opID.
+func deactivatedEdgesOf(delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) []predicate.DelegationEdge {
+	return []predicate.DelegationEdge{
+		delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
+		delegationedge.DelegateIDEQ(delegateID),
+		delegationedge.ActiveEQ(false),
+		delegationedge.DeactivationCauseEQ(string(cause)),
+		delegationedge.DeactivationOpIDEQ(opID),
+	}
+}
+
+// GetDeactivatedDelegationEdgesForDelegate returns the inactive edges of the
+// delegate deactivated with cause under opID, oldest first.
+func (s *DelegationEdgeStore) GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) ([]*store.DelegationEdge, error) {
+	if err := validateEdgeDeactivation(cause, opID); err != nil {
+		return nil, err
+	}
+	edges, err := s.client.DelegationEdge.Query().
+		Where(deactivatedEdgesOf(delegateType, delegateID, cause, opID)...).
+		Order(ent.Asc(delegationedge.FieldCreated)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.DelegationEdge, len(edges))
+	for i, e := range edges {
+		result[i] = entDelegationEdgeToStore(e)
+	}
+	return result, nil
+}
+
 // ReactivateDelegationEdgesForDelegate reactivates exactly the inactive edges
 // of the delegate deactivated with cause under opID, and clears their
 // deactivation record. A conflict with an active edge in the same scope
@@ -281,13 +313,7 @@ func (s *DelegationEdgeStore) ReactivateDelegationEdgesForDelegate(ctx context.C
 		return 0, err
 	}
 	n, err := s.client.DelegationEdge.Update().
-		Where(
-			delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
-			delegationedge.DelegateIDEQ(delegateID),
-			delegationedge.ActiveEQ(false),
-			delegationedge.DeactivationCauseEQ(string(cause)),
-			delegationedge.DeactivationOpIDEQ(opID),
-		).
+		Where(deactivatedEdgesOf(delegateType, delegateID, cause, opID)...).
 		SetActive(true).
 		SetDeactivationCause("").
 		ClearDeactivatedAt().
