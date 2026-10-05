@@ -19,7 +19,10 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -263,6 +266,7 @@ func TestDispatchAgentCreate_InvalidPhaseIsNotSent(t *testing.T) {
 	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
 	require.ErrorIs(t, err, ErrLaunchInvalidPhase)
 	require.ErrorIs(t, err, store.ErrInvalidPhase)
+	assert.NotErrorIs(t, err, store.ErrDeleteInProgress, "a plain stop is not a delete")
 	assert.Empty(t, f.client.sends, "nothing is sent for an agent that can no longer launch")
 }
 
@@ -393,4 +397,95 @@ func TestDispatchLaunching_AcceptedMarkSurvivesCanceledRequest(t *testing.T) {
 	assert.Equal(t, launch.ID, row.LaunchID)
 	assert.Equal(t, "broker-instance-1", row.LaunchOwner, "the accepted mark is written")
 	assert.Equal(t, string(state.PhaseProvisioning), row.Phase)
+}
+
+// An async create persists the run it mints before the launch begins and
+// before the send, sends that run with the launch, and keeps it when the
+// broker accepts, even if the accepted answer reports another run: only a
+// synchronous answer is adopted (ptone/scion#2550, round 6 N2).
+func TestDispatchAgentCreate_AsyncKeepsMintedRunID(t *testing.T) {
+	f := newAsyncLaunchFixture(t, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "run-id", string(state.PhaseCreated), true)
+	var atSend *store.Agent
+	f.client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		atSend = f.row(t, agent.ID)
+		resp := acceptedAnswer(req, req.LaunchID)
+		resp.Agent.RunID = "broker-other-run"
+		return resp, nil, nil
+	}
+
+	res, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.NoError(t, err)
+	require.NotNil(t, res.AcceptedLaunch())
+	require.Len(t, f.client.sends, 1)
+	sent := f.client.sends[0]
+	require.True(t, sent.AsyncLaunch)
+	require.NotEmpty(t, sent.RunID, "the launch carries the minted run")
+	require.NotNil(t, atSend)
+	assert.Equal(t, sent.RunID, atSend.RunID, "the run is persisted before the send")
+	assert.Equal(t, sent.LaunchID, atSend.LaunchID, "the launch began before the send")
+
+	assert.Equal(t, sent.RunID, f.row(t, agent.ID).RunID, "the accepted launch keeps the minted run")
+}
+
+// A row a delete holds refuses the async create's run write: nothing is
+// sent and no launch is begun (ptone/scion#2550, round 6 N2).
+func TestDispatchAgentCreate_AsyncDeleteClaimedSendsNothing(t *testing.T) {
+	f := newAsyncLaunchFixture(t, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "claimed", string(state.PhaseCreated), true)
+	seedAgentDeletion(t, f.store, agent.ID, seedLiveDeleting)
+
+	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.ErrorIs(t, err, store.ErrDeleteInProgress)
+	assert.Empty(t, f.client.sends, "nothing is sent")
+	row := f.row(t, agent.ID)
+	assert.Empty(t, row.LaunchID, "no launch is begun")
+	assert.Empty(t, row.RunID, "no run is written")
+}
+
+// claimOnBeginLaunchStore lands a delete claim (phase stopping plus a live
+// deleting lease, as the delete engine writes it) just before BeginLaunch:
+// the window between the create's beginRun and its BeginLaunch.
+type claimOnBeginLaunchStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s claimOnBeginLaunchStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
+	row, err := s.GetAgent(ctx, agentID)
+	require.NoError(s.t, err)
+	row.Phase = string(state.PhaseStopping)
+	require.NoError(s.t, s.UpdateAgent(ctx, row))
+	seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
+	return s.Store.BeginLaunch(ctx, agentID, kind, timeout)
+}
+
+// A delete claim landing between beginRun and BeginLaunch is reported as
+// the delete (store.ErrDeleteInProgress), still wrapped in
+// ErrLaunchInvalidPhase so callers leave the row to the delete; nothing is
+// sent (ptone/scion#2550, round 6 n3).
+func TestDispatchAgentCreate_DeleteClaimBeforeBeginLaunch(t *testing.T) {
+	base := createTestStore(t)
+	f := newAsyncLaunchFixtureOn(t, claimOnBeginLaunchStore{Store: base, t: t}, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "claim-before-begin", string(state.PhaseCreated), true)
+
+	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.ErrorIs(t, err, ErrLaunchInvalidPhase)
+	require.ErrorIs(t, err, store.ErrInvalidPhase)
+	require.ErrorIs(t, err, store.ErrDeleteInProgress)
+	assert.Empty(t, f.client.sends, "nothing is sent")
+	assert.Empty(t, f.row(t, agent.ID).LaunchID, "no launch is begun")
+}
+
+// writeLaunchInvalidPhase answers delete_in_progress, with details.agentId,
+// when the refusal was a delete, and invalid_state otherwise (round 6 n3).
+func TestWriteLaunchInvalidPhase_DeleteHoldsRow(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLaunchInvalidPhase(rec, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress), "agent-1")
+	requireIntentDeleteInProgress(t, rec, "agent-1")
+
+	rec = httptest.NewRecorder()
+	writeLaunchInvalidPhase(rec, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase), "agent-1")
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_state")
 }
