@@ -543,78 +543,16 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Phase 1 & 2: Create broker and complete join if needed
 	if needsJoin || brokerID == "" {
-		fmt.Printf("Registering broker with Hub...\n")
-
-		// Phase 1: Create broker registration
-		createReq := &hubclient.CreateBrokerRequest{
-			BrokerID:     stableBrokerID,
-			Name:         brokerName,
-			Capabilities: brokerRegistrationCapabilities(),
-			AutoProvide:  brokerAutoProvide,
-			Labels: map[string]string{
-				"scion.io/broker-role": "remote",
-			},
-		}
-
-		createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
+		brokerID, err = registerBrokerWithHub(ctx, client, multiStore, brokerHubRegistration{
+			BrokerID:    stableBrokerID,
+			Name:        brokerName,
+			AutoProvide: brokerAutoProvide,
+			Profiles:    buildBrokerProfiles(settings),
+			HubName:     hubName,
+			Endpoint:    endpoint,
+		})
 		if err != nil {
-			if brokerAutoProvide && apiclient.IsForbiddenError(err) {
-				return fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
-			}
-			return fmt.Errorf("failed to create broker registration: %w", err)
-		}
-
-		if createResp.Reregistered {
-			fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", brokerName, createResp.BrokerID)
-		} else {
-			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
-		}
-
-		// Build profiles from settings to send to Hub
-		profiles := buildBrokerProfiles(settings)
-
-		// Phase 2: Complete broker join with join token
-		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:     createResp.BrokerID,
-			JoinToken:    createResp.JoinToken,
-			Hostname:     brokerName,
-			Version:      version.Version,
-			Capabilities: brokerRegistrationCapabilities(),
-			Profiles:     profiles,
-		}
-
-		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
-		if err != nil {
-			return fmt.Errorf("failed to complete broker join: %w", err)
-		}
-
-		brokerID = joinResp.BrokerID
-
-		// Resolve transport config from flags, then env
-		transportMode := brokerTransportMode
-		if transportMode == "" {
-			transportMode = os.Getenv(transportauth.EnvTransportMode)
-		}
-		transportAudience := brokerTransportAudience
-		if transportAudience == "" {
-			transportAudience = os.Getenv(transportauth.EnvTransportAudience)
-		}
-
-		// Save credentials to MultiStore
-		newCreds := &brokercredentials.BrokerCredentials{
-			Name:              hubName,
-			BrokerID:          brokerID,
-			SecretKey:         joinResp.SecretKey,
-			HubEndpoint:       endpoint,
-			AuthMode:          brokercredentials.AuthModeHMAC,
-			RegisteredAt:      time.Now(),
-			TransportMode:     transportMode,
-			TransportAudience: transportAudience,
-		}
-		if err := multiStore.Save(newCreds); err != nil {
-			fmt.Printf("Warning: failed to save broker credentials: %v\n", err)
-		} else {
-			fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
+			return err
 		}
 	}
 
@@ -667,6 +605,96 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	fmt.Println("Use 'scion hub status' to check the connection status.")
 
 	return nil
+}
+
+// brokerHubRegistration is the input of registerBrokerWithHub.
+type brokerHubRegistration struct {
+	// BrokerID is the stable broker ID requested for a first registration.
+	BrokerID    string
+	Name        string
+	AutoProvide bool
+	Profiles    []hubclient.BrokerProfile
+	// HubName names the hub connection the credentials are saved under.
+	HubName  string
+	Endpoint string
+}
+
+// registerBrokerWithHub runs the two-phase broker registration against the
+// hub: POST /api/v1/brokers for a join token, then POST /api/v1/brokers/join
+// for the broker's HMAC secret, which it saves to multiStore under
+// reg.HubName. It returns the joined broker's ID. client carries whichever
+// credential getHubClient selected, for example a hub user access token
+// from SCION_HUB_TOKEN.
+func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiStore *brokercredentials.MultiStore, reg brokerHubRegistration) (string, error) {
+	fmt.Printf("Registering broker with Hub...\n")
+
+	// Phase 1: Create broker registration
+	createReq := &hubclient.CreateBrokerRequest{
+		BrokerID:     reg.BrokerID,
+		Name:         reg.Name,
+		Capabilities: brokerRegistrationCapabilities(),
+		AutoProvide:  reg.AutoProvide,
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+		},
+	}
+
+	createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
+	if err != nil {
+		if reg.AutoProvide && apiclient.IsForbiddenError(err) {
+			return "", fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
+		}
+		return "", fmt.Errorf("failed to create broker registration: %w", err)
+	}
+
+	if createResp.Reregistered {
+		fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", reg.Name, createResp.BrokerID)
+	} else {
+		fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
+	}
+
+	// Phase 2: Complete broker join with join token
+	joinReq := &hubclient.JoinBrokerRequest{
+		BrokerID:     createResp.BrokerID,
+		JoinToken:    createResp.JoinToken,
+		Hostname:     reg.Name,
+		Version:      version.Version,
+		Capabilities: brokerRegistrationCapabilities(),
+		Profiles:     reg.Profiles,
+	}
+
+	joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to complete broker join: %w", err)
+	}
+
+	// Resolve transport config from flags, then env
+	transportMode := brokerTransportMode
+	if transportMode == "" {
+		transportMode = os.Getenv(transportauth.EnvTransportMode)
+	}
+	transportAudience := brokerTransportAudience
+	if transportAudience == "" {
+		transportAudience = os.Getenv(transportauth.EnvTransportAudience)
+	}
+
+	// Save credentials to MultiStore
+	newCreds := &brokercredentials.BrokerCredentials{
+		Name:              reg.HubName,
+		BrokerID:          joinResp.BrokerID,
+		SecretKey:         joinResp.SecretKey,
+		HubEndpoint:       reg.Endpoint,
+		AuthMode:          brokercredentials.AuthModeHMAC,
+		RegisteredAt:      time.Now(),
+		TransportMode:     transportMode,
+		TransportAudience: transportAudience,
+	}
+	if err := multiStore.Save(newCreds); err != nil {
+		fmt.Printf("Warning: failed to save broker credentials: %v\n", err)
+	} else {
+		fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
+	}
+	return joinResp.BrokerID, nil
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
