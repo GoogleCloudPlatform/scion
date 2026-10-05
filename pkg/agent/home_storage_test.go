@@ -542,3 +542,17 @@ func TestResolveHomeStorage_RecordedNFSNeedsValidNFSBlock(t *testing.T) {
 	_, err = resolveHomeStorage(h.input("kubernetes", "gke"))
 	require.Error(t, err)
 }
+
+func TestFirstNFSShare(t *testing.T) {
+	for _, sd := range []*config.V1SharedDirStorageConfig{
+		nil,
+		{Backend: "nfs"},
+		{Backend: "nfs", NFS: &config.V1NFSConfig{}},
+	} {
+		_, err := firstNFSShare(sd)
+		assert.Error(t, err, "%+v", sd)
+	}
+	share, err := firstNFSShare(&config.V1SharedDirStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "s", PVName: "pv"}}}})
+	require.NoError(t, err)
+	assert.Equal(t, "s", share.ID)
+}
