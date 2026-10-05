@@ -96,8 +96,8 @@ type WebChatStore interface {
 	GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error)
 
 	// ListTopics returns all non-deleted topics for a project, ordered by
-	// last_activity_at DESC. If no #general topic exists, one is lazily
-	// created (covers pre-existing projects).
+	// last_activity_at DESC. It creates nothing; EnsureGeneralTopic is what
+	// creates a project's #general topic.
 	ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error)
 
 	// ListTopicsByProjects returns the non-deleted topics of every project

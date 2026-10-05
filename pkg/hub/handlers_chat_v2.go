@@ -142,7 +142,9 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 			ThreadCount: ru.threadCount,
 			UnreadCount: ru.unreadCount,
 		}
-		if ru.threadCount > 0 {
+		// last_activity_at is unset until a thread's first message, so a
+		// space whose threads have no messages has no activity to report.
+		if !ru.lastActivityAt.IsZero() {
 			last := ru.lastActivityAt
 			entry.LastActivityAt = &last
 		}
@@ -183,9 +185,10 @@ type chatSpaceRollup struct {
 // thread activity of every project in projects for userID, fetching topics
 // and read states in batches across projects rather than per project.
 //
-// Store errors are ignored, as the per-project lookups this replaces
-// ignored them: a failed topic read leaves its projects with no threads,
-// and a failed read-state read leaves its threads with no read state.
+// A failed batch read is logged and otherwise degrades as the per-project
+// lookups this replaces did: a failed topic read leaves its projects with
+// no threads, and a failed read-state read leaves its threads with no
+// read state.
 func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project) map[string]chatSpaceRollup {
 	out := make(map[string]chatSpaceRollup, len(projects))
 	if len(projects) == 0 {
@@ -199,7 +202,12 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		for _, p := range projects[start:end] {
 			ids = append(ids, p.ID)
 		}
-		batch, _ := wcs.ListTopicsByProjects(ctx, ids)
+		batch, err := wcs.ListTopicsByProjects(ctx, ids)
+		if err != nil {
+			slog.Warn("chat spaces: batched topic read failed",
+				"projects", len(ids), "error", err)
+			continue
+		}
 		topics = append(topics, batch...)
 	}
 	if len(topics) == 0 {
@@ -213,7 +221,12 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		for _, t := range topics[start:end] {
 			keys = append(keys, t.ID)
 		}
-		states, _ := wcs.GetReadStates(ctx, userID, keys)
+		states, err := wcs.GetReadStates(ctx, userID, keys)
+		if err != nil {
+			slog.Warn("chat spaces: batched read-state read failed",
+				"threads", len(keys), "error", err)
+			continue
+		}
 		for _, rs := range states {
 			readMap[rs.ConversationKey] = rs
 		}
@@ -401,7 +414,6 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	// ListTopics lazily creates #general.
 	topics, err := wcs.ListTopics(r.Context(), projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list threads", nil)
@@ -4739,7 +4751,7 @@ type chatSpaceEntry struct {
 	UnreadCount int    `json:"unreadCount"`
 	// LastActivityAt is the newest lastActivityAt across the space's
 	// threads, in the same format as a thread's lastActivityAt. Omitted
-	// when the space has no threads.
+	// when the space has no threads or none of them has a message yet.
 	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
 }
 

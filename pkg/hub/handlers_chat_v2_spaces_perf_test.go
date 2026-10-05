@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -62,6 +63,9 @@ type spacesCountingWCS struct {
 	listTopics    int
 	topicsBatch   int
 	getReadStates int
+	// failTopicsBatch and failReadStates make the batched reads fail.
+	failTopicsBatch bool
+	failReadStates  bool
 }
 
 func (w *spacesCountingWCS) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
@@ -74,14 +78,22 @@ func (w *spacesCountingWCS) ListTopics(ctx context.Context, projectID string) ([
 func (w *spacesCountingWCS) ListTopicsByProjects(ctx context.Context, ids []string) ([]WebChatTopic, error) {
 	w.mu.Lock()
 	w.topicsBatch++
+	fail := w.failTopicsBatch
 	w.mu.Unlock()
+	if fail {
+		return nil, errors.New("injected topics batch failure")
+	}
 	return w.WebChatStore.ListTopicsByProjects(ctx, ids)
 }
 
 func (w *spacesCountingWCS) GetReadStates(ctx context.Context, userID string, keys []string) ([]WebChatReadState, error) {
 	w.mu.Lock()
 	w.getReadStates++
+	fail := w.failReadStates
 	w.mu.Unlock()
+	if fail {
+		return nil, errors.New("injected read states failure")
+	}
 	return w.WebChatStore.GetReadStates(ctx, userID, keys)
 }
 
@@ -281,24 +293,34 @@ func TestChatSpaces_BatchedMatchesLegacy(t *testing.T) {
 	assert.Equal(t, "🚀", mine.Emoji)
 }
 
-// lastActivityAt is the newest lastActivityAt across the space's threads as
-// GET .../threads reports them, and is omitted for a space with no threads.
-func TestChatSpaces_LastActivityAt(t *testing.T) {
-	f := newSpacesPerfFixture(t)
-	resp := getSpaces(t, f.srv, f.admin)
-	require.NotEmpty(t, resp.Spaces)
-
-	rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, "/api/v1/chat/spaces", nil)
+// getSpacesRaw returns GET /chat/spaces keyed by project ID, with each
+// space's fields left as raw JSON so tests can check field presence.
+func getSpacesRaw(t *testing.T, srv *Server, u *store.User) map[string]map[string]json.RawMessage {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/chat/spaces", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var raw struct {
 		Spaces []map[string]json.RawMessage `json:"spaces"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
-	rawByID := make(map[string]map[string]json.RawMessage, len(raw.Spaces))
+	out := make(map[string]map[string]json.RawMessage, len(raw.Spaces))
 	for _, sp := range raw.Spaces {
 		var id string
 		require.NoError(t, json.Unmarshal(sp["projectId"], &id))
-		rawByID[id] = sp
+		out[id] = sp
 	}
+	return out
+}
+
+// lastActivityAt is the newest lastActivityAt across the space's threads as
+// GET .../threads reports them. It is omitted for a space with no threads
+// and for a space whose threads have no messages yet, whose activity time
+// is unset.
+func TestChatSpaces_LastActivityAt(t *testing.T) {
+	f := newSpacesPerfFixture(t)
+	resp := getSpaces(t, f.srv, f.admin)
+	require.NotEmpty(t, resp.Spaces)
+	rawByID := getSpacesRaw(t, f.srv, f.admin)
 
 	sawWith, sawWithout := false, false
 	for _, sp := range resp.Spaces {
@@ -309,29 +331,68 @@ func TestChatSpaces_LastActivityAt(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(trec.Body.Bytes(), &threads))
 
-		if len(threads.Threads) == 0 {
-			sawWithout = true
-			assert.Nil(t, sp.LastActivityAt, "space %s has no threads", sp.ProjectSlug)
-			_, present := rawByID[sp.ProjectID]["lastActivityAt"]
-			assert.False(t, present, "lastActivityAt must be omitted for %s", sp.ProjectSlug)
-			continue
-		}
-		sawWith = true
 		var newest time.Time
 		var newestRaw json.RawMessage
 		for _, th := range threads.Threads {
 			var ts time.Time
 			require.NoError(t, json.Unmarshal(th["lastActivityAt"], &ts))
-			if newestRaw == nil || ts.After(newest) {
+			if !ts.IsZero() && (newestRaw == nil || ts.After(newest)) {
 				newest, newestRaw = ts, th["lastActivityAt"]
 			}
 		}
+
+		if newestRaw == nil {
+			sawWithout = true
+			assert.Nil(t, sp.LastActivityAt, "space %s has no thread activity", sp.ProjectSlug)
+			_, present := rawByID[sp.ProjectID]["lastActivityAt"]
+			assert.False(t, present, "lastActivityAt must be omitted for %s", sp.ProjectSlug)
+			continue
+		}
+		sawWith = true
 		require.NotNil(t, sp.LastActivityAt, "space %s", sp.ProjectSlug)
 		assert.True(t, newest.Equal(*sp.LastActivityAt), "space %s: got %v want %v", sp.ProjectSlug, *sp.LastActivityAt, newest)
 		assert.JSONEq(t, string(newestRaw), string(rawByID[sp.ProjectID]["lastActivityAt"]),
 			"space %s: same wire format as the thread's lastActivityAt", sp.ProjectSlug)
 	}
-	require.True(t, sawWith && sawWithout, "fixture: need spaces with and without threads")
+	require.True(t, sawWith && sawWithout, "fixture: need spaces with and without thread activity")
+}
+
+// A space whose only threads have never had a message must omit
+// lastActivityAt rather than report the zero time, and reports it as soon
+// as one of those threads gets a message.
+func TestChatSpaces_LastActivityAtOmittedForMessagelessThreads(t *testing.T) {
+	f := newSpacesPerfFixture(t)
+	ctx := context.Background()
+
+	// f.projects[2] has one thread with no messages; add a second.
+	quietProject := f.projects[2]
+	second := tid(quietProject + "-second-empty")
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID: second, ProjectID: quietProject, Name: "second-empty",
+		CreatedBy: f.admin.ID, CreatedAt: time.Now().UTC(),
+	}))
+
+	resp := getSpaces(t, f.srv, f.admin)
+	var quiet *chatSpaceEntry
+	for i := range resp.Spaces {
+		if resp.Spaces[i].ProjectID == quietProject {
+			quiet = &resp.Spaces[i]
+		}
+	}
+	require.NotNil(t, quiet, "space missing")
+	require.Equal(t, 2, quiet.ThreadCount, "fixture: two message-less threads")
+	assert.Nil(t, quiet.LastActivityAt)
+	raw := getSpacesRaw(t, f.srv, f.admin)[quietProject]
+	_, present := raw["lastActivityAt"]
+	assert.False(t, present, "lastActivityAt must be omitted, got %s", raw["lastActivityAt"])
+
+	// The first message gives the space an activity time.
+	require.NoError(t, f.wcs.TouchTopicActivity(ctx, second, tid("first-msg")))
+	raw = getSpacesRaw(t, f.srv, f.admin)[quietProject]
+	require.Contains(t, raw, "lastActivityAt")
+	var ts time.Time
+	require.NoError(t, json.Unmarshal(raw["lastActivityAt"], &ts))
+	assert.False(t, ts.IsZero(), "lastActivityAt must be a real time once a message exists")
 }
 
 // The spaces list decides only ActionRead per project, lists projects
@@ -432,4 +493,39 @@ func TestListProjectSummaries_MatchesListProjects(t *testing.T) {
 		assert.Equal(t, fp, lean.Items[i])
 	}
 	assert.True(t, sawAgents, "fixture: enrichment must have had something to compute")
+}
+
+// A failed batch read is logged as a warning and degrades as the
+// per-project reads did: a failed topic read leaves its spaces with no
+// threads, and a failed read-state read leaves every messaged thread
+// unread. The list itself still succeeds.
+func TestChatSpaces_BatchReadFailureIsLogged(t *testing.T) {
+	t.Run("topics", func(t *testing.T) {
+		f := newSpacesPerfFixture(t)
+		f.wcs.failTopicsBatch = true
+		logs := captureSpaceMembersLogs(t)
+
+		resp := getSpaces(t, f.srv, f.admin)
+		require.Len(t, resp.Spaces, len(f.projects))
+		for _, sp := range resp.Spaces {
+			assert.Zero(t, sp.ThreadCount, "space %s", sp.ProjectSlug)
+			assert.Nil(t, sp.LastActivityAt, "space %s", sp.ProjectSlug)
+		}
+		assert.Contains(t, logs.String(), "chat spaces: batched topic read failed")
+		assert.Contains(t, logs.String(), "injected topics batch failure")
+	})
+	t.Run("read states", func(t *testing.T) {
+		f := newSpacesPerfFixture(t)
+		f.wcs.failReadStates = true
+		logs := captureSpaceMembersLogs(t)
+
+		resp := getSpaces(t, f.srv, f.admin)
+		for _, sp := range resp.Spaces {
+			if sp.ProjectID == f.projects[0] {
+				assert.Equal(t, 3, sp.UnreadCount, "every messaged thread is unread without read state")
+			}
+		}
+		assert.Contains(t, logs.String(), "chat spaces: batched read-state read failed")
+		assert.Contains(t, logs.String(), "injected read states failure")
+	})
 }
