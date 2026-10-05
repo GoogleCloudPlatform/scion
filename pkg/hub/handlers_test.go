@@ -2870,22 +2870,27 @@ func TestProjectRenameGroupMigration(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Create associated groups (mimicking what createProject does)
+	// Create associated groups (mimicking what createProjectGroup and
+	// createProjectMembersGroup write, including the system group markers).
+	// Overlaps TestProjectRenameSlugMigratesSystemGroups, which also checks
+	// the groups keep their IDs; this one also checks the old slugs are gone.
 	agentsGroup := &store.Group{
-		ID:        api.NewUUID(),
-		Name:      "Group Test Agents",
-		Slug:      "project:grp-old:agents",
-		GroupType: store.GroupTypeProjectAgents,
-		ProjectID: tid("project_rename_grp"),
-		CreatedBy: "test-user",
+		ID:          api.NewUUID(),
+		Name:        "Group Test Agents",
+		Slug:        "project:grp-old:agents",
+		GroupType:   store.GroupTypeProjectAgents,
+		ProjectID:   tid("project_rename_grp"),
+		CreatedBy:   "test-user",
+		Annotations: map[string]string{store.AnnotationProjectAgentsGroup: "true"},
 	}
 	membersGroup := &store.Group{
-		ID:        api.NewUUID(),
-		Name:      "Group Test Members",
-		Slug:      "project:grp-old:members",
-		GroupType: store.GroupTypeExplicit,
-		ProjectID: tid("project_rename_grp"),
-		CreatedBy: "test-user",
+		ID:          api.NewUUID(),
+		Name:        "Group Test Members",
+		Slug:        "project:grp-old:members",
+		GroupType:   store.GroupTypeExplicit,
+		ProjectID:   tid("project_rename_grp"),
+		CreatedBy:   "test-user",
+		Annotations: map[string]string{store.AnnotationProjectMembersGroup: "true"},
 	}
 	if err := s.CreateGroup(ctx, agentsGroup); err != nil {
 		t.Fatalf("failed to create agents group: %v", err)

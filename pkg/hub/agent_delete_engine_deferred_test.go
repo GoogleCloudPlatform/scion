@@ -190,7 +190,7 @@ func endIntent(t *testing.T, s store.Store, id string, ok bool) {
 	if ok {
 		require.NoError(t, s.CompleteBrokerDispatch(ctx, id, ""))
 	} else {
-		require.NoError(t, s.FailBrokerDispatch(ctx, id, "gave up"))
+		require.NoError(t, s.FailBrokerDispatch(ctx, id, "gave up", ""))
 	}
 }
 
@@ -268,7 +268,7 @@ func TestAgentDeleteEngine_DeferredFailedIntentRollsBack(t *testing.T) {
 			for _, d := range all {
 				if d.AgentID == f.agent.ID {
 					if ok, _ := f.store.ClaimBrokerDispatch(context.Background(), d.ID, "test-owner"); ok {
-						_ = f.store.FailBrokerDispatch(context.Background(), d.ID, "owner refused")
+						_ = f.store.FailBrokerDispatch(context.Background(), d.ID, "owner refused", "")
 					}
 					f.bus.PublishDispatchDone(context.Background(), d.ID)
 					return true

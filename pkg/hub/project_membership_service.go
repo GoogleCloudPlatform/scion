@@ -805,6 +805,14 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
+	// Project members groups cannot be granted roles. Checked after the
+	// actor is authorized (so the refusal is only visible to callers who may
+	// manage this project) and before the transaction: the marker
+	// annotations cannot be changed through the API.
+	if isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
+	}
+
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the
 	// same transaction. The lock serializes concurrent membership mutations
 	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
@@ -1000,6 +1008,9 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if txErr == store.ErrAlreadyExists {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: "this member already has this role in this project", HTTPStatus: 409}
 		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
+		}
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
@@ -1062,6 +1073,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			Reason:     fmt.Sprintf("role %q cannot be assigned to %s principals", newRoleDef.Name, existing.PrincipalType),
 			HTTPStatus: 400,
 		}
+	}
+	// A role change re-creates the binding, so it is refused for a project
+	// members group principal. Deleting the existing binding stays allowed.
+	if isProjectMembersGroupPrincipal(ctx, svc.store, existing.PrincipalType, existing.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(existing.PrincipalID)
 	}
 
 	// Governance: check both old and new target roles.
@@ -1219,6 +1235,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
+		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
