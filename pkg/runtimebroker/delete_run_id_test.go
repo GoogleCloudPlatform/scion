@@ -775,3 +775,67 @@ func TestDeleteAgent_RecordedRuntimeRestrictsBeforeRunFilter(t *testing.T) {
 		t.Errorf("acted: docker=%d kubernetes=%d, want kubernetes only", dockerMgr.acted(), k8sMgr.acted())
 	}
 }
+
+// panickingManager panics in Stop or Start, after recording the call.
+type panickingManager struct {
+	*mockManager
+	panicIn string // "stop" or "start"
+}
+
+func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath string) error {
+	err := m.mockManager.Stop(ctx, agentID, projectPath)
+	if m.panicIn == "stop" {
+		panic("stop panicked")
+	}
+	return err
+}
+
+func (m *panickingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	info, err := m.mockManager.Start(ctx, opts)
+	if m.panicIn == "start" {
+		panic("start panicked")
+	}
+	return info, err
+}
+
+// A panic once a start or restart has reached the runtime (restart's stop,
+// or Manager.Start) is answered with the startAttempted marker and the run
+// ID, like a failed Manager.Start, not with the recovery middleware's
+// generic error.
+func TestStartPanic_MarksStartAttempted(t *testing.T) {
+	for _, tc := range []struct{ name, path, panicIn string }{
+		{"start panics in Manager.Start", "/api/v1/agents/test-agent-1/start", "start"},
+		{"restart panics in Stop", "/api/v1/agents/test-agent-1/restart", "stop"},
+		{"restart panics in Manager.Start", "/api/v1/agents/test-agent-1/restart", "start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "running"}}}
+			srv := newTestServerWithManager(t, &panickingManager{mockManager: mock, panicIn: tc.panicIn})
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"runId":"run-x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("status %d, want 500: %s", w.Code, w.Body.String())
+			}
+			var b struct {
+				Error APIError `json:"error"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&b); err != nil {
+				t.Fatalf("decode %q: %v", w.Body.String(), err)
+			}
+			if b.Error.Code != ErrCodeRuntimeError {
+				t.Errorf("code = %q, want %q", b.Error.Code, ErrCodeRuntimeError)
+			}
+			if attempted, _ := b.Error.Details[api.BrokerErrorDetailStartAttempted].(bool); !attempted {
+				t.Errorf("startAttempted missing: %v", b.Error.Details)
+			}
+			if b.Error.Details[api.BrokerErrorDetailRunID] != "run-x" {
+				t.Errorf("runId detail = %v, want run-x", b.Error.Details[api.BrokerErrorDetailRunID])
+			}
+			if tc.panicIn == "stop" && mock.StartCalls() != 0 {
+				t.Errorf("Manager.Start called after the stop panicked")
+			}
+		})
+	}
+}
