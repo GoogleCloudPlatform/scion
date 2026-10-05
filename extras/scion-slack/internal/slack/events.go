@@ -336,7 +336,7 @@ func (s *eventServer) handleInteractionCallback(callback slackapi.InteractionCal
 		}
 		action := callback.ActionCallback.BlockActions[0]
 		s.log.Debug("block action received", "action_id", action.ActionID)
-		HandleBlockAction(ctx, s.client, s.store, s.deliverInbound, callback, action, s.log)
+		HandleBlockAction(ctx, s.client, s.store, s.hubClient, s.deliverInbound, callback, action, s.log)
 
 	case slackapi.InteractionTypeViewSubmission:
 		s.log.Debug("view submission received", "callback_id", callback.View.CallbackID)

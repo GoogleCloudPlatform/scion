@@ -295,3 +295,73 @@ func TestHandleSetup_DeniedShowsActionableText(t *testing.T) {
 		"Your Scion account (alice@example.com) doesn't have permission to list projects. Ask a project owner.",
 		f.slack.lastText(t))
 }
+
+func (f *commandFixture) clickSetupProject(t *testing.T, projectID string) {
+	t.Helper()
+	action := &slackapi.BlockAction{ActionID: "setup:proj:" + projectID, Value: projectID}
+	var cb slackapi.InteractionCallback
+	cb.Channel.ID = "C1"
+	cb.User.ID = "U1"
+	cb.Team.ID = "T1"
+	cb.ActionCallback.BlockActions = []*slackapi.BlockAction{action}
+	HandleBlockAction(context.Background(), f.slack.client(), f.store, f.hub.client(), nil, cb, action, slog.Default())
+}
+
+func TestSetupCallback_LinksTheUsersProjectWithItsSlug(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusOK,
+		`{"projects":[{"id":"p1","name":"Project One","slug":"project-one"}]}`)
+
+	f.clickSetupProject(t, "p1")
+
+	reqs := f.hub.recorded()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, "user:alice@example.com", reqs[0].LinkedUser)
+	link, err := f.store.GetChannelLink(context.Background(), "C1")
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "p1", link.ProjectID)
+	assert.Equal(t, "project-one", link.ProjectSlug)
+	assert.Contains(t, f.slack.lastText(t), "project-one")
+}
+
+func TestSetupCallback_ProjectNotInUsersListIsNotLinked(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "alice@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusOK,
+		`{"projects":[{"id":"p1","name":"Project One","slug":"project-one"}]}`)
+
+	f.clickSetupProject(t, "p-other")
+
+	link, err := f.store.GetChannelLink(context.Background(), "C1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+	assert.Contains(t, f.slack.lastText(t), "don't have access to that project")
+}
+
+func TestSetupCallback_UnlinkedClickerAsksToRegister(t *testing.T) {
+	f := newCommandFixture(t)
+
+	f.clickSetupProject(t, "p1")
+
+	assert.Empty(t, f.hub.recorded())
+	link, err := f.store.GetChannelLink(context.Background(), "C1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+	assert.Contains(t, f.slack.lastText(t), "/scion register")
+}
+
+func TestSetupCallback_DeniedShowsActionableText(t *testing.T) {
+	f := newCommandFixture(t)
+	f.linkUser(t, "gone@example.com")
+	f.hub.on("GET", "/api/v1/projects", http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"on-behalf-of principal not found"}}`)
+
+	f.clickSetupProject(t, "p1")
+
+	link, err := f.store.GetChannelLink(context.Background(), "C1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+	assert.Equal(t, staleAccountLinkText, f.slack.lastText(t))
+}

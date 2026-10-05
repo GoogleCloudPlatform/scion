@@ -514,6 +514,7 @@ func HandleBlockAction(
 	ctx context.Context,
 	client *slackapi.Client,
 	store Store,
+	hubClient HubClient,
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError,
 	callback slackapi.InteractionCallback,
 	action *slackapi.BlockAction,
@@ -532,7 +533,7 @@ func HandleBlockAction(
 
 	switch parts[0] {
 	case "setup":
-		handleSetupCallback(ctx, client, store, callback, parts[1:], log)
+		handleSetupCallback(ctx, client, store, hubClient, callback, parts[1:], log)
 	case "ask":
 		handleAskCallback(ctx, client, store, deliverInbound, callback, actionID, log)
 	case "settings":
@@ -563,7 +564,7 @@ func HandleViewSubmission(
 	}
 }
 
-func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Store, callback slackapi.InteractionCallback, parts []string, log *slog.Logger) {
+func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Store, hubClient HubClient, callback slackapi.InteractionCallback, parts []string, log *slog.Logger) {
 	if len(parts) == 0 {
 		return
 	}
@@ -578,11 +579,47 @@ func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Sto
 		}
 		projectID := parts[1]
 
+		// Link only a project the clicking user can see, as that user.
+		email, ok := requireLinkedUser(ctx, client, store, channelID, userID, log)
+		if !ok {
+			return
+		}
+		if hubClient == nil {
+			postEphemeral(client, channelID, userID, "Failed to fetch your projects. Please try again later.")
+			return
+		}
+		projects, err := hubClient.ListUserProjects(ctx, "user:"+email)
+		if err != nil {
+			log.Warn("Failed to list user projects", "error", err)
+			if text := deniedRequestText(err, email, ""); text != "" {
+				postEphemeral(client, channelID, userID, text)
+				return
+			}
+			postEphemeral(client, channelID, userID, "Failed to fetch your projects. Please try again later.")
+			return
+		}
+		var project *ProjectOption
+		for i := range projects {
+			if projects[i].ID == projectID {
+				project = &projects[i]
+				break
+			}
+		}
+		if project == nil {
+			postEphemeral(client, channelID, userID,
+				"You don't have access to that project. Run `/scion setup` to choose one of your projects.")
+			return
+		}
+		projectSlug := project.Slug
+		if projectSlug == "" {
+			projectSlug = project.DisplayName()
+		}
+
 		link := &ChannelLink{
 			ChannelID:        channelID,
 			TeamID:           callback.Team.ID,
 			ProjectID:        projectID,
-			ProjectSlug:      projectID,
+			ProjectSlug:      projectSlug,
 			LinkedBy:         userID,
 			LinkedAt:         time.Now(),
 			Active:           true,
@@ -596,7 +633,7 @@ func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Sto
 		}
 
 		postEphemeral(client, channelID, userID,
-			fmt.Sprintf("Channel linked to project *%s*. Use `/scion default <agent>` to set a default agent.", projectID))
+			fmt.Sprintf("Channel linked to project *%s*. Use `/scion default <agent>` to set a default agent.", projectSlug))
 		log.Info("Channel linked", "channel_id", channelID, "project_id", projectID)
 	}
 }
