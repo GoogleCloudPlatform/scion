@@ -154,7 +154,10 @@ test-fixture-coverage:
 # FOR UPDATE on Postgres only, and the restore-during-purge cases exercise
 # that path. A third run covers the storetest group/MembershipCleanup
 # conformance (pkg/store/storetest), selected by name so only that subtest
-# of the CRUD-parity suite runs here.
+# of the CRUD-parity suite runs here. The TestCompositeDeleteAgent_ and
+# TestCompositeDeleteProject_ prefixes also select the PostgreSQL-only
+# *_LockOrderNoDeadlock tests, which check that both deletes lock agent rows
+# before deleting their memberships (the purge/finalize order).
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly

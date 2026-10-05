@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
@@ -246,9 +247,24 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // Everything runs in one transaction, so the membership delete and the agent
 // row delete commit or roll back together: a failed agent delete leaves the
 // agent with its memberships.
+//
+// On PostgreSQL the agent row is locked FOR UPDATE before its memberships are
+// deleted, so this path takes locks agent -> membership -> agent delete, the
+// same order as PurgeDeletedAgents and finalize-hard. Deleting the
+// memberships first would invert that order and could deadlock (40P01)
+// against a concurrent purge or finalize of the same agent.
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteAgent(ctx, id) })
+	}
+	if c.client.Driver().Dialect() == dialect.Postgres {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return err
+		}
+		if _, err := c.client.Agent.Query().Where(agent.IDEQ(uid)).ForUpdate().IDs(ctx); err != nil {
+			return err
+		}
 	}
 	if _, err := c.DeleteGroupMembershipsForAgents(ctx, []string{id}); err != nil {
 		return err
@@ -304,6 +320,12 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // Everything runs in one transaction: the agent-ID query, the cascades
 // (including the group-membership delete) and the row deletes commit or roll
 // back together.
+//
+// On PostgreSQL the agent-ID query locks the project's agent rows FOR UPDATE,
+// in ID order, before their memberships are deleted. Every path that deletes
+// agent memberships then takes locks agent -> membership -> agent delete,
+// matching PurgeDeletedAgents and finalize-hard (which also lock in ID order),
+// so they cannot deadlock (40P01) against this delete.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
@@ -312,7 +334,13 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	agentIDs, err := c.client.Agent.Query().Where(agent.ProjectIDEQ(uid)).IDs(ctx)
+	agentQuery := c.client.Agent.Query().
+		Where(agent.ProjectIDEQ(uid)).
+		Order(ent.Asc(agent.FieldID))
+	if c.client.Driver().Dialect() == dialect.Postgres {
+		agentQuery = agentQuery.ForUpdate()
+	}
+	agentIDs, err := agentQuery.IDs(ctx)
 	if err != nil {
 		return err
 	}

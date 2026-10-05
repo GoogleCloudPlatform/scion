@@ -6317,12 +6317,18 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 // sweepOrphanedGroupMemberships deletes group memberships whose user and
 // agent are both NULL and logs how many it removed. It runs on every startup
 // and is idempotent. A failure is logged at Warn and startup continues: the
-// rows are inert apart from role counts, and the next startup retries.
+// rows are inert apart from role counts, and the next startup retries. The
+// count is logged at Info only when rows were removed; the usual no-op run
+// logs at Debug.
 func sweepOrphanedGroupMemberships(ctx context.Context, s store.Store) {
 	n, err := s.DeleteOrphanedGroupMemberships(ctx)
 	if err != nil {
 		slog.Warn("failed to delete orphaned group memberships", "error", err)
 		return
 	}
-	slog.Info("deleted orphaned group memberships", "count", n)
+	if n > 0 {
+		slog.Info("deleted orphaned group memberships", "count", n)
+		return
+	}
+	slog.Debug("deleted orphaned group memberships", "count", n)
 }
