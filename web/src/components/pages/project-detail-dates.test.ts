@@ -75,6 +75,8 @@ async function renderProject(project: Record<string, unknown>): Promise<HTMLElem
     pageData: PageData | null;
     projectId: string;
   };
+  /** Private state read to wait for the project load to finish. */
+  const internals = el as unknown as { loading: boolean; project: unknown };
   el.projectId = PROJECT_ID;
   el.pageData = {
     path: `/projects/${PROJECT_ID}`,
@@ -83,7 +85,14 @@ async function renderProject(project: Record<string, unknown>): Promise<HTMLElem
   };
   document.body.appendChild(el);
   await el.updateComplete;
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Wait (bounded) for loadProject to finish, then for the resulting render.
+  await vi.waitFor(
+    () => {
+      expect(internals.loading).toBe(false);
+      expect(internals.project).not.toBeNull();
+    },
+    { timeout: 5_000, interval: 10 }
+  );
   await el.updateComplete;
   return el;
 }
