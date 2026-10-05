@@ -1223,6 +1223,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			s.recordHeartbeatRuntimeTarget(ctx, agent, agentHB.RuntimeTarget)
 
+			// While a lifecycle dispatch runs, keep the phase the lifecycle
+			// path owns; the rest of the report still applies
+			// (ptone/scion#2014).
+			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
+				statusUpdate.Phase = ""
+			}
+
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
 			// observed crash/exit, or best-effort re-reserve on an observed
