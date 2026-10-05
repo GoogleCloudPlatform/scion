@@ -3908,3 +3908,33 @@ func TestDiscoverProjects_FindsProjectMigratedFromGroves(t *testing.T) {
 		t.Errorf("marker no longer resolves through the legacy path: %v", err)
 	}
 }
+
+// TestUpdateVersionedSetting_MigratesLegacyHubProjectKey checks that the
+// in-place settings write-back still migrates a legacy hub key and keeps
+// the file's comments.
+func TestUpdateVersionedSetting_MigratesLegacyHubProjectKey(t *testing.T) {
+	legacy := hubGroveIDRename[0].legacy
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: \"1\"\n# hub section\nhub:\n  "+legacy+": p1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateVersionedSetting(dir, "hub.endpoint", "https://h"); err != nil {
+		t.Fatalf("UpdateVersionedSetting: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, legacy+":") || !strings.Contains(got, "# hub section") {
+		t.Errorf("unexpected file after update:\n%s", got)
+	}
+	vs, err := LoadSingleFileVersioned(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vs.Hub == nil || vs.Hub.ProjectID != "p1" || vs.Hub.Endpoint != "https://h" {
+		t.Errorf("hub = %+v, want project_id p1 and endpoint https://h", vs.Hub)
+	}
+}

@@ -15,7 +15,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -4020,9 +4022,216 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 }
 
 // UpdateVersionedSetting updates a specific setting key in a v1 versioned settings file.
-// It loads only the single file at dir (not merged settings), maps legacy key names to
-// their v1 equivalents, updates the appropriate field, and saves via SaveVersionedSettings.
+// It edits only the single file at dir (not merged settings) and maps legacy key names
+// to their v1 equivalents (hub.brokerId -> server.broker.broker_id, project_id ->
+// hub.project_id, ...).
+//
+// A YAML file is edited in place: only the target key changes, so comments, key order,
+// unknown keys and formatting elsewhere in the file survive. The file is not rewritten
+// when the value is already set, and is otherwise replaced atomically. A JSON file (or
+// a YAML edit that would have to write through an alias) goes through the struct
+// round-trip in updateVersionedSettingStruct.
 func UpdateVersionedSetting(dir string, key string, value string) error {
+	settingsPath := GetSettingsPath(dir)
+	if filepath.Ext(settingsPath) == ".json" {
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	edit, err := versionedSettingEditFor(key, value)
+	if err != nil {
+		return err
+	}
+	if edit.noop {
+		// Keys with no v1 equivalent are accepted and ignored. Loading still
+		// runs the legacy-key migration and surfaces a malformed file, as
+		// before.
+		_, err := LoadSingleFileVersioned(dir)
+		return err
+	}
+	err = updateVersionedSettingYAML(dir, settingsPath, edit)
+	if errors.Is(err, errYAMLEditThroughAlias) {
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	return err
+}
+
+// versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
+// for one key: set path to value, or delete path when value is nil (an empty
+// string for an omitempty field). noop marks keys with no v1 equivalent.
+type versionedSettingEdit struct {
+	path  []string
+	value *yamlv3.Node
+	noop  bool
+}
+
+// versionedSettingKey describes where a settable key lives in the v1 file.
+type versionedSettingKey struct {
+	path   []string
+	isBool bool
+}
+
+// versionedSettingKeys maps every key UpdateVersionedSetting accepts (other
+// than the project ID aliases and the ignored keys) to its v1 path. It must
+// stay in step with the switch in updateVersionedSettingStruct; the
+// TestUpdateVersionedSetting_MatchesStructPath table test enforces that.
+var versionedSettingKeys = map[string]versionedSettingKey{
+	"active_profile":           {path: []string{"active_profile"}},
+	"default_template":         {path: []string{"default_template"}},
+	"default_harness_config":   {path: []string{"default_harness_config"}},
+	"workspace_path":           {path: []string{"workspace_path"}},
+	"image_registry":           {path: []string{"image_registry"}},
+	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
+	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
+	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
+	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
+	"hub.local_only":           {path: []string{"hub", "local_only"}, isBool: true},
+	"hub.brokerId":             {path: []string{"server", "broker", "broker_id"}},
+	"hub.brokerToken":          {path: []string{"server", "broker", "broker_token"}},
+	"hub.brokerNickname":       {path: []string{"server", "broker", "broker_nickname"}},
+	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
+	"server.auth.email":        {path: []string{"server", "auth", "email"}},
+	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+}
+
+// versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
+// key=value. Typing matches the struct path: booleans are true only for the
+// exact string "true", and every string field is omitempty, so an empty
+// string removes the key.
+func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
+	var k versionedSettingKey
+	switch {
+	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
+		k = versionedSettingKey{path: []string{"hub", "project_id"}}
+	case key == "hub.token", key == "hub.apiKey", key == "hub.lastSyncedAt",
+		key == "bucket.provider", key == "bucket.name", key == "bucket.prefix",
+		strings.HasPrefix(key, "hub_connections."):
+		// Deprecated or unsupported in v1: accepted and ignored.
+		return versionedSettingEdit{noop: true}, nil
+	default:
+		var ok bool
+		if k, ok = versionedSettingKeys[key]; !ok {
+			return versionedSettingEdit{}, fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
+		}
+	}
+	edit := versionedSettingEdit{path: k.path}
+	switch {
+	case k.isBool:
+		edit.value = newYAMLBoolScalar(value == "true")
+	case value != "":
+		edit.value = newYAMLStringScalar(value)
+	}
+	return edit, nil
+}
+
+// updateVersionedSettingYAML applies edit to the YAML settings file at
+// settingsPath (or creates dir/settings.yaml when settingsPath is empty).
+func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingEdit) error {
+	targetPath := settingsPath
+	var orig []byte
+	var override string
+	if targetPath == "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+		targetPath = filepath.Join(dir, "settings.yaml")
+	} else {
+		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
+		_, override = migrateProjectSettingsFile(targetPath)
+		var err error
+		if orig, err = os.ReadFile(targetPath); err != nil {
+			return fmt.Errorf("failed to read %s: %w", targetPath, err)
+		}
+	}
+
+	doc, err := parseYAMLMappingDocument(orig)
+	if err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	// Refuse to edit a file the struct loader would reject, as before.
+	var vs VersionedSettings
+	if err := doc.Decode(&vs); err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	root := doc.Content[0]
+	indent := detectYAMLIndent(root)
+
+	// fullEncode marks edits beyond the single key, which the byte-level
+	// splice does not cover.
+	fullEncode := len(orig) == 0
+	if _, sv := findMapKey(root, "schema_version"); sv == nil || isYAMLNull(sv) || (sv.Kind == yamlv3.ScalarNode && sv.Value == "") {
+		if sv != nil {
+			deleteMapKey(root, "schema_version")
+		}
+		svKey := newYAMLStringScalar("schema_version")
+		if len(root.Content) > 0 {
+			// Keep a file's leading comment at the top of the file.
+			svKey.HeadComment, root.Content[0].HeadComment = root.Content[0].HeadComment, ""
+		}
+		root.Content = append([]*yamlv3.Node{svKey, newYAMLStringScalar("1")}, root.Content...)
+		fullEncode = true
+	}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if _, err := setYAMLPath(root, []string{"hub", "project_id"}, newYAMLStringScalar(override)); err != nil {
+			return err
+		}
+		fullEncode = true
+	}
+
+	var changed bool
+	if edit.value == nil {
+		changed, err = deleteYAMLPath(root, edit.path)
+	} else {
+		changed, err = setYAMLPath(root, edit.path, edit.value)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to update %s: %w", targetPath, err)
+	}
+	if !changed && !fullEncode {
+		return nil
+	}
+
+	out, err := encodeYAMLDocument(doc, indent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal versioned settings: %w", err)
+	}
+	if !fullEncode {
+		if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlSemanticallyEqual(spliced, out) {
+			out = spliced
+		}
+	}
+	if bytes.Equal(out, orig) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, out)
+}
+
+// spliceVersionedSettingEdit applies edit to orig as a byte-level splice.
+func spliceVersionedSettingEdit(orig []byte, edit versionedSettingEdit, indent int) ([]byte, bool) {
+	var doc yamlv3.Node
+	if err := yamlv3.Unmarshal(orig, &doc); err != nil || doc.Kind != yamlv3.DocumentNode || len(doc.Content) == 0 {
+		return nil, false
+	}
+	if edit.value == nil {
+		return spliceDeleteYAMLPath(orig, doc.Content[0], edit.path)
+	}
+	return spliceSetYAMLPath(orig, doc.Content[0], edit.path, edit.value, indent)
+}
+
+// writeSettingsFileAtomic atomically replaces the settings file at path. A
+// symlinked settings file is resolved first so the link itself survives and
+// the write lands in its target, as a plain os.WriteFile would.
+func writeSettingsFileAtomic(path string, data []byte) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return writeFileAtomic(path, data)
+}
+
+// updateVersionedSettingStruct is the struct round-trip form of
+// UpdateVersionedSetting: it loads the single file at dir into a
+// VersionedSettings, sets the field and saves via SaveVersionedSettings.
+// That drops comments and unknown keys, so it is only used for JSON files
+// and YAML that cannot be edited in place.
+func updateVersionedSettingStruct(dir string, key string, value string) error {
 	vs, err := LoadSingleFileVersioned(dir)
 	if err != nil {
 		return err
@@ -4477,6 +4686,7 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 }
 
 // SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.
+// The file is replaced atomically, and left untouched when its bytes would not change.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
@@ -4488,7 +4698,10 @@ func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
 	}
 
 	targetPath := filepath.Join(dir, "settings.yaml")
-	return os.WriteFile(targetPath, data, 0644)
+	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, data)
 }
 
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
