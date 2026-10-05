@@ -1097,6 +1097,14 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	return gc, true
 }
 
+// LegacyServerConfigSources returns the legacy server.yaml files the server
+// config would be loaded from when no settings.yaml has a server key (the
+// global dir, the --config path or file, else ./server.yaml), as
+// loadGlobalConfigLegacy resolves them.
+func LegacyServerConfigSources(configPath string) []string {
+	return serverConfigSources(configPath)
+}
+
 // serverConfigSources resolves the actual server.yaml/server.yml file path(s)
 // loadGlobalConfigLegacy reads (global dir plus the effective local config
 // location) for the unused-keys warning's dedup key and log message. This
@@ -1108,14 +1116,6 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 // a hub or broker log where the process's cwd isn't obvious. Like
 // settingsHierarchySources, a resolved path already seen (e.g. configPath, or
 // the cwd it defaults to, is the global dir itself) is not listed twice.
-// LegacyServerConfigSources returns the legacy server.yaml files the server
-// config would be loaded from when no settings.yaml has a server key (the
-// global dir, the --config path or file, else ./server.yaml), as
-// loadGlobalConfigLegacy resolves them.
-func LegacyServerConfigSources(configPath string) []string {
-	return serverConfigSources(configPath)
-}
-
 func serverConfigSources(configPath string) []string {
 	seen := make(map[string]struct{}, 2)
 	add := func(out []string, path string) []string {

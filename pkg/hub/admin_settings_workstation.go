@@ -715,6 +715,8 @@ func prepareSettingsFileTxn(configPath string, build func(*config.GlobalConfig, 
 	// ./server.yaml; resolved as the loader does). Creating the server block
 	// here would silently switch it to settings.yaml and drop every
 	// server.yaml setting at the next start, so refuse instead.
+	// Not covered (ptone/scion#3070): a --config <dir> whose settings.yaml
+	// has a server key.
 	if typed.Server == nil && len(config.LegacyServerConfigSources(configPath)) > 0 {
 		for _, p := range staged.Changed {
 			if p == "server" || strings.HasPrefix(p, "server.") {
