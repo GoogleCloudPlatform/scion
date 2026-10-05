@@ -5168,6 +5168,104 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 		"crashed activity must not stick on a suspended agent")
 }
 
+// postAgentStatusAsAgent POSTs a status update for agent using an agent
+// token with ScopeAgentStatusUpdate, the way sciontool does.
+func postAgentStatusAsAgent(t *testing.T, srv *Server, agent *store.Agent, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader([]byte(body)))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied
+// pins ptone/scion#2267: Guard 0b (reincarnation-sticky) must apply to a
+// status POST that carries only a message or only exit fields, not just to
+// phase/activity reports. The dropped report is not written and the
+// response says so.
+func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"message only", `{"message":"x"}`},
+		{"exit code only", `{"exitCode":137}`},
+		{"exit reason only", `{"exitReason":"crashed"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-reinc-msg"), Name: "Reinc Msg Project", Slug: "reinc-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-reinc-msg"), Slug: "reinc-msg-slug", Name: "Reinc Msg Agent",
+				ProjectID: project.ID, Phase: string(state.PhaseStarting),
+				Message: "Reincarnating",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			agent.ReincarnationState = store.ReincarnationStateStopping
+			require.NoError(t, s.UpdateAgent(ctx, agent))
+			before, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, store.ReincarnationStateStopping, before.ReincarnationState)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "reincarnation_in_flight", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "Reincarnating", after.Message, "message must not change while a reincarnation is in flight")
+			assert.Equal(t, before.ExitCode, after.ExitCode)
+			assert.Equal(t, before.ExitReason, after.ExitReason)
+			assert.Equal(t, string(state.PhaseStarting), after.Phase)
+			assert.True(t, before.LastSeen.Equal(after.LastSeen) && before.Updated.Equal(after.Updated),
+				"a dropped report must skip the store write (LastSeen/Updated unchanged)")
+		})
+	}
+}
+
+// TestAgentStatusUpdate_MessageOnlyPostApplied is the counterpart to the
+// test above: with no reincarnation in flight a message-only POST is
+// written and reported as applied.
+func TestAgentStatusUpdate_MessageOnlyPostApplied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-msg-only"), Name: "Msg Only Project", Slug: "msg-only-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-msg-only"), Slug: "msg-only-slug", Name: "Msg Only Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+		Message: "old",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+	_, hasReason := resp["reason"]
+	assert.False(t, hasReason)
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "x", after.Message)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase)
+	assert.Equal(t, string(state.ActivityWorking), after.Activity)
+}
+
 // TestBrokerHeartbeat_DoesNotRevertSuspendedAgent verifies that a racing broker
 // heartbeat reporting stopped/crashed for a suspended agent leaves it suspended.
 func TestBrokerHeartbeat_DoesNotRevertSuspendedAgent(t *testing.T) {

@@ -88,7 +88,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Guard against phase regressions and auto-correct phase from activity.
-	if status.Phase != "" || status.Activity != "" {
+	// The guards run whenever the update touches a field they own —
+	// Phase/Activity/Message/ExitCode/ExitReason — so a message-only or
+	// exit-only POST is subject to the same reincarnation-sticky Guard 0b as
+	// a phase report (ptone/scion#2267). Fields the guards never touch
+	// (heartbeat, tool name, task summary, limits, ...) skip the extra read.
+	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -128,6 +133,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// A report racing an in-flight `scion reincarnate` migration that
+		// carried nothing beyond the fields Guard 0b owns is now empty: skip
+		// the store write entirely and tell the caller it was not applied,
+		// so the dropped report is distinguishable from an accepted one.
+		// 200 (not an error) keeps `sciontool status` succeeding; it ignores
+		// the body today.
+		if reincarnationInFlight(agent) && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonReincarnationInFlight})
+			return
+		}
 		// Reconcile the max_agents_per_broker reservation against the phase
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
@@ -151,7 +166,36 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
+}
+
+// statusUpdateReasonReincarnationInFlight is the statusUpdateResult.Reason
+// for a status report dropped because a reincarnation owns the agent.
+const statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+
+// statusUpdateResult is the response body of POST /agents/{id}/status.
+// Applied is false when the hub accepted the request but persisted nothing
+// (see Reason).
+type statusUpdateResult struct {
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// statusUpdateTouchesGuardedFields reports whether the update sets any field
+// guardAgentPhaseTransition may blank or rewrite.
+func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
+	return su.Phase != "" || su.Activity != "" || su.Message != "" ||
+		su.ExitCode != nil || su.ExitReason != "" || su.ClearExit
+}
+
+// statusUpdateIsEmpty reports whether the update carries nothing for the
+// store to persist (beyond the Updated/LastSeen bump every write does).
+func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
+	return !statusUpdateTouchesGuardedFields(su) &&
+		su.ToolName == "" && su.ConnectionState == "" && su.ContainerStatus == "" &&
+		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
+		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
+		su.StartedAt == "" && su.ClearMessageIf == ""
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
