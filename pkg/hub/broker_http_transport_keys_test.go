@@ -552,3 +552,131 @@ func TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched(t *testing
 		t.Fatalf("expected zero HTTP calls when signing fails, got %d", spy.calls)
 	}
 }
+
+// pendingDialKeysClient returns an HTTPRuntimeBrokerClient whose keys
+// transport dials through a stub that never connects: each dial blocks until
+// the test ends. This reproduces a broker endpoint that is not reachable
+// (for example a broker that only connects out over the control channel)
+// without depending on the sandbox's network behaviour. The returned counter
+// reports how many dials were started.
+func pendingDialKeysClient(t *testing.T, clientTimeout time.Duration) (*HTTPRuntimeBrokerClient, *atomic.Int32) {
+	t.Helper()
+	release := make(chan struct{})
+	var dials atomic.Int32
+	rt := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil, errors.New("stub dial abandoned")
+		},
+	}
+	t.Cleanup(func() {
+		close(release)
+		rt.CloseIdleConnections()
+	})
+	client := NewHTTPRuntimeBrokerClient()
+	client.transport.keysClient.Transport = rt
+	client.transport.keysClient.Timeout = clientTimeout
+	return client, &dials
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_PendingDialIsNotDispatched pins
+// ptone/scion#2628: when the request context expires while the dial is still
+// pending, net/http returns only the context error (no *net.OpError), yet no
+// byte of the request was ever written. That must classify as
+// keys_unavailable, not keys_outcome_unknown. The client-timeout variant
+// covers the same pending dial ended by http.Client.Timeout instead.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_PendingDialIsNotDispatched(t *testing.T) {
+	t.Run("request context deadline", func(t *testing.T) {
+		client, dials := pendingDialKeysClient(t, 0)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		_, err := client.ExecuteKeys(ctx, tid("broker-1"), "http://broker.invalid:9800", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+		if !errors.Is(err, agentkeys.ErrNotDispatched) {
+			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+		}
+		if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
+			t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
+		}
+		if dials.Load() == 0 {
+			t.Fatal("expected the transport to start a dial; the test would otherwise not exercise the pending-dial path")
+		}
+	})
+
+	t.Run("client timeout", func(t *testing.T) {
+		client, dials := pendingDialKeysClient(t, 200*time.Millisecond)
+
+		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), "http://broker.invalid:9800", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+		if !errors.Is(err, agentkeys.ErrNotDispatched) {
+			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+		}
+		if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
+			t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
+		}
+		if dials.Load() == 0 {
+			t.Fatal("expected the transport to start a dial")
+		}
+	})
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_TLSHandshakeFailureIsNotDispatched
+// proves a TLS handshake failure (here an untrusted server certificate)
+// classifies as keys_unavailable: the handshake completes before net/http
+// hands the request a connection, so no request byte was written, and the
+// broker handler is never reached.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_TLSHandshakeFailureIsNotDispatched(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer srv.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), srv.URL, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("broker handler must not be reached, got %d hits", got)
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_DeadlineAfterConnectIsUnknown is the
+// counterpart to the pending-dial test: once a connection was obtained and
+// the request written, a context deadline that expires while waiting for the
+// response must stay keys_outcome_unknown, because the broker may already be
+// executing the keys.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_DeadlineAfterConnectIsUnknown(t *testing.T) {
+	release := make(chan struct{})
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	client := NewHTTPRuntimeBrokerClient()
+	_, err := client.ExecuteKeys(ctx, tid("broker-1"), srv.URL, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("a deadline after the request reached the broker must not be ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected the broker handler to be reached exactly once, got %d", got)
+	}
+}
