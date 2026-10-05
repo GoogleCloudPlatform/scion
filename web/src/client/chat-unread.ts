@@ -142,6 +142,8 @@ export class ChatUnreadCounter {
    * held.
    */
   holdFirstRefreshForPagePushes(): void {
+    // Called at start for a chat first page and again when the chat page
+    // connects; the second call must not re-arm the timer.
     if (!this.initial || this.holdingForPagePushes) return;
     this.holdingForPagePushes = true;
     this.cancelInitialRefresh();
@@ -283,14 +285,22 @@ export class ChatUnreadCounter {
  * Starts the counter only for a signed-in user with native chat enabled. With
  * chat disabled the endpoints it reads are not registered, and with nobody
  * signed in there is nothing to count. Returns whether it started.
+ *
+ * When the first page is a chat page, the first refresh is held for that
+ * page's pushes right away. The chat page also asks for the hold when it
+ * connects, but on a cold load it connects only after its module has been
+ * downloaded, and the idle-time first refresh could already have run during
+ * that wait.
  */
 export function startChatUnreadIfEligible(
-  counter: Pick<ChatUnreadCounter, 'start'>,
+  counter: Pick<ChatUnreadCounter, 'start' | 'holdFirstRefreshForPagePushes'>,
   signedIn: boolean,
-  chatEnabled: boolean
+  chatEnabled: boolean,
+  onChatRoute: boolean
 ): boolean {
   if (!signedIn || !chatEnabled) return false;
   counter.start();
+  if (onChatRoute) counter.holdFirstRefreshForPagePushes();
   return true;
 }
 

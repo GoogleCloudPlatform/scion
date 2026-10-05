@@ -928,13 +928,20 @@ async function init(): Promise<void> {
   // every page, because an unread mention is worth seeing from the dashboard.
   // After the flags settle — with chat disabled the endpoints it reads are
   // not even registered.
-  startChatUnreadIfEligible(chatUnread, !!currentUser, isFeatureEnabled('web.native_chat'));
+  // A chat first page holds the first refresh from here, before its module
+  // has loaded (see startChatUnreadIfEligible).
+  const initialPath = stripBasePath(window.location.pathname);
+  startChatUnreadIfEligible(
+    chatUnread,
+    !!currentUser,
+    isFeatureEnabled('web.native_chat'),
+    CHAT_ROUTES.has(resolveRoute(initialPath).tag)
+  );
 
   // Setup client-side router for navigation
   setupRouter();
   // Include query string on initial render so terminal layout state
   // from a shared/bookmarked URL can be restored on page load (#1715).
-  const initialPath = stripBasePath(window.location.pathname);
   const initialSearch = window.location.search;
   await renderRoute(initialSearch ? `${initialPath}${initialSearch}` : initialPath);
 
