@@ -92,6 +92,11 @@ const (
 	ErrCodeClockSkew        = "clock_skew"
 	ErrCodeReplayDetected   = "replay_detected"
 
+	// ErrCodeUserNotFound is returned (401) when a hub-issued user token
+	// names a subject that has no user record, for example after the
+	// account was deleted. Such tokens stop working immediately.
+	ErrCodeUserNotFound = "user_not_found"
+
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
 
@@ -329,6 +334,11 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
+		// Must precede ErrInvalidInput, which it wraps.
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidRequest
+		message = storeMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError

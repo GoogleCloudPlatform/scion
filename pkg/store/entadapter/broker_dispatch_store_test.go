@@ -129,7 +129,7 @@ func TestBrokerDispatch_CompleteAndFail(t *testing.T) {
 	require.NoError(t, s.InsertBrokerDispatch(ctx, d2))
 	_, err = s.ClaimBrokerDispatch(ctx, d2.ID, "hub-1")
 	require.NoError(t, err)
-	require.NoError(t, s.FailBrokerDispatch(ctx, d2.ID, "boom"))
+	require.NoError(t, s.FailBrokerDispatch(ctx, d2.ID, "boom", ""))
 	got2, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d2.ID))
 	require.NoError(t, err)
 	assert.Equal(t, store.DispatchStateFailed, got2.State)
@@ -595,4 +595,40 @@ func mustCreateAgent(t *testing.T, client *ent.Client, projectID uuid.UUID, brok
 		Save(context.Background())
 	require.NoError(t, err)
 	return a.ID.String()
+}
+
+func TestBrokerDispatch_FailRecordsResult(t *testing.T) {
+	client := enttest.NewClient(t)
+	s := NewBrokerDispatchStore(client)
+	ctx := context.Background()
+
+	d := newDispatch(uuid.NewString(), "start")
+	require.NoError(t, s.InsertBrokerDispatch(ctx, d))
+	_, err := s.ClaimBrokerDispatch(ctx, d.ID, "hub-1")
+	require.NoError(t, err)
+	const envelope = `{"brokerError":{"status":429,"body":"{}"}}`
+	require.NoError(t, s.FailBrokerDispatch(ctx, d.ID, "boom", envelope))
+	got, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d.ID))
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateFailed, got.State)
+	assert.Equal(t, "boom", got.Error)
+	assert.Equal(t, envelope, got.Result, "result is written with the failed state")
+
+	// The CAS still rejects a row that is not in_progress.
+	err = s.FailBrokerDispatch(ctx, d.ID, "again", `{"other":true}`)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	got, err = client.BrokerDispatch.Get(ctx, uuid.MustParse(d.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "boom", got.Error)
+	assert.Equal(t, envelope, got.Result)
+
+	// An empty result leaves the column empty.
+	d2 := newDispatch(uuid.NewString(), "start")
+	require.NoError(t, s.InsertBrokerDispatch(ctx, d2))
+	_, err = s.ClaimBrokerDispatch(ctx, d2.ID, "hub-1")
+	require.NoError(t, err)
+	require.NoError(t, s.FailBrokerDispatch(ctx, d2.ID, "boom", ""))
+	got2, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d2.ID))
+	require.NoError(t, err)
+	assert.Empty(t, got2.Result)
 }
