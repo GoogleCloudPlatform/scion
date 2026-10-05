@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-		"sync"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
