@@ -2832,9 +2832,11 @@ export class ScionPageChat extends LitElement {
    * blanks on error.
    *
    * Skips publishing if a conversation is open, the generation moved on or
-   * a space claimed the sidebar by the time the walk finishes, and stops requesting further pages as
-   * soon as either becomes true (`shouldContinue`, checked by `paginateAll`
-   * before every page). A conversation that opened and closed again within
+   * a space claimed the sidebar by the time the walk finishes. It stops
+   * requesting further pages once a conversation is open or the generation
+   * moved on (`shouldContinue`, checked by `paginateAll` before every page),
+   * but not for a space's claim: that walk keeps paging, so a hub view
+   * returning in the same generation joins it. A conversation that opened and closed again within
    * one Lit update batch never bumps the generation, but `shouldContinue`
    * (a live field read) still stops a page fetch for the moment it was open;
    * that walk rejects with {@link PaginationStoppedError} rather than
