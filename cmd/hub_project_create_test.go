@@ -389,7 +389,7 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 
 			var runErr error
 			stderr := captureStderr(t, func() {
-				runErr = startAgentViaHub(hubCtx, "agent-1", "do it", false, nil)
+				runErr = startAgentViaHub(nil, hubCtx, "agent-1", "do it", false, nil)
 			})
 			require.NoError(t, runErr, stderr)
 			require.NotEmpty(t, sentFiles, "the CLI must have sent the local non-git files")

@@ -213,13 +213,78 @@ func TestResolveMessageBody_BodyFile(t *testing.T) {
 func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
 	tmpDir := t.TempDir()
 	bodyFile := filepath.Join(tmpDir, "msg.txt")
-	content := "line1\nline2\nline3\n"
+	content := "  line1\n\nline2\nline3  \n\n"
 	err := os.WriteFile(bodyFile, []byte(content), 0644)
 	require.NoError(t, err)
 
 	got, err := resolveMessageBody(bodyFile, "")
 	require.NoError(t, err)
-	assert.Equal(t, content, got, "body-file content should be preserved exactly")
+	// Same rule as stdin: trailing newlines are trimmed, everything else
+	// (interior blank lines, leading/trailing spaces) is preserved exactly.
+	assert.Equal(t, "  line1\n\nline2\nline3  ", got)
+}
+
+// withStdin replaces os.Stdin with a pipe carrying content for the test.
+func withStdin(t *testing.T, content string) {
+	t.Helper()
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	// Write from a goroutine: content larger than the OS pipe buffer
+	// (64 KiB on Linux) would otherwise block before anything reads it.
+	go func() {
+		_, _ = w.WriteString(content)
+		_ = w.Close()
+	}()
+	t.Cleanup(func() { _ = r.Close() })
+	os.Stdin = r
+}
+
+func TestResolveMessageBody_BodyFileDashReadsStdin(t *testing.T) {
+	withStdin(t, "from `stdin` via --body-file - $(not expanded)\n")
+	got, err := resolveMessageBody("-", "")
+	require.NoError(t, err)
+	assert.Equal(t, "from `stdin` via --body-file - $(not expanded)", got)
+}
+
+func TestResolveMessageBody_BodyFileDashConflict(t *testing.T) {
+	_, err := resolveMessageBody("-", "positional content")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestResolveMessageBody_NewlineRuleConsistent pins that --body-file <path>,
+// --body-file -, and positional "-" apply the same newline rule.
+func TestResolveMessageBody_NewlineRuleConsistent(t *testing.T) {
+	cases := map[string]string{
+		"single trailing LF":    "a\nb\n",
+		"multiple trailing LF":  "a\nb\n\n\n",
+		"trailing CRLF":         "a\r\nb\r\n",
+		"no trailing newline":   "a\nb",
+		"only newlines → empty": "\n\n",
+		"trailing spaces kept":  "a\nb  \n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			bodyFile := filepath.Join(t.TempDir(), "msg.txt")
+			require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+			fromFile, err := resolveMessageBody(bodyFile, "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashFlag, err := resolveMessageBody("-", "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashArg, err := resolveMessageBody("", "-")
+			require.NoError(t, err)
+
+			assert.Equal(t, fromFile, fromDashFlag)
+			assert.Equal(t, fromFile, fromDashArg)
+			assert.NotRegexp(t, `[\r\n]$`, fromFile, "trailing line breaks should be trimmed")
+		})
+	}
 }
 
 func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
@@ -3375,4 +3440,40 @@ func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T)
 	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
 	assert.NotContains(t, output, "Message delivered to agent",
 		"the generic delivered message must not also print for a deferred outcome")
+}
+
+// TestResolveMessageBody_OversizeRejectedNotTruncated pins that an over-limit
+// body is rejected rather than cut at the read limit and sent. The input puts
+// newlines at the cut point, which trimming would otherwise remove, pulling
+// the read back under the limit and silently dropping the tail.
+func TestResolveMessageBody_OversizeRejectedNotTruncated(t *testing.T) {
+	content := strings.Repeat("a", messages.MaxMsgSize-1) + "\n\n" + "TAIL"
+
+	t.Run("--body-file path", func(t *testing.T) {
+		bodyFile := filepath.Join(t.TempDir(), "big.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+		_, err := resolveMessageBody(bodyFile, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("--body-file -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("-", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("positional -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("", "-")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("exactly at the limit is accepted", func(t *testing.T) {
+		atLimit := strings.Repeat("a", messages.MaxMsgSize)
+		bodyFile := filepath.Join(t.TempDir(), "limit.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(atLimit), 0644))
+		got, err := resolveMessageBody(bodyFile, "")
+		require.NoError(t, err)
+		assert.Len(t, got, messages.MaxMsgSize)
+	})
 }

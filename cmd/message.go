@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -68,8 +70,8 @@ var deprecationReplacements = []struct {
 	{"notify", "use 'scion notifications subscribe' instead"},
 	{"in", "use 'scion schedule create --in' instead"},
 	{"at", "use 'scion schedule create --at' instead"},
-	{"channel", "use @<agent-name> to message an agent directly"},
-	{"thread-id", "use @<agent-name> to message an agent directly"},
+	{"channel", "address the conversation with conv:<uuid> (see 'scion conversation list'), or use @<name> to message an agent directly"},
+	{"thread-id", "address the conversation with conv:<uuid> (see 'scion conversation list'); for user: recipients on the web channel, the Hub rejects a thread ID that does not match an existing conversation"},
 	{"cc", "--cc is deprecated and will be removed"},
 }
 
@@ -104,6 +106,18 @@ Message body can be provided as:
   - Positional arguments: scion message agent "hello world"
   - File: scion message agent --body-file msg.txt
   - Stdin: echo "hello" | scion message agent -
+           (or: scion message agent --body-file -)
+
+For --body-file and stdin, trailing CR/LF characters are trimmed; all other text,
+including interior newlines, is sent exactly as read.
+
+The shell expands backticks and $(...) inside double-quoted arguments before
+scion runs, executing them and splicing in their output. To send code or
+shell snippets verbatim, use --body-file or stdin with a quoted heredoc:
+
+  scion message my-agent - <<'EOF'
+  Run ` + "`make test`" + ` and check $(pwd)
+  EOF
 
 Examples:
   scion message my-agent "Please review the PR"
@@ -506,6 +520,23 @@ func buildStructuredMessage(sender, recipient, message string, attachments []str
 	return msg
 }
 
+// agentMessageSendError renders a failed agent-message send. A 404 with the
+// hub's agent_not_found code means the recipient does not exist (deleted,
+// reaped, or misspelled), so the error states that plainly and names the
+// agent; the hub's own message is kept as the cause. Other 404s (e.g. a
+// stale project ID, "Project not found", or a bare 404 from an older hub or
+// a proxy) are not about the agent, so they and all other failures keep the
+// generic wording. Both go through wrapHubError, which (for a 404) adds no
+// local-only hint, and Execute prints no Usage block for hub failures; the
+// command exits 1.
+func agentMessageSendError(agentName string, err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.IsNotFound() && apiErr.Code == apiclient.ErrCodeAgentNotFound {
+		return wrapHubError(fmt.Errorf("agent '%s' not found; message not sent: %w", agentName, err))
+	}
+	return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
+}
+
 func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
@@ -558,7 +589,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		Mentions:  mentions,
 	})
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
+		return agentMessageSendError(agentName, err)
 	}
 
 	if isJSONOutput() {
@@ -700,7 +731,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				Mentions: mentions,
 			})
 			if err != nil {
-				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+				return agentMessageSendError(ref.Value, err)
 			}
 			if isJSONOutput() {
 				if resp != nil {
@@ -807,7 +838,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	}
 
 	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+		return agentMessageSendError(ref.Value, err)
 	}
 	if !isJSONOutput() {
 		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
@@ -894,7 +925,13 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 		return nil
 	}
-	fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	// #2026: name the conversation the message landed in when the hub
+	// reports it, so a send with --channel/--thread-id shows where it went.
+	if result != nil && result.ConversationID != "" {
+		fmt.Printf("Message sent to %s via Hub (conversation %s).\n", userRecipient, result.ConversationID)
+	} else {
+		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	}
 	if result != nil {
 		printMentionResults(result.MentionResults)
 	}
@@ -1380,31 +1417,49 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 }
 
 // resolveMessageBody determines the message body from flags or positional args.
-// Priority: --body-file > positional args. If body is "-", read from stdin.
+// Priority: --body-file > positional args. A positional body of exactly "-",
+// or --body-file -, reads the body from stdin.
+//
+// Newline rule (the same for every non-positional source): trailing CR/LF
+// characters are trimmed, so the newline that echo, a heredoc, or an editor
+// adds at end-of-file is not sent. Interior newlines and leading
+// or trailing spaces are preserved exactly. Positional bodies are used as
+// given.
 func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
 	if bodyFile != "" {
 		if positionalBody != "" {
 			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		if bodyFile == "-" {
+			return readMessageBody(os.Stdin, "stdin")
 		}
 		file, err := os.Open(bodyFile)
 		if err != nil {
 			return "", fmt.Errorf("failed to open body file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
-		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read body file: %w", err)
-		}
-		return string(data), nil
+		return readMessageBody(file, "body file")
 	}
 	if positionalBody == "-" {
-		data, err := io.ReadAll(io.LimitReader(os.Stdin, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read message from stdin: %w", err)
-		}
-		return strings.TrimRight(string(data), "\n"), nil
+		return readMessageBody(os.Stdin, "stdin")
 	}
 	return positionalBody, nil
+}
+
+// readMessageBody reads up to messages.MaxMsgSize+1 bytes from r and rejects
+// anything over messages.MaxMsgSize before trimming, so a body that is cut
+// off at the read limit is never sent in truncated form (trimming first
+// could pull an over-limit read back under the limit). It then trims
+// trailing CR/LF characters. source names r in error messages.
+func readMessageBody(r io.Reader, source string) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(messages.MaxMsgSize)+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read message from %s: %w", source, err)
+	}
+	if len(data) > messages.MaxMsgSize {
+		return "", fmt.Errorf("message body from %s exceeds maximum size of %d bytes", source, messages.MaxMsgSize)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func init() {
@@ -1412,7 +1467,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
