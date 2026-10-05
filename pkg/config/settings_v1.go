@@ -2517,8 +2517,7 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isSettingsExcludedEnv(s) {
-		// See settingsExcludedEnvVars for the full list (a bare SCION_HUB
-		// is dropped for the same collision reason, on key "hub").
+		// See settingsExcludedEnvVars for every excluded name and the reason.
 		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
 		// consumed directly by sciontool's auto-expose scanner
 		// (pkg/sciontool/autoexpose), not read as settings overrides. Left

@@ -996,18 +996,31 @@ harnesses:
 func TestLoadSettings_BareScionHubEnvDoesNotBreakDecode(t *testing.T) {
 	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_AUTO_EXPOSE_PORTS", "SCION_HUB")
 
-	newProject := func(t *testing.T) string {
+	writeProject := func(t *testing.T, settingsYAML string) string {
 		t.Helper()
 		tmpDir := t.TempDir()
 		t.Setenv("HOME", tmpDir)
 		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 		require.NoError(t, os.MkdirAll(projectDir, 0755))
-		settingsYAML := `schema_version: "1"
-hub:
-  endpoint: https://file.example.com
-`
 		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
 		return projectDir
+	}
+	newProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `schema_version: "1"
+hub:
+  endpoint: https://file.example.com
+`)
+	}
+	// newLegacyProject writes an unversioned settings.yaml (no
+	// schema_version), which LoadEffectiveSettings routes through
+	// LoadSettingsKoanf and its legacy env key mapper. The legacy
+	// Settings.Hub field is struct-typed too, so it collides the same way.
+	newLegacyProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `hub:
+  endpoint: https://file.example.com
+`)
 	}
 
 	t.Run("SCION_HUB unset: file hub map loads", func(t *testing.T) {
@@ -1027,13 +1040,22 @@ hub:
 		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
 	})
 
-	t.Run("SCION_HUB set: effective load ignores it", func(t *testing.T) {
-		projectDir := newProject(t)
+	t.Run("SCION_HUB set: effective load of legacy file ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
 		t.Setenv("SCION_HUB", "https://env.example.com")
 		vs, _, err := LoadEffectiveSettings(projectDir)
 		require.NoError(t, err, "a bare SCION_HUB must never break LoadEffectiveSettings decoding")
 		require.NotNil(t, vs.Hub)
 		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: legacy koanf load ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		s, err := LoadSettingsKoanf(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettingsKoanf decoding")
+		require.NotNil(t, s.Hub)
+		assert.Equal(t, "https://file.example.com", s.Hub.Endpoint)
 	})
 
 	t.Run("SCION_HUB set: SCION_HUB_ENDPOINT still applies", func(t *testing.T) {
