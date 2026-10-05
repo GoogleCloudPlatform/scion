@@ -33,6 +33,7 @@ type schemaEnvVarEntry struct {
 	Path    string // dotted settings.yaml path, e.g. server.hub.admin_emails
 	EnvVar  string
 	Type    string
+	Items   string // item type of an array property
 	Enum    []string
 	Default interface{}
 }
@@ -66,6 +67,9 @@ func collectSchemaEnvVars(t *testing.T) []schemaEnvVarEntry {
 		if ev, ok := node["x-env-var"].(string); ok && ev != "" {
 			e := schemaEnvVarEntry{Path: path, EnvVar: ev, Default: node["default"]}
 			e.Type, _ = node["type"].(string)
+			if items, ok := node["items"].(map[string]interface{}); ok {
+				e.Items, _ = items["type"].(string)
+			}
 			if enum, ok := node["enum"].([]interface{}); ok {
 				for _, v := range enum {
 					e.Enum = append(e.Enum, fmt.Sprint(v))
@@ -210,6 +214,9 @@ func sampleEnvValues(e schemaEnvVarEntry) []string {
 	case "integer", "number":
 		return []string{"4243", "17"}
 	case "array":
+		if e.Items == "integer" {
+			return []string{"4243,17"}
+		}
 		return []string{"envtest-a@example.com,envtest-b@example.com"}
 	default:
 		// A duration-shaped value is also a valid plain string.
