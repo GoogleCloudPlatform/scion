@@ -43,8 +43,9 @@ import {
 } from './terminal-palette-data.js';
 import { ChatPaletteDataController, type RawPaletteAgent } from './chat-palette-data.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
-import type { Agent } from '../shared/types.js';
+import type { Agent, AgentActivity } from '../shared/types.js';
 import { createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
+import { AGENT_PROBE_INTERVAL_MS } from './agent-store.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -491,5 +492,63 @@ describe('retainTerminalPaletteAgents', () => {
 
     expect(heard).toEqual([]);
     keepAlive();
+  });
+});
+
+describe('an agent that went offline, then stopped and restarted', () => {
+  const T0 = '2026-01-01T00:00:00Z';
+  const T1 = '2026-01-01T00:10:00Z';
+
+  /**
+   * Retains the hub list for the terminal palette over a hub where `a1` was
+   * swept offline, then stops and restarts it the way the hub does: the stop
+   * clears its activity, and neither SSE status event carries the empty
+   * value. Returns what the palette last heard.
+   */
+  async function offlineThenRestarted(): Promise<{ h: Harness; heard: () => string[] }> {
+    const h = storeWith([
+      row('a1', { activity: 'offline', updated: T0, lastActivityEvent: T0 }),
+      row('a2', { activity: 'working', updated: T0, lastActivityEvent: T0 }),
+    ]);
+    let last: string[] = [];
+    retainTerminalPaletteAgents((c) => {
+      last = labels(c);
+    }, h.store);
+    const first = load(h).promise;
+    await h.connect();
+    expect(labels(await first)).toEqual(['a2']);
+
+    const a1 = h.server.agents.find((a) => a.id === 'a1')!;
+    a1.phase = 'stopped';
+    a1.activity = '' as AgentActivity;
+    a1.updated = T1;
+    await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
+    a1.phase = 'running';
+    await h.emitAgent('status', { agentId: 'a1', phase: 'running' });
+    // SSE alone cannot clear the activity: the row still reads offline.
+    expect(last).toEqual(['a2']);
+    return { h, heard: () => last };
+  }
+
+  it('appears in Jump to agent after the next probe', async () => {
+    const { h, heard } = await offlineThenRestarted();
+    const walks = h.server.walks();
+
+    await vi.advanceTimersByTimeAsync(AGENT_PROBE_INTERVAL_MS);
+    await settle();
+
+    expect(h.server.probes()).toBeGreaterThan(0);
+    expect(h.server.walks()).toBe(walks);
+    expect(heard()).toEqual(['a1', 'a2']);
+  });
+
+  it('appears in Jump to agent after the next walk', async () => {
+    const { h, heard } = await offlineThenRestarted();
+
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    expect(heard()).toEqual(['a1', 'a2']);
   });
 });
