@@ -165,6 +165,11 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		writeInvalidFilePathError(w, err)
+		return
+	}
+
 	template := &store.Template{
 		ID:           api.NewUUID(),
 		Name:         req.Name,

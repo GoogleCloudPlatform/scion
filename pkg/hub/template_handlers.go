@@ -322,6 +322,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		writeInvalidFilePathError(w, err)
+		return
+	}
+
 	// Create template record
 	template := &store.Template{
 		ID:           api.NewUUID(),
@@ -718,6 +723,9 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	// Generate upload URLs using shared helper
 	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, template.StoragePath, req.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 		return
 	}
@@ -780,6 +788,9 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	// Verify files exist in storage and compute content hash using shared helper
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, template.StoragePath, req.Manifest.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		ValidationError(w, err.Error(), nil)
 		return
 	}
