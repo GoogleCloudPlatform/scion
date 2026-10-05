@@ -39,6 +39,7 @@ type routedTestFixture struct {
 
 	// Servers.
 	hubServer *httptest.Server
+	slack     *fakeSlack
 
 	// Response overrides (default: 200 OK).
 	routedStatus int
@@ -108,6 +109,9 @@ func newRoutedTestFixture(t *testing.T) *routedTestFixture {
 
 	// Build broker using the real Configure path so we exercise config wiring.
 	f.broker = NewBroker(slog.Default())
+	// Ephemeral messages go to a fake Slack API.
+	f.slack = newFakeSlack(t)
+	f.broker.client = f.slack.client()
 	// Phase 1: bot_token + routed_inbound_enabled. We set socket_mode=false with
 	// a signing_secret so Configure doesn't complain, and provide a temp db path.
 	require.NoError(t, f.broker.Configure(map[string]string{
@@ -702,6 +706,7 @@ func TestDeliverUserMessage_LegacyNoEmail_BlockedBeforeHub(t *testing.T) {
 
 	assert.Len(t, f.legacyCalls, 0, "legacy endpoint must NOT be called for email-empty user")
 	assert.Len(t, f.routedCalls, 0)
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 // TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub verifies that on the
@@ -729,9 +734,7 @@ func TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub(t *testing.T) {
 		"routed endpoint must NOT be called for email-empty user")
 	assert.Len(t, f.legacyCalls, 0,
 		"legacy endpoint must NOT be called when routed is enabled")
-	// The adapter posts an ephemeral to the user via s.client.PostEphemeral.
-	// We can't easily assert the ephemeral content without a mock Slack client,
-	// but the absence of hub calls proves the guard fired.
+	assert.Equal(t, missingEmailLinkText, f.slack.lastText(t))
 }
 
 // TestDeliverUserMessage_RoutedMixedResults_NoRetry verifies that when the hub
