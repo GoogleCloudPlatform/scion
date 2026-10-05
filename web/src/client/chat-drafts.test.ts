@@ -99,4 +99,53 @@ describe('seedChatDraft', () => {
     el.remove();
     expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBeNull();
   });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function mountComposer(): Promise<any> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = true;
+    el.conversationKey = KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    return el;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function typeInto(el: any, value: string): void {
+    const textarea = el.shadowRoot.querySelector('sl-textarea') as HTMLTextAreaElement;
+    textarea.value = value;
+    textarea.dispatchEvent(new Event('sl-input', { bubbles: true, composed: true }));
+  }
+
+  it('keeps a hand-over appended to a draft the composer already saved', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = await mountComposer();
+      typeInto(el, 'foo');
+      vi.advanceTimersByTime(600);
+      expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBe('foo');
+      seedChatDraft(KEY, 'bar');
+      el.remove();
+      expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBe('foo\n\nbar');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not bring back edited-message text as a draft', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = await mountComposer();
+      el.editMessage = { messageId: 'm1', content: 'original' };
+      await el.updateComplete;
+      typeInto(el, 'original, edited');
+      vi.advanceTimersByTime(600);
+      el.handleSend();
+      el.remove();
+      expect(localStorage.getItem(chatDraftStorageKey(KEY))).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
