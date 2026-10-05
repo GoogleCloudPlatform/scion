@@ -616,6 +616,12 @@ func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
+	_c.mutation.SetPreviousRunIds(v)
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1549,6 +1555,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RunID(); ok {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
 		_node.RunID = value
+	}
+	if value, ok := _c.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+		_node.PreviousRunIds = value
 	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -2524,6 +2534,24 @@ func (u *AgentUpsert) UpdateRunID() *AgentUpsert {
 // ClearRunID clears the value of the "run_id" field.
 func (u *AgentUpsert) ClearRunID() *AgentUpsert {
 	u.SetNull(agent.FieldRunID)
+	return u
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsert) SetPreviousRunIds(v []string) *AgentUpsert {
+	u.Set(agent.FieldPreviousRunIds, v)
+	return u
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
+	u.SetExcluded(agent.FieldPreviousRunIds)
+	return u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
+	u.SetNull(agent.FieldPreviousRunIds)
 	return u
 }
 
@@ -3997,6 +4025,27 @@ func (u *AgentUpsertOne) UpdateRunID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunID()
+	})
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertOne) SetPreviousRunIds(v []string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
 	})
 }
 
@@ -5727,6 +5776,27 @@ func (u *AgentUpsertBulk) UpdateRunID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunID()
+	})
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertBulk) SetPreviousRunIds(v []string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
 	})
 }
 

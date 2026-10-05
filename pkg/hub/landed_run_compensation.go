@@ -108,6 +108,8 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 
 	target := *agent
 	target.RunID = runID
+	// Only the run that landed: its start replaced any previous entry.
+	target.PreviousRunIDs = nil
 	d.log.Info("Dispatcher: agent was deleted while the broker started it; deleting the run it started",
 		"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID)
 	if err := d.DispatchAgentDelete(delCtx, &target, false, false, false, time.Time{}); err != nil {

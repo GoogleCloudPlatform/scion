@@ -359,6 +359,10 @@ type AgentStore interface {
 	// delete claim and a run-ID write are ordered by the database: a claim
 	// that lands first refuses the write, and a claim that lands after it
 	// snapshots the new run ID.
+	//
+	// The same write appends the replaced run to the row's PreviousRunIDs
+	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
+	// until the new run settles.
 	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
@@ -366,7 +370,10 @@ type AgentStore interface {
 	// dispatch uses it to correct (or revert) the run ID it minted without
 	// overwriting a newer run ID a later dispatch has since recorded. Like
 	// SetAgentRunID it neither checks nor bumps state_version. A missing
-	// agent reports false with no error.
+	// agent reports false with no error. A swap also clears the row's
+	// PreviousRunIDs: every caller settles the run (the broker reported or
+	// replaced the entry, or the dispatch reverted to the run the entry
+	// still carries), so no other run's entry is left to delete.
 	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
 
 	// UpdateAgentStatus updates only status-related fields.

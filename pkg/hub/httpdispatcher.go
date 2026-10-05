@@ -1378,6 +1378,9 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) 
 		case err == nil:
 			previous = prior
 			recorded = true
+			// Mirror the row's previous-run list (SetAgentRunID appended
+			// the run it replaced) on the caller's struct.
+			agent.PreviousRunIDs, _ = store.AppendPreviousRunID(agent.PreviousRunIDs, prior, runID)
 		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
 				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
@@ -1398,8 +1401,19 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) 
 // against the minted ID, so a late response cannot overwrite a newer run
 // ID that a later dispatch has recorded. A response without a run ID (an
 // older broker) keeps the minted value.
+//
+// Either way the run has settled, so the swap (a same-value swap when the
+// broker reports the minted run or none) also clears the row's previous
+// runs (ptone/scion#3097): the broker's Start removes every existing entry
+// of the agent's name in its project, whatever run it carries, before it
+// creates the new one (agent.AgentManager.Start, step 0), so no previous
+// run's entry is left once a start has landed.
 func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store.Agent, minted string, resp *RemoteAgentResponse) {
-	if resp == nil || resp.Agent == nil || resp.Agent.RunID == "" || resp.Agent.RunID == minted {
+	if resp == nil || resp.Agent == nil {
+		return
+	}
+	if resp.Agent.RunID == "" || resp.Agent.RunID == minted {
+		d.swapRunID(ctx, agent, minted, minted, "settled the run")
 		return
 	}
 	actual := resp.Agent.RunID
@@ -1418,6 +1432,7 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 	}
 	if agent.RunID == minted {
 		agent.RunID = actual
+		agent.PreviousRunIDs = nil
 	}
 	d.log.Info("Dispatcher: adopted the broker's run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "minted_run_id", minted, "run_id", actual)
@@ -1482,9 +1497,10 @@ func (d *HTTPAgentDispatcher) settleFailedRun(ctx context.Context, agent *store.
 		return
 	}
 	if current, ok := brokerCurrentRunID(err); ok {
-		if current != minted {
-			d.swapRunID(ctx, agent, minted, current, "recorded the broker's current run ID after a failed start")
-		}
+		// Also when current is the minted run: the broker reports what its
+		// runtime holds, so the swap settles the run and clears the
+		// previous runs (ptone/scion#3097).
+		d.swapRunID(ctx, agent, minted, current, "recorded the broker's current run ID after a failed start")
 		return
 	}
 	if shouldRevertRun(err) {
@@ -1506,7 +1522,8 @@ func (d *HTTPAgentDispatcher) revertRun(ctx context.Context, agent *store.Agent,
 
 // swapRunID replaces the minted run ID with to, in the row (compare-and-swap
 // against minted, so a newer run recorded by a later dispatch is never
-// overwritten) and in the caller's struct.
+// overwritten) and in the caller's struct. The swap settles the run, so it
+// also clears the previous runs (ptone/scion#3097).
 func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent, minted, to, what string) {
 	if d.store != nil && agent.ID != "" {
 		swapped, err := d.store.CompareAndSwapAgentRunID(ctx, agent.ID, minted, to)
@@ -1523,6 +1540,7 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 	}
 	if agent.RunID == minted {
 		agent.RunID = to
+		agent.PreviousRunIDs = nil
 	}
 	d.log.Debug("Dispatcher: "+what,
 		"agent_id", agent.ID, "minted_run_id", minted, "run_id", to)
@@ -3456,17 +3474,68 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		d.log.Debug("Dispatcher: delete carries run ID",
 			"agent_id", agent.ID, "agent", agent.Slug, "run_id", agent.RunID)
 	}
-	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, DeleteAgentOptions{
+	opts := DeleteAgentOptions{
 		DeleteFiles:  deleteFiles,
 		RemoveBranch: removeBranch,
 		SoftDelete:   softDelete,
 		DeletedAt:    deletedAt,
 		RunID:        agent.RunID,
-	})
+	}
+	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return d.deletePreviousRuns(ctx, agent, endpoint, opts)
+}
+
+// deletePreviousRuns deletes the runtime entries of the agent's previous
+// runs, after its current run's delete succeeded (ptone/scion#3097). A
+// start or restart records its new run before the broker call, so a delete
+// claimed while that call is in flight names the new run; when the start
+// never lands (it fails, or the delete cancels it), the previous entry
+// still carries the previous run and the current-run delete misses it.
+// agent.PreviousRunIDs lists every run not yet settled (see
+// store.Agent.PreviousRunIDs); the delete engine passes its claim
+// snapshot, so a later start cannot change the list.
+//
+// Each delete is the current-run delete with only the run changed (opts
+// carries everything else, including the files flags, so the previous
+// run's files are deleted or kept exactly as the current run's are), and
+// is always run-scoped, never by name, so it cannot remove a same-name
+// successor. Newest run first. A run with no entry is the broker's 404,
+// which counts as success; any other error stops and is returned, and the
+// caller's failure handling applies as for the current-run delete. A row
+// with no current run ID was already deleted by name, which covers every
+// run.
+func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *store.Agent, endpoint string, opts DeleteAgentOptions) error {
+	if agent.RunID == "" {
+		return nil
+	}
+	for i := len(agent.PreviousRunIDs) - 1; i >= 0; i-- {
+		prev := agent.PreviousRunIDs[i]
+		if prev == "" || prev == agent.RunID {
+			continue
+		}
+		d.log.Info("Dispatcher: deleting a previous run of the agent",
+			"agent_id", agent.ID, "agent", agent.Slug, "run_id", agent.RunID, "previous_run_id", prev)
+		prevOpts := opts
+		prevOpts.RunID = prev
+		err := d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, prevOpts)
+		if errors.Is(err, ErrLifecycleDeferred) {
+			// Hand the remaining runs to the owning node, whose delete
+			// names them (its repeat of the current run is a 404).
+			rest := *agent
+			rest.PreviousRunIDs = append([]string(nil), agent.PreviousRunIDs[:i+1]...)
+			return d.deferredDelete(ctx, &rest, opts.DeleteFiles, opts.RemoveBranch, opts.SoftDelete, opts.DeletedAt)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to delete previous run %s of agent %s: %w", prev, agent.Slug, err)
+		}
+	}
+	return nil
 }
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
@@ -3688,10 +3757,11 @@ func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.
 // idempotent: 404 from the owner is treated as success.
 func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	args := &DeleteDispatchArgs{
-		DeleteFiles:  deleteFiles,
-		RemoveBranch: removeBranch,
-		SoftDelete:   softDelete,
-		DeletedAt:    deletedAt,
+		DeleteFiles:    deleteFiles,
+		RemoveBranch:   removeBranch,
+		SoftDelete:     softDelete,
+		DeletedAt:      deletedAt,
+		PreviousRunIDs: agent.PreviousRunIDs,
 	}
 	return d.deferredDataOp(ctx, agent, "delete", args)
 }

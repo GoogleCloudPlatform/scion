@@ -170,6 +170,9 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// authz input, and no list reader uses it (only the delete dispatch, from
 	// a single-row read).
 	"RunID": true,
+	// previous_run_ids are written only by the same two methods
+	// (ptone/scion#3097), for the same reasons.
+	"PreviousRunIDs": true,
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
 	"RunIntent": true, "RunIntentAt": true,

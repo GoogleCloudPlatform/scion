@@ -2741,6 +2741,16 @@ func RunIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldRunID, v))
 }
 
+// PreviousRunIdsIsNil applies the IsNil predicate on the "previous_run_ids" field.
+func PreviousRunIdsIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPreviousRunIds))
+}
+
+// PreviousRunIdsNotNil applies the NotNil predicate on the "previous_run_ids" field.
+func PreviousRunIdsNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPreviousRunIds))
+}
+
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.
 func LaunchStateEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
