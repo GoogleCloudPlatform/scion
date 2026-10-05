@@ -551,3 +551,53 @@ func (d *persistProbeDispatcher) DispatchAgentMessage(ctx context.Context, agent
 	d.probe()
 	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
 }
+
+// panicDispatcher panics on its first message dispatch, after the row is
+// stored, then behaves normally.
+type panicDispatcher struct {
+	*wakeTrackingDispatcher
+	mu       sync.Mutex
+	panicked bool
+}
+
+func (d *panicDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.mu.Lock()
+	first := !d.panicked
+	d.panicked = true
+	d.mu.Unlock()
+	if first {
+		panic("dispatch blew up")
+	}
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+}
+
+// A send that panics during dispatch, after its row is stored, leaves the
+// row failed (not the optimistic "dispatched") and its idempotency key done
+// via the deferred Finish: a replay answers 200 with the same message and
+// that failed state, and dispatches nothing.
+func TestChatV2Wake_PanicDuringDispatch_ReplayReportsInterrupted(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	disp := &panicDispatcher{wakeTrackingDispatcher: f.disp}
+	f.srv.SetDispatcher(disp)
+	payload := map[string]any{"content": "hello", "idempotency_key": "key-panic"}
+
+	func() {
+		defer func() { _ = recover() }() // the handler may re-panic; a middleware may also recover
+		_ = doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	}()
+	require.True(t, disp.panicked, "the dispatcher must have run")
+	require.Equal(t, 1, f.countThreadMessages(t), "the row was stored before dispatch")
+
+	retry := doRequest(t, f.srv, http.MethodPost, f.path(), payload)
+	require.Equal(t, http.StatusOK, retry.Code, "body=%s", retry.Body.String())
+	resp := decodeWakeResp(t, retry)
+
+	res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, res.Items[0].ID, resp["id"], "the replay names the stored message")
+	assert.Equal(t, "failed", resp["dispatchState"])
+	assert.Equal(t, chatSendInterruptedReason, resp["dispatchFailureReason"])
+	assert.Empty(t, f.disp.getMessageCalls(), "the replay must not dispatch")
+	assert.Equal(t, 1, f.countThreadMessages(t))
+}

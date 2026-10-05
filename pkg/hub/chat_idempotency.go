@@ -70,6 +70,13 @@ const (
 // chatIdempotencyTTL. Deduplication is therefore "at most once per hub
 // process within the TTL", not durable; a store-backed key would be the
 // durable fix.
+//
+// Ownership limit: Record, MarkPersisted and Finish do not check which
+// request owns an entry. If an in-flight entry outlives the TTL, a retry
+// can Begin a fresh entry for the same key, and a late Record or Finish
+// from the original request then overwrites it. Clients stop retrying
+// before the TTL (the web client caps confirmation below it), so no
+// generation token is kept.
 type ChatIdempotencyCache struct {
 	mu          sync.Mutex
 	entries     map[idempotencyCacheKey]chatIdempotencyEntry

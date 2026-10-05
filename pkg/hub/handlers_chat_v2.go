@@ -1387,6 +1387,10 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	return false, ""
 }
 
+// chatSendInterruptedReason is the failure reason recorded on a chat v2 row
+// whose send panicked before its primary dispatch settled.
+const chatSendInterruptedReason = "Send interrupted before delivery was confirmed"
+
 // chatSendOptions carries the per-send flags of a chat v2 agent-routed send.
 type chatSendOptions struct {
 	// Interrupt interrupts each running agent recipient before delivery.
@@ -1792,6 +1796,24 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		opts.OnPersisted(storeMsg.ID)
 	}
 
+	// The row was stored with the optimistic "dispatched" state, which the
+	// primary dispatch below confirms or replaces. If anything panics
+	// before that settles, mark the row failed (the message may not have
+	// been delivered) and re-panic: otherwise the row, and an idempotent
+	// replay of it, would claim a delivery that may never have happened.
+	primarySettled := false
+	defer func() {
+		if primarySettled {
+			return
+		}
+		if p := recover(); p != nil {
+			if storeMsg.DispatchState == store.MessageDispatchDispatched {
+				_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
+			}
+			panic(p)
+		}
+	}()
+
 	// Phase-3: Store reply-to reference if provided.
 	if replyToID != "" {
 		s.mu.RLock()
@@ -1908,6 +1930,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			primaryDispatchOK = false
 		}
 	}
+	// The row now holds the primary's real outcome.
+	primarySettled = true
 	if primaryDispatchOK {
 		dispatchedAgents = append(dispatchedAgents, primaryAgent)
 	}
