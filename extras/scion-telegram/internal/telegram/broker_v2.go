@@ -2927,17 +2927,27 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 // message would go to the default agent. Other messages are ignored.
 func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, tgMsg *TGMessage, botUsername, effectiveDefault string, lookupErr error) {
 	addressed := isBotMentioned(tgMsg, botUsername) || b.isReplyToBot(tgMsg)
-	text := registerHint
+	text, kind := registerHint, ""
 	switch {
 	case errors.Is(lookupErr, errSenderLinkStale):
-		text = staleLinkText
-		addressed = addressed || defaultAgentApplies(tgMsg, botUsername, effectiveDefault)
+		text, kind = staleLinkText, "stale_link"
 	case errors.Is(lookupErr, errSenderLookupFailed):
-		text = "Something went wrong. Please try again."
-		addressed = addressed || defaultAgentApplies(tgMsg, botUsername, effectiveDefault)
+		text, kind = "Something went wrong. Please try again.", "lookup_failed"
 	}
 	if !addressed {
-		return
+		// A message that would go to the default agent is answered for a
+		// link that needs attention, at most once per suppression window
+		// per sender.
+		if kind == "" || !defaultAgentApplies(tgMsg, botUsername, effectiveDefault) {
+			return
+		}
+		key := "unresolved_sender:" + kind
+		if tgMsg.From != nil {
+			key += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
+		}
+		if b.shouldSuppressError(tgMsg.Chat.ID, int(tgMsg.MessageThreadID), key) {
+			return
+		}
 	}
 	b.api.SendMessage(ctx, tgMsg.Chat.ID, text, "") //nolint:errcheck
 }

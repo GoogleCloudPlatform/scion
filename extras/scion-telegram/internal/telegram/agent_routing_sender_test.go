@@ -244,6 +244,13 @@ var agentCacheStates = map[string]func(t *testing.T, store Store){
 		saveStaleAgentCache(t, store, "user:bob@example.com", "proj-1", "coder", "reviewer")
 		saveStaleAgentCache(t, store, "user:carol@example.com", "proj-1", "coder")
 	},
+	// 456 was formerly linked as alice@example.com.
+	"fresh list under the sender's former account": func(t *testing.T, store Store) {
+		saveAgentCache(t, store, "user:alice@example.com", "proj-1", time.Now(), "coder", "reviewer")
+	},
+	"stale list under the sender's former account": func(t *testing.T, store Store) {
+		saveStaleAgentCache(t, store, "user:alice@example.com", "proj-1", "coder", "reviewer")
+	},
 }
 
 // unresolvedSenderReplies sends msg from an unresolved sender in a group
@@ -317,6 +324,42 @@ func TestV2_UnresolvedSender_NeverSeenSenderUnaddressedTextGetsNoReply(t *testin
 	assert.False(t, delivered)
 	assert.Empty(t, hub.agentCalls())
 	assert.Empty(t, tgSrv.getSentMessages())
+}
+
+func TestV2_UnresolvedSender_DefaultAgentReplyIsThrottledPerSender(t *testing.T) {
+	for _, senderName := range []string{"link without email", "lookup failure"} {
+		t.Run(senderName, func(t *testing.T) {
+			sc := unresolvedSenders[senderName]
+			b, tgSrv, _ := newRoutingTestBroker(t) // default agent "coder"
+			sc.setup(t, b)
+			if senderName == "lookup failure" {
+				// Another sender whose link cannot be read either.
+				require.NoError(t, b.store.(mappingLookupFailingStore).Store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+					TelegramUserID: "789", ScionUserID: "u-789", LinkedAt: time.Now().UTC(),
+				}))
+			} else {
+				require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+					TelegramUserID: "789", ScionUserID: "u-789", LinkedAt: time.Now().UTC(),
+				}))
+			}
+
+			b.handleGroupMessage(plainGroupMessage(456, "hello"))
+			b.handleGroupMessage(plainGroupMessage(456, "hello again"))
+			b.handleGroupMessage(plainGroupMessage(789, "hi"))
+			b.handleGroupMessage(botMentionMessage(456, "are you there"))
+
+			assert.Equal(t, []string{sc.want, sc.want, sc.want}, sentTexts(tgSrv),
+				"one reply per sender for unaddressed text; addressing the bot is always answered")
+		})
+	}
+}
+
+func sentTexts(tgSrv *fakeTGServerV2) []string {
+	var out []string
+	for _, m := range tgSrv.getSentMessages() {
+		out = append(out, m.Text)
+	}
+	return out
 }
 
 func TestV2_UnresolvedSender_LookupFailureReplyIsGeneric(t *testing.T) {
