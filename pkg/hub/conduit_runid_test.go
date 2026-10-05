@@ -76,6 +76,7 @@ func TestConduitAdmission_RunIDCompare(t *testing.T) {
 	}{
 		{name: "row empty, Hello empty: generation fallback", rowRunID: "", presented: "", wantSource: relay.IncarnationSourceGeneration},
 		{name: "row empty, Hello with launch id: refused", rowRunID: "", presented: "some-run", wantReason: relay.ReasonSupersededIncarnation},
+		{name: "row set, Hello empty, nothing connected: generation fallback", rowRunID: "current", presented: "", wantSource: relay.IncarnationSourceGeneration},
 		{name: "row and Hello differ: refused", rowRunID: "current", presented: "other-run", wantReason: relay.ReasonSupersededIncarnation},
 		{name: "row and Hello match: admitted", rowRunID: "current", presented: "current", wantSource: relay.IncarnationSourceLaunchID},
 		{name: "Hello empty while the current run is connected: refused", rowRunID: "current", connectFirst: true, presented: "", wantReason: relay.ReasonLegacyHelloSuperseded},
@@ -199,4 +200,15 @@ func TestConduitAdmission_RuntimeLocalRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, f.launched.RunID, second.GetEndpointIncarnation())
 	assert.Greater(t, second.GetConnectionEpoch(), first.GetConnectionEpoch())
+
+	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
+	require.NoError(t, err)
+	var current []string
+	for _, s := range ps.Sessions {
+		if registry.EpochCurrent(ps, s.Session) {
+			current = append(current, s.Session.SessionID)
+		}
+	}
+	assert.Equal(t, []string{second.GetSessionId()}, current, "only the redial is epoch-current; the first session is fenced")
+	assert.NotEqual(t, first.GetSessionId(), second.GetSessionId())
 }
