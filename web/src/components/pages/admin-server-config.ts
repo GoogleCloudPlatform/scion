@@ -545,6 +545,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
   @state() private defaultGCPIdentitySAID = '';
+  /** Account as loaded from the server; used to detect admin edits. */
+  private loadedGCPIdentitySAID = '';
   @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
@@ -1603,6 +1605,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
+    this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
     // Server
     const srv = data.server;
@@ -1860,16 +1863,25 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
-   * Service account value to save. The account only applies in "assign"
-   * mode, so it is cleared when the admin picks another mode in the form.
+   * Service account value to save, or undefined to leave it out of the
+   * payload. The account only applies in "assign" mode, so it is cleared
+   * when the admin picks another mode in the form.
+   *
    * When the mode itself is read-only (env-pinned or deployment-managed),
    * the form mode is not the effective mode and the page cannot see the
-   * effective one, so the account is sent as loaded instead of being
-   * cleared (ptone/scion#2720).
+   * effective one, so the form mode must not drive clearing
+   * (ptone/scion#2720). In that case the account is sent only when the
+   * admin edited it. An unchanged account is left out, so the server
+   * neither clears it nor re-checks it on unrelated saves. In the db tier
+   * both GCP keys are in one settings section and lock together, so this
+   * branch is file-tier (env-pinned) in practice.
    */
-  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string {
-    if (!ok('default_gcp_identity_mode')) return this.defaultGCPIdentitySAID || '';
-    return this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string | undefined {
+    const said = this.defaultGCPIdentitySAID || '';
+    if (!ok('default_gcp_identity_mode')) {
+      return said === this.loadedGCPIdentitySAID ? undefined : said;
+    }
+    return this.defaultGCPIdentityMode === 'assign' ? said : '';
   }
 
   private buildLayer1Payload(): Record<string, unknown> {
@@ -1939,7 +1951,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id = this.gcpIdentitySAIDForPayload(ok);
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     const server: Record<string, unknown> = {};
@@ -2147,7 +2160,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id = this.gcpIdentitySAIDForPayload(ok);
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     // Server
