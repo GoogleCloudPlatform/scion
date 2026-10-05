@@ -1395,12 +1395,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if embeddedBroker != nil {
 			// Same target rule as a POST /brokers re-registration: the
-			// caller's user must be the matched broker's creator or a
-			// super-admin.
+			// caller's user must be the matched broker's creator, or a
+			// super-admin presenting an interactive session or dev
+			// credential.
 			matched := embeddedBroker
 			if !s.brokerRemintTargetAuthorized(ctx, GetUserIdentityFromContext(ctx), matched) {
 				logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: matched.ID}, ActionUpdate,
-					"caller is not the broker's creator or a super-admin")
+					"caller is not the broker's creator or a super-admin with an interactive or dev credential")
 				if embeddedBrokerMatchedByID {
 					// The caller named an explicit broker ID they do not
 					// own: hard deny, before any project mutation.
@@ -1701,7 +1702,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		// The embedded path does not call authorizeBrokerProvide: the caller
 		// either created this broker (and owns it) or passed
-		// brokerRemintTargetAuthorized above (creator or super-admin), which
+		// brokerRemintTargetAuthorized above (creator, or super-admin with an
+		// interactive or dev credential), which
 		// is at least as strict as the broker.update consent check.
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,

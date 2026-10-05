@@ -32,7 +32,8 @@ import (
 // broker:create, and its user must currently hold broker.create (granted to
 // hub members). Broker on-behalf-of requests are not admitted. A new broker
 // is owned by the caller's user. Re-registration additionally requires that
-// user to be the broker's creator or a super-admin. Turning on auto-provide
+// user to be the broker's creator, or a super-admin presenting an
+// interactive session or dev credential. Turning on auto-provide
 // additionally requires broker.auto_provide. Registration never associates
 // the broker with a project. The route is RouteBrokerHMAC, so these checks
 // run in the handler.
@@ -104,7 +105,8 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// caller-supplied ID), treat it as re-registration of that broker rather
 	// than a brand-new one. Re-registration mutates the existing record and
 	// issues a fresh join token, so on top of the broker.create gate above
-	// the caller's user must be the broker's creator or a super-admin
+	// the caller's user must be the broker's creator, or a super-admin
+	// presenting an interactive session or dev credential
 	// (brokerRemintTargetAuthorized). A first-time registration (no existing
 	// match) requires only the broker.create gate above; the caller's user
 	// becomes the new broker's owner.
@@ -115,7 +117,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	}
 	if existingBroker != nil && !s.brokerRemintTargetAuthorized(r.Context(), user, existingBroker) {
 		logAuthzDenial(r, user, Resource{Type: "broker", ID: existingBroker.ID}, Action("reregister"),
-			"caller is not the broker's creator or a super-admin")
+			"caller is not the broker's creator or a super-admin with an interactive or dev credential")
 		Forbidden(w)
 		return
 	}
@@ -202,14 +204,15 @@ func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) b
 
 // brokerRemintTargetAuthorized reports whether the caller, already admitted
 // by authorizeBrokerCreate, may re-register (re-mint the join token of) the
-// existing broker: its live user must be the broker's recorded creator or a
-// super-admin. It runs only after the credential restrictions in
-// authorizeBrokerCreate, so a user access token reaches it only when its
-// boundary and ceiling already admit broker.create. It also requires an
-// admitted user credential itself, so a caller that skips
-// authorizeBrokerCreate never gains the creator or super-admin arms through
-// a broker credential. An ownerless broker (empty CreatedBy) matches no
-// creator.
+// existing broker: its live user must be the broker's recorded creator, or
+// a super-admin presenting an interactive session or dev credential. A user
+// access token therefore re-mints only a broker its own user created. It
+// runs only after the credential restrictions in authorizeBrokerCreate, so
+// a user access token reaches it only when its boundary and ceiling already
+// admit broker.create. It also requires an admitted user credential itself,
+// so a caller that skips authorizeBrokerCreate never gains the creator or
+// super-admin arms through a broker credential. An ownerless broker (empty
+// CreatedBy) matches no creator.
 func (s *Server) brokerRemintTargetAuthorized(ctx context.Context, user UserIdentity, broker *store.RuntimeBroker) bool {
 	if isNilIdentity(user) || broker == nil || user.ID() == "" {
 		return false
@@ -219,6 +222,11 @@ func (s *Server) brokerRemintTargetAuthorized(ctx context.Context, user UserIden
 	}
 	if broker.CreatedBy != "" && broker.CreatedBy == user.ID() {
 		return true
+	}
+	// The super-admin arm admits only an interactive session or a dev
+	// credential; a user access token is held to the creator arm above.
+	if !brokerUserCredentialKindAdmitted(ctx, user, false) {
+		return false
 	}
 	return s.authzService.IsSystemAdmin(ctx, user.ID())
 }

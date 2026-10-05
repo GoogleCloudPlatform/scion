@@ -36,7 +36,8 @@ import (
 // ceiling contains broker:create, held by a user who currently holds
 // broker.create. A new broker is owned by the token's user. Re-registering
 // an existing broker additionally requires that user to be the broker's
-// creator or a super-admin. Rotation admits no user access token.
+// creator; the super-admin arm admits only an interactive session or dev
+// credential. Rotation admits no user access token.
 // ============================================================================
 
 // mintHubBrokerUAT mints a hub-boundary user access token for userID with
@@ -266,11 +267,43 @@ func TestBrokerHubToken_OwnerReregistersByIDWithNewName(t *testing.T) {
 	assert.Equal(t, broker.ID, resp.BrokerID)
 }
 
-func TestBrokerHubToken_SuperAdminReregistersOtherUsersBroker(t *testing.T) {
+func TestBrokerHubToken_SuperAdminTokenCannotReregisterOtherUsersBroker(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  func(b *store.RuntimeBroker) CreateBrokerRegistrationRequest
+	}{
+		{"by name", func(b *store.RuntimeBroker) CreateBrokerRegistrationRequest {
+			return CreateBrokerRegistrationRequest{Name: b.Name, Labels: map[string]string{"env": "other"}}
+		}},
+		{"by id", func(b *store.RuntimeBroker) CreateBrokerRegistrationRequest {
+			return CreateBrokerRegistrationRequest{Name: "hubtoken-rereg-admin-unused-name", BrokerID: b.ID, Labels: map[string]string{"env": "other"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			audit := installBrokerAuditCapture(srv)
+			owner := newHubMemberUser(t, s, "hubtoken-rereg-admin-owner")
+			admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin")
+			broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-broker", owner.ID)
+			key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
+
+			rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", tc.req(broker))
+
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"a user access token re-registers only a broker its user created; got: %s", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "joinToken")
+			assertBrokerUnchanged(t, s, broker.ID)
+			assertNoJoinToken(t, s, broker.ID)
+			assertNoBrokerNamed(t, s, "hubtoken-rereg-admin-unused-name")
+			assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventRegister), "a denied re-registration records no register event")
+		})
+	}
+}
+
+func TestBrokerHubToken_SuperAdminTokenReregistersOwnBroker(t *testing.T) {
 	srv, s := testServer(t)
-	owner := newHubMemberUser(t, s, "hubtoken-rereg-admin-owner")
-	admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin")
-	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-broker", owner.ID)
+	admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin-own")
+	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-own-broker", admin.ID)
 	key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
 
 	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
@@ -281,6 +314,80 @@ func TestBrokerHubToken_SuperAdminReregistersOtherUsersBroker(t *testing.T) {
 	resp := decodeBrokerRegistration(t, rec.Body)
 	assert.True(t, resp.Reregistered)
 	assert.Equal(t, broker.ID, resp.BrokerID)
+}
+
+func TestBrokerHubToken_SuperAdminTokenCannotReregisterOwnerlessBroker(t *testing.T) {
+	srv, s := testServer(t)
+	audit := installBrokerAuditCapture(srv)
+	admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin-ownerless")
+	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-ownerless-broker", "")
+	key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
+
+	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "other"},
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"an ownerless broker matches no creator, so a user access token cannot re-register it; got: %s", rec.Body.String())
+	assertBrokerUnchanged(t, s, broker.ID)
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventRegister))
+}
+
+func TestBrokerHubToken_SuperAdminDevCredentialReregistersOtherUsersBroker(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newHubMemberUser(t, s, "hubtoken-rereg-dev-owner")
+	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-dev-broker", owner.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: broker.Name,
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"a super-admin dev credential may re-register a broker another user created; got: %s", rec.Body.String())
+	resp := decodeBrokerRegistration(t, rec.Body)
+	assert.True(t, resp.Reregistered)
+	assert.Equal(t, broker.ID, resp.BrokerID)
+}
+
+// TestBrokerRemintTargetAuthorized_SuperAdminArmNeedsSessionCredential pins
+// the shared target helper used by POST /api/v1/brokers and the embedded
+// broker path of POST /api/v1/projects/register: the super-admin arm admits
+// an interactive or dev credential, and a user access token is held to the
+// creator arm.
+func TestBrokerRemintTargetAuthorized_SuperAdminArmNeedsSessionCredential(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "remint-helper-owner")
+	admin := newSuperAdminUser(t, s, "remint-helper-admin")
+	other := createReregistrationTestBroker(t, s, "remint-helper-other-broker", owner.ID)
+	own := createReregistrationTestBroker(t, s, "remint-helper-own-broker", admin.ID)
+	ownerless := createReregistrationTestBroker(t, s, "remint-helper-ownerless-broker", "")
+
+	session := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, string(ClientTypeWeb))
+	scoped := NewScopedUserIdentityWithCredentialID(session, "", []string{"broker:create"}, "remint-helper-token")
+	sessionCtx := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive})
+	devCtx := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindDev})
+	uatCtx := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindUAT, ID: "remint-helper-token"})
+
+	for _, tc := range []struct {
+		name   string
+		ctx    context.Context
+		user   UserIdentity
+		broker *store.RuntimeBroker
+		want   bool
+	}{
+		{"user access token, other user's broker", uatCtx, scoped, other, false},
+		{"user access token, ownerless broker", uatCtx, scoped, ownerless, false},
+		{"user access token, own broker", uatCtx, scoped, own, true},
+		{"interactive session, other user's broker", sessionCtx, session, other, true},
+		{"interactive session, ownerless broker", sessionCtx, session, ownerless, true},
+		{"dev credential, other user's broker", devCtx, session, other, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, srv.brokerRemintTargetAuthorized(tc.ctx, tc.user, tc.broker))
+		})
+	}
 }
 
 func TestBrokerHubToken_SuperAdminTokenWithoutBrokerCreateDenied(t *testing.T) {
