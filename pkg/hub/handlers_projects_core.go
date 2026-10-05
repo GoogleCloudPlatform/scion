@@ -1337,8 +1337,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A provider path that is the broker's global directory is only valid
-	// for the global project. Checked before any project or provider write.
+	// A provider path must be absolute and outside the restricted system
+	// directories, and a path that is the broker's global directory is only
+	// valid for the global project (checkProviderLocalPath, shared with
+	// POST /projects/{id}/providers). Checked before any project or
+	// provider write.
 	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
 		// A project created by this request is the global project only when
 		// it takes the reserved global slug, which only a register without a
@@ -1351,10 +1354,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if project != nil {
 			targetName, targetSlug = project.Name, project.Slug
 		}
-		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+		cleanPath, err := checkProviderLocalPath("path", targetName, targetSlug, req.Path)
+		if err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
 			return
 		}
+		req.Path = cleanPath
 	}
 
 	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker

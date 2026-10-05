@@ -90,6 +90,32 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 		"or pass the project's own directory", localPath, projectName)
 }
 
+// restrictedProviderPathPrefixes are host system directories a provider
+// local path may not name or sit under.
+var restrictedProviderPathPrefixes = []string{"/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/lib"}
+
+// checkProviderLocalPath validates a requested provider local path for the
+// named project and returns it cleaned. The path must be absolute, must not
+// name or sit under a restricted system directory, and must pass
+// validateProviderLocalPath. Every broker's path is checked the same way;
+// whether the directory exists is checked only for the embedded broker, by
+// the caller. field names the request field in error messages.
+func checkProviderLocalPath(field, projectName, projectSlug, localPath string) (string, error) {
+	clean := filepath.Clean(localPath)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("%s must be an absolute path", field)
+	}
+	for _, prefix := range restrictedProviderPathPrefixes {
+		if clean == prefix || strings.HasPrefix(clean, prefix+"/") {
+			return "", fmt.Errorf("%s points to a restricted system directory", field)
+		}
+	}
+	if err := validateProviderLocalPath(projectName, projectSlug, clean); err != nil {
+		return "", err
+	}
+	return clean, nil
+}
+
 // registerProviderLocalPath returns the local path to store for a provider
 // written by project register.
 //
@@ -104,7 +130,7 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 //     keeps none, which avoids converting a hub-native project into a linked
 //     one, and a linked path is not dropped by a register that omits it.
 //
-// requestedPath must already have passed validateProviderLocalPath.
+// requestedPath must already have passed checkProviderLocalPath.
 func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) string {
 	if created {
 		// The request was checked against the slug register expected to

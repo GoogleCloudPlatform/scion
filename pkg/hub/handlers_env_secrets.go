@@ -2397,7 +2397,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 
 	// Validate LocalPath before persisting — fail fast before touching the DB.
 	// LocalPath names a directory on the broker's host. Every broker's path
-	// passes the same syntax and global-directory checks. Only the embedded
+	// passes the same checks (checkProviderLocalPath). Only the embedded
 	// broker shares the hub's filesystem, so only for it does the hub check
 	// that the directory exists and initialize its .scion directory below.
 	// For any other broker the path is validated and stored.
@@ -2412,18 +2412,8 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	var cleanPath string
 	embedded := s.isEmbeddedBroker(broker.ID)
 	if req.LocalPath != "" {
-		cleanPath = filepath.Clean(req.LocalPath)
-		if !filepath.IsAbs(cleanPath) {
-			ValidationError(w, "localPath must be an absolute path", nil)
-			return
-		}
-		for _, prefix := range []string{"/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/lib"} {
-			if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix+"/") {
-				ValidationError(w, "localPath points to a restricted system directory", nil)
-				return
-			}
-		}
-		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+		cleanPath, err = checkProviderLocalPath("localPath", target.Name, target.Slug, req.LocalPath)
+		if err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
 			return
 		}

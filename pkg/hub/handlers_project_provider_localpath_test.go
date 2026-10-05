@@ -163,3 +163,48 @@ func TestProviderLocalPath_EmptyPathNewProviderHasNoPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, provider.LocalPath)
 }
+
+func TestCheckProviderLocalPath(t *testing.T) {
+	cases := []struct {
+		path    string
+		want    string
+		wantErr string
+	}{
+		{"/srv/web-app/.scion", "/srv/web-app/.scion", ""},
+		{"/srv/web-app/../web-app/.scion/", "/srv/web-app/.scion", ""},
+		{"relative/path", "", "path must be an absolute path"},
+		{"/etc", "", "restricted system directory"},
+		{"/usr/local/src", "", "restricted system directory"},
+		{brokerGlobalDir, "", "global scion directory"},
+	}
+	for _, tc := range cases {
+		got, err := checkProviderLocalPath("path", "web-app", "web-app", tc.path)
+		if tc.wantErr != "" {
+			require.Error(t, err, "path %q", tc.path)
+			assert.Contains(t, err.Error(), tc.wantErr, "path %q", tc.path)
+			continue
+		}
+		require.NoError(t, err, "path %q", tc.path)
+		assert.Equal(t, tc.want, got)
+	}
+	got, err := checkProviderLocalPath("path", "global", "global", brokerGlobalDir)
+	require.NoError(t, err, "the global project may hold the global directory")
+	assert.Equal(t, brokerGlobalDir, got)
+}
+
+// Project register checks a provider path with the same rules as the
+// providers API, before any project or provider write.
+func TestProviderLocalPath_RegisterRejectsRelativeAndRestrictedPaths(t *testing.T) {
+	f := brokerAssocSetup(t, "localpath-register-reject")
+
+	for _, path := range []string{"/etc/x", "relative/path"} {
+		rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			ID:       f.project.ID,
+			Name:     f.project.Name,
+			BrokerID: f.ownBroker.ID,
+			Path:     path,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "path %q: %s", path, rec.Body.String())
+	}
+	assertNoProvider(t, f.store, f.project.ID, f.ownBroker.ID)
+}
