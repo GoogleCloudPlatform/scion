@@ -850,6 +850,7 @@ describe('AgentStore delta probe', () => {
       const snapshot = h.store.peek(HUB);
       expect(snapshot?.status).toBe('error');
       expect(snapshot?.error).toBeDefined();
+      expect(snapshot?.complete).toBe(false);
       expect(ids(snapshot)).toEqual(['a1']);
     });
 
