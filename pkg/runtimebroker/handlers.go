@@ -2280,11 +2280,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			"agent_id", id, "error", err)
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
-		// the run the runtime holds now.
+		// the run the runtime holds now. Start can also re-provision the
+		// agent, so a required skill reference that cannot be resolved gets
+		// the same typed response as on create, with those details added.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		var skillErr *agent.SkillResolutionError
+		switch {
+		case errors.Is(err, agent.ErrContainerNameInUse):
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
-		} else {
+		case errors.As(err, &skillErr):
+			skillResolutionFailedWithDetails(w, skillErr, details)
+		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
 		return
@@ -2334,8 +2340,11 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		return
 	}
 
-	// Merge inline config over existing
+	// Merge inline config over existing. MergeScionConfig appends skills, and
+	// the Hub sends the agent's full skill list on every start and restart,
+	// so collapse references that name the same skill and destination.
 	merged := config.MergeScionConfig(&existing, inlineConfig)
+	merged.Skills = dedupeSkillReferences(merged.Skills)
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -2351,6 +2360,37 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		s.agentLifecycleLog.Debug("applyInlineConfigUpdate: applied inline config update",
 			"agent", agentName, "maxTurns", inlineConfig.MaxTurns, "maxModelCalls", inlineConfig.MaxModelCalls)
 	}
+}
+
+// dedupeSkillReferences keeps only the final occurrence of each skill
+// reference key (URI plus As) and drops earlier ones, preserving the relative
+// order of the references that remain. The Hub resolver and the provision
+// step's required-skill check collapse references that share a URI
+// last-wins, taking As, Scope and Optional from the last one. The last
+// reference for a URI is always the final occurrence of its own key, so it
+// survives and stays last among that URI's references, and on that path the
+// installed result is unchanged. Resolvers that resolve each reference on
+// its own (gcp-skill://, and gh:// when the Hub is unavailable) install the
+// same files under the same name; the surviving entry carries the latest
+// Scope and Optional, matching the Hub path. References with the same URI
+// but different As are kept as separate entries, because the dedupe does not
+// merge different install names (the per-reference resolvers install both).
+func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
+	if len(refs) < 2 {
+		return refs
+	}
+	type key struct{ uri, as string }
+	last := make(map[key]int, len(refs))
+	for i, ref := range refs {
+		last[key{ref.URI, ref.As}] = i
+	}
+	out := make([]api.SkillReference, 0, len(last))
+	for i, ref := range refs {
+		if last[key{ref.URI, ref.As}] == i {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 // isContainerStopTolerable returns true if the error from stopping a container
@@ -2742,6 +2782,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
+		// Start can re-provision the agent: a required skill reference that
+		// cannot be resolved gets the same typed response as on start, and
+		// is checked before the "not found" text match so a skill cause
+		// is not reported as a missing agent.
+		var skillErr *agent.SkillResolutionError
+		if errors.As(err, &skillErr) {
+			skillResolutionFailedWithDetails(w, skillErr, details)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return

@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
 
@@ -1373,6 +1374,11 @@ type Server struct {
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
 
+	// ghFailures remembers, per cache key, that GitHub recently reported a
+	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
+	// It is in memory only, per hub process, and never written to the store.
+	ghFailures agent.FailureMemo
+
 	// ghCooldown holds gh:// resolution requests back per credential
 	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
 	// Nil means the process-wide agent.SharedGitHubCooldown, the same
@@ -1951,7 +1957,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
-	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
+	if err := srv.seedPlatformSkillInsertions(ctx, resources.PlatformSkillsFS()); err != nil {
 		slog.Warn("Failed to seed platform skill insertions", "error", err)
 	}
 
