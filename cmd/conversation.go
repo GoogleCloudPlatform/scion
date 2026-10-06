@@ -727,7 +727,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 
 	since, err := time.ParseDuration(convCatchUpSince)
 	if err != nil {
-		return fmt.Errorf("invalid --since value %q: %w", convCatchUpSince, err)
+		return newUsageError("invalid --since value %q: %w", convCatchUpSince, err)
 	}
 
 	afterTime := time.Now().UTC().Add(-since).Format(time.RFC3339)
@@ -767,7 +767,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {
 	ref, err := messaging.ParseReference(refStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid conversation reference %q: %w", refStr, err)
+		return "", newUsageError("invalid conversation reference %q: %w", refStr, err)
 	}
 
 	switch ref.Kind {
@@ -807,7 +807,7 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 		return "", fmt.Errorf("no conversation found for #%s", ref.Value)
 
 	default:
-		return "", fmt.Errorf("unsupported conversation reference type: %s", refStr)
+		return "", newUsageError("unsupported conversation reference type: %s", refStr)
 	}
 }
 

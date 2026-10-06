@@ -222,27 +222,27 @@ func runProjectSkillsList(cmd *cobra.Command, args []string) error {
 func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	if projectSkillsFromDir != "" {
 		if projectSkillsAs != "" || projectSkillsOptional {
-			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+			return newUsageError("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
 		}
 		projectArg, skillRef := splitProjectSkillsArgs(args)
 		if skillRef != "" {
-			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+			return newUsageError("cannot combine a skill URI argument with --from-directory; choose one")
 		}
 		return runProjectSkillsFromDirectory(cmd, projectArg, projectSkillsFromDir)
 	}
 
 	if len(args) == 0 {
-		return fmt.Errorf("skill URI or --from-directory is required")
+		return newUsageError("skill URI or --from-directory is required")
 	}
 
 	projectArg, skillURI := splitProjectSkillsArgs(args)
 	if skillURI == "" {
-		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", args[0])
+		return newUsageError("skill URI is required (expected format containing ://), got %q", args[0])
 	}
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
 	if err != nil {
-		return fmt.Errorf("invalid skill URI: %w", err)
+		return newUsageError("invalid skill URI: %w", err)
 	}
 	if normalized != skillURI {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
@@ -283,7 +283,7 @@ func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 func runProjectSkillsRemove(cmd *cobra.Command, args []string) error {
 	projectArg, skillRef := splitProjectSkillsArgs(args)
 	if skillRef == "" {
-		return fmt.Errorf("skill ID or URI is required")
+		return newUsageError("skill ID or URI is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -333,7 +333,7 @@ func resolveInjectedSkillEntryID(ctx context.Context, svc hubclient.InjectedSkil
 	}
 	// Otherwise it must be a UUID; reject anything else to avoid a silent misrouted path segment.
 	if !isUUIDLike(ref) {
-		return "", fmt.Errorf("invalid skill entry ID: %q (expected UUID or skill URI)", ref)
+		return "", newUsageError("invalid skill entry ID: %q (expected UUID or skill URI)", ref)
 	}
 	return ref, nil
 }
@@ -386,7 +386,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	// Fix 2: Client-side URL validation.
 	if !looksLikeGitHubDirectoryURL(dirURL) {
-		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+		return newUsageError("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
 	}
 
 	// Fix 4: Split nil-error check.

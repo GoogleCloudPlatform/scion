@@ -525,6 +525,7 @@ func TestProofDuplicateEntryPointRejected(t *testing.T) {
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestProofDuplicateEntryPointRejected"}},
+		Bearer:           SessionOnly(ReasonInteractiveState),
 	}
 
 	if err := proofSpec.Validate(); err != nil {
@@ -1493,6 +1494,10 @@ func TestCIGateCoversAllAF1Tests(t *testing.T) {
 		"TestProofNonexistentTestRefDetected",
 		"TestProofPermissionSemanticMismatchDetected",
 		"TestProofUnmappedDomainDetected",
+		// Bearer dispositions
+		"TestBearerDisposition_EveryOperationDeclaresOne",
+		"TestBearerDisposition_RuleRejectsInvalidDispositions",
+		"TestBearerDisposition_CredentialsMatchDisposition",
 	}
 
 	repoRoot := findRepoRoot(t)

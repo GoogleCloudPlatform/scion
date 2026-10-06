@@ -69,12 +69,19 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 // dispatch shape that makes a 405 control meaningless for that entry — not
 // merely that the control happens to fail today.
 var controlCheckExclusions = map[liveInventoryKey]string{
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:           "proxyAgentPort forwards every HTTP method to the tunnel with no method-based routing at all (see the entry's own comment in catalog.go); there is no unsupported method to control against",
-	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:          "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:           "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:        "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}: "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:     "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "proxyAgentPort forwards every HTTP method to the tunnel with no method-based routing at all (see the entry's own comment in catalog.go); there is no unsupported method to control against",
+	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                     "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                   "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:            "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                             "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the method or the key; testServer configures no secrets backend, so every method gets the same 501",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                       "same as the GET .../secrets control entry above",
+	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                       "same as the GET .../secrets control entry above",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                        "handlePolicies (handlers_policies.go) answers 410 Gone for every method by design; there is no unsupported method to control against",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                   "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every method by design, the same as the GET /api/v1/policies entry above",
+	{OperationID: "user.session.logout", Method: "POST", Pattern: "/api/v1/auth/logout"}:                                     "every method on /api/v1/auth/logout gets the same route-guard answer, so there is no unsupported method to control against",
+	{OperationID: "broker.messagefailures.report", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/message-failures"}: "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"message-failures\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
+	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:                "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
 }
 
 // suffixCheckExclusions lists HTTP catalog entry points for which
@@ -120,6 +127,11 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                    "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                 "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:          "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                           "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the key; testServer configures no secrets backend, so a suffixed path gets the same 501 as the bare one",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                     "same as the GET .../secrets suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                     "same as the GET .../secrets suffix entry above",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                      "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                 "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
 	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                               "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                            "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 }
@@ -527,6 +539,13 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
 
+		// --- agent self-access family (agent JWT routes) ---
+		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
+		"/api/v1/agents/{id}/refresh-token":                         {"id": f.agent},
+		"/api/v1/agents/{id}/outbound-message":                      {"id": f.agent},
+		"/api/v1/agents/{id}/metrics":                               {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/outbound-message": {"projectId": f.project, "id": f.agent},
+
 		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},
 		"/api/v1/agents/{id}/stop":                             {"id": f.agentLifecycle},
@@ -607,8 +626,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/env/{key}": {"key": f.envVarKey},
 
 		// --- runtime broker family ---
-		"/api/v1/runtime-brokers/{id}":          {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/settings": {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},
