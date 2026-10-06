@@ -14,8 +14,9 @@
 
 /**
  * Chromium, real xterm: the terminal workspace's "Jump to agent" palette —
- * the header button opens it with the chat palette's type scale, its
- * options spanning the full width of the results; in a multi-pane grid a
+ * the terminal list footer's button opens it with the chat palette's
+ * type scale, its options spanning the full width of the results; in a
+ * multi-pane grid a
  * pick adds a pane, or replaces the focused pane when the grid is full; in
  * a single-pane view (the single preset, or any preset on
  * a narrow viewport) a pick navigates to the agent's URL like the rail; the
@@ -145,8 +146,9 @@ function fixture(id: string, name: string): AgentFixture {
   return { id, name, phase: 'running', projectId: 'fixture-project' };
 }
 
+/** The "Jump to agent" button pinned in the terminal list footer. */
 function paletteButton(page: Page): Locator {
-  return page.locator('#terminal-workspace scion-header .palette-button');
+  return page.locator('#terminal-workspace .terminal-rail-footer .terminal-jump-btn');
 }
 
 function paletteDialog(page: Page): Locator {
@@ -215,7 +217,7 @@ async function pick(page: Page, name: string): Promise<void> {
   await expect(paletteDialog(page)).toBeHidden();
 }
 
-test('the header button opens the palette, labeled "Jump to agent"', async ({ page }) => {
+test('the footer button opens the palette, labeled "Jump to agent"', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -230,7 +232,7 @@ test('the header button opens the palette, labeled "Jump to agent"', async ({ pa
   );
 });
 
-test('a dismiss refocuses the header button that opened the palette', async ({ page }) => {
+test('a dismiss refocuses the footer button that opened the palette', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -245,7 +247,7 @@ test('a dismiss refocuses the header button that opened the palette', async ({ p
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -481,11 +483,7 @@ test('typing straight after the rail footer button becomes the query, while the 
   await page.goto(`/terminals/${agentA}`);
   await expect.poll(() => attaches()).toBeGreaterThan(0);
 
-  await expectTypingRightAfterOpenFilters(
-    page,
-    () => page.locator('#terminal-workspace .terminal-jump-btn').click(),
-    ptyInput
-  );
+  await expectTypingRightAfterOpenFilters(page, () => paletteButton(page).click(), ptyInput);
 });
 
 test('typing straight after a reopen from a pane becomes the new query', async ({ page }) => {
@@ -609,7 +607,7 @@ test('a reopen during the close animation shows a focused palette, and keeps the
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -630,7 +628,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
   await page.evaluate(() => {
     const w = window as unknown as { hideSettled?: Promise<void> };
     w.hideSettled = new Promise((resolve) => {
-      // Only the palette's own dialog: the header button's tooltip fires one too.
+      // Only the palette's own dialog: other Shoelace popups fire one too.
       const listener = (e: Event): void => {
         const dialog = document
           .querySelector('scion-quick-palette')
@@ -659,7 +657,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
