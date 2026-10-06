@@ -1446,7 +1446,9 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     await settle();
 
     expect(internals().pendingRevealId).toBeNull();
-    expectCenteredOn('k2', 16 / 15.2);
+    const fontPx = parseFloat(getComputedStyle(node('k2')!.querySelector('.name')!).fontSize);
+    expect(fontPx).toBeGreaterThan(0);
+    expectCenteredOn('k2', 16 / fontPx);
   });
 
   it('starts the highlight once the node is centered, not when the reveal is asked for', async () => {

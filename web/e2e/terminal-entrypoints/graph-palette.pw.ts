@@ -128,13 +128,15 @@ async function renderedNamePx(page: Page, id: string): Promise<number> {
 /** Zooms the graph out with its zoom-out button until it stops changing. */
 async function zoomAllTheWayOut(page: Page): Promise<void> {
   const button = page.locator('scion-agent-tree-view .zoom-controls sl-button[title^="Zoom out"]');
+  const maxClicks = 30;
   let last = '';
-  for (;;) {
+  for (let i = 0; i < maxClicks; i++) {
     await button.click();
     const transform = await stageTransform(page);
     if (transform === last) return;
     last = transform;
   }
+  throw new Error(`the graph was still zooming out after ${maxClicks} clicks`);
 }
 
 /** How far the node's centre is from the graph canvas's centre, in px. */
