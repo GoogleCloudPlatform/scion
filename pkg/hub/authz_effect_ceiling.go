@@ -301,9 +301,7 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 // scope out of its tokens. The artifact scopes joined the agent roles after
 // UAT selector sets were in use, so making them optional keeps every token
 // that fit a role before still fitting it, while a child only uses the
-// artifact service when its source could. project:artifact:write is listed
-// although no role carries it yet, so adding it to a role later needs no
-// change here.
+// artifact service when its source could.
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
 	ScopeProjectArtifactRead:  true,
 	ScopeProjectArtifactWrite: true,

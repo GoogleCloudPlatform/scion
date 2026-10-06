@@ -42,7 +42,7 @@ var (
 	reincarnateServiceAccount string
 	reincarnateRole           string
 	reincarnateModel          string
-	reincarnateThinkingLevel  int = -1
+	reincarnateThinkingLevel  string
 	reincarnateHarnessAuth    string
 	reincarnateImage          string
 )
@@ -361,7 +361,28 @@ func validateReincarnatePatchFlags() error {
 	if err := validateHarnessAuthFlag(reincarnateHarnessAuth); err != nil {
 		return asUsageError(err)
 	}
-	return asUsageError(validateThinkingLevelFlag(reincarnateThinkingLevel))
+	_, err := reincarnateThinkingLevelPatch()
+	return err
+}
+
+// reincarnateThinkingLevelChanged reports whether --thinking-level was set
+// on the command line. It is wired to the flag set in init, which avoids an
+// initialization cycle through reincarnateCmd.
+var reincarnateThinkingLevelChanged = func() bool { return false }
+
+// reincarnateThinkingLevelPatch returns the --thinking-level patch value: nil
+// when the flag is unset (no patch), otherwise the integer level parsed the
+// way start parses it (0-100 or low/medium/high/max). An explicitly set
+// empty value is parsed, so it fails. Invalid values are usage errors.
+func reincarnateThinkingLevelPatch() (*int, error) {
+	if reincarnateThinkingLevel == "" && !reincarnateThinkingLevelChanged() {
+		return nil, nil
+	}
+	level, err := parseThinkingLevel(reincarnateThinkingLevel)
+	if err != nil {
+		return nil, err
+	}
+	return &level, nil
 }
 
 // applyReincarnatePatchFlags copies the patch flags onto req. The model is
@@ -374,9 +395,9 @@ func applyReincarnatePatchFlags(req *hubclient.ReincarnateAgentRequest) {
 	if reincarnateModel != "" {
 		req.Model = config.NormalizeModelAlias(reincarnateModel)
 	}
-	if reincarnateThinkingLevel != -1 {
-		tl := reincarnateThinkingLevel
-		req.ThinkingLevel = &tl
+	// Validated by validateReincarnatePatchFlags before any request.
+	if tl, err := reincarnateThinkingLevelPatch(); err == nil {
+		req.ThinkingLevel = tl
 	}
 }
 
@@ -554,7 +575,8 @@ func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account ID for the new generation (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")
-	reincarnateCmd.Flags().IntVar(&reincarnateThinkingLevel, "thinking-level", -1, "Thinking level (0-100) for the new generation")
+	reincarnateCmd.Flags().StringVar(&reincarnateThinkingLevel, "thinking-level", "", "Thinking level for the new generation: an integer 0-100, or low (25), medium (50), high (75), max (100)")
+	reincarnateThinkingLevelChanged = func() bool { return reincarnateCmd.Flags().Changed("thinking-level") }
 	reincarnateCmd.Flags().StringVar(&reincarnateHarnessAuth, "harness-auth", "", "Auth method for the new generation (api-key, oauth-token, auth-file, vertex-ai)")
 	reincarnateCmd.Flags().StringVarP(&reincarnateImage, "image", "i", "", "Container image for the new generation")
 	rootCmd.AddCommand(reincarnateCmd)

@@ -248,6 +248,36 @@ func (s *ProjectStore) LockProjectForMembership(ctx context.Context, projectID s
 	return nil
 }
 
+// LockProjectAgents locks every agent row of the project FOR UPDATE, in
+// ascending agent-ID order, on PostgreSQL. On SQLite it is a plain read
+// (writes are already database-serialized). See store.ProjectStore.
+func (s *ProjectStore) LockProjectAgents(ctx context.Context, projectID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	_, err = lockProjectAgentIDs(ctx, s.client, uid)
+	return err
+}
+
+// lockProjectAgentIDs returns the IDs of the project's agents (soft-deleted
+// ones included) in ascending ID order. On PostgreSQL the rows are locked
+// FOR UPDATE, so the locks are taken in ID order: the order every agent
+// hard-delete path (and the project delete) uses (DeleteAgent, DeleteProject,
+// ProjectDeletionService via LockProjectAgents, PurgeDeletedAgents,
+// finalize-hard), so they cannot deadlock (40P01) on overlapping agents.
+// Shared by LockProjectAgents and CompositeStore.DeleteProject so both lock
+// the same way.
+func lockProjectAgentIDs(ctx context.Context, client *ent.Client, projectID uuid.UUID) ([]uuid.UUID, error) {
+	q := client.Agent.Query().
+		Where(agent.ProjectIDEQ(projectID)).
+		Order(ent.Asc(agent.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	return q.IDs(ctx)
+}
+
 // GetProjectBySlug retrieves a project by its exact (case-sensitive) slug.
 func (s *ProjectStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	p, err := s.client.Project.Query().Where(project.SlugEQ(slug)).Only(ctx)

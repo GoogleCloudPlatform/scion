@@ -36,12 +36,20 @@ import (
 // makes.
 type spacesCountingStore struct {
 	store.Store
+	fault     *storeFaultSwitch // nil: always counting
 	mu        sync.Mutex
 	list      int
 	summaries int
 }
 
+func newSpacesCountingStore(inner store.Store, fault *storeFaultSwitch) *spacesCountingStore {
+	return &spacesCountingStore{Store: inner, fault: fault}
+}
+
 func (s *spacesCountingStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if !s.fault.Active() {
+		return s.Store.ListProjects(ctx, f, o)
+	}
 	s.mu.Lock()
 	s.list++
 	s.mu.Unlock()
@@ -49,6 +57,9 @@ func (s *spacesCountingStore) ListProjects(ctx context.Context, f store.ProjectF
 }
 
 func (s *spacesCountingStore) ListProjectSummaries(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if !s.fault.Active() {
+		return s.Store.ListProjectSummaries(ctx, f, o)
+	}
 	s.mu.Lock()
 	s.summaries++
 	s.mu.Unlock()
@@ -175,6 +186,20 @@ type spacesPerfFixture struct {
 func newSpacesPerfFixture(t *testing.T) *spacesPerfFixture {
 	t.Helper()
 	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	return newSpacesPerfFixtureOn(t, srv, s, owner, member, projectID)
+}
+
+// newSpacesPerfFixtureWithCounting is newSpacesPerfFixture with a
+// spacesCountingStore installed (disarmed) before the audited setup, so the
+// test arms it instead of assigning srv.store (ptone/scion#3184).
+func newSpacesPerfFixtureWithCounting(t *testing.T) (*spacesPerfFixture, *spacesCountingStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, owner, member, projectID, counting, fault := msgAuthzSetupWithFault(t, newSpacesCountingStore)
+	return newSpacesPerfFixtureOn(t, srv, s, owner, member, projectID), counting, fault
+}
+
+func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, member *store.User, projectID string) *spacesPerfFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := sql.Open("sqlite3", ":memory:")
@@ -401,13 +426,12 @@ func TestChatSpaces_LastActivityAtOmittedForMessagelessThreads(t *testing.T) {
 func TestChatSpaces_FewerDecisionsAndStoreCalls(t *testing.T) {
 	for _, who := range []string{"member", "admin"} {
 		t.Run(who, func(t *testing.T) {
-			f := newSpacesPerfFixture(t)
+			f, counting, fault := newSpacesPerfFixtureWithCounting(t)
 			u := f.member
 			if who == "admin" {
 				u = f.admin
 			}
-			counting := &spacesCountingStore{Store: f.s}
-			f.srv.store = counting
+			fault.Arm()
 			emitter := &parityRecordingAuditEmitter{}
 			f.srv.authzService.SetDecisionAuditEmitter(emitter)
 			f.srv.authzService.DecisionAuditSampleRate = 1.0
