@@ -18,6 +18,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,11 +31,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Guard for ptone/scion#2140: every Resource{Type: ...} literal in this
-// package must name a resource type that the permission registry defines,
-// or one of the reviewed unregistered pairs in
-// unregisteredResourcePermissions. A new literal with an unknown type would
-// otherwise resolve to no permission and deny every caller.
+// Guard for ptone/scion#2140: it rejects a Resource{Type: ...} literal in
+// this package that names a type the permission registry does not define,
+// unless the type is in one of the reviewed unregistered pairs in
+// unregisteredResourcePermissions. Types it cannot resolve statically are
+// pinned in unresolvedResourceTypeValues so a new one needs review.
 
 // resourceTypeLiteral is one Resource{Type: ...} literal whose type could be
 // resolved to a string constant.
@@ -95,19 +96,112 @@ func parseGoDir(t *testing.T, fset *token.FileSet, dir string) map[string]*ast.F
 // scanned.
 var logOnlyResourceFuncs = map[string]bool{"logAuthzDenial": true}
 
-// collectResourceTypeLiterals returns every Resource{Type: X} literal in
-// files whose X is a string literal, a package-level string constant of this
-// package, or a permissions.<Const> selector. Literals whose type comes from
-// a variable or call are counted in unresolved. Literals passed directly to
-// a logOnlyResourceFuncs function are skipped.
-func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File, localConsts, permConsts map[string]string) (found []resourceTypeLiteral, unresolved int) {
+// isResourceType reports whether e is the type Resource or *Resource.
+func isResourceType(e ast.Expr) bool {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	ident, ok := e.(*ast.Ident)
+	return ok && ident.Name == "Resource"
+}
+
+// isResourceValue reports whether e is a Resource{...} or &Resource{...}
+// literal.
+func isResourceValue(e ast.Expr) bool {
+	if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+		e = u.X
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	return ok && lit.Type != nil && isResourceType(lit.Type)
+}
+
+// declaredAsResource reports whether the variable x was declared in this
+// file with type Resource or *Resource, or from a Resource literal.
+func declaredAsResource(x *ast.Ident) bool {
+	if x.Obj == nil || x.Obj.Kind != ast.Var {
+		return false
+	}
+	switch d := x.Obj.Decl.(type) {
+	case *ast.Field:
+		return isResourceType(d.Type)
+	case *ast.ValueSpec:
+		if d.Type != nil {
+			return isResourceType(d.Type)
+		}
+		for i, name := range d.Names {
+			if name.Name == x.Name && i < len(d.Values) {
+				return isResourceValue(d.Values[i])
+			}
+		}
+	case *ast.AssignStmt:
+		for i, lhs := range d.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Name == x.Name && len(d.Rhs) == len(d.Lhs) {
+				return isResourceValue(d.Rhs[i])
+			}
+		}
+	}
+	return false
+}
+
+// collectResourceTypeLiterals returns every Resource type value in files
+// whose value is a string literal, a string constant of this package, or a
+// permissions.<Const> selector. It scans Resource{Type: X} and
+// &Resource{Type: X} literals, literals whose Resource element type is
+// elided inside a Resource slice, array or map literal, and assignments
+// x.Type = X where x is declared in the same file as a Resource. Values it
+// cannot resolve statically (a variable, a call, a concatenation, or an
+// identifier that shadows a package constant) are returned in unresolved
+// as "file: expr". Literals passed directly to a logOnlyResourceFuncs
+// function are skipped. Not scanned: Type values set through any other
+// path, such as a Resource returned by a call or a field of another struct.
+//
+// The guard is type-level only: it checks that each type is one the
+// registry defines, not that each (type, action) pair resolves. Pair
+// resolution is covered by the permission resolver tests.
+func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File, localConsts, permConsts map[string]string) (found []resourceTypeLiteral, unresolved []string) {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		record := func(value ast.Expr) {
+			s, resolved := "", false
+			switch v := value.(type) {
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					if u, err := strconv.Unquote(v.Value); err == nil {
+						s, resolved = u, true
+					}
+				}
+			case *ast.Ident:
+				// A name the parser resolved in this file is declared
+				// here and shadows a package constant of the same name;
+				// only a constant declaration resolves to a value.
+				if v.Obj == nil {
+					s, resolved = localConsts[v.Name]
+				} else if vs, ok := v.Obj.Decl.(*ast.ValueSpec); ok && v.Obj.Kind == ast.Con {
+					s, resolved = constValue(vs, v.Name)
+				}
+			case *ast.SelectorExpr:
+				if pkg, ok := v.X.(*ast.Ident); ok && pkg.Name == "permissions" && pkg.Obj == nil {
+					s, resolved = permConsts[v.Sel.Name]
+				}
+			}
+			pos := fset.Position(value.Pos())
+			file := filepath.Base(pos.Filename)
+			if !resolved {
+				unresolved = append(unresolved, file+": "+types.ExprString(value))
+				return
+			}
+			found = append(found, resourceTypeLiteral{
+				pos:      file + ":" + strconv.Itoa(pos.Line),
+				typeName: s,
+			})
+		}
+
 		logOnly := map[*ast.CompositeLit]bool{}
+		elided := map[*ast.CompositeLit]bool{}
 		ast.Inspect(files[name], func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -123,52 +217,74 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			return true
 		})
 		ast.Inspect(files[name], func(n ast.Node) bool {
+			if as, ok := n.(*ast.AssignStmt); ok {
+				for i, lhs := range as.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Type" || len(as.Rhs) != len(as.Lhs) {
+						continue
+					}
+					if x, ok := sel.X.(*ast.Ident); ok && declaredAsResource(x) {
+						record(as.Rhs[i])
+					}
+				}
+				return true
+			}
 			lit, ok := n.(*ast.CompositeLit)
 			if !ok || logOnly[lit] {
 				return true
 			}
-			ident, ok := lit.Type.(*ast.Ident)
-			if !ok || ident.Name != "Resource" {
+			// Mark element literals whose Resource type is elided.
+			var elt ast.Expr
+			switch t := lit.Type.(type) {
+			case *ast.ArrayType:
+				elt = t.Elt
+			case *ast.MapType:
+				elt = t.Value
+			}
+			if elt != nil && isResourceType(elt) {
+				for _, e := range lit.Elts {
+					if kv, ok := e.(*ast.KeyValueExpr); ok {
+						e = kv.Value
+					}
+					if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+						e = u.X
+					}
+					if inner, ok := e.(*ast.CompositeLit); ok && inner.Type == nil {
+						elided[inner] = true
+					}
+				}
+			}
+			if !elided[lit] && (lit.Type == nil || !isResourceType(lit.Type)) {
 				return true
 			}
-			for _, elt := range lit.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
+			for _, e := range lit.Elts {
+				kv, ok := e.(*ast.KeyValueExpr)
 				if !ok {
 					continue
 				}
-				key, ok := kv.Key.(*ast.Ident)
-				if !ok || key.Name != "Type" {
-					continue
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Type" {
+					record(kv.Value)
 				}
-				value, resolved := "", false
-				switch v := kv.Value.(type) {
-				case *ast.BasicLit:
-					if v.Kind == token.STRING {
-						if s, err := strconv.Unquote(v.Value); err == nil {
-							value, resolved = s, true
-						}
-					}
-				case *ast.Ident:
-					value, resolved = localConsts[v.Name]
-				case *ast.SelectorExpr:
-					if pkg, ok := v.X.(*ast.Ident); ok && pkg.Name == "permissions" {
-						value, resolved = permConsts[v.Sel.Name]
-					}
-				}
-				if !resolved {
-					unresolved++
-					continue
-				}
-				pos := fset.Position(kv.Value.Pos())
-				found = append(found, resourceTypeLiteral{
-					pos:      filepath.Base(pos.Filename) + ":" + strconv.Itoa(pos.Line),
-					typeName: value,
-				})
 			}
 			return true
 		})
 	}
 	return found, unresolved
+}
+
+// constValue returns the string value of the constant name in vs.
+func constValue(vs *ast.ValueSpec, name string) (string, bool) {
+	for i, n := range vs.Names {
+		if n.Name != name || i >= len(vs.Values) {
+			continue
+		}
+		if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if s, err := strconv.Unquote(lit.Value); err == nil {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 // knownResourceTypes returns the resource types the registry defines plus
@@ -217,7 +333,7 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 		}
 	}
 
-	found, _ := collectResourceTypeLiterals(fset, hubFiles, localConsts, permConsts)
+	found, unresolved := collectResourceTypeLiterals(fset, hubFiles, localConsts, permConsts)
 	require.NotEmpty(t, found, "scanner found no Resource{Type: ...} literals; the matcher is broken")
 
 	// Scanner self-check: brokerResource's own "broker" literal must be seen.
@@ -232,8 +348,35 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 
 	bad := unknownResourceTypeLiterals(found, knownResourceTypes())
 	assert.Empty(t, bad,
-		"Resource literals use a type that is not in permissions.Registry; "+
-			"use the registry resource type (see pkg/hub/permissions/registry.go)")
+		"Resource literals use a type that is not in permissions.Registry. "+
+			"Either use the registry resource type (see "+
+			"pkg/hub/permissions/registry.go), or add a reviewed pair to "+
+			"unregisteredResourcePermissions (authz_permission_resolver.go), "+
+			"naming its call sites, and update "+
+			"TestUnregisteredResourcePermissions_ExactSet")
+
+	sort.Strings(unresolved)
+	assert.Equal(t, unresolvedResourceTypeValues, unresolved,
+		"the set of Resource type values the guard cannot resolve statically "+
+			"changed. Resolve the type statically (a string literal or a "+
+			"permissions constant), or confirm the value can only hold "+
+			"registry types and update unresolvedResourceTypeValues")
+}
+
+// unresolvedResourceTypeValues pins the Resource type values, as
+// "file: expr", that the guard cannot resolve statically. These were
+// present when the pin was added; a new entry needs a review that the
+// value can only hold registry types. Keep it sorted.
+var unresolvedResourceTypeValues = []string{
+	"audit_authz.go: req.Resource.Type",
+	"authorized_list.go: resourceType",
+	"authz_relationship_rules.go: kind",
+	"capabilities.go: resourceType",
+	"handlers_resource_import.go: authzResourceType",
+	"handlers_resource_import.go: authzResourceType",
+	"handlers_resource_import.go: authzType",
+	"handlers_resource_import.go: authzType",
+	"route_metadata.go: meta.Resource",
 }
 
 // TestResourceTypeLiterals_DetectsUnknownType proves the guard reports an
@@ -244,12 +387,23 @@ func TestResourceTypeLiterals_DetectsUnknownType(t *testing.T) {
 
 const localType = "not_a_registry_type"
 
-func f() {
+func f(param string) {
 	_ = Resource{Type: "another_unknown_type", ID: "x"}
 	_ = Resource{Type: localType, ID: "x"}
 	_ = Resource{Type: permissions.ResourceBroker, ID: "x"}
 	_ = Resource{Type: "broker", ID: "x"}
 	logAuthzDenial(nil, nil, Resource{Type: "log_label_only"}, "read", "r")
+	_ = []Resource{{Type: "elided_slice_type"}}
+	_ = map[string]*Resource{"k": {Type: "elided_map_type"}}
+	var r Resource
+	r.Type = "assigned_type"
+	_ = Resource{Type: param}
+}
+
+func g() {
+	localType := pick()
+	_ = Resource{Type: localType}
+	other.Type = "not_a_resource_field"
 }
 `
 	fset := token.NewFileSet()
@@ -259,11 +413,14 @@ func f() {
 	permConsts := map[string]string{"ResourceBroker": permissions.ResourceBroker}
 
 	found, unresolved := collectResourceTypeLiterals(fset, files, stringConsts(f), permConsts)
-	assert.Zero(t, unresolved)
-	assert.Len(t, found, 4)
+	assert.Equal(t, []string{"sample.go: param", "sample.go: localType"}, unresolved)
+	assert.Len(t, found, 7)
 	assert.Equal(t, []string{
 		`sample.go:6: "another_unknown_type"`,
 		`sample.go:7: "not_a_registry_type"`,
+		`sample.go:11: "elided_slice_type"`,
+		`sample.go:12: "elided_map_type"`,
+		`sample.go:14: "assigned_type"`,
 	}, unknownResourceTypeLiterals(found, knownResourceTypes()))
 }
 
@@ -274,5 +431,7 @@ func TestUnregisteredResourcePermissions_ExactSet(t *testing.T) {
 	assert.Equal(t, map[resourceActionKey]string{
 		{ResourceType: "runtime_broker", Action: ActionRead}:   "runtime_broker.read",
 		{ResourceType: "runtime_broker", Action: ActionUpdate}: "runtime_broker.update",
-	}, unregisteredResourcePermissions)
+	}, unregisteredResourcePermissions,
+		"unregistered pairs changed; confirm the new pair is needed "+
+			"(see ptone/scion#2140) and update this pin")
 }
