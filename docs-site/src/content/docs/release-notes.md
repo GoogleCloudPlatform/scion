@@ -14,6 +14,11 @@ Raw keystroke messaging was replaced by a dedicated agent keys API (`scion keys`
 
 During the week of September 28 ([release notes](/scion/release-notes/2026-09-28/)), timezone handling changed: the Hub sends every timestamp in UTC with `Z`, the web dashboard has a per-user display timezone and a 24-hour clock, and cron schedules are UTC only. The runtime-profile `timezone` setting introduced the week before ([release notes](/scion/release-notes/2026-09-21/)) has been removed: an agent's `TZ` now comes from its pin, `TZ` environment variables on the Hub, or the Hub default timezone. See [Times and Timezones](/scion/reference/times-and-timezones/) for the full behaviour and the operator steps after upgrading.
 
+## Migration guides
+
+- [Migrating from raw message delivery](/scion/reference/raw-message-removal/): raw keystroke delivery through messages is removed. `scion message --raw` fails before sending anything, and any message request that still carries `raw` is refused with `422 raw_input_removed`. Use `scion keys` or `POST .../keys` instead.
+- [Migrating from grove names](/scion/reference/grove-removal/): the grove→project rename.
+
 ## Previous Weeks
 
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)

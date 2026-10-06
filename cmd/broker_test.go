@@ -37,7 +37,9 @@ func TestBrokerRestartCmdFlags(t *testing.T) {
 	// Verify restart command has the expected flags
 	portFlag := brokerRestartCmd.Flags().Lookup("port")
 	assert.NotNil(t, portFlag, "--port flag should be registered")
-	assert.Equal(t, "9800", portFlag.DefValue, "default port should be 9800")
+	// 0 means "not set": restart then keeps the running daemon's port
+	// (see resolveBrokerRestartOptions), else uses DefaultBrokerPort.
+	assert.Equal(t, "0", portFlag.DefValue, "unset --port should keep the daemon's port")
 
 	autoProvideFlag := brokerRestartCmd.Flags().Lookup("auto-provide")
 	assert.NotNil(t, autoProvideFlag, "--auto-provide flag should be registered")

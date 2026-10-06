@@ -393,6 +393,14 @@ type StartOpts struct {
 	// in some tests), the dispatch runs on the caller's context itself, so
 	// its cancellation and deadline both reach it.
 	KeepCallerDeadline bool
+	// SyncDispatchBound bounds the DispatchAgentStart call by
+	// syncDispatchTimeout (syncDispatch), as a synchronous launch that no
+	// longer follows its client is bounded (ptone/scion#1961). Set only by
+	// the HTTP handler sites (lifecycle start and restart, and the starts of
+	// create-on-existing); scheduled, reconcile and wake starts are not
+	// bounded by it. It composes with KeepCallerDeadline: the earlier
+	// deadline wins.
+	SyncDispatchBound bool
 	// NewGeneration clears the previous run's message, stalled marker and
 	// exit fields in the post-start write even when the agent was already
 	// in a counted phase (a restart). A start from a resting phase always
@@ -455,7 +463,16 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			dctx, cancel = context.WithDeadline(ctx, callerDeadline)
 			defer cancel()
 		}
-		if err := dispatcher.DispatchAgentStart(dctx, agent, opts.Task, opts.Resume); err != nil {
+		dispatch := func(c context.Context) error {
+			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
+		}
+		var err error
+		if opts.SyncDispatchBound {
+			err = syncDispatch(dctx, dispatch)
+		} else {
+			err = dispatch(dctx)
+		}
+		if err != nil {
 			sd.rollback(ctx)
 			return false, err
 		}

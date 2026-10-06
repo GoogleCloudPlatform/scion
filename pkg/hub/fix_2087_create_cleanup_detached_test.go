@@ -140,8 +140,8 @@ type cancelingCreateDispatcher struct {
 	cancelRequest context.CancelFunc
 	createErr     error
 
-	heldBeforeCleanup   reservationsHeld
-	dispatchCtxCanceled bool
+	heldBeforeCleanup reservationsHeld
+	dispatchCtxErr    error
 	// reqCtx is the request's context; requestDoneAtCleanup records whether
 	// it was done when the failure cleanup ran.
 	reqCtx               context.Context
@@ -166,12 +166,9 @@ func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Co
 		ExpiresAt:    now.Add(time.Hour),
 	}))
 	d.cancelRequest()
-	// A create-and-start runs under a start claim on a context detached from
-	// the request (a start runs to its outcome, bounded by
-	// start_max_duration), so the dispatch does not see the cancel; the
-	// handler's own context, which the failure cleanup must not depend on,
-	// is canceled.
-	d.dispatchCtxCanceled = ctx.Err() != nil
+	// Since ptone/scion#1961 the dispatch runs detached from the request:
+	// the request is canceled, but the dispatch ctx must stay live.
+	d.dispatchCtxErr = ctx.Err()
 	if d.createErr != nil {
 		return nil, d.createErr
 	}
@@ -243,7 +240,7 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 			serve()
 
 			require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
-			require.False(t, disp.dispatchCtxCanceled, "the create runs detached from the canceled request")
+			require.NoError(t, disp.dispatchCtxErr, "the dispatch ctx must not follow the canceled request (ptone/scion#1961)")
 			if tc.createErr != nil {
 				require.True(t, disp.requestDoneAtCleanup, "the request ctx is done when the failure cleanup runs")
 			}

@@ -29,7 +29,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { listGroups, listMyGroups, GroupsApiError } from '../../client/groups-api.js';
 import type {
   AdminGroup,
@@ -640,9 +640,7 @@ export class ScionPageAdminGroups extends LitElement {
     if (this.activeTab === 'mine') params.set('tab', 'mine');
     if (this.currentCursor) params.set('cursor', this.currentCursor);
 
-    const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
-    window.history.replaceState({}, '', newUrl);
+    replaceSearch(params);
   }
 
   // ---------------------------------------------------------------------------

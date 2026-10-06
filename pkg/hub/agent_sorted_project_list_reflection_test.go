@@ -34,9 +34,13 @@ import (
 // --- resourceEqual must be a true whole-Resource compare -------------
 
 // TestResourceEqual_MutationCoversEveryField is the required proof:
-// reflection-fill a Resource, mutate each exported field one at a
-// time, and assert resourceEqual returns false every time. A future
-// Resource field is then covered automatically, because this test iterates
+// reflection-fill a Resource, mutate each field one at a time, and
+// assert resourceEqual returns false every time. Exported fields are
+// mutated through reflection by kind. Reflection cannot set unexported
+// fields, so each one is assigned directly by name (launchedTarget gets
+// a pointer to a store.Agent with ID x), and any other unexported field
+// fails the test until it is added here. A future exported Resource
+// field is then covered automatically, because this test iterates
 // reflect.TypeOf(Resource{}).NumField() rather than naming fields by hand --
 // exactly the property the old hand-written field list lacked (it already
 // silently omitted ScopeUserID).
@@ -61,19 +65,30 @@ func TestResourceEqual_MutationCoversEveryField(t *testing.T) {
 		field := typ.Field(i)
 		t.Run(field.Name, func(t *testing.T) {
 			mutated := base
-			v := reflect.ValueOf(&mutated).Elem().Field(i)
-			switch v.Kind() {
-			case reflect.String:
-				v.SetString(v.String() + "-mutated")
-			case reflect.Map:
-				m := reflect.MakeMap(v.Type())
-				m.SetMapIndex(reflect.ValueOf("different-key"), reflect.ValueOf("different-value"))
-				v.Set(m)
-			case reflect.Slice:
-				v.Set(reflect.AppendSlice(reflect.MakeSlice(v.Type(), 0, 0), v))
-				v.Set(reflect.Append(v, reflect.ValueOf("different-element")))
-			default:
-				t.Fatalf("unhandled Resource field kind %s for field %s; extend this test", v.Kind(), field.Name)
+			if !field.IsExported() {
+				// Reflection cannot set an unexported field, so assign it
+				// directly by name.
+				switch field.Name {
+				case "launchedTarget":
+					mutated.launchedTarget = &store.Agent{ID: "x"}
+				default:
+					t.Fatalf("unhandled unexported Resource field %s; extend this test", field.Name)
+				}
+			} else {
+				v := reflect.ValueOf(&mutated).Elem().Field(i)
+				switch v.Kind() {
+				case reflect.String:
+					v.SetString(v.String() + "-mutated")
+				case reflect.Map:
+					m := reflect.MakeMap(v.Type())
+					m.SetMapIndex(reflect.ValueOf("different-key"), reflect.ValueOf("different-value"))
+					v.Set(m)
+				case reflect.Slice:
+					v.Set(reflect.AppendSlice(reflect.MakeSlice(v.Type(), 0, 0), v))
+					v.Set(reflect.Append(v, reflect.ValueOf("different-element")))
+				default:
+					t.Fatalf("unhandled Resource field kind %s for field %s; extend this test", v.Kind(), field.Name)
+				}
 			}
 			require.NotEqual(t, base, mutated, "mutation must actually change the struct (test bug if not)")
 			require.False(t, resourceEqual(base, mutated),
