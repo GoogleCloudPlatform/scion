@@ -34,7 +34,7 @@
 # What this image still does for itself, because it is genuinely specific to
 # this base:
 #   * git — Ubuntu 24.04 (noble) caps at 2.43.0 with no newer apt candidate,
-#     and scion hard-requires 2.47.0 (pkg/util/git.go CheckGitVersion, for
+#     and scion hard-requires 2.48.0 (pkg/util/git.go CheckGitVersion, for
 #     `worktree add --relative-paths`). This matters only here: scion-base never
 #     installs git, and targets.sh routes thick as thick-prep -> scion-base,
 #     bypassing core-base, the only other place git comes from. Before the

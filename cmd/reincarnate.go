@@ -201,7 +201,7 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 		agentName = api.Slugify(args[0])
 	} else {
 		if selfName == "" {
-			return "", false, fmt.Errorf("specify an agent name, or run this inside an agent container to migrate yourself")
+			return "", false, newUsageError("specify an agent name, or run this inside an agent container to migrate yourself")
 		}
 		agentName = api.Slugify(selfName)
 	}

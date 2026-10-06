@@ -206,7 +206,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
+		return "", "", newUsageError("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
@@ -216,7 +216,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		case "user", "":
 			return "user", "", nil
 		default:
-			return "", "", fmt.Errorf("invalid --scope value %q: must be 'hub' or 'user'", envScope)
+			return "", "", newUsageError("invalid --scope value %q: must be 'hub' or 'user'", envScope)
 		}
 	}
 
@@ -299,7 +299,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		// Single argument: expect KEY=VALUE format
 		parts := strings.SplitN(args[0], "=", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid format: expected KEY=VALUE or KEY VALUE")
+			return newUsageError("invalid format: expected KEY=VALUE or KEY VALUE")
 		}
 		key = parts[0]
 		value = parts[1]
@@ -311,10 +311,10 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
@@ -325,7 +325,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 
 	// Validate --always and --as-needed are mutually exclusive
 	if envAlways && envAsNeeded {
-		return fmt.Errorf("--always and --as-needed are mutually exclusive")
+		return newUsageError("--always and --as-needed are mutually exclusive")
 	}
 
 	// Determine injection mode
