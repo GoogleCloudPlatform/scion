@@ -215,6 +215,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			clone.Labels = make(map[string]string)
 		}
 		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideCanonical)
+		// Defence in depth: overrideRemote is already query-stripped, validated and credential-stripped above.
 		if src := util.SanitizeGitSourceURL(overrideRemote); src != "" {
 			clone.Labels[store.LabelSourceURL] = src
 		}
