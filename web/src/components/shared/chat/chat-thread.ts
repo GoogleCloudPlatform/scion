@@ -1418,6 +1418,10 @@ export class ScionChatThread extends LitElement {
     this.loaded = false;
     this.error = null;
     this.sendError = null;
+    // A send still in flight belongs to the conversation we just left; its
+    // completion will not touch `sending` (fetchId guard), so release the
+    // composer here.
+    this.sending = false;
     this.pinnedToBottom = true;
     this._lastScrollEl = null;
     this.loadingOlder = false;
@@ -1734,11 +1738,14 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async initialLoadV2(): Promise<void> {
+    const loadId = this.fetchId;
     this.loading = true;
     this.error = null;
 
     try {
-      await this.fetchHistoryV2();
+      // A switch while the history loads hands over to the next
+      // conversation's own load; this one stops here.
+      if (!(await this.fetchHistoryV2())) return;
       this.startStreamV2();
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
@@ -1757,115 +1764,133 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
-      this.loading = false;
-      // Determine scroll target: permalink hash > restored position >
-      // unread divider > bottom. A restored position that was following the
-      // bottom yields to the unread divider: messages that arrived while the
-      // user was away should be met at "New messages", not scrolled past.
-      // The anchor is taken (used up) even when the hash wins.
-      const hashMsgId = this.parseMessageHash();
-      const restore = this.takeRestoreScrollAnchor();
-      if (hashMsgId) {
-        void this.scrollToMessageById(hashMsgId, true);
-      } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
-        void this.restoreScrollPosition(restore);
-      } else if (this.showUnreadDivider) {
-        this.scrollToUnreadDivider();
-      } else {
-        this.scrollToBottomAfterRender();
-      }
-      // Advance read watermark after a delay so the blue dot clears. When
-      // showUnreadDivider is true, use a longer delay so the user can see the
-      // "New messages" divider before it is acknowledged. When it is false
-      // (first DM open — no prior read state), a shorter settle delay is
-      // enough to let the render commit.
-      if (this.messages.length > 0) {
-        const delay = this.showUnreadDivider ? 2000 : 500;
-        if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
-        this._initialWatermarkTimer = setTimeout(() => {
-          this._initialWatermarkTimer = null;
-          // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
-          // gates — a mark-unread landing during this delay (e.g. another tab,
-          // or this one via the rail) must not be undone the instant this
-          // timer fires.
-          if (this._autoAdvanceSuppressed) return;
-          const messageId = this.lastReadableMessageId();
-          if (messageId) {
-            void this.advanceReadWatermark(messageId);
-          }
-        }, delay);
+      // The loading flag, the restore anchor, the scroll target and the
+      // watermark timer all belong to the conversation now on screen.
+      if (loadId === this.fetchId) {
+        this.loading = false;
+        // Determine scroll target: permalink hash > restored position >
+        // unread divider > bottom. A restored position that was following the
+        // bottom yields to the unread divider: messages that arrived while the
+        // user was away should be met at "New messages", not scrolled past.
+        // The anchor is taken (used up) even when the hash wins.
+        const hashMsgId = this.parseMessageHash();
+        const restore = this.takeRestoreScrollAnchor();
+        if (hashMsgId) {
+          void this.scrollToMessageById(hashMsgId, true);
+        } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
+          void this.restoreScrollPosition(restore);
+        } else if (this.showUnreadDivider) {
+          this.scrollToUnreadDivider();
+        } else {
+          this.scrollToBottomAfterRender();
+        }
+        // Advance read watermark after a delay so the blue dot clears. When
+        // showUnreadDivider is true, use a longer delay so the user can see the
+        // "New messages" divider before it is acknowledged. When it is false
+        // (first DM open — no prior read state), a shorter settle delay is
+        // enough to let the render commit.
+        if (this.messages.length > 0) {
+          const delay = this.showUnreadDivider ? 2000 : 500;
+          if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
+          this._initialWatermarkTimer = setTimeout(() => {
+            this._initialWatermarkTimer = null;
+            // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
+            // gates — a mark-unread landing during this delay (e.g. another tab,
+            // or this one via the rail) must not be undone the instant this
+            // timer fires.
+            if (this._autoAdvanceSuppressed) return;
+            const messageId = this.lastReadableMessageId();
+            if (messageId) {
+              void this.advanceReadWatermark(messageId);
+            }
+          }, delay);
+        }
       }
     }
   }
 
-  private async fetchHistoryV2(cursor?: string): Promise<void> {
+  /**
+   * Fetch a page of history and merge it. Resolves false, having changed
+   * nothing, when the thread switched conversations before the page
+   * arrived — including when the request then failed: that failure
+   * belongs to the conversation left. Callers then leave the new
+   * conversation alone too.
+   */
+  private async fetchHistoryV2(cursor?: string): Promise<boolean> {
     const currentId = this.fetchId;
-    // Captured before the request starts: a response landing after the user
-    // has logged out (or switched accounts) must not repopulate a store that
-    // is no longer this identity's.
-    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
-    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
-    if (cursor) {
-      params.set('cursor', cursor);
-    }
-
-    const res = await apiFetch(
-      `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
-    );
-
-    if (currentId !== this.fetchId) return;
-
-    if (!res.ok) {
-      throw new Error(await extractApiError(res, 'Failed to fetch messages'));
-    }
-
-    const data = (await res.json()) as {
-      items?: Message[];
-      messages?: Message[];
-      nextCursor?: string;
-      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
-      messageExtensions?: Record<
-        string,
-        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
-      >;
-      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
-    };
-
-    const items = data?.items ?? data?.messages ?? [];
-
-    // W7: Merge attachment refs from history response.
-    if (data?.messageAttachments) {
-      for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
-        this.v2AttachmentMap.set(msgId, refs);
+    try {
+      // Captured before the request starts: a response landing after the user
+      // has logged out (or switched accounts) must not repopulate a store that
+      // is no longer this identity's.
+      const recentFilesGeneration = chatRecentFiles.scopeGeneration;
+      const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+      if (cursor) {
+        params.set('cursor', cursor);
       }
-    }
 
-    // Phase-3: Merge message extensions and reply previews.
-    if (data?.messageExtensions) {
-      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
-        this.v2MessageExtMap.set(msgId, ext);
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+      );
+
+      // Early out only: the catch below and the check after the body is
+      // read would also drop a stale page, but there is no need to read it.
+      if (currentId !== this.fetchId) return false;
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, 'Failed to fetch messages'));
       }
-    }
-    if (data?.replyPreviews) {
-      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
-        this.v2ReplyPreviewMap.set(msgId, preview);
+
+      const data = (await res.json()) as {
+        items?: Message[];
+        messages?: Message[];
+        nextCursor?: string;
+        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageExtensions?: Record<
+          string,
+          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+        >;
+        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      };
+
+      // The body can still be arriving after the headers; a conversation
+      // switch in the meantime must not merge this page into the new one.
+      if (currentId !== this.fetchId) return false;
+
+      const items = data?.items ?? data?.messages ?? [];
+
+      // W7: Merge attachment refs from history response.
+      if (data?.messageAttachments) {
+        for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
+          this.v2AttachmentMap.set(msgId, refs);
+        }
       }
-    }
 
-    if (items.length < HISTORY_PAGE_SIZE) {
-      this.hasOlderMessages = false;
-    }
+      // Phase-3: Merge message extensions and reply previews.
+      if (data?.messageExtensions) {
+        for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+          this.v2MessageExtMap.set(msgId, ext);
+        }
+      }
+      if (data?.replyPreviews) {
+        for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+          this.v2ReplyPreviewMap.set(msgId, preview);
+        }
+      }
 
-    if (data?.nextCursor) {
-      this.nextCursor = data.nextCursor;
-    }
+      if (items.length < HISTORY_PAGE_SIZE) {
+        this.hasOlderMessages = false;
+      }
 
-    this.mergeMessages(items);
-    // Re-checked here, not just before the fetch/json-parse awaits above: a
-    // conversation switch that lands during `res.json()` must not attribute
-    // this page's items to the new conversation/project.
-    if (currentId === this.fetchId) {
+      if (data?.nextCursor) {
+        this.nextCursor = data.nextCursor;
+      }
+
+      this.mergeMessages(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
+      return true;
+    } catch (err) {
+      if (currentId !== this.fetchId) return false;
+      throw err;
     }
   }
 
@@ -2155,6 +2180,8 @@ export class ScionChatThread extends LitElement {
       >;
       replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
+    // See fetchHistoryV2: re-checked once the body has been read.
+    if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
 
     // W7: Merge attachment refs from history response.
@@ -2177,12 +2204,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
-    // See fetchHistoryV2's identical re-check: a conversation switch during
-    // `res.json()` must not attribute this page's items to the new
-    // conversation/project.
-    if (currentId === this.fetchId) {
-      this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    }
+    this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
@@ -2495,6 +2517,9 @@ export class ScionChatThread extends LitElement {
     // whatever conversation/project the thread has since moved on to.
     const sendConversationKey = this.conversationKey;
     const sendProjectId = this.resolvePathLinkProjectId(optimisticMsg);
+    // A failure that lands after a conversation switch must not put this
+    // send's reply bar or error on the conversation now on screen.
+    const sendFetchId = this.fetchId;
 
     try {
       const body: Record<string, unknown> = {
@@ -2548,10 +2573,14 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
-        // Restore reply-to state so the reply bar comes back for retry.
-        this.composerReplyTo = savedReplyTo;
-        this.sendError = await extractApiError(res, 'Failed to send message');
-        onError?.(this.sendError ?? 'Failed to send message');
+        // Restore reply-to state so the reply bar comes back for retry —
+        // before reading the error, so a reply picked meanwhile stands.
+        // These guards cover the thread's own state only; the composer's
+        // onError restore after a switch is handled separately.
+        if (sendFetchId === this.fetchId) this.composerReplyTo = savedReplyTo;
+        const error = await extractApiError(res, 'Failed to send message');
+        if (sendFetchId === this.fetchId) this.sendError = error;
+        onError?.(error ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -2662,12 +2691,19 @@ export class ScionChatThread extends LitElement {
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort(compareMessageOrder);
-      // Restore reply-to state so the reply bar comes back for retry.
-      this.composerReplyTo = savedReplyTo;
-      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
-      onError?.(this.sendError ?? 'Failed to send message');
+      const error = err instanceof Error ? err.message : 'Failed to send message';
+      // Thread state only; the composer's onError restore after a switch
+      // is handled separately.
+      if (sendFetchId === this.fetchId) {
+        // Restore reply-to state so the reply bar comes back for retry.
+        this.composerReplyTo = savedReplyTo;
+        this.sendError = error;
+      }
+      onError?.(error);
     } finally {
-      this.sending = false;
+      // After a switch, `sending` belongs to the new conversation (the
+      // switch reset it), so a stale send must not clear it.
+      if (sendFetchId === this.fetchId) this.sending = false;
     }
   }
 
@@ -3045,6 +3081,7 @@ export class ScionChatThread extends LitElement {
   }
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
+    const loadId = this.fetchId;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
@@ -3053,10 +3090,14 @@ export class ScionChatThread extends LitElement {
     } catch {
       // Silently fail for older messages
     } finally {
-      this.loadingOlder = false;
-      await this.updateComplete;
-      const newScrollHeight = scrollEl.scrollHeight;
-      scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      // After a switch, the spinner and the height delta belong to the
+      // conversation the user left.
+      if (loadId === this.fetchId) {
+        this.loadingOlder = false;
+        await this.updateComplete;
+        const newScrollHeight = scrollEl.scrollHeight;
+        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      }
     }
   }
 
@@ -3278,7 +3319,8 @@ export class ScionChatThread extends LitElement {
       this.pinnedToBottom = true;
 
       try {
-        await this.fetchHistoryV2();
+        // Switched away meanwhile: the new conversation keeps its own view.
+        if (!(await this.fetchHistoryV2())) return;
         this.viewingAroundMessage = false;
       } catch (err) {
         this.error = err instanceof Error ? err.message : 'Failed to load messages';
