@@ -382,6 +382,11 @@ type StartOpts struct {
 	// it instead of taking one. startAgentCore settles it on success and
 	// rolls it back on any failure.
 	Dispatch *startDispatch
+	// KeepCallerDeadline bounds the dispatch by the caller's context
+	// deadline too, when it has one and it is earlier than the claim run's
+	// (a direct-message wake bounds its resume this way). Cancellation of
+	// the caller's context still does not reach the start.
+	KeepCallerDeadline bool
 	// NewGeneration clears the previous run's message, stalled marker and
 	// exit fields in the post-start write even when the agent was already
 	// in a counted phase (a restart). A start from a resting phase always
@@ -424,6 +429,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		return errors.New("no dispatcher")
 	}
 	sd := opts.Dispatch
+	callerDeadline, hasCallerDeadline := ctx.Deadline()
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
 		defer endOp()
@@ -437,7 +443,13 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			sd.rollback(ctx)
 			return false, err
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, agent, opts.Task, opts.Resume); err != nil {
+		dctx := ctx
+		if opts.KeepCallerDeadline && hasCallerDeadline {
+			var cancel context.CancelFunc
+			dctx, cancel = context.WithDeadline(ctx, callerDeadline)
+			defer cancel()
+		}
+		if err := dispatcher.DispatchAgentStart(dctx, agent, opts.Task, opts.Resume); err != nil {
 			sd.rollback(ctx)
 			return false, err
 		}

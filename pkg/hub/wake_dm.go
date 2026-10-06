@@ -135,7 +135,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// releases the claim like a success: the start itself was accepted.
 		var statusErr *AgentDMError
 		var readyErr error
-		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, AfterStart: func(ctx context.Context, st startedState) error {
+		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, AfterStart: func(ctx context.Context, st startedState) error {
 			// Re-assert 'starting' (beginStartDispatch already wrote it) and
 			// clear the previous generation's leftovers while the lifecycle
 			// op is still held: a heartbeat guarded during the dispatch may
