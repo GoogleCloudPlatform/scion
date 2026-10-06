@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -294,10 +295,12 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	wantPatched := requestedPatchFields(req)
 
 	// A hub that predates the patch fields ignores serviceAccount, role and
-	// thinkingLevel, and would run an unpatched reincarnation. Before a real
-	// patched request, ask for the plan first and stop if the hub did not
-	// apply the patch.
-	if len(wantPatched) > 0 && !reincarnateDryRun {
+	// thinkingLevel, and would run an unpatched reincarnation; one that
+	// predates sharedDirBackends ignores those too. Before a real patched
+	// or shared dir request, ask for the plan first and stop if the hub did
+	// not apply it.
+	wantSharedDirs := len(req.SharedDirBackends) > 0
+	if (len(wantPatched) > 0 || wantSharedDirs) && !reincarnateDryRun {
 		probe := *req
 		probe.DryRun = true
 		probeResp, err := agentSvc.Reincarnate(ctx, agentName, &probe)
@@ -311,6 +314,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 		}
 		if err := checkHubAppliedPatch(wantPatched, probeResp); err != nil {
+			return err
+		}
+		if err := checkHubAppliedSharedDirs(req, probeResp); err != nil {
 			return err
 		}
 	}
@@ -347,6 +353,14 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			// reincarnation is already running, without the patch.
 			return fmt.Errorf("the reincarnation of '%s' started without the requested changes (%s): the hub that accepted it does not support reincarnate patch flags; upgrade the hub, then reincarnate again with the flags",
 				agentName, strings.Join(wantPatched, ", "))
+		}
+		return err
+	}
+	if err := checkHubAppliedSharedDirs(req, resp); err != nil {
+		if !reincarnateDryRun {
+			// As above: the probe passed, but the hub that accepted the
+			// real request ignored the shared dir change.
+			return fmt.Errorf("the reincarnation of '%s' started without the shared dir backend change: the hub that accepted it does not support --shared-dir-backend; upgrade the hub, then reincarnate again with the flag", agentName)
 		}
 		return err
 	}
@@ -479,6 +493,21 @@ func patchNeedsUpdateError(err error, wantPatched []string, cred hubsync.Credent
 
 // checkHubAppliedPatch fails when the response's plan does not list every
 // requested patch field: the hub ignored them.
+// checkHubAppliedSharedDirs reports an error when req asks for a shared dir
+// backend change and resp's plan does not echo it exactly. A hub that
+// predates the change ignores the request fields and plans a plain
+// reincarnation.
+func checkHubAppliedSharedDirs(req *hubclient.ReincarnateAgentRequest, resp *hubclient.ReincarnateAgentResponse) error {
+	if len(req.SharedDirBackends) == 0 {
+		return nil
+	}
+	if resp == nil || !maps.Equal(resp.Plan.SharedDirBackends, req.SharedDirBackends) ||
+		resp.Plan.AllowEmptySharedDir != req.AllowEmptySharedDir {
+		return fmt.Errorf("this hub does not support --shared-dir-backend; upgrade the hub")
+	}
+	return nil
+}
+
 func checkHubAppliedPatch(want []string, resp *hubclient.ReincarnateAgentResponse) error {
 	if len(want) == 0 {
 		return nil

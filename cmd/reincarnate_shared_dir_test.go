@@ -63,8 +63,13 @@ func TestReincarnateCmd_SharedDirFlagsRegistered(t *testing.T) {
 }
 
 // sharedDirTestHub is a fake hub that records reincarnate request bodies.
-func sharedDirTestHub(t *testing.T) (*HubContext, *[]map[string]interface{}) {
+// plan returns the plan JSON for a request body; nil echoes the request's
+// sharedDirBackends and allowEmptySharedDir, as a current hub does.
+func sharedDirTestHub(t *testing.T, plan func(body map[string]interface{}) string) (*HubContext, *[]map[string]interface{}) {
 	t.Helper()
+	if plan == nil {
+		plan = echoSharedDirPlan
+	}
 	var bodies []map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/reincarnate") {
@@ -75,14 +80,35 @@ func sharedDirTestHub(t *testing.T) (*HubContext, *[]map[string]interface{}) {
 		var body map[string]interface{}
 		_ = json.Unmarshal(data, &body)
 		bodies = append(bodies, body)
+		state := "pending"
+		if dry, _ := body["dryRun"].(bool); dry {
+			state = "planned"
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"planned","plan":{"sharedDirBackends":{"notes":"nfs"},"allowEmptySharedDir":true}}`))
+		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"` + state + `","plan":` + plan(body) + `}`))
 	}))
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}, &bodies
 }
+
+// echoSharedDirPlan is the plan of a hub that supports shared dir backend
+// changes: it echoes them.
+func echoSharedDirPlan(body map[string]interface{}) string {
+	plan := map[string]interface{}{}
+	if v, ok := body["sharedDirBackends"]; ok {
+		plan["sharedDirBackends"] = v
+	}
+	if v, ok := body["allowEmptySharedDir"]; ok {
+		plan["allowEmptySharedDir"] = v
+	}
+	data, _ := json.Marshal(plan)
+	return string(data)
+}
+
+// oldHubPlan is the plan of a hub that predates shared dir backend changes.
+func oldHubPlan(map[string]interface{}) string { return `{}` }
 
 func setSharedDirFlags(t *testing.T, values []string, allowEmpty, dryRun bool) {
 	t.Helper()
@@ -95,7 +121,7 @@ func setSharedDirFlags(t *testing.T, values []string, allowEmpty, dryRun bool) {
 
 // The flags reach the hub as sharedDirBackends and allowEmptySharedDir.
 func TestReincarnateAgentViaHub_SendsSharedDirBackends(t *testing.T) {
-	hubCtx, bodies := sharedDirTestHub(t)
+	hubCtx, bodies := sharedDirTestHub(t, nil)
 	setSharedDirFlags(t, []string{"notes=nfs"}, true, true)
 	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "", false))
 	require.Len(t, *bodies, 1)
@@ -107,7 +133,7 @@ func TestReincarnateAgentViaHub_SendsSharedDirBackends(t *testing.T) {
 
 // Without the flags the request carries neither field.
 func TestReincarnateAgentViaHub_NoSharedDirBackendsByDefault(t *testing.T) {
-	hubCtx, bodies := sharedDirTestHub(t)
+	hubCtx, bodies := sharedDirTestHub(t, nil)
 	setSharedDirFlags(t, nil, false, true)
 	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "", false))
 	require.Len(t, *bodies, 1)
@@ -120,7 +146,7 @@ func TestReincarnateAgentViaHub_NoSharedDirBackendsByDefault(t *testing.T) {
 // An agent changing its own shared dir backend, or a malformed flag, is
 // refused before any hub request.
 func TestReincarnateAgentViaHub_SharedDirRefusalsBeforeHub(t *testing.T) {
-	hubCtx, bodies := sharedDirTestHub(t)
+	hubCtx, bodies := sharedDirTestHub(t, nil)
 
 	setSharedDirFlags(t, []string{"notes=nfs"}, false, false)
 	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", true)
@@ -143,4 +169,68 @@ func TestReincarnateAgentViaHub_SharedDirRefusalsBeforeHub(t *testing.T) {
 	setSharedDirFlags(t, nil, false, true)
 	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "", true))
 	assert.Len(t, *bodies, 1)
+}
+
+// A real request with a shared dir change is preceded by a dry-run probe;
+// the hub echoes the change, so the real request follows.
+func TestReincarnateAgentViaHub_SharedDirProbeEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, nil)
+	setSharedDirFlags(t, []string{"notes=nfs"}, false, false)
+	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
+	require.Len(t, *bodies, 2, "probe, then the real request")
+	assert.Equal(t, true, (*bodies)[0]["dryRun"])
+	assert.Equal(t, map[string]interface{}{"notes": "nfs"}, (*bodies)[0]["sharedDirBackends"])
+	_, dry := (*bodies)[1]["dryRun"]
+	assert.False(t, dry, "the second request is the real one")
+	assert.Equal(t, map[string]interface{}{"notes": "nfs"}, (*bodies)[1]["sharedDirBackends"])
+}
+
+// A hub that does not echo the change stops the CLI after the probe, so no
+// plain reincarnation runs.
+func TestReincarnateAgentViaHub_SharedDirProbeNotEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, oldHubPlan)
+	setSharedDirFlags(t, []string{"notes=nfs"}, false, false)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support --shared-dir-backend; upgrade the hub", err.Error())
+	require.Len(t, *bodies, 1, "only the dry-run probe reaches the hub")
+	assert.Equal(t, true, (*bodies)[0]["dryRun"])
+}
+
+// A dry run against a hub that does not echo the change fails instead of
+// printing a plan without it.
+func TestReincarnateAgentViaHub_SharedDirDryRunNotEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, oldHubPlan)
+	setSharedDirFlags(t, []string{"notes=nfs"}, true, true)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support --shared-dir-backend")
+	assert.Len(t, *bodies, 1)
+}
+
+// An echo that differs (here allowEmptySharedDir dropped) is not accepted.
+func TestReincarnateAgentViaHub_SharedDirPartialEchoRejected(t *testing.T) {
+	hubCtx, _ := sharedDirTestHub(t, func(map[string]interface{}) string {
+		return `{"sharedDirBackends":{"notes":"nfs"}}`
+	})
+	setSharedDirFlags(t, []string{"notes=nfs"}, true, true)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support --shared-dir-backend")
+}
+
+// The probe passes but the hub that takes the real request ignores the
+// change: the error says the reincarnation started without it.
+func TestReincarnateAgentViaHub_SharedDirRealRequestNotEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, func(body map[string]interface{}) string {
+		if dry, _ := body["dryRun"].(bool); dry {
+			return echoSharedDirPlan(body)
+		}
+		return `{}`
+	})
+	setSharedDirFlags(t, []string{"notes=nfs"}, false, false)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "started without the shared dir backend change")
+	assert.Len(t, *bodies, 2)
 }
