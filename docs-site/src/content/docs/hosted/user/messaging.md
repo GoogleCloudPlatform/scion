@@ -508,6 +508,7 @@ To send to multiple recipients at once, use the `group[...]` addressing form:
 ```bash
 scion message "group[tech-lead, dev-agent, qa-agent]" "Let's review the deployment strategy"
 ```
+A group send reports each recipient's outcome and exits `3` when only some recipients received the message; see [Group sends and exit codes](/scion/reference/cli/#scion-message-or-msg).
 
 :::caution[Deprecated Flag]
 The `--cc` flag on `scion message` is deprecated and will be removed in a future release. It still works but triggers a deprecation warning. Use `group[...]` addressing or body `@mentions` for multi-recipient delivery instead.
