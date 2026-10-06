@@ -29,14 +29,14 @@ import (
 // reply-to agent, and no @mention that names an agent or a project member;
 // a mention of nobody, such as a typo, counts as none) may have been meant
 // for the agent that last posted in the thread. It is never silently routed
-// to that agent. Instead, when an agent has posted in the thread, the hub
-// appends a note to the stored body that @mentions the most recent human
-// poster other than the sender (else the thread creator), who gets the
-// ordinary human mention notification, and names the most recent agent
-// poster by plain slug so that agent does not read as addressed. No agent
-// is invoked. In a thread where no agent has posted there is no agent the
-// reply could have been meant for, so it gets no note and stays
-// no_recipient. A reply that reaches a live default agent is left
+// to that agent. Instead, when the most recent message in the thread not
+// from the sender was posted by an agent, the hub appends a note to the
+// stored body that @mentions the most recent human poster other than the
+// sender (else the thread creator), who gets the ordinary human mention
+// notification, and names that agent by plain slug so it does not read as
+// addressed. No agent is invoked. Otherwise (no agent posted, or people have been talking
+// since) the reply is not plausibly meant for an agent, so it gets no note
+// and stays no_recipient. A reply that reaches a live default agent is left
 // untouched.
 //
 // The note is a suffix on the message body rather than a separate message
@@ -79,23 +79,31 @@ func appendUnmentionedNote(content, mention, poster string) (string, bool) {
 
 // recentThreadPosters returns the slug of the most recent agent poster in
 // thread key, and the IDs of human posters other than senderUserID, most
-// recent first and without duplicates. Mention fan-out copies are ignored.
-func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID string) (string, []string, error) {
+// recent first and without duplicates. agentLast reports whether the most
+// recent message not from the sender was posted by an agent. Mention
+// fan-out copies are ignored.
+func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID string) (agentSlug string, humans []string, agentLast bool, err error) {
 	res, err := s.store.ListMessages(ctx, store.MessageFilter{
 		ThreadID:    key,
 		ExcludeType: messages.TypeMention,
 	}, store.ListOptions{Limit: unmentionedNoteScanLimit, SkipTotalCount: true})
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
-	var agentSlug string
-	var humans []string
 	seen := make(map[string]bool)
+	sawOther := false
 	for _, m := range res.Items {
-		if agentSlug == "" {
-			if slug, ok := strings.CutPrefix(m.Sender, "agent:"); ok && slug != "" {
+		isAgent := false
+		if slug, ok := strings.CutPrefix(m.Sender, "agent:"); ok && slug != "" {
+			isAgent = true
+			if agentSlug == "" {
 				agentSlug = slug
 			}
+		}
+		fromSender := strings.HasPrefix(m.Sender, "user:") && m.SenderID == senderUserID
+		if !sawOther && !fromSender {
+			sawOther = true
+			agentLast = isAgent
 		}
 		if strings.HasPrefix(m.Sender, "user:") && m.SenderID != "" &&
 			m.SenderID != senderUserID && !seen[m.SenderID] {
@@ -103,7 +111,7 @@ func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID stri
 			humans = append(humans, m.SenderID)
 		}
 	}
-	return agentSlug, humans, nil
+	return agentSlug, humans, agentLast, nil
 }
 
 // memberMentionToken returns an @mention token (without the @) that
@@ -146,15 +154,15 @@ func memberMentionToken(m chatMemberEntry, members []chatMemberEntry, agentSlugs
 // first of these who is a project member other than the sender and can be
 // mentioned unambiguously: the human posters in the thread, most recent
 // first, then the thread creator (creatorID). ok is false, and content is
-// unchanged, when no agent has posted in the thread, there is no such
-// person, or a lookup fails.
+// unchanged, when the most recent message not from the sender is not an
+// agent's, there is no such person, or a lookup fails.
 func (s *Server) unmentionedHumanNote(ctx context.Context, members func() ([]chatMemberEntry, error), projectID, key, creatorID, senderUserID, content string) (string, string, bool) {
 	all, err := members()
 	if err != nil || len(all) == 0 {
 		return content, "", false
 	}
-	poster, humans, err := s.recentThreadPosters(ctx, key, senderUserID)
-	if err != nil || poster == "" {
+	poster, humans, agentLast, err := s.recentThreadPosters(ctx, key, senderUserID)
+	if err != nil || poster == "" || !agentLast {
 		return content, "", false
 	}
 	agents, err := listAllProjectAgents(ctx, s.store, projectID)

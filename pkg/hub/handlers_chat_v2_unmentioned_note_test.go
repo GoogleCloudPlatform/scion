@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -170,6 +171,8 @@ func TestUnmentionedReplyNote_ExplicitTargetsUnchanged(t *testing.T) {
 	posterMsg := seedThreadMsgAt(t, s, def.ProjectID, topicID, "agent:"+poster.Slug, poster.ID,
 		time.Now().UTC().Add(-time.Minute))
 
+	// The mention goroutines these sends start have no observable
+	// completion: agent and unknown names store no notification.
 	for _, content := range []string{
 		"@" + poster.Slug + " please check",
 		"please check @" + poster.Slug,
@@ -387,7 +390,7 @@ func TestUnmentionedReplyNote_TokenSkipsAgentSlug(t *testing.T) {
 	srv, s, topicID, a, d, projectID := noRecipientSetupProject(t)
 	otherAgent(t, s, projectID, "ada")
 	human := addHumanMember(t, s, projectID, "ada@x.com", "")
-	seedThreadMsgAt(t, s, projectID, topicID, "user:ada@x.com", human.ID, time.Now().UTC().Add(-time.Second))
+	seedThreadMsgAt(t, s, projectID, topicID, "user:ada@x.com", human.ID, time.Now().UTC().Add(-time.Minute))
 
 	_, _, m := unreachableSend(t, srv, s, topicID, "thanks")
 	want := "thanks\n\n" + unmentionedReplyNote("ada@x.com", a.Slug)
@@ -428,8 +431,8 @@ func TestUnmentionedReplyNote_MostRecentPosters(t *testing.T) {
 	now := time.Now().UTC()
 	seedThreadMsgAt(t, s, projectID, topicID, "agent:"+older.Slug, older.ID, now.Add(-5*time.Minute))
 	seedThreadMsgAt(t, s, projectID, topicID, "user:ann@example.com", ann.ID, now.Add(-4*time.Minute))
-	seedThreadMsgAt(t, s, projectID, topicID, "agent:"+newer.Slug, newer.ID, now.Add(-3*time.Minute))
-	seedThreadMsgAt(t, s, projectID, topicID, "user:ben@example.com", ben.ID, now.Add(-2*time.Minute))
+	seedThreadMsgAt(t, s, projectID, topicID, "user:ben@example.com", ben.ID, now.Add(-3*time.Minute))
+	seedThreadMsgAt(t, s, projectID, topicID, "agent:"+newer.Slug, newer.ID, now.Add(-2*time.Minute))
 	seedThreadMsgAt(t, s, projectID, topicID, "user:dev", DevUserID, now.Add(-time.Minute))
 
 	_, _, m := unreachableSend(t, srv, s, topicID, "ok")
@@ -442,4 +445,32 @@ func TestUnmentionedReplyNote_MostRecentPosters(t *testing.T) {
 	}
 	waitMentionNotified(t, s, ben.ID)
 	assertNotNotified(t, s, ann.ID)
+}
+
+// People have talked since the agent last posted: the reply is not
+// plausibly meant for the agent, so no note and still no_recipient.
+func TestUnmentionedReplyNote_HumansTalkedSinceAgent(t *testing.T) {
+	srv, s, topicID, _, d, projectID := noRecipientSetupProject(t)
+	ann := addHumanMember(t, s, projectID, "ann@example.com", "Ann")
+	now := time.Now().UTC()
+	seedThreadMsgAt(t, s, projectID, topicID, "user:ann@example.com", ann.ID, now.Add(time.Second))
+	seedThreadMsgAt(t, s, projectID, topicID, "user:dev", DevUserID, now.Add(2*time.Second))
+	seedThreadMsgAt(t, s, projectID, topicID, "user:ann@example.com", ann.ID, now.Add(3*time.Second))
+
+	_, _, m := unreachableSend(t, srv, s, topicID, "agreed")
+	if m == nil || m.Msg != "agreed" || m.DispatchState != store.MessageDispatchNoRecipient {
+		t.Fatalf("expected unchanged no_recipient row, got %+v", m)
+	}
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+}
+
+// A note that would push the body past the length limit is not added.
+func TestUnmentionedReplyNote_AppendOverflow(t *testing.T) {
+	content := strings.Repeat("a", messages.MaxMessageLength-10)
+	out, ok := appendUnmentionedNote(content, "bob", "agent")
+	if ok || out != content {
+		t.Fatalf("expected original content and ok=false, got ok=%v len=%d", ok, len(out))
+	}
 }
